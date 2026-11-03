@@ -128,12 +128,13 @@ week 01, day 5. It looks like a data error in the suite.
 
 ```
 swift package --allow-writing-to-package-directory benchmark
-swift package benchmark baseline compare v1-straightforward v7-basic-swar
+swift package benchmark baseline compare v1-straightforward v8-binary-size
 ```
 
-The suite uses [package-benchmark](https://github.com/ordo-one/package-benchmark), which needs
-jemalloc for the malloc counts. Each iteration parses 1,000 timestamps, and every figure below is
-**per parse** (p50, Apple Silicon, macOS 27, Swift 6.4.2, release).
+The suite uses [package-benchmark](https://github.com/ordo-one/package-benchmark). On Swift 6.3+
+it counts allocations with its own bundled malloc interposer, so nothing needs installing. Each
+iteration parses 1,000 timestamps, and every speed figure below is **per parse** (p50, Apple Silicon,
+macOS 27, Swift 6.4.2, release).
 
 ### Against Foundation
 
@@ -171,6 +172,24 @@ The floor benchmarks show where input overhead goes:
 
 If you already have a span (for example, while scanning a JSON buffer), pass it directly.
 
+### Binary size
+
+The `Binary size: NativeISO8601` benchmark tracks code size alongside speed. It isn't timed. It
+reads the Mach-O section and symbol tables of the library's release object, which the benchmark
+build produces anyway (`NativeISO8601.o` next to the benchmark executable, or the per-file objects
+under `NativeISO8601.build/` with the native build system). It parses them with bounds-checked
+`RawSpan` loads in `Benchmarks/ISO8601Benchmarks/BinarySize.swift`. The three custom metrics are
+stored in baselines, so `baseline compare` and `baseline check` cover them like any other metric:
+
+| Metric | Measures | v8 |
+|---|---|---:|
+| Code size | `__TEXT,__text` | 25,068 bytes |
+| Loadable size | every section a linked binary keeps (excludes `__LD` compact unwind, `__DWARF`, zero-fill) | 30,037 bytes |
+| Hot path | the fully inlined `ISO8601.date(from: RawSpan)`: both SWAR fast paths, their suffixes, and `resolve()` | 4,112 bytes |
+
+These match `size -m` and `nm` for the same object. They measure the library's own compiled code;
+a client that links it statically and dead-strips keeps only what it calls.
+
 ### Progress (stored in `.benchmarkBaselines/`)
 
 | Baseline | Change | String UTC | Span / RawSpan UTC |
@@ -182,6 +201,7 @@ If you already have a span (for example, while scanning a JSON buffer), pass it 
 | `v5-template-swar` | XOR-template SWAR, lazy leap year, single code copy | **315 / 13 ns** | **235 / 8 ns** |
 | `v6-reduced-expanded` | reduced precision, expanded/negative years, `timestamp(from:)`; general path out of line | 314 / 13 ns | 234 / 9 ns |
 | `v7-basic-swar` | basic-format SWAR fast path (`20240115T103045Z`: 787 → 299) | 319 / 13 ns | 239 / 9 ns |
+| `v8-binary-size` | binary size metrics added (code unchanged) | 319 / 13 ns | 239 / 9 ns |
 
 † From a fresh `[UInt8]` each iteration, which includes about 90 instructions of array retain/release.
 From v4 on, the span is acquired once outside the loop.
