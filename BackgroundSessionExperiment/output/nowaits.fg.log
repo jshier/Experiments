@@ -1,0 +1,5 @@
+[  0.049] [main] launch scenario=nowaits
+[  0.049] [main] scene.willEnterForeground
+[  0.076] [bg] FG nowaits didFinishCollecting id=1 txns=1 redirects=0 proto=nil fetchType=1 reused=false remote=false dns=false connect=false reqStart=false respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.076] [bg] FG nowaits didCompleteWithError id=1 NSURLErrorDomain#-1004 (Could not connect to the server.) status=-1 recv=0/0 sent=0/0 orig=/ cur=/ resp=nil progress=0.0
+[  0.822] [main] DONE

@@ -1,0 +1,6 @@
+[  0.050] [main] launch scenario=resourceTimeout
+[  0.050] [main] scene.willEnterForeground
+[  0.072] [bg] resTO willBeginDelayedRequest id=1 /delay/8 -> disposition 0
+[  2.277] [bg] resTO didFinishCollecting id=1 txns=1 redirects=0
+[  2.277] [bg] resTO didCompleteWithError id=1 NSURLErrorDomain#-1001 (The request timed out.) status=-1
+[  3.022] [main] DONE

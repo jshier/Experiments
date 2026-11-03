@@ -1,0 +1,7 @@
+[  0.050] [main] launch scenario=authDefault
+[  0.051] [main] scene.willEnterForeground
+[  0.079] [bg] FG authDefault task.didReceiveChallenge id=1 NSURLAuthenticationMethodHTTPBasic prevFailures=0 -> 1
+[  0.080] [bg] FG authDefault didReceiveResponse id=1 401 len=0 -> disposition 1
+[  0.080] [bg] FG authDefault didFinishCollecting id=1 txns=3 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.081] [bg] FG authDefault didCompleteWithError id=1 nil status=401 recv=0/0 sent=0/0 orig=/basic-auth/u/p cur=/basic-auth/u/p resp=/basic-auth/u/p progress=0.0
+[  0.826] [main] DONE

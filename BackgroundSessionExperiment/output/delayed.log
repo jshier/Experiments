@@ -1,0 +1,10 @@
+[  0.051] [main] launch scenario=delayed
+[  0.052] [main] scene.willEnterForeground
+[  0.072] [main] resume w/ earliestBeginDate +2s
+[  2.080] [bg] BG delayed willBeginDelayedRequest id=1 /get -> disposition 0
+[  2.093] [bg] BG delayed didReceiveResponse id=1 200 len=406 -> disposition 1
+[  2.093] [bg] BG delayed didReceiveData id=1 406B received=406
+[  2.095] [bg] BG delayed didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=406 reqBodyBytes=0 interval=2.02
+[  2.095] [bg] BG delayed didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  2.095] [bg] BG delayed data summary id=1 chunks=1 bytes=406 max=406
+[  2.839] [main] DONE

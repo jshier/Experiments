@@ -1,0 +1,9 @@
+[  0.051] [main] launch scenario=discretionary
+[  0.051] [main] scene.willEnterForeground
+[  0.078] [bg] FG discr didReceiveResponse id=1 200 len=406 -> disposition 1
+[  0.078] [bg] FG discr didReceiveData id=1 406B received=406
+[  0.078] [bg] FG discr willCacheResponse id=1 storage=0
+[  0.079] [bg] FG discr didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.079] [bg] FG discr didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  0.079] [bg] FG discr data summary id=1 chunks=1 bytes=406 max=406
+[  0.825] [main] DONE

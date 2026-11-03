@@ -1,0 +1,8 @@
+[  0.041] [main] launch scenario=stream
+[  0.042] [main] scene.willEnterForeground
+[  0.071] [bg] stream write error=nil
+[  0.071] [bg] stream read 248B eof=false error=nil
+[  0.071] [bg] FG stream stream.readClosed
+[  0.071] [bg] FG stream stream.writeClosed
+[  0.072] [bg] FG stream didCompleteWithError id=0 nil status=-1 recv=0/0 sent=0/0 orig= cur= resp=nil progress=0.0
+[  0.603] [main] DONE

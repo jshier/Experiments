@@ -1,0 +1,8 @@
+[  0.049] [main] launch scenario=delayedTimeout
+[  0.050] [main] scene.willEnterForeground
+[  3.081] [bg] delayedTO willBeginDelayedRequest id=1 /get -> disposition 0
+[  3.086] [bg] delayedTO didReceiveResponse id=1 200
+[  3.087] [bg] delayedTO didReceiveData id=1 406B
+[  3.088] [bg] delayedTO didFinishCollecting id=1 txns=1 redirects=0
+[  3.088] [bg] delayedTO didCompleteWithError id=1 nil status=200
+[  3.834] [main] DONE

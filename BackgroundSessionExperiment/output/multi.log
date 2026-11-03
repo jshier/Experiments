@@ -1,0 +1,21 @@
+[  0.041] [main] launch scenario=multi
+[  0.041] [main] scene.willEnterForeground
+[  0.075] [bg] BG multi willBeginDelayedRequest id=1 /delay/0 -> disposition 0
+[  0.076] [bg] BG multi willBeginDelayedRequest id=2 /delay/1 -> disposition 0
+[  0.077] [bg] BG multi willBeginDelayedRequest id=3 /delay/2 -> disposition 0
+[  0.082] [bg] BG multi didReceiveResponse id=1 200 len=411 -> disposition 1
+[  0.083] [bg] BG multi didReceiveData id=1 411B received=411
+[  0.083] [bg] BG multi didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=411 reqBodyBytes=0 interval=0.01
+[  0.084] [bg] BG multi didCompleteWithError id=1 nil status=200 recv=411/411 sent=0/0 orig=/delay/0 cur=/delay/0 resp=/delay/0 progress=0.0
+[  0.084] [bg] BG multi data summary id=1 chunks=1 bytes=411 max=411
+[  1.086] [bg] BG multi didReceiveResponse id=2 200 len=411 -> disposition 1
+[  1.087] [bg] BG multi didReceiveData id=2 411B received=411
+[  1.089] [bg] BG multi didFinishCollecting id=2 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=true remote=true dns=false connect=false reqStart=true respBodyBytes=411 reqBodyBytes=0 interval=1.01
+[  1.090] [bg] BG multi didCompleteWithError id=2 nil status=200 recv=411/411 sent=0/0 orig=/delay/1 cur=/delay/1 resp=/delay/1 progress=0.0
+[  1.090] [bg] BG multi data summary id=2 chunks=1 bytes=411 max=411
+[  3.089] [bg] BG multi didReceiveResponse id=3 200 len=411 -> disposition 1
+[  3.089] [bg] BG multi didReceiveData id=3 411B received=411
+[  3.090] [bg] BG multi didFinishCollecting id=3 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=true remote=true dns=false connect=false reqStart=true respBodyBytes=411 reqBodyBytes=0 interval=3.01
+[  3.090] [bg] BG multi didCompleteWithError id=3 nil status=200 recv=411/411 sent=0/0 orig=/delay/2 cur=/delay/2 resp=/delay/2 progress=0.0
+[  3.090] [bg] BG multi data summary id=3 chunks=1 bytes=411 max=411
+[  3.836] [main] DONE

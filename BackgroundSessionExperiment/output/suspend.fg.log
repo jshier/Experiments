@@ -1,0 +1,11 @@
+[  0.050] [main] launch scenario=suspend
+[  0.051] [main] scene.willEnterForeground
+[  0.568] [main] suspend() -> state=1
+[  3.212] [main] state=1 resume()
+[  3.213] [bg] FG suspend didReceiveResponse id=1 200 len=411 -> disposition 1
+[  3.213] [bg] FG suspend didReceiveData id=1 411B received=411
+[  3.214] [bg] FG suspend willCacheResponse id=1 storage=0
+[  3.216] [bg] FG suspend didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=3.15
+[  3.217] [bg] FG suspend didCompleteWithError id=1 nil status=200 recv=411/411 sent=0/0 orig=/delay/2 cur=/delay/2 resp=/delay/2 progress=0.0
+[  3.217] [bg] FG suspend data summary id=1 chunks=1 bytes=411 max=411
+[  3.963] [main] DONE

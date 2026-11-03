@@ -1,0 +1,4 @@
+[  0.046] [main] launch scenario=respStream
+[  0.046] [main] scene.willEnterForeground
+[  0.087] [bg] FG respStream didReceiveResponse id=1 200 len=406 -> disposition 3
+[  0.087] [bg] FG respStream didBecomeStreamTask

@@ -1,0 +1,13 @@
+[  0.055] [main] launch scenario=authUpload
+[  0.055] [main] scene.willEnterForeground
+[  0.082] [bg] FG authUpload didSendBodyData id=1 +5000 5000/5000 task.sent=5000
+[  0.085] [bg] FG authUpload task.didReceiveChallenge id=1 NSURLAuthenticationMethodHTTPBasic prevFailures=0 -> 0
+[  0.086] [bg] FG authUpload didSendBodyData id=1 +5000 10000/10000 task.sent=10000
+[  0.087] [bg] FG authUpload didReceiveResponse id=1 200 len=30668 -> disposition 1
+[  0.087] [bg] FG authUpload didReceiveData id=1 30668B received=30668
+[  0.087] [bg] FG authUpload willCacheResponse id=1 storage=0
+[  0.087] [bg] FG authUpload didFinishCollecting id=1 txns=2 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=5000 interval=0.02
+[  0.088] [bg] FG authUpload didCompleteWithError id=1 nil status=200 recv=30668/30668 sent=10000/10000 orig=/basic-auth/u/p cur=/basic-auth/u/p resp=/basic-auth/u/p progress=0.0
+[  0.088] [bg] FG authUpload data summary id=1 chunks=1 bytes=30668 max=30668
+[  0.088] [bg] FG authUpload send summary id=1 calls=2 last=10000
+[  0.834] [main] DONE

@@ -1,0 +1,3 @@
+[  0.054] [main] launch scenario=downloadCompletionHandler
+[  0.054] [main] scene.willEnterForeground
+[  0.084] [bg] FG dch didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02

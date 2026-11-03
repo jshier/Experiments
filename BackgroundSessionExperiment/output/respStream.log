@@ -1,0 +1,7 @@
+[  0.054] [main] launch scenario=respStream
+[  0.054] [main] scene.willEnterForeground
+[  0.085] [bg] BG respStream willBeginDelayedRequest id=1 /get -> disposition 0
+[  0.090] [bg] BG respStream didReceiveResponse id=1 200 len=406 -> disposition 3
+[  0.092] [bg] BG respStream didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=406 reqBodyBytes=0 interval=0.01
+[  0.092] [bg] BG respStream didCompleteWithError id=1 NSURLErrorDomain#-999 (cancelled) status=200 recv=0/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  0.837] [main] DONE

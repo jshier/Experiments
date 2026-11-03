@@ -1,0 +1,7 @@
+[  0.052] [main] launch scenario=authCancel
+[  0.052] [main] scene.willEnterForeground
+[  0.075] [bg] BG authCancel willBeginDelayedRequest id=1 /basic-auth/u/p -> disposition 0
+[  0.081] [bg] BG authCancel task.didReceiveChallenge id=1 NSURLAuthenticationMethodHTTPBasic prevFailures=0 -> 2
+[  0.083] [bg] BG authCancel didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.01
+[  0.083] [bg] BG authCancel didCompleteWithError id=1 NSURLErrorDomain#-999 (cancelled) status=-1 recv=0/0 sent=0/0 orig=/basic-auth/u/p cur=/basic-auth/u/p resp=nil progress=0.0
+[  0.829] [main] DONE

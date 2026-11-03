@@ -1,0 +1,8 @@
+[  0.048] [main] launch scenario=requestTimeout
+[  0.049] [main] scene.willEnterForeground
+[  0.071] [bg] reqTO willBeginDelayedRequest id=1 /delay/8 -> disposition 0
+[  8.081] [bg] reqTO didReceiveResponse id=1 200
+[  8.082] [bg] reqTO didReceiveData id=1 411B
+[  8.085] [bg] reqTO didFinishCollecting id=1 txns=1 redirects=0
+[  8.085] [bg] reqTO didCompleteWithError id=1 nil status=200
+[  8.829] [main] DONE

@@ -1,0 +1,12 @@
+[  0.054] [main] launch scenario=respDownload
+[  0.055] [main] scene.willEnterForeground
+[  0.078] [bg] BG respDl willBeginDelayedRequest id=1 /bytes/5000 -> disposition 0
+[  0.083] [bg] BG respDl didReceiveResponse id=1 200 len=5000 -> disposition 2
+[  0.083] [bg] BG respDl didBecomeDownloadTask old=1 new=1 state=0
+[  0.084] [bg] BG respDl download.didWriteData +5000 5000/5000
+[  0.084] [bg] BG respDl download.didFinishDownloadingTo .../Downloads/com.jshier.bgexp/CFNetworkDownload_xrMsLh.tmp size=5000 resp=200
+[  0.085] [bg] BG respDl didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=5000 reqBodyBytes=0 interval=0.01
+[  0.085] [bg] BG respDl didCompleteWithError id=1 nil status=200 recv=5000/5000 sent=0/0 orig=/bytes/5000 cur=/bytes/5000 resp=/bytes/5000 progress=0.0
+[  0.085] [bg] BG respDl write summary id=1 calls=1 last=5000
+[  0.509] [bg] BG respDl download file exists after delegate returned: false
+[  0.830] [main] DONE

@@ -1,0 +1,18 @@
+[  0.054] [main] launch scenario=headers
+[  0.055] [main] scene.willEnterForeground
+[  0.077] [bg] BG headers willBeginDelayedRequest id=1 /get -> disposition 0
+[  0.077] [bg] BG headers willBeginDelayedRequest id=2 /get -> disposition 0
+[  0.083] [bg] BG headers download.didWriteData +406 406/406
+[  0.083] [bg] BG headers download.didFinishDownloadingTo .../Downloads/com.jshier.bgexp/CFNetworkDownload_th5vaC.tmp size=406 resp=200
+[  0.083] [bg] BG headers request headers: Accept=*/*; Accept-Language=en-US,en;q=0.9; Connection=keep-alive; Accept-Encoding=gzip, deflate; User-Agent=BGExp/1 CFNetwork/3896.100.1.2.1 Darwin/27.0.0
+[  0.083] [bg] BG headers didReceiveResponse id=1 200 len=406 -> disposition 1
+[  0.084] [bg] BG headers didFinishCollecting id=2 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=406 reqBodyBytes=0 interval=0.01
+[  0.084] [bg] BG headers didCompleteWithError id=2 nil status=200 recv=406/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  0.084] [bg] BG headers write summary id=2 calls=1 last=406
+[  0.084] [bg] BG headers didReceiveData id=1 406B received=406
+[  0.085] [bg] BG headers didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=406 reqBodyBytes=0 interval=0.01
+[  0.085] [bg] BG headers didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  0.085] [bg] BG headers data summary id=1 chunks=1 bytes=406 max=406
+[  0.085] [bg] BG headers request headers: Accept=*/*; Accept-Language=en-US,en;q=0.9; Connection=keep-alive; Accept-Encoding=gzip, deflate; User-Agent=BGExp/1 CFNetwork/3896.100.1.2.1 Darwin/27.0.0
+[  0.507] [bg] BG headers download file exists after delegate returned: false
+[  0.832] [main] DONE

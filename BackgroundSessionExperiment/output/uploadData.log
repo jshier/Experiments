@@ -1,0 +1,31 @@
+[  0.051] [main] launch scenario=uploadData
+[  0.051] [main] scene.willEnterForeground
+*** Terminating app due to uncaught exception 'NSGenericException', reason: 'Upload tasks from NSData are not supported in background sessions.'
+*** First throw call stack:
+(
+	0   CoreFoundation                      0x00000001c0287f24 __exceptionPreprocess + 172
+	1   libobjc.A.dylib                     0x00000001c008194c objc_exception_throw + 72
+	2   CFNetwork                           0x00000001cb4d838c __56-[__NSURLBackgroundSession _uploadTaskWithTaskForClass:]_block_invoke + 3820
+	3   CFNetwork                           0x00000001cb4d6a70 __68-[__NSURLBackgroundSession performBlockOnQueueAndRethrowExceptions:]_block_invoke + 604
+	4   libdispatch.dylib                   0x00000001e6435fb8 _dispatch_client_callout + 12
+	5   libdispatch.dylib                   0x00000001e642bb28 _dispatch_lane_barrier_sync_invoke_and_complete + 92
+	6   CFNetwork                           0x00000001cb4d67c8 -[__NSURLBackgroundSession performBlockOnQueueAndRethrowExceptions:] + 132
+	7   CFNetwork                           0x00000001cb4d7438 -[__NSURLBackgroundSession _uploadTaskWithTaskForClass:] + 148
+	8   BGExp                               0x0000000104ca8ecc $s5BGExp11AppDelegateC3runyySSF + 18856
+	9   BGExp                               0x0000000104ca4514 $s5BGExp11AppDelegateC5startyyFyyScMYccfU_ + 64
+	10  BGExp                               0x0000000104cadef0 $sIeg_IeyB_TR + 48
+	11  libdispatch.dylib                   0x00000001e641b6a0 _dispatch_call_block_and_release + 24
+	12  libdispatch.dylib                   0x00000001e6435fb8 _dispatch_client_callout + 12
+	13  libdispatch.dylib                   0x00000001e6452890 _dispatch_main_queue_drain.cold.8 + 24
+	14  libdispatch.dylib                   0x00000001e642ae44 _dispatch_main_queue_drain + 1172
+	15  libdispatch.dylib                   0x00000001e642a9a0 _dispatch_main_queue_callback_4CF + 40
+	16  CoreFoundation                      0x00000001c01e42e4 __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__ + 12
+	17  CoreFoundation                      0x00000001c01e34fc __CFRunLoopRun + 1896
+	18  CoreFoundation                      0x00000001c01de040 _CFRunLoopRunSpecificWithOptions + 496
+	19  GraphicsServices                    0x00000002219199ac GSEventRunModal + 116
+	20  UIKitCore                           0x00000001c5535e30 UIApplicationMain + 124
+	21  BGExp                               0x0000000104c95504 main + 404
+	22  dyld                                0x0000000104da0350 dyld-internal + 20
+	23  ???                                 0x0000000104ff9e80 0x0 + 4378828416
+)
+libc++abi: terminating due to uncaught exception of type NSException

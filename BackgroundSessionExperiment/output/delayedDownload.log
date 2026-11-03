@@ -1,0 +1,8 @@
+[  0.050] [main] launch scenario=delayedDownload
+[  0.050] [main] scene.willEnterForeground
+[  2.199] [bg] delayedDL willBeginDelayedRequest id=1 /bytes/100 -> disposition 0
+[  2.210] [bg] delayedDL download.didWriteData 100/100
+[  2.210] [bg] delayedDL download.didFinishDownloadingTo CFNetworkDownload_tnB0VT.tmp size=100
+[  2.211] [bg] delayedDL didFinishCollecting id=1 txns=1 redirects=0
+[  2.211] [bg] delayedDL didCompleteWithError id=1 nil status=200
+[  2.957] [main] DONE

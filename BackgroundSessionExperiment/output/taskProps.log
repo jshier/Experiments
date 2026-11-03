@@ -1,0 +1,12 @@
+[  0.053] [main] launch scenario=taskProps
+[  0.054] [main] scene.willEnterForeground
+[  0.075] [main] pre-resume state=1 prio=0.5 earliest=nil expectedRecv=-1 expectedSend=-1 prefersIncremental=true
+[  0.075] [main] post-resume state=0 prio=0.9 tid=1
+[  0.077] [bg] BG props willBeginDelayedRequest id=1 /get -> disposition 0
+[  0.082] [bg] BG props didReceiveResponse id=1 200 len=406 -> disposition 1
+[  0.082] [bg] BG props didReceiveData id=1 406B received=406
+[  0.083] [bg] BG props didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=406 reqBodyBytes=0 interval=0.01
+[  0.083] [bg] BG props didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  0.083] [bg] BG props data summary id=1 chunks=1 bytes=406 max=406
+[  0.127] [main] t+50ms state=3
+[  0.830] [main] DONE

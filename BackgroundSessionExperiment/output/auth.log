@@ -1,0 +1,10 @@
+[  0.053] [main] launch scenario=auth
+[  0.053] [main] scene.willEnterForeground
+[  0.075] [bg] BG auth willBeginDelayedRequest id=1 /basic-auth/u/p -> disposition 0
+[  0.082] [bg] BG auth task.didReceiveChallenge id=1 NSURLAuthenticationMethodHTTPBasic prevFailures=0 -> 0
+[  0.085] [bg] BG auth didReceiveResponse id=1 200 len=465 -> disposition 1
+[  0.085] [bg] BG auth didReceiveData id=1 465B received=465
+[  0.086] [bg] BG auth didFinishCollecting id=1 txns=2 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.01
+[  0.087] [bg] BG auth didCompleteWithError id=1 nil status=200 recv=465/465 sent=0/0 orig=/basic-auth/u/p cur=/basic-auth/u/p resp=/basic-auth/u/p progress=0.0
+[  0.087] [bg] BG auth data summary id=1 chunks=1 bytes=465 max=465
+[  0.833] [main] DONE

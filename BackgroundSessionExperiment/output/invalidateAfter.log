@@ -1,0 +1,4 @@
+[  0.052] [main] launch scenario=invalidateAfter
+[  0.052] [main] scene.willEnterForeground
+[  0.074] [bg] BG invAfter session.didBecomeInvalidWithError nil
+[  2.174] [main] DONE

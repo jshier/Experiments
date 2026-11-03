@@ -1,0 +1,6 @@
+[  0.052] [main] launch scenario=authCancel
+[  0.053] [main] scene.willEnterForeground
+[  0.082] [bg] FG authCancel task.didReceiveChallenge id=1 NSURLAuthenticationMethodHTTPBasic prevFailures=0 -> 2
+[  0.083] [bg] FG authCancel didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.083] [bg] FG authCancel didCompleteWithError id=1 NSURLErrorDomain#-999 (cancelled) status=-1 recv=0/0 sent=0/0 orig=/basic-auth/u/p cur=/basic-auth/u/p resp=nil progress=0.0
+[  0.829] [main] DONE

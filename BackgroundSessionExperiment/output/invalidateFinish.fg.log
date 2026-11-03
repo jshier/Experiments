@@ -1,0 +1,10 @@
+[  0.051] [main] launch scenario=invalidateFinish
+[  0.051] [main] scene.willEnterForeground
+[  1.080] [bg] FG invFinish didReceiveResponse id=1 200 len=411 -> disposition 1
+[  1.080] [bg] FG invFinish didReceiveData id=1 411B received=411
+[  1.080] [bg] FG invFinish willCacheResponse id=1 storage=0
+[  1.082] [bg] FG invFinish didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=1.02
+[  1.083] [bg] FG invFinish didCompleteWithError id=1 nil status=200 recv=411/411 sent=0/0 orig=/delay/1 cur=/delay/1 resp=/delay/1 progress=0.0
+[  1.083] [bg] FG invFinish data summary id=1 chunks=1 bytes=411 max=411
+[  1.084] [bg] FG invFinish session.didBecomeInvalidWithError nil
+[  4.259] [main] DONE

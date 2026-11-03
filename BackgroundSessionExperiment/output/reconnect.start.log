@@ -1,0 +1,8 @@
+[  0.050] [main] launch scenario=reconnect
+[  0.051] [main] scene.willEnterForeground
+[  0.073] [bg] reconnect-start willBeginDelayedRequest id=1 /bytes/200 -> disposition 0
+[  0.077] [bg] reconnect-start download.didWriteData 200/200
+[  0.077] [bg] reconnect-start download.didFinishDownloadingTo CFNetworkDownload_XcbLRY.tmp size=200
+[  0.077] [bg] reconnect-start didFinishCollecting id=1 txns=1 redirects=0
+[  0.077] [bg] reconnect-start didCompleteWithError id=1 nil status=200
+[  0.281] [main] exiting before completion

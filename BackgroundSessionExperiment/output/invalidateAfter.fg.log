@@ -1,0 +1,28 @@
+[  0.052] [main] launch scenario=invalidateAfter
+[  0.053] [main] scene.willEnterForeground
+[  0.063] [bg] FG invAfter session.didBecomeInvalidWithError nil
+*** Terminating app due to uncaught exception 'NSGenericException', reason: 'Task created in a session that has been invalidated'
+*** First throw call stack:
+(
+	0   CoreFoundation                      0x00000001c0287f24 __exceptionPreprocess + 172
+	1   libobjc.A.dylib                     0x00000001c008194c objc_exception_throw + 72
+	2   CFNetwork                           0x00000001cb64fe1c _ZL45__URLSESSION_CLIENT_API_MISUSE_NIL_ARGUMENT__P8NSString.4439 + 0
+	3   CFNetwork                           0x00000001cb434c88 -[__NSURLSessionLocal taskForClassInfo:] + 120
+	4   BGExp                               0x0000000104b00d04 $s5BGExp11AppDelegateC3runyySSF + 34784
+	5   BGExp                               0x0000000104af8514 $s5BGExp11AppDelegateC5startyyFyyScMYccfU_ + 64
+	6   BGExp                               0x0000000104b01ef0 $sIeg_IeyB_TR + 48
+	7   libdispatch.dylib                   0x00000001e641b6a0 _dispatch_call_block_and_release + 24
+	8   libdispatch.dylib                   0x00000001e6435fb8 _dispatch_client_callout + 12
+	9   libdispatch.dylib                   0x00000001e6452890 _dispatch_main_queue_drain.cold.8 + 24
+	10  libdispatch.dylib                   0x00000001e642ae44 _dispatch_main_queue_drain + 1172
+	11  libdispatch.dylib                   0x00000001e642a9a0 _dispatch_main_queue_callback_4CF + 40
+	12  CoreFoundation                      0x00000001c01e42e4 __CFRUNLOOP_IS_SERVICING_THE_MAIN_DISPATCH_QUEUE__ + 12
+	13  CoreFoundation                      0x00000001c01e34fc __CFRunLoopRun + 1896
+	14  CoreFoundation                      0x00000001c01de040 _CFRunLoopRunSpecificWithOptions + 496
+	15  GraphicsServices                    0x00000002219199ac GSEventRunModal + 116
+	16  UIKitCore                           0x00000001c5535e30 UIApplicationMain + 124
+	17  BGExp                               0x0000000104ae9504 main + 404
+	18  dyld                                0x0000000104dbc350 dyld-internal + 20
+	19  ???                                 0x0000000104bc5e80 0x0 + 4374421120
+)
+libc++abi: terminating due to uncaught exception of type NSException

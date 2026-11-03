@@ -1,0 +1,4 @@
+[  0.050] [main] launch scenario=neverResumed
+[  0.050] [main] scene.willEnterForeground
+[  0.061] [main] created id=1 state=1, not resumed
+[  0.061] [bg] getAllTasks -> 0

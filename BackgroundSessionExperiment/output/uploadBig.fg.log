@@ -1,0 +1,12 @@
+[  0.053] [main] launch scenario=uploadBig
+[  0.053] [main] scene.willEnterForeground
+[  0.083] [bg] FG upBig didSendBodyData id=1 +2000000 2000000/2000000 task.sent=2000000
+[  0.126] [bg] FG upBig didReceiveResponse id=1 200 len=12000613 -> disposition 1
+[  0.126] [bg] FG upBig didReceiveData id=1 16231B received=16231
+[  0.126] [bg] FG upBig didReceiveData id=1 195932B received=212163
+[  0.126] [bg] FG upBig didReceiveData id=1 97992B received=310155
+[  0.135] [bg] FG upBig didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.07
+[  0.135] [bg] FG upBig didCompleteWithError id=1 nil status=200 recv=12000613/12000613 sent=2000000/2000000 orig=/post cur=/post resp=/post progress=0.0
+[  0.135] [bg] FG upBig data summary id=1 chunks=61 bytes=12000613 max=1042228
+[  0.135] [bg] FG upBig send summary id=1 calls=1 last=2000000
+[  0.881] [main] DONE

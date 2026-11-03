@@ -1,0 +1,15 @@
+[  0.053] [main] launch scenario=dataBig
+[  0.053] [main] scene.willEnterForeground
+[  0.077] [bg] BG dataBig willBeginDelayedRequest id=1 /bytes/100000 -> disposition 0
+[  0.077] [bg] BG dataBig willBeginDelayedRequest id=2 /stream/50 -> disposition 0
+[  0.083] [bg] BG dataBig didReceiveResponse id=2 200 len=462 -> disposition 1
+[  0.083] [bg] BG dataBig didReceiveData id=2 462B received=462
+[  0.084] [bg] BG dataBig didFinishCollecting id=2 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=462 reqBodyBytes=0 interval=0.01
+[  0.084] [bg] BG dataBig didCompleteWithError id=2 nil status=200 recv=462/462 sent=0/0 orig=/stream/50 cur=/stream/50 resp=/stream/50 progress=0.0
+[  0.084] [bg] BG dataBig data summary id=2 chunks=1 bytes=462 max=462
+[  0.087] [bg] BG dataBig didReceiveResponse id=1 200 len=100000 -> disposition 1
+[  0.088] [bg] BG dataBig didReceiveData id=1 100000B received=100000
+[  0.088] [bg] BG dataBig didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=100000 reqBodyBytes=0 interval=0.01
+[  0.088] [bg] BG dataBig didCompleteWithError id=1 nil status=200 recv=100000/100000 sent=0/0 orig=/bytes/100000 cur=/bytes/100000 resp=/bytes/100000 progress=0.0
+[  0.088] [bg] BG dataBig data summary id=1 chunks=1 bytes=100000 max=100000
+[  0.835] [main] DONE

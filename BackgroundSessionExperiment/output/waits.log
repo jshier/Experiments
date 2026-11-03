@@ -1,0 +1,6 @@
+[  0.041] [main] launch scenario=waits
+[  0.041] [main] scene.willEnterForeground
+[  0.073] [bg] BG waits willBeginDelayedRequest id=1 / -> disposition 0
+[  6.577] [bg] BG waits didFinishCollecting id=1 txns=1 redirects=0 proto=nil fetchType=1 reused=false remote=false dns=false connect=false reqStart=false respBodyBytes=0 reqBodyBytes=0 interval=6.50
+[  6.577] [bg] BG waits didCompleteWithError id=1 NSURLErrorDomain#-1001 (The request timed out.) status=-1 recv=0/0 sent=0/0 orig=/ cur=/ resp=nil progress=0.0
+[  7.324] [main] DONE

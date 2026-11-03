@@ -1,0 +1,9 @@
+[  0.057] [main] launch scenario=data
+[  0.057] [main] scene.willEnterForeground
+[  0.091] [bg] FG data didReceiveResponse id=1 200 len=406 -> disposition 1
+[  0.091] [bg] FG data didReceiveData id=1 406B received=406
+[  0.091] [bg] FG data willCacheResponse id=1 storage=0
+[  0.092] [bg] FG data didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=406 reqBodyBytes=0 interval=0.02
+[  0.092] [bg] FG data didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  0.092] [bg] FG data data summary id=1 chunks=1 bytes=406 max=406
+[  0.838] [main] DONE

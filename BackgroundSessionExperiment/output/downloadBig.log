@@ -1,0 +1,10 @@
+[  0.053] [main] launch scenario=downloadBig
+[  0.053] [main] scene.willEnterForeground
+[  0.076] [bg] BG dlBig willBeginDelayedRequest id=1 /bytes/100000 -> disposition 0
+[  0.084] [bg] BG dlBig download.didWriteData +100000 100000/100000
+[  0.084] [bg] BG dlBig download.didFinishDownloadingTo .../Downloads/com.jshier.bgexp/CFNetworkDownload_sfdTH7.tmp size=100000 resp=200
+[  0.085] [bg] BG dlBig didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=100000 reqBodyBytes=0 interval=0.01
+[  0.085] [bg] BG dlBig didCompleteWithError id=1 nil status=200 recv=100000/100000 sent=0/0 orig=/bytes/100000 cur=/bytes/100000 resp=/bytes/100000 progress=0.0
+[  0.085] [bg] BG dlBig write summary id=1 calls=1 last=100000
+[  0.508] [bg] BG dlBig download file exists after delegate returned: false
+[  0.830] [main] DONE

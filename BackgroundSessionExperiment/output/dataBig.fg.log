@@ -1,0 +1,16 @@
+[  0.050] [main] launch scenario=dataBig
+[  0.050] [main] scene.willEnterForeground
+[  0.079] [bg] FG dataBig didReceiveResponse id=2 200 len=462 -> disposition 1
+[  0.079] [bg] FG dataBig didReceiveData id=2 462B received=462
+[  0.079] [bg] FG dataBig willCacheResponse id=2 storage=0
+[  0.079] [bg] FG dataBig didFinishCollecting id=2 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.080] [bg] FG dataBig didCompleteWithError id=2 nil status=200 recv=462/462 sent=0/0 orig=/stream/50 cur=/stream/50 resp=/stream/50 progress=0.0
+[  0.080] [bg] FG dataBig data summary id=2 chunks=1 bytes=462 max=462
+[  0.082] [bg] FG dataBig didReceiveResponse id=1 200 len=100000 -> disposition 1
+[  0.082] [bg] FG dataBig didReceiveData id=1 16280B received=16280
+[  0.082] [bg] FG dataBig didReceiveData id=1 83720B received=100000
+[  0.082] [bg] FG dataBig willCacheResponse id=1 storage=0
+[  0.082] [bg] FG dataBig didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=100000 reqBodyBytes=0 interval=0.02
+[  0.082] [bg] FG dataBig didCompleteWithError id=1 nil status=200 recv=100000/100000 sent=0/0 orig=/bytes/100000 cur=/bytes/100000 resp=/bytes/100000 progress=0.0
+[  0.082] [bg] FG dataBig data summary id=1 chunks=2 bytes=100000 max=83720
+[  0.828] [main] DONE

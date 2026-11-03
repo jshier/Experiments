@@ -1,0 +1,7 @@
+[  0.050] [main] launch scenario=invalidateCancel
+[  0.050] [main] scene.willEnterForeground
+[  1.064] [main] invalidateAndCancel()
+[  1.069] [bg] FG invCancel didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=1.01
+[  1.070] [bg] FG invCancel didCompleteWithError id=1 NSURLErrorDomain#-999 (cancelled) status=-1 recv=0/0 sent=0/0 orig=/delay/5 cur=/delay/5 resp=nil progress=0.0
+[  1.070] [bg] FG invCancel session.didBecomeInvalidWithError nil
+[  4.260] [main] DONE

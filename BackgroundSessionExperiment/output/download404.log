@@ -1,0 +1,8 @@
+[  0.052] [main] launch scenario=download404
+[  0.052] [main] scene.willEnterForeground
+[  0.076] [bg] BG dl404 willBeginDelayedRequest id=1 /status/404 -> disposition 0
+[  0.080] [bg] BG dl404 download.didFinishDownloadingTo .../Downloads/com.jshier.bgexp/CFNetworkDownload_CHvrFz.tmp size=0 resp=404
+[  0.081] [bg] BG dl404 didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.01
+[  0.081] [bg] BG dl404 didCompleteWithError id=1 nil status=404 recv=0/0 sent=0/0 orig=/status/404 cur=/status/404 resp=/status/404 progress=0.0
+[  0.507] [bg] BG dl404 download file exists after delegate returned: false
+[  0.826] [main] DONE

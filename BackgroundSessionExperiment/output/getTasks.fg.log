@@ -1,0 +1,10 @@
+[  0.050] [main] launch scenario=getTasks
+[  0.051] [main] scene.willEnterForeground
+[  0.063] [bg] getTasks data=1 up=0 down=0
+[  2.078] [bg] FG getTasks didReceiveResponse id=1 200 len=411 -> disposition 1
+[  2.078] [bg] FG getTasks didReceiveData id=1 411B received=411
+[  2.078] [bg] FG getTasks willCacheResponse id=1 storage=0
+[  2.079] [bg] FG getTasks didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=411 reqBodyBytes=0 interval=2.02
+[  2.079] [bg] FG getTasks didCompleteWithError id=1 nil status=200 recv=411/411 sent=0/0 orig=/delay/2 cur=/delay/2 resp=/delay/2 progress=0.0
+[  2.079] [bg] FG getTasks data summary id=1 chunks=1 bytes=411 max=411
+[  2.825] [main] DONE

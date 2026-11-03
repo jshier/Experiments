@@ -1,0 +1,9 @@
+[  0.052] [main] launch scenario=websocket
+[  0.053] [main] scene.willEnterForeground
+[  0.081] [bg] FG ws didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.081] [bg] FG ws websocket.didOpen protocol=nil
+[  0.082] [bg] ws send error=nil
+[  0.084] [bg] ws receive success((extension in Foundation):__C.NSURLSessionWebSocketTask.Message.string("hi"))
+[  0.085] [bg] FG ws websocket.didClose 1000
+[  0.085] [bg] FG ws didCompleteWithError id=1 nil status=101 recv=0/0 sent=0/0 orig=/websocket/echo cur=/websocket/echo resp=/websocket/echo progress=0.0
+[  0.830] [main] DONE

@@ -1,0 +1,7 @@
+[  0.048] [main] launch scenario=cancel
+[  0.049] [main] scene.willEnterForeground
+[  0.071] [bg] cancel willBeginDelayedRequest id=1 /delay/5 -> disposition 0
+[  1.118] [main] cancel()
+[  1.123] [bg] cancel didFinishCollecting id=1 txns=1 redirects=0
+[  1.123] [bg] cancel didCompleteWithError id=1 NSURLErrorDomain#-999 (cancelled) status=-1
+[  1.868] [main] DONE

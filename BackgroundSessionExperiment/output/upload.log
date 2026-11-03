@@ -1,0 +1,10 @@
+[  0.053] [main] launch scenario=upload
+[  0.054] [main] scene.willEnterForeground
+[  0.079] [bg] BG upload willBeginDelayedRequest id=1 /post -> disposition 0
+[  0.082] [bg] BG upload didSendBodyData id=1 +20000 20000/20000 task.sent=20000
+[  0.085] [bg] BG upload didReceiveData id=1 120611B received=120611
+[  0.085] [bg] BG upload didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=120611 reqBodyBytes=20000 interval=0.01
+[  0.085] [bg] BG upload didCompleteWithError id=1 nil status=200 recv=120611/120611 sent=20000/20000 orig=/post cur=/post resp=/post progress=0.0
+[  0.085] [bg] BG upload data summary id=1 chunks=1 bytes=120611 max=120611
+[  0.085] [bg] BG upload send summary id=1 calls=1 last=20000
+[  0.831] [main] DONE

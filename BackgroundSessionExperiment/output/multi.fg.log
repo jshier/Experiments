@@ -1,0 +1,21 @@
+[  0.053] [main] launch scenario=multi
+[  0.053] [main] scene.willEnterForeground
+[  0.081] [bg] FG multi didReceiveResponse id=1 200 len=411 -> disposition 1
+[  0.081] [bg] FG multi didReceiveData id=1 411B received=411
+[  0.081] [bg] FG multi willCacheResponse id=1 storage=0
+[  0.081] [bg] FG multi didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=411 reqBodyBytes=0 interval=0.02
+[  0.082] [bg] FG multi didCompleteWithError id=1 nil status=200 recv=411/411 sent=0/0 orig=/delay/0 cur=/delay/0 resp=/delay/0 progress=0.0
+[  0.082] [bg] FG multi data summary id=1 chunks=1 bytes=411 max=411
+[  1.084] [bg] FG multi didReceiveResponse id=2 200 len=411 -> disposition 1
+[  1.084] [bg] FG multi didReceiveData id=2 411B received=411
+[  1.084] [bg] FG multi willCacheResponse id=2 storage=0
+[  1.085] [bg] FG multi didFinishCollecting id=2 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=true remote=true dns=false connect=false reqStart=true respBodyBytes=411 reqBodyBytes=0 interval=1.02
+[  1.085] [bg] FG multi didCompleteWithError id=2 nil status=200 recv=411/411 sent=0/0 orig=/delay/1 cur=/delay/1 resp=/delay/1 progress=0.0
+[  1.085] [bg] FG multi data summary id=2 chunks=1 bytes=411 max=411
+[  3.087] [bg] FG multi didReceiveResponse id=3 200 len=411 -> disposition 1
+[  3.087] [bg] FG multi didReceiveData id=3 411B received=411
+[  3.087] [bg] FG multi willCacheResponse id=3 storage=0
+[  3.088] [bg] FG multi didFinishCollecting id=3 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=3.02
+[  3.088] [bg] FG multi didCompleteWithError id=3 nil status=200 recv=411/411 sent=0/0 orig=/delay/2 cur=/delay/2 resp=/delay/2 progress=0.0
+[  3.088] [bg] FG multi data summary id=3 chunks=1 bytes=411 max=411
+[  3.833] [main] DONE

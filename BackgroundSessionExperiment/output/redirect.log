@@ -1,0 +1,9 @@
+[  0.053] [main] launch scenario=redirect
+[  0.053] [main] scene.willEnterForeground
+[  0.077] [bg] BG redirect willBeginDelayedRequest id=1 /redirect/2 -> disposition 0
+[  0.085] [bg] BG redirect didReceiveResponse id=1 200 len=406 -> disposition 1
+[  0.086] [bg] BG redirect didReceiveData id=1 406B received=406
+[  0.087] [bg] BG redirect didFinishCollecting id=1 txns=3 redirects=2 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.01
+[  0.087] [bg] BG redirect didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/redirect/2 cur=/get resp=/get progress=0.0
+[  0.087] [bg] BG redirect data summary id=1 chunks=1 bytes=406 max=406
+[  0.833] [main] DONE

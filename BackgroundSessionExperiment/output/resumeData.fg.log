@@ -1,0 +1,5 @@
+[  0.051] [main] launch scenario=resumeData
+[  0.051] [main] scene.willEnterForeground
+[  0.065] [bg] FG dlResume didFinishCollecting id=2 txns=1 redirects=0 proto=nil fetchType=0 reused=false remote=false dns=false connect=false reqStart=false respBodyBytes=0 reqBodyBytes=0 interval=0.00
+[  0.065] [bg] FG dlResume didCompleteWithError id=2 NSURLErrorDomain#-1002 (unsupported URL) status=-1 recv=0/0 sent=0/0 orig=nil cur=nil resp=nil progress=0.0
+[  0.811] [main] DONE

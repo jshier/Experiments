@@ -1,0 +1,7 @@
+[  0.043] [main] launch scenario=cancelRunning
+[  0.043] [main] scene.willEnterForeground
+[  1.079] [main] cancel() at state=0
+[  1.079] [main] state after cancel=2
+[  1.084] [bg] FG cancelRun didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=1.02
+[  1.085] [bg] FG cancelRun didCompleteWithError id=1 NSURLErrorDomain#-999 (cancelled) status=-1 recv=0/0 sent=0/0 orig=/delay/5 cur=/delay/5 resp=nil progress=0.0
+[  1.831] [main] DONE

@@ -1,0 +1,4 @@
+[  0.051] [main] launch scenario=noDelegate
+[  0.052] [main] scene.willEnterForeground
+[  0.072] [main] no-delegate session task resumed
+[  3.220] [main] DONE

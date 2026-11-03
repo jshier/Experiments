@@ -1,0 +1,4 @@
+[  0.052] [main] launch scenario=badScheme
+[  0.052] [main] scene.willEnterForeground
+[  0.074] [bg] BG badScheme didCompleteWithError id=1 NSURLErrorDomain#-1002 (unsupported URL) status=-1 recv=0/0 sent=0/0 orig=nil cur=nil resp=nil progress=0.0
+[  0.819] [main] DONE

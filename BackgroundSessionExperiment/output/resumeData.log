@@ -1,0 +1,4 @@
+[  0.052] [main] launch scenario=resumeData
+[  0.052] [main] scene.willEnterForeground
+[  0.075] [bg] BG dlResume didCompleteWithError id=1 NSURLErrorDomain#-3003 (The operation couldn’t be completed. (NSURLErrorDomain error -3003.)) status=-1 recv=0/0 sent=0/0 orig=nil cur=nil resp=nil progress=0.0
+[  0.821] [main] DONE

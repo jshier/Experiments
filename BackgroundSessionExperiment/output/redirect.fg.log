@@ -1,0 +1,11 @@
+[  0.042] [main] launch scenario=redirect
+[  0.042] [main] scene.willEnterForeground
+[  0.081] [bg] FG redirect willPerformHTTPRedirection id=1 302 -> http://127.0.0.1:8080/redirect/1 follow=true
+[  0.082] [bg] FG redirect willPerformHTTPRedirection id=1 302 -> http://127.0.0.1:8080/get follow=true
+[  0.084] [bg] FG redirect didReceiveResponse id=1 200 len=406 -> disposition 1
+[  0.084] [bg] FG redirect didReceiveData id=1 406B received=406
+[  0.084] [bg] FG redirect willCacheResponse id=1 storage=0
+[  0.085] [bg] FG redirect didFinishCollecting id=1 txns=4 redirects=2 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.085] [bg] FG redirect didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/redirect/2 cur=/get resp=/get progress=0.0
+[  0.085] [bg] FG redirect data summary id=1 chunks=1 bytes=406 max=406
+[  0.829] [main] DONE

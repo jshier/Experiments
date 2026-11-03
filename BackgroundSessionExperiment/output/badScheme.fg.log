@@ -1,0 +1,5 @@
+[  0.056] [main] launch scenario=badScheme
+[  0.056] [main] scene.willEnterForeground
+[  0.073] [bg] FG badScheme didFinishCollecting id=1 txns=1 redirects=0 proto=nil fetchType=0 reused=false remote=false dns=false connect=false reqStart=false respBodyBytes=0 reqBodyBytes=0 interval=0.01
+[  0.073] [bg] FG badScheme didCompleteWithError id=1 NSURLErrorDomain#-1002 (unsupported URL) status=-1 recv=0/0 sent=0/0 orig=/y cur=/y resp=nil progress=0.0
+[  0.819] [main] DONE

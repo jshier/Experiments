@@ -1,0 +1,9 @@
+[  0.049] [main] launch scenario=downloadBig
+[  0.049] [main] scene.willEnterForeground
+[  0.081] [bg] FG dlBig download.didWriteData +100000 100000/100000
+[  0.081] [bg] FG dlBig didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.081] [bg] FG dlBig download.didFinishDownloadingTo .../C8019B1F-F8AD-4117-9DAB-3A7164CA5A76/tmp/CFNetworkDownload_vv2dNp.tmp size=100000 resp=200
+[  0.082] [bg] FG dlBig didCompleteWithError id=1 nil status=200 recv=100000/100000 sent=0/0 orig=/bytes/100000 cur=/bytes/100000 resp=/bytes/100000 progress=0.0
+[  0.082] [bg] FG dlBig write summary id=1 calls=1 last=100000
+[  0.508] [bg] FG dlBig download file exists after delegate returned: false
+[  0.826] [main] DONE

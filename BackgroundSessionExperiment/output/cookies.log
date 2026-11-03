@@ -1,0 +1,18 @@
+[  0.056] [main] launch scenario=cookies
+[  0.057] [main] scene.willEnterForeground
+[  0.081] [bg] BG cookies willBeginDelayedRequest id=1 /response-headers -> disposition 0
+[  0.087] [bg] BG cookies didReceiveResponse id=1 200 len=24 -> disposition 1
+[  0.087] [bg] BG cookies didReceiveData id=1 24B received=24
+[  0.088] [bg] BG cookies didFinishCollecting id=1 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=24 reqBodyBytes=0 interval=0.01
+[  0.089] [bg] BG cookies didCompleteWithError id=1 nil status=200 recv=24/24 sent=0/0 orig=/response-headers cur=/response-headers resp=/response-headers progress=0.0
+[  0.089] [bg] BG cookies data summary id=1 chunks=1 bytes=24 max=24
+[  0.089] [bg] BG cookies request headers: (no header echo)
+[  1.127] [main] shared cookies=["bgexp"] session cookies=["bgexp"]
+[  1.132] [bg] BG cookies willBeginDelayedRequest id=2 /get -> disposition 0
+[  1.139] [bg] BG cookies didReceiveResponse id=2 200 len=442 -> disposition 1
+[  1.140] [bg] BG cookies didReceiveData id=2 442B received=442
+[  1.140] [bg] BG cookies didFinishCollecting id=2 txns=1 redirects=0 proto=http/1.1 fetchType=1 reused=false remote=true dns=true connect=true reqStart=true respBodyBytes=442 reqBodyBytes=0 interval=0.01
+[  1.141] [bg] BG cookies didCompleteWithError id=2 nil status=200 recv=442/442 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  1.141] [bg] BG cookies data summary id=2 chunks=1 bytes=442 max=442
+[  1.141] [bg] BG cookies request headers: Accept=*/*; Cookie=bgexp=1; User-Agent=BGExp/1 CFNetwork/3896.100.1.2.1 Darwin/27.0.0; Accept-Language=en-US,en;q=0.9; Accept-Encoding=gzip, deflate; Connection=keep-alive
+[  1.885] [main] DONE

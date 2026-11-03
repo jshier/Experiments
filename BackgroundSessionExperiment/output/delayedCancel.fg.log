@@ -1,0 +1,9 @@
+[  0.050] [main] launch scenario=delayedCancel
+[  0.050] [main] scene.willEnterForeground
+[  0.076] [bg] FG delayedCancel didReceiveResponse id=1 200 len=406 -> disposition 1
+[  0.076] [bg] FG delayedCancel didReceiveData id=1 406B received=406
+[  0.076] [bg] FG delayedCancel willCacheResponse id=1 storage=0
+[  0.077] [bg] FG delayedCancel didFinishCollecting id=1 txns=2 redirects=0 proto=nil fetchType=3 reused=false remote=false dns=false connect=false reqStart=true respBodyBytes=0 reqBodyBytes=0 interval=0.02
+[  0.077] [bg] FG delayedCancel didCompleteWithError id=1 nil status=200 recv=406/406 sent=0/0 orig=/get cur=/get resp=/get progress=0.0
+[  0.077] [bg] FG delayedCancel data summary id=1 chunks=1 bytes=406 max=406
+[  0.823] [main] DONE
