@@ -119,6 +119,17 @@ struct FormTests {
             == base + 0.999_999_999)
     }
 
+    @Test("A fraction after the minutes is a fraction of a minute")
+    func minuteFractions() throws {
+        let base = try ISO8601.date(from: "2024-01-15T10:30:00Z")
+        #expect(try ISO8601.date(from: "2024-01-15T10:30,5Z") == base.addingTimeInterval(30))
+        #expect(try ISO8601.date(from: "2024-01-15T1030.25Z") == base.addingTimeInterval(15))
+        #expect(try ISO8601.date(from: "2024-01-15T10:30.999999999Z") == base.addingTimeInterval(59.99999994))
+        #expect(throws: ISO8601ParseError.valueOutOfRange(.hour, value: 24)) {
+            try ISO8601.date(from: "2024-01-15T24:00,5Z")
+        }
+    }
+
     @Test func endOfDayAndLeapSecond() throws {
         let midnight = try ISO8601.date(from: "2024-01-16T00:00:00Z")
         #expect(try ISO8601.date(from: "2024-01-15T24:00:00Z") == midnight)
@@ -148,12 +159,17 @@ struct FormTests {
 struct ErrorTests {
     @Test(arguments: [
         ("", ISO8601ParseError.unexpectedEnd(offset: 0)),
-        ("2024", .unexpectedEnd(offset: 4)),
-        ("2024-01", .unexpectedEnd(offset: 7)),
+        ("198504", .unexpectedEnd(offset: 6)),
+        ("1985-04T10", .unexpectedByte(UInt8(ascii: "T"), offset: 7)),
+        ("1985T10", .unexpectedByte(UInt8(ascii: "T"), offset: 4)),
+        ("12345-01-01", .unexpectedByte(UInt8(ascii: "5"), offset: 4)),
+        ("+19850412", .unexpectedEnd(offset: 9)),
+        ("+1234567890-01-01", .unexpectedByte(UInt8(ascii: "0"), offset: 10)),
+        ("+", .unexpectedEnd(offset: 1)),
         ("2024-01-1", .unexpectedEnd(offset: 9)),
         ("2024/01/15", .unexpectedByte(UInt8(ascii: "/"), offset: 4)),
         ("2024-01-15X10:30:45Z", .unexpectedByte(UInt8(ascii: "X"), offset: 10)),
-        ("2024-01-15T10", .unexpectedEnd(offset: 13)),
+        ("2024-01-15T1", .unexpectedEnd(offset: 12)),
         ("2024-01-15T10:3", .unexpectedEnd(offset: 15)),
         ("2024-01-15T10:30:45.Z", .unexpectedByte(UInt8(ascii: "Z"), offset: 20)),
         ("2024-01-15T10:30:45+5", .unexpectedEnd(offset: 21)),

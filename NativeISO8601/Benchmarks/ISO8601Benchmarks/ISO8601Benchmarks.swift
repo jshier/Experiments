@@ -111,6 +111,29 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
+    // General-path forms: everything the SWAR prefix doesn't cover.
+    let generalSamples: [(name: String, input: String)] = [
+        ("basic format", "20240115T103045Z"),
+        ("expanded year", "+002024-01-15T10:30:45Z"),
+        ("week date", "2024-W03-1T10:30:45Z"),
+        ("reduced: year-month", "2024-01"),
+    ]
+    for (name, input) in generalSamples {
+        Benchmark("Native String (\(name))") { benchmark in
+            for _ in benchmark.scaledIterations {
+                blackHole(try ISO8601.date(from: identity(input)))
+            }
+        }
+    }
+
+    // The components API, which also builds an `ISO8601.Timestamp`.
+    Benchmark("Native Timestamp (offset)") { benchmark in
+        let input = samples[2].input
+        for _ in benchmark.scaledIterations {
+            blackHole(try ISO8601.timestamp(from: identity(input)))
+        }
+    }
+
     Benchmark("Native String (mixed corpus)") { benchmark in
         for _ in 0..<benchmark.scaledIterations.count / corpus.count {
             for input in corpus {

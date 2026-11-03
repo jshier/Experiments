@@ -14,6 +14,7 @@ let package = Package(
     platforms: [.macOS(.v27), .iOS(.v27), .tvOS(.v27), .watchOS(.v27), .visionOS(.v27)],
     products: [
         .library(name: "NativeISO8601", targets: ["NativeISO8601"]),
+        .executable(name: "iso8601-suite-adapter", targets: ["ISO8601SuiteAdapter"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
@@ -22,6 +23,12 @@ let package = Package(
         .target(
             name: "NativeISO8601",
             swiftSettings: strictSettings
+        ),
+        // Adapter for the CalConnect ISO 8601 conformance suite's `exec:` JSON protocol.
+        .executableTarget(
+            name: "ISO8601SuiteAdapter",
+            dependencies: ["NativeISO8601"],
+            swiftSettings: [.swiftLanguageMode(.v6)]
         ),
         .testTarget(
             name: "NativeISO8601Tests",
