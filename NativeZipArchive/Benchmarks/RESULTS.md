@@ -1,0 +1,131 @@
+# NativeZip performance log
+
+Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra (32 cores), macOS 27.2, APFS.
+Each step is saved as a named baseline in `.benchmarkBaselines/` and can be re-compared with
+`swift package --disable-sandbox benchmark baseline compare <a> <b> | python3 -I Benchmarks/summarize.py`.
+
+## baseline — the code before any performance work
+
+`OutputFilter` (Compression.framework) decoding with a new 1 MB buffer + `Data` per chunk, `FileManager`
+for attributes and existence checks, `mkdir` for every path component of every file, all serial.
+
+| Benchmark | Wall | Instructions | Mallocs |
+|---|---|---|---|
+| Parse central directory (2,000 entries) | 287 µs | 6.1 M | 2,290 |
+| Inflate + CRC 32 MB text | 33 ms | 359 M | 48 |
+| Stored + CRC 32 MB random | 5.5 ms | 62 M | 41 |
+| Inflate + CRC 2,000 small files | 48 ms | 470 M | 18 K |
+| Extract 2,000 small files | 306 ms | 4,012 M | 129 K |
+| Extract 32 MB text | 37 ms | 382 M | 146 |
+| Extract 32 MB random | 8.4 ms | 84 M | 139 |
+
+## step1 — zlib decoder, zero-allocation decoding, cheaper filesystem work, parallel workers
+
+- `ZipDecoder`: reusable zlib `inflate` state (`inflateReset` per entry) and a single 1 MB output buffer,
+  handing out `RawSpan`s. zlib inflate measured 2.3x faster than Compression's (`Backend:` benchmark: 30 ms
+  vs ~13 ms for the same 32 MB payload).
+- Output callback takes `RawSpan` instead of `Data`; stored entries are passed straight from the mapped archive.
+- `DirectoryCache` (one `mkdir` per directory per extraction), `fchmod`/`futimens` on the open descriptor
+  instead of `FileManager.setAttributes`, `FilePath.stat` only when the overwrite policy needs it.
+- Files extracted by a pool of child tasks (`withThrowingDiscardingTaskGroup` + atomic work queue,
+  largest first), one decoder per worker.
+
+| Benchmark | Wall | Instructions | Mallocs |
+|---|---|---|---|
+| Parse central directory (2,000 entries) | 295 µs (+3%) | 6.1 M | 2,290 |
+| Inflate + CRC 32 MB text | 14 ms (−58%) | 218 M (−39%) | 1 |
+| Stored + CRC 32 MB random | 2.6 ms (−52%) | 31 M (−50%) | 0 |
+| Inflate + CRC 2,000 small files | 15 ms (−69%) | 217 M (−54%) | 0 |
+| Extract 2,000 small files (32 workers) | 333 ms (**+9%**) | 5,490 M (+37%) | 14 K (−89%) |
+| Extract 2,000 small files (1 worker) | 230 ms (−25%) | 3,020 M (−25%) | 14 K (−89%) |
+| Extract 32 MB text | 17 ms (−54%) | 239 M (−37%) | 44 |
+| Extract 32 MB random | 5.7 ms (−32%) | 51 M (−39%) | 44 |
+
+Finding: parallel small-file extraction used 1.75 s of CPU for 333 ms of wall time — 32 workers creating
+files in the same directories contend in the kernel. Serial is faster. Next: find the right width.
+
+### Width experiment (2,000 small files, step1 code)
+
+| Workers | 1 | 2 | 4 | 8 | 32 |
+|---|---|---|---|---|---|
+| Wall | 215 ms | 152 ms | 113 ms | 106 ms | 311 ms |
+| CPU | 215 ms | 263 ms | 327 ms | 490 ms | 1,637 ms |
+
+Floor (`Floor: create + write 2,000 files`, raw `open`/`write`/`close`, no decoding, 1 thread): 167 ms,
+~1 M kernel instructions per file. Claiming contiguous archive-order batches (so workers stay in
+different directories) changed nothing (8 workers: 110 ms), so the contention is filesystem-wide,
+not per directory; reverted.
+
+## step2 — cap file-creation width at 8 (plus one worker per ≥ 1 MB entry beyond that)
+
+| Benchmark | Wall | Instructions | CPU |
+|---|---|---|---|
+| Extract 2,000 small files | 102 ms (−69% vs step1, **−67% vs baseline**) | 3,253 M | 483 ms |
+| Extract 2,000 small files (1 worker) | 250 ms (noise: ±10% run to run) | 2,991 M | 250 ms |
+| Verify 2,000 small files (parallel, 32 workers) | 4.8 ms (vs 15 ms serial) | 288 M | 25 ms |
+
+Everything else unchanged within noise.
+
+## step3 — own `mmap` (`MappedFile`) and pipelined writes for large deflated entries
+
+- `MappedFile` replaces `Data(contentsOf:options: .alwaysMapped)`: a `Sendable` class owning the mapping,
+  exposing `bytes: RawSpan` (`@_lifetime(borrow self)`) and a stable pointer for async decode loops.
+- `ZipDecoder.inflatePipelined`: two 1 MB buffers; chunk N is written in a child task
+  (`withThrowingTaskGroup`) while chunk N+1 inflates. Used for deflated entries ≥ 4 MB.
+
+| Benchmark | step2 | step3 |
+|---|---|---|
+| Extract 32 MB text | 17 ms | 15 ms (−12%) |
+| Extract 32 MB random | 6.2 ms | 4.3 ms (−31%, from the mapping change) |
+
+## step4 — no per-entry allocations; `sending` instead of `@unchecked Sendable`
+
+- A local func passed as a closure boxed its captured `crc`/`written` vars on the heap: 2 mallocs per
+  entry. Closure literals keep them on the stack.
+- The pipelined `Chunk` is no longer `@unchecked Sendable`; it's sent to exactly one child task, with
+  the single opt-out (`nonisolated(unsafe) let`) at the send site, since it points into the decoder's buffer.
+
+| Benchmark | step3 | step4 |
+|---|---|---|
+| Inflate + CRC 2,000 small files | 4,001 mallocs | **1** (the harness's own) |
+| Inflate + CRC 32 MB text | 3 mallocs | 1 |
+| Stored + CRC 32 MB random | 3 mallocs | 1 |
+
+Times unchanged (allocation was never the bottleneck there; now it's provably absent).
+
+### Experiments that didn't pay off
+
+- `openat` relative to cached directory descriptors (skip absolute-path resolution): floor 142 → 133 ms
+  (−6%). Path lookup isn't where the time goes; file creation is. Not adopted.
+- `@inlinable` on the public entry points (`contents(of:using:_:)`, `contents(of:_:)`, `isEncrypted`):
+  removing it changed instructions by < 0.3% and wall time within noise, because each call does a whole
+  entry's work. Kept (no cost), but not pushed deeper: that would expose zlib/parsing internals as
+  `@usableFromInline` for no measured gain.
+
+## Benchmark summary: baseline → step4
+
+| Benchmark | baseline | step4 | Change |
+|---|---|---|---|
+| Extract 2,000 small files | 306 ms | 105 ms | −66% |
+| Extract 32 MB text | 37 ms | 15 ms | −59% |
+| Extract 32 MB random | 8.4 ms | 4.3 ms | −49% |
+| Inflate + CRC 32 MB text | 33 ms | 14 ms | −58% |
+| Inflate + CRC 2,000 small files | 48 ms / 18 K mallocs | 15 ms / 0 per entry | −69% |
+| Stored + CRC 32 MB random | 5.5 ms | 2.7 ms | −50% |
+| Extract 2,000 small files: mallocs | 129 K | 14 K | −89% |
+
+## End-to-end CLI comparison (hyperfine, 5 runs, warm cache)
+
+Same archives as the first comparison: SDK headers (3,460 files → 7.4 MB), 188 MB text (→ 30 MB),
+200 MB random (stored). `nunzip` before = the pre-optimization release build.
+
+| Job | unzip | ditto | nunzip before | nunzip now | now vs before | now vs unzip |
+|---|---|---|---|---|---|---|
+| Extract headers.zip | 564 ms | 771 ms | 492 ms | **150 ms** | 3.3x | 3.8x |
+| Extract text.zip | 802 ms | 119 ms | 200 ms | **106 ms** | 1.9x | 7.6x |
+| Extract random.zip | 763 ms | 45 ms | 69 ms | **39 ms** | 1.8x | 19.7x |
+| Test headers.zip (`-t`) | 158 ms | — | 83 ms | **15 ms** | 5.4x | 10.2x |
+| Test text.zip (`-t`) | 770 ms | — | 184 ms | **99 ms** | 1.9x | 7.8x |
+| Test random.zip (`-t`) | 739 ms | — | 46 ms | **28 ms** | 1.6x | 26.1x |
+
+`nunzip` is now faster than `ditto` on all three (it was 1.6x slower on the large files).
