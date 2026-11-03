@@ -1,0 +1,6 @@
+[  0.000] === nowfc-refused: delay=0.0 reqTimeout=5.0 resTimeout=604800.0 waits=false url=http://127.0.0.1:1/ willBegin=true waiting=true
+[  0.011] task class = NWURLSessionDataTask
+[  0.011] resumed; state=1
+[  0.017] metrics: fetchStart=0.011 connectStart=nil reqStart=nil respEnd=nil taskInterval=0.006
+[  0.018] didCompleteWithError: NSURLErrorDomain -1004 "Could not connect to the server." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "NSUnderlyingError", "_NSURLErrorNWPathKey"] underlying=NSPOSIXErrorDomain/61
+[  0.018] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1004 "Could not connect to the server." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "NSUnderlyingError", "_NSURLErrorNWPathKey"] underlying=NSPOSIXErrorDomain/61

@@ -1,0 +1,7 @@
+[  0.000] === wfc-dns: delay=0.0 reqTimeout=3.0 resTimeout=8.0 waits=true url=https://nonexistent.invalid/ willBegin=true waiting=true
+[  0.007] task class = NWURLSessionDataTask
+[  0.008] resumed; state=1
+[  0.016] taskIsWaitingForConnectivity #1 state=0
+[  8.581] metrics: fetchStart=0.007 connectStart=nil reqStart=nil respEnd=nil taskInterval=8.574
+[  8.582] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey", "_NSURLErrorNWResolutionReportKey"]
+[  8.583] final: state=3 willBegin=0 waiting=1 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey", "_NSURLErrorNWResolutionReportKey"]

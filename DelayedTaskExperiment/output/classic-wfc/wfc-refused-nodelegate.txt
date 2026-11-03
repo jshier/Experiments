@@ -1,0 +1,8 @@
+[  0.000] === wfc-refused-nodelegate: delay=0.0 reqTimeout=3.0 resTimeout=6.0 waits=true url=http://127.0.0.1:1/ willBegin=true waiting=false
+[  0.008] task class = __NSCFLocalDataTask
+[  0.009] resumed; state=0
+[  6.558] metrics: fetchStart=0.013 connectStart=nil reqStart=nil respEnd=nil taskInterval=6.550
+[  6.558] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_NSURLErrorFailingURLSessionTaskErrorKey", "_NSURLErrorRelatedURLSessionTaskErrorKey", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] related=(
+    "LocalDataTask <6D439282-2765-46C5-B89A-DC39B76A34D8>.<1>"
+) streamCode=-2103 streamDomain=4
+[  6.558] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] streamCode=-2103 streamDomain=4

@@ -1,0 +1,8 @@
+[  0.000] === nowfc-dns: delay=0.0 reqTimeout=3.0 resTimeout=604800.0 waits=false url=https://nonexistent.invalid/ willBegin=true waiting=true
+[  0.013] task class = __NSCFLocalDataTask
+[  0.013] resumed; state=0
+[  0.018] metrics: fetchStart=0.015 connectStart=nil reqStart=nil respEnd=nil taskInterval=0.005
+[  0.018] didCompleteWithError: NSURLErrorDomain -1003 "A server with the specified hostname could not be found." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "NSUnderlyingError", "_NSURLErrorFailingURLSessionTaskErrorKey", "_NSURLErrorRelatedURLSessionTaskErrorKey", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] related=(
+    "LocalDataTask <74A63B13-2E7E-466A-903F-5D94414C8223>.<1>"
+) streamCode=8 streamDomain=12 underlying=kCFErrorDomainCFNetwork/-1003
+[  0.018] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1003 "A server with the specified hostname could not be found." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "NSUnderlyingError", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] streamCode=8 streamDomain=12 underlying=kCFErrorDomainCFNetwork/-1003

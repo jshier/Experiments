@@ -1,0 +1,6 @@
+[  0.000] === nowfc-dns: delay=0.0 reqTimeout=3.0 resTimeout=604800.0 waits=false url=https://nonexistent.invalid/ willBegin=true waiting=true
+[  0.008] task class = NWURLSessionDataTask
+[  0.010] resumed; state=1
+[  0.017] metrics: fetchStart=0.008 connectStart=nil reqStart=nil respEnd=nil taskInterval=0.009
+[  0.018] didCompleteWithError: NSURLErrorDomain -1003 "A server with the specified hostname could not be found." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "NSUnderlyingError", "_NSURLErrorNWPathKey", "_NSURLErrorNWResolutionReportKey"] underlying=kNWErrorDomainDNS/-65554
+[  0.018] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1003 "A server with the specified hostname could not be found." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "NSUnderlyingError", "_NSURLErrorNWPathKey", "_NSURLErrorNWResolutionReportKey"] underlying=kNWErrorDomainDNS/-65554

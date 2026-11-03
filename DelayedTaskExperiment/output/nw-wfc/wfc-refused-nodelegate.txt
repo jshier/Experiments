@@ -1,0 +1,6 @@
+[  0.000] === wfc-refused-nodelegate: delay=0.0 reqTimeout=3.0 resTimeout=6.0 waits=true url=http://127.0.0.1:1/ willBegin=true waiting=false
+[  0.010] task class = NWURLSessionDataTask
+[  0.011] resumed; state=1
+[  6.555] metrics: fetchStart=0.010 connectStart=nil reqStart=nil respEnd=nil taskInterval=6.545
+[  6.557] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[  6.557] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]

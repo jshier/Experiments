@@ -1,0 +1,6 @@
+[  0.000] === wfc-refused: delay=0.0 reqTimeout=5.0 resTimeout=604800.0 waits=true url=http://127.0.0.1:1/ willBegin=true waiting=true
+[  0.008] task class = NWURLSessionDataTask
+[  0.008] resumed; state=1
+[  0.019] taskIsWaitingForConnectivity #1 state=0
+[ 12.013] !! no completion within 12.0s; state=0 willBegin=0 waiting=1
+[ 12.013] final: state=0 willBegin=0 waiting=1 error=nil

@@ -1,0 +1,6 @@
+[  0.000] === wfc-invalid-host: delay=0.0 reqTimeout=5.0 resTimeout=604800.0 waits=true url=http://nonexistent.invalid/ willBegin=true waiting=true
+[  0.010] task class = NWURLSessionDataTask
+[  0.010] resumed; state=1
+[  0.021] metrics: fetchStart=0.010 connectStart=nil reqStart=nil respEnd=nil taskInterval=0.011
+[  0.022] didCompleteWithError: NSURLErrorDomain -1022 "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[  0.022] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1022 "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]

@@ -1,0 +1,8 @@
+[  0.000] === wfc-refused-delay2: delay=2.0 reqTimeout=60.0 resTimeout=8.0 waits=true url=http://127.0.0.1:1/ willBegin=true waiting=true
+[  0.011] task class = NWURLSessionDataTask
+[  0.012] resumed; state=1
+[  2.017] willBeginDelayedRequest #1 url=http://127.0.0.1:1/ main=false state=0
+[  2.028] taskIsWaitingForConnectivity #1 state=0
+[ 10.560] metrics: fetchStart=0.011 connectStart=nil reqStart=nil respEnd=nil taskInterval=10.549
+[ 10.562] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[ 10.562] final: state=3 willBegin=1 waiting=1 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]

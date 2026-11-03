@@ -1,0 +1,6 @@
+[  0.000] === wfc-testnet-restimeout6: delay=0.0 reqTimeout=4.0 resTimeout=6.0 waits=true url=http://192.0.2.1/ willBegin=true waiting=true
+[  0.005] task class = NWURLSessionDataTask
+[  0.006] resumed; state=1
+[  0.015] metrics: fetchStart=0.005 connectStart=nil reqStart=nil respEnd=nil taskInterval=0.010
+[  0.016] didCompleteWithError: NSURLErrorDomain -1022 "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[  0.016] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1022 "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]

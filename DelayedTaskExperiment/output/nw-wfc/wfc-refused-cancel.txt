@@ -1,0 +1,8 @@
+[  0.000] === wfc-refused-cancel: delay=0.0 reqTimeout=60.0 resTimeout=604800.0 waits=true url=http://127.0.0.1:1/ willBegin=true waiting=true
+[  0.009] task class = NWURLSessionDataTask
+[  0.011] resumed; state=1
+[  0.016] taskIsWaitingForConnectivity #1 state=0
+[  3.160] cancel()
+[  3.160] metrics: fetchStart=0.009 connectStart=nil reqStart=nil respEnd=nil taskInterval=3.151
+[  3.163] didCompleteWithError: NSURLErrorDomain -999 "cancelled" userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[  3.163] final: state=3 willBegin=0 waiting=1 error=NSURLErrorDomain -999 "cancelled" userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]

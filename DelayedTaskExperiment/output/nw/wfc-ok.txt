@@ -1,0 +1,7 @@
+[  0.000] === wfc-ok: delay=0.0 reqTimeout=60.0 resTimeout=604800.0 waits=true url=http://127.0.0.1:8080/get willBegin=true waiting=true
+[  0.010] task class = NWURLSessionDataTask
+[  0.010] resumed; state=1
+[  0.023] didReceiveResponse status=200 url=http://127.0.0.1:8080/get
+[  0.025] metrics: fetchStart=0.010 connectStart=0.011 reqStart=0.022 respEnd=0.023 taskInterval=0.015
+[  0.025] didCompleteWithError: nil
+[  0.025] final: state=3 willBegin=0 waiting=0 error=nil

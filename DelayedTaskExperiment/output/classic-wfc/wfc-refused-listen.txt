@@ -1,0 +1,10 @@
+[  0.000] === wfc-refused-listen: delay=0.0 reqTimeout=3.0 resTimeout=12.0 waits=true url=http://127.0.0.1:18089/ willBegin=true waiting=true
+[  0.012] task class = __NSCFLocalDataTask
+[  0.012] resumed; state=0
+[  0.016] taskIsWaitingForConnectivity #1 state=0
+[  4.199] starting python listener on 18089
+[ 12.563] metrics: fetchStart=0.015 connectStart=nil reqStart=nil respEnd=nil taskInterval=12.550
+[ 12.563] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_NSURLErrorFailingURLSessionTaskErrorKey", "_NSURLErrorRelatedURLSessionTaskErrorKey", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] related=(
+    "LocalDataTask <12B74FBF-618B-448A-AF36-CB9A0A4F90B8>.<1>"
+) streamCode=-2103 streamDomain=4
+[ 12.563] final: state=3 willBegin=0 waiting=1 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] streamCode=-2103 streamDomain=4

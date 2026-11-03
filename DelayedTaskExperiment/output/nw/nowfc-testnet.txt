@@ -1,0 +1,6 @@
+[  0.000] === nowfc-testnet: delay=0.0 reqTimeout=4.0 resTimeout=604800.0 waits=false url=http://192.0.2.1/ willBegin=true waiting=true
+[  0.007] task class = NWURLSessionDataTask
+[  0.007] resumed; state=1
+[  0.017] metrics: fetchStart=0.007 connectStart=nil reqStart=nil respEnd=nil taskInterval=0.010
+[  0.017] didCompleteWithError: NSURLErrorDomain -1022 "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[  0.018] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1022 "The resource could not be loaded because the App Transport Security policy requires the use of a secure connection." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]

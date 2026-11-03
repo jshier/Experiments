@@ -1,0 +1,6 @@
+[  0.000] === wfc-testnet-https: delay=0.0 reqTimeout=3.0 resTimeout=8.0 waits=true url=https://192.0.2.1/ willBegin=true waiting=true
+[  0.007] task class = NWURLSessionDataTask
+[  0.008] resumed; state=0
+[  3.569] metrics: fetchStart=0.007 connectStart=nil reqStart=nil respEnd=nil taskInterval=3.562
+[  3.570] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[  3.571] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]

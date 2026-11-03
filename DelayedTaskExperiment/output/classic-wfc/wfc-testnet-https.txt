@@ -1,0 +1,8 @@
+[  0.000] === wfc-testnet-https: delay=0.0 reqTimeout=3.0 resTimeout=8.0 waits=true url=https://192.0.2.1/ willBegin=true waiting=true
+[  0.012] task class = __NSCFLocalDataTask
+[  0.012] resumed; state=0
+[  8.023] metrics: fetchStart=0.015 connectStart=nil reqStart=nil respEnd=nil taskInterval=8.011
+[  8.023] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_NSURLErrorFailingURLSessionTaskErrorKey", "_NSURLErrorRelatedURLSessionTaskErrorKey", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] related=(
+    "LocalDataTask <D40C90F4-89B3-42E5-9277-5FD7A283A5B9>.<1>"
+) streamCode=-2103 streamDomain=4
+[  8.023] final: state=3 willBegin=0 waiting=0 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] streamCode=-2103 streamDomain=4

@@ -1,0 +1,8 @@
+[  0.000] === delay5-reqtimeout2: delay=5.0 reqTimeout=2.0 resTimeout=604800.0 waits=false url=http://127.0.0.1:8080/get willBegin=true waiting=true
+[  0.006] task class = NWURLSessionDataTask
+[  0.007] resumed; state=1
+[  5.022] willBeginDelayedRequest #1 url=http://127.0.0.1:8080/get main=false state=0
+[  5.042] didReceiveResponse status=200 url=http://127.0.0.1:8080/get
+[  5.046] metrics: fetchStart=0.006 connectStart=0.009 reqStart=5.041 respEnd=5.042 taskInterval=5.040
+[  5.046] didCompleteWithError: nil
+[  5.046] final: state=3 willBegin=1 waiting=0 error=nil

@@ -1,0 +1,9 @@
+[  0.000] === wfc-refused-restimeout6: delay=0.0 reqTimeout=3.0 resTimeout=6.0 waits=true url=http://127.0.0.1:1/ willBegin=true waiting=true
+[  0.011] task class = __NSCFLocalDataTask
+[  0.011] resumed; state=0
+[  0.016] taskIsWaitingForConnectivity #1 state=0
+[  6.557] metrics: fetchStart=0.014 connectStart=nil reqStart=nil respEnd=nil taskInterval=6.546
+[  6.557] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_NSURLErrorFailingURLSessionTaskErrorKey", "_NSURLErrorRelatedURLSessionTaskErrorKey", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] related=(
+    "LocalDataTask <E42C19FB-270B-4A42-A7CA-A4060B3415BC>.<1>"
+) streamCode=-2103 streamDomain=4
+[  6.557] final: state=3 willBegin=0 waiting=1 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSErrorFailingURLStringKey", "NSLocalizedDescription", "_kCFStreamErrorCodeKey", "_kCFStreamErrorDomainKey"] streamCode=-2103 streamDomain=4

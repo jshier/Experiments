@@ -1,0 +1,4 @@
+[  0.000] === delay2-twice: delay=2.0 reqTimeout=60.0 resTimeout=604800.0 waits=false url=http://127.0.0.1:8080/get willBegin=true waiting=true
+[  0.007] task class = NWURLSessionDataTask
+[  0.007] resumed; state=1
+[  2.033] willBeginDelayedRequest #1 url=http://127.0.0.1:8080/get main=false state=0

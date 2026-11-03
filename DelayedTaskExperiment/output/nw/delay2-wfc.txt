@@ -1,0 +1,8 @@
+[  0.000] === delay2-wfc: delay=2.0 reqTimeout=60.0 resTimeout=604800.0 waits=true url=http://127.0.0.1:8080/get willBegin=true waiting=true
+[  0.008] task class = NWURLSessionDataTask
+[  0.008] resumed; state=1
+[  2.040] willBeginDelayedRequest #1 url=http://127.0.0.1:8080/get main=false state=0
+[  2.057] didReceiveResponse status=200 url=http://127.0.0.1:8080/get
+[  2.063] metrics: fetchStart=0.008 connectStart=0.009 reqStart=2.055 respEnd=2.056 taskInterval=2.056
+[  2.063] didCompleteWithError: nil
+[  2.063] final: state=3 willBegin=1 waiting=0 error=nil

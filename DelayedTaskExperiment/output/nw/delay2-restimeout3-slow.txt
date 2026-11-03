@@ -1,0 +1,8 @@
+[  0.000] === delay2-restimeout3-slow: delay=2.0 reqTimeout=60.0 resTimeout=3.0 waits=false url=http://127.0.0.1:8080/delay/3 willBegin=true waiting=true
+[  0.005] task class = NWURLSessionDataTask
+[  0.006] resumed; state=1
+[  2.024] willBeginDelayedRequest #1 url=http://127.0.0.1:8080/delay/3 main=false state=0
+[  5.041] didReceiveResponse status=200 url=http://127.0.0.1:8080/delay/3
+[  5.041] metrics: fetchStart=0.005 connectStart=0.006 reqStart=2.038 respEnd=5.041 taskInterval=5.036
+[  5.043] didCompleteWithError: NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
+[  5.043] final: state=3 willBegin=1 waiting=0 error=NSURLErrorDomain -1001 "The request timed out." userInfoKeys=["NSErrorFailingURLKey", "NSLocalizedDescription", "_NSURLErrorNWPathKey"]
