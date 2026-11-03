@@ -27,6 +27,29 @@ let benchmarks: @Sendable () -> Void = {
         return formatter.string(from: date)
     }
 
+    // MARK: Binary size
+
+    // Not timed: one sample per run, read from the library's release object. Tracked in baselines so
+    // code-size growth shows up next to the speed numbers it buys.
+    if let size = BinarySize.library() {
+        let code = BenchmarkMetric.custom("Code size: __text (bytes)", useScalingFactor: false)
+        let loadable = BenchmarkMetric.custom("Loadable size: all sections (bytes)", useScalingFactor: false)
+        let hotPath = BenchmarkMetric.custom("Hot path: date(from: RawSpan) (bytes)", useScalingFactor: false)
+        Benchmark(
+            "Binary size: NativeISO8601",
+            configuration: .init(metrics: [code, loadable, hotPath],
+                                 // Exact bytes rather than auto-scaled "25 K", so small changes show.
+                                 units: [code: .count, loadable: .count, hotPath: .count],
+                                 warmupIterations: 0, scalingFactor: .one, maxIterations: 1)
+        ) { benchmark in
+            benchmark.measurement(code, size.code)
+            benchmark.measurement(loadable, size.loadable)
+            benchmark.measurement(hotPath, size.functions[BinarySize.hotPathSymbol] ?? 0)
+        }
+    } else {
+        print("warning: NativeISO8601 object file not found next to the benchmark executable; skipping binary size")
+    }
+
     // MARK: NativeISO8601
 
     // The harness's own per-parse cost (input copy, result sink), to subtract from the rows below.
