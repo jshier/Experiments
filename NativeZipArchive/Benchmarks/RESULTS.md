@@ -129,3 +129,22 @@ Same archives as the first comparison: SDK headers (3,460 files → 7.4 MB), 188
 | Test random.zip (`-t`) | 739 ms | — | 46 ms | **28 ms** | 1.6x | 26.1x |
 
 `nunzip` is now faster than `ditto` on all three (it was 1.6x slower on the large files).
+
+## step5: parsing with the Bytes package (`../Bytes`)
+
+`ByteReader` replaced by `Bytes` for the central directory, EOCD/ZIP64 records, and local headers:
+fixed-size headers are read as sub-cursors (one bounds check per record instead of one per field),
+signatures are `Byte4` literals, and the EOCD search uses `lastByteOffset(of:)` (16-byte SIMD). The
+original parser is kept in `ZipArchive+ByteReaderParsing.swift`, behind `@_spi(Benchmarking)`, so the two
+run side by side; the benchmark setup checks they produce identical entries and payload ranges for every
+fixture. Baselines: `pre-bytes` (fresh run of step4 code) and `bytes`.
+
+| Benchmark (same run) | ByteReader | Bytes | Change |
+|---|---|---|---|
+| Parse central directory (2,000 entries, includes `String` names and `Date`s) | 279 µs, 5,861 K instr | 238 µs, 4,960 K instr | −15% |
+| Locate 2,000 payloads (local headers) | 207 µs, 3,592 K instr | 202 µs, 3,396 K instr | −5% instr |
+
+Decoding, CRC, and verification are unchanged (they don't parse). Extraction moved within its usual
+run-to-run noise (±20%: the two `Floor:` benchmarks, which don't parse at all, moved −9% and −12% between
+the same two runs); the ~50 µs saved per archive open is far below that. CLI regression archives behave as
+before (Info-ZIP-identical trees; slip, absolute path, bad CRC, truncated, and non-zip inputs rejected).
