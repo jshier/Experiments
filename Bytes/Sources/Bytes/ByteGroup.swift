@@ -9,17 +9,20 @@
 /// let length = try reader.read(Byte3.self, .bigEndian) // UInt32
 /// ```
 ///
-/// Write constants, such as file signatures, as array literals in memory order:
+/// Write constants, such as file signatures, as hexadecimal literals whose digits are the bytes in memory
+/// order, as a hex dump shows them, or as array literals of the bytes:
 ///
 /// ```swift
-/// let signature: Byte4 = [0x50, 0x4B, 0x03, 0x04]
+/// let signature: Byte4 = 0x50_4B_03_04         // the bytes 50 4B 03 04
+/// let same: Byte4 = [0x50, 0x4B, 0x03, 0x04]
 /// ```
 ///
 /// To conform your own type, use 2 through 16 bytes, the narrowest `Integer` that holds them, and make
 /// `init(littleEndian:)` keep only the low `byteCount` bytes. For fixed-size values that aren't integers,
 /// conform to ``ByteRepresentable`` instead.
-public protocol ByteGroup: BitwiseCopyable, Hashable, Sendable, ExpressibleByArrayLiteral, CustomStringConvertible
-where ArrayLiteralElement == UInt8 {
+public protocol ByteGroup: BitwiseCopyable, Hashable, Sendable, ExpressibleByArrayLiteral, ExpressibleByIntegerLiteral,
+    CustomStringConvertible
+where ArrayLiteralElement == UInt8, IntegerLiteralType == Integer {
     /// The narrowest standard unsigned integer that holds `byteCount` bytes.
     associatedtype Integer: FixedWidthInteger & UnsignedInteger & ConvertibleFromBytes
 
@@ -87,6 +90,40 @@ extension ByteGroup {
             self = Self(littleEndian: littleEndian & ~(Integer(0xFF) &<< shift) | Integer(newValue) &<< shift)
         }
     }
+
+    // MARK: Bitwise operators
+
+    // Byte by byte, in memory order: byte `i` of the result comes from byte `i` of each operand, so no byte
+    // order is involved. For checksums, masks (a WebSocket frame's 4-byte key), and XOR-based formats.
+
+    /// The bitwise XOR of each byte.
+    ///
+    /// ```swift
+    /// let unmasked = payload ^ maskingKey      // Byte4s
+    /// ```
+    @inlinable @inline(__always)
+    public static func ^ (lhs: Self, rhs: Self) -> Self { Self(littleEndian: lhs.littleEndian ^ rhs.littleEndian) }
+
+    /// The bitwise AND of each byte.
+    @inlinable @inline(__always)
+    public static func & (lhs: Self, rhs: Self) -> Self { Self(littleEndian: lhs.littleEndian & rhs.littleEndian) }
+
+    /// The bitwise OR of each byte.
+    @inlinable @inline(__always)
+    public static func | (lhs: Self, rhs: Self) -> Self { Self(littleEndian: lhs.littleEndian | rhs.littleEndian) }
+
+    /// Each byte's bits inverted.
+    @inlinable @inline(__always)
+    public static prefix func ~ (value: Self) -> Self { Self(littleEndian: ~value.littleEndian) }
+
+    @inlinable @inline(__always)
+    public static func ^= (lhs: inout Self, rhs: Self) { lhs = lhs ^ rhs }
+
+    @inlinable @inline(__always)
+    public static func &= (lhs: inout Self, rhs: Self) { lhs = lhs & rhs }
+
+    @inlinable @inline(__always)
+    public static func |= (lhs: inout Self, rhs: Self) { lhs = lhs | rhs }
 
     /// The first `H.byteCount` bytes, as `H`.
     @inlinable @inline(__always)
@@ -232,6 +269,27 @@ extension ByteGroup {
             value |= Integer(byte) &<< (8 &* index)
         }
         self.init(littleEndian: value)
+    }
+
+    /// Creates a value from a literal whose digits are the bytes in memory order: `0x50_4B_03_04` is the
+    /// bytes 50 4B 03 04, as a hex dump shows them, and `0x00_04` as a ``Byte2`` is 00 04. That is, the
+    /// literal is the group's big-endian value (``init(bigEndian:)``), whatever byte order the data uses:
+    /// a signature or magic number reads the same in the source as in the file.
+    ///
+    /// A literal with more than `byteCount` bytes is an error: at compile time for ``Byte2``, ``Byte4``,
+    /// ``Byte8``, and ``Byte16``, whose integers are exactly their width; a trap for the others.
+    @inlinable @inline(__always)
+    public init(integerLiteral value: Integer) {
+        precondition(value <= Self._mask, "\(Self.self) literals have at most \(Self.byteCount) bytes")
+        // The bytes reversed with shifts, not `init(bigEndian:)`'s byte swap: the compiler evaluates a
+        // global's initializer at compile time only if it can fold every operation, and it can't fold a
+        // byte swap (an LLVM intrinsic). With the swap, `static let signature: Byte4 = 0x50_4B_01_02` was
+        // a lazily initialized global, checked on every use: 41% more instructions parsing zip headers.
+        var littleEndian: Integer = 0
+        for index in 0..<Self.byteCount {
+            littleEndian |= (value &>> (8 &* index) & 0xFF) &<< (8 &* (Self.byteCount &- 1 &- index))
+        }
+        self.init(littleEndian: littleEndian)
     }
 
     /// The bytes in memory order, in hexadecimal, such as `"50 4B 03 04"`.

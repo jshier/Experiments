@@ -194,36 +194,36 @@ extension BytesWriter {
     // Every defined identifier is below 128, so it's a one-byte Variable Byte Integer.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func writeProperty(_ identifier: UInt8, byte value: UInt8) throws(BytesError) {
-        try write(Byte(identifier))
+    mutating func writeProperty(_ identifier: Byte, byte value: UInt8) throws(BytesError) {
+        try write(identifier)
         try write(Byte(value))
     }
 
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func writeProperty(_ identifier: UInt8, two value: UInt16) throws(BytesError) {
-        try write(Byte(identifier))
+    mutating func writeProperty(_ identifier: Byte, two value: UInt16) throws(BytesError) {
+        try write(identifier)
         try write(value, as: Byte2.self, .bigEndian)
     }
 
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func writeProperty(_ identifier: UInt8, four value: UInt32) throws(BytesError) {
-        try write(Byte(identifier))
+    mutating func writeProperty(_ identifier: Byte, four value: UInt32) throws(BytesError) {
+        try write(identifier)
         try write(value, as: Byte4.self, .bigEndian)
     }
 
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func writeProperty(_ identifier: UInt8, string value: UTF8Span) throws(BytesError) {
-        try write(Byte(identifier))
+    mutating func writeProperty(_ identifier: Byte, string value: UTF8Span) throws(BytesError) {
+        try write(identifier)
         try writeMQTTString(value)
     }
 
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func writeProperty(_ identifier: UInt8, binary value: RawSpan) throws(BytesError) {
-        try write(Byte(identifier))
+    mutating func writeProperty(_ identifier: Byte, binary value: RawSpan) throws(BytesError) {
+        try write(identifier)
         try writeMQTTBinary(value)
     }
 }

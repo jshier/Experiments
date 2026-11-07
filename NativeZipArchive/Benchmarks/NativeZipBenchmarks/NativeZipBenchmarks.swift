@@ -108,15 +108,32 @@ let benchmarks: @Sendable () -> Void = {
 
         extractionBenchmark("Extract 32 MB text: \(suffix)", archive: Fixtures.largeText, backend: backend)
         extractionBenchmark("Extract 2,000 small files: \(suffix)", archive: Fixtures.smallFiles, backend: backend)
-    }
 
-    Benchmark("Stored + CRC 32 MB random") { benchmark in
-        let archive = try ZipArchive(url: Fixtures.largeRandom)
-        let entry = firstFile(archive)
-        var decoder = ZipDecoder()
-        benchmark.startMeasurement()
-        for _ in benchmark.scaledIterations {
-            try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+        // A stored entry is only a CRC: the backends' checksums end to end.
+        Benchmark("Stored + CRC 32 MB random: \(suffix)") { benchmark in
+            let archive = try ZipArchive(url: Fixtures.largeRandom)
+            let entry = firstFile(archive)
+            var decoder = ZipDecoder(backend: backend)
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+            }
+        }
+
+        // CRC-32 alone, at the sizes zip entries come in: a large file (from memory), a cache-resident
+        // buffer, small files, and tiny ones. Each runs enough bytes per iteration (32 MB) to time.
+        for (label, size) in [("32 MB", 32 << 20), ("256 KB, in cache", 256 << 10), ("1 KB", 1 << 10), ("64 B", 64)] {
+            Benchmark("CRC-32 \(label): \(suffix)", configuration: .init(metrics: [.wallClock, .instructions, .throughput])) { benchmark in
+                var rng = SystemRandomNumberGenerator()
+                let bytes = (0..<size).map { _ in UInt8.random(in: 0...255, using: &rng) }
+                let repeats = (32 << 20) / size
+                benchmark.startMeasurement()
+                for _ in benchmark.scaledIterations {
+                    for _ in 0..<repeats {
+                        blackHole(DeflateBackends.crc32(bytes.span.bytes, backend: backend))
+                    }
+                }
+            }
         }
     }
 
@@ -133,14 +150,6 @@ let benchmarks: @Sendable () -> Void = {
         for _ in benchmark.scaledIterations {
             let produced = DeflateBackends.compressionOneShot(data.bytes.extracting(payload), into: &output)
             precondition(produced == output.count)
-        }
-    }
-
-    Benchmark("CRC-32 32 MB") { benchmark in
-        let bytes = [UInt8](repeating: 0xA5, count: 32 << 20)
-        benchmark.startMeasurement()
-        for _ in benchmark.scaledIterations {
-            blackHole(DeflateBackends.crc32(bytes.span.bytes))
         }
     }
 

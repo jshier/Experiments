@@ -369,8 +369,8 @@ struct Lexer: ~Copyable, ~Escapable {
     @inline(__always)
     private func peek(_ offset: Int = 0) -> UInt8 {
         let index = position &+ offset
-        // Safety: `index` is non-negative (position and offset both are) and checked against count.
-        return index < bytes.byteCount ? unsafe bytes.unsafeLoad(fromByteOffset: index, as: UInt8.self) : 0
+        // A checked load: the same bounds check `unsafeLoad(fromByteOffset:)` made, without `unsafe`.
+        return index < bytes.byteCount ? bytes.load(fromByteOffset: index, as: UInt8.self) : 0
     }
 
     @inline(__always)

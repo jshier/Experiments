@@ -28,6 +28,9 @@ Pick each field's type from its shape in the data:
 - Multi-byte integers are a ``ByteGroup`` (``Byte2`` through ``Byte16``) plus a `ByteOrder`. Odd widths
   such as 24-bit samples are first-class.
 - Fields that are really enumerations become enums with integer raw values, read through their field type.
+- Fields packed inside a multi-byte value (flags in a `Byte2`, a DOS date's day and month) are read with
+  the value, then taken out of its integer as ``Bits``: `flags[bit: 0]`, `date[Bits<5>.self, at: 0]`, or
+  wider ones as integers, `attributes[bits: 16..<32]`. `Unit(rawBits: field)` makes an enum of one.
 - Opaque fixed-size values (addresses, identifiers, digests) become your own types conforming to
   ``ByteRepresentable``, backed by an `InlineArray` of their bytes.
 
@@ -66,7 +69,7 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
         // A fixed-size header read as its own cursor: its length is a constant the optimizer can see,
         // so every field read inside it needs no bounds check of its own.
         var header = Bytes(try reader.read(byteCount: 5))
-        try header.expect([0x53, 0x52] as Byte2)
+        try header.expect(0x53_52 as Byte2)
         let version = try header.read(Nibble.self)
         guard version == 1 else { throw .invalidValue }
         let unit = try header.read(Unit.self, as: Crumb.self)  // throws .invalidValue for 3
@@ -106,7 +109,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
     let size = 5 + (reading.timestamp == nil ? 0 : 8) + reading.samples.count * 3 + 6
     return try [UInt8](capacity: size) { (output) throws(BytesError) in
         try output.withBytesWriter { (writer) throws(BytesError) in
-            try writer.write([0x53, 0x52] as Byte2)
+            try writer.write(0x53_52 as Byte2)
             try writer.write(reading.version)
             try writer.write(reading.unit, as: Crumb.self)
             try writer.write(Bit(reading.timestamp != nil))

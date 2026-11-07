@@ -225,6 +225,97 @@ extension Bits {
 
 // MARK: - Single bits
 
+// MARK: - Bit fields
+
+// Fields packed inside a value already read: the flags in a zip header's `Byte2`, the DOS date's day,
+// month, and year, an MQTT header's QoS. Bits are numbered from the least significant (bit 0), in the
+// value's integer: for multi-byte fields, read it in its byte order first.
+
+extension Bits {
+    /// The `fieldWidth`-bit field starting at bit `offset`, counting from the least significant bit.
+    ///
+    /// ```swift
+    /// var flags: Nibble = 0b0101
+    /// let qos = flags[Crumb.self, at: 1]   // 0b10
+    /// flags[Crumb.self, at: 1] = 0b01      // 0b0011
+    /// ```
+    @inlinable
+    public subscript<let fieldWidth: Int>(_: Bits<fieldWidth>.Type, at offset: Int) -> Bits<fieldWidth> {
+        @inline(__always) get {
+            precondition(offset >= 0 && offset &+ fieldWidth <= width, "Field out of range for \(width) bits")
+            return Bits<fieldWidth>(truncatingIfNeeded: rawValue &>> offset)
+        }
+        @inline(__always) set {
+            precondition(offset >= 0 && offset &+ fieldWidth <= width, "Field out of range for \(width) bits")
+            let mask = Bits<fieldWidth>.mask &<< offset
+            _rawValue = _rawValue & ~mask | newValue.rawValue &<< offset
+        }
+    }
+}
+
+extension FixedWidthInteger {
+    /// The bit at `index`, counting from the least significant bit (index 0), as a `Bool`.
+    ///
+    /// ```swift
+    /// let flags = try header.read(Byte2.self, .littleEndian)
+    /// let isEncrypted = flags[bit: 0]
+    /// ```
+    @inlinable
+    public subscript(bit index: Int) -> Bool {
+        @inline(__always) get {
+            precondition(index >= 0 && index < Self.bitWidth, "Bit index \(index) out of range")
+            return self &>> index & 1 != 0
+        }
+        @inline(__always) set {
+            precondition(index >= 0 && index < Self.bitWidth, "Bit index \(index) out of range")
+            let bit: Self = 1 &<< index
+            self = newValue ? self | bit : self & ~bit
+        }
+    }
+
+    /// The `width`-bit field (up to 8 bits) starting at bit `offset`, counting from the least significant
+    /// bit, as ``Bits``.
+    ///
+    /// ```swift
+    /// let date = try header.read(Byte2.self, .littleEndian)   // DOS date: yyyyyyy mmmm ddddd
+    /// let day = date[Bits<5>.self, at: 0], month = date[Nibble.self, at: 5]
+    /// let year = 1980 + Int(date[Bits<7>.self, at: 9])
+    /// ```
+    @inlinable
+    public subscript<let width: Int>(_: Bits<width>.Type, at offset: Int) -> Bits<width> {
+        @inline(__always) get {
+            precondition(offset >= 0 && offset &+ width <= Self.bitWidth, "Field out of range")
+            return Bits<width>(truncatingIfNeeded: self &>> offset)
+        }
+        @inline(__always) set {
+            precondition(offset >= 0 && offset &+ width <= Self.bitWidth, "Field out of range")
+            let mask = Self(truncatingIfNeeded: Bits<width>.mask) &<< offset
+            self = self & ~mask | Self(truncatingIfNeeded: newValue.rawValue) &<< offset
+        }
+    }
+
+    /// The bits in `range`, counting from the least significant bit (0), shifted down: for fields wider
+    /// than ``Bits`` holds, such as the Unix mode in a zip entry's upper 16 bits of attributes.
+    ///
+    /// ```swift
+    /// let mode = attributes[bits: 16..<32]
+    /// ```
+    @inlinable
+    public subscript(bits range: Range<Int>) -> Self {
+        @inline(__always) get {
+            precondition(range.lowerBound >= 0 && range.upperBound <= Self.bitWidth, "Bit range out of range")
+            return self &>> range.lowerBound & ~(~Self.zero << range.count)
+        }
+        @inline(__always) set {
+            precondition(range.lowerBound >= 0 && range.upperBound <= Self.bitWidth, "Bit range out of range")
+            let mask = ~(~Self.zero << range.count) &<< range.lowerBound
+            self = self & ~mask | newValue &<< range.lowerBound & mask
+        }
+    }
+}
+
+// MARK: - Single bits
+
 extension Bits {
     @inlinable @inline(__always)
     static func _checkIndex(_ index: Int) {

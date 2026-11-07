@@ -132,6 +132,9 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
             var output = buffer.mutableSpan
             var count = 0
             let byteOrder = byteOrder
+            // Unsafe: unchecked stores. Safe: `_forEach` calls this at most `limit` times, which is at most
+            // the buffer's capacity. Checked, the store is the only check left in `_forEach`'s loop, and it
+            // stops the loop from vectorizing.
             cursor._forEach(T.self, limit: Swift.min(maxCount, Self.capacity)) { group in
                 unsafe output[unchecked: count] = group.integer(byteOrder)
                 count &+= 1
@@ -193,7 +196,7 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
             var output = buffer.mutableSpan
             var count = 0
             // 4,096 is a multiple of 8, so a view that starts byte-aligned ends each span on a byte boundary,
-            // and the next span starts vectorized.
+            // and the next span starts vectorized. Unchecked stores, for the reason above.
             cursor._forEach(Bits<width>.self, limit: Swift.min(maxCount, Self.capacity)) { value in
                 unsafe output[unchecked: count] = value
                 count &+= 1

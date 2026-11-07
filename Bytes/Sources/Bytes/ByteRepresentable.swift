@@ -64,9 +64,14 @@ extension Load {
         }
     }
 
-    /// `R` from the first `MemoryLayout<R>.size` bytes of `wide`'s memory.
+    /// `R` from the first `MemoryLayout<R>.size` (at most 16) bytes of `wide`'s memory.
+    ///
+    /// Unsafe: an unchecked load from `wide`'s bytes. Safe: `R` is at most 16 bytes (callers' sizes are
+    /// 9–15) and every bit pattern is a valid `R` (`ConvertibleFromBytes`). The safe form, a checked load
+    /// from an `InlineArray<1, UInt128>`'s span, measured 46% more instructions reading 12-byte values:
+    /// the array goes through a stack slot the optimizer doesn't remove.
     @inlinable @inline(__always)
-    static func lowBytes<Wide: BitwiseCopyable, R: ConvertibleFromBytes>(_ wide: Wide, as _: R.Type) -> R {
+    static func lowBytes<R: ConvertibleFromBytes>(_ wide: UInt128, as _: R.Type) -> R {
         withUnsafeBytes(of: wide) { unsafe $0.loadUnaligned(as: R.self) }
     }
 }
@@ -148,6 +153,8 @@ extension Bytes {
         }
         let span = span
         let start = _byteOffset
+        // Unsafe and safe as in `read(_:_:into:)` for byte groups: exactly `count` values initialized and
+        // counted, through a pointer so the loop vectorizes.
         unsafe output.withUnsafeMutableBufferPointer { buffer, initializedCount in
             let destination = unsafe buffer.baseAddress! + initializedCount
             for index in 0..<count {
@@ -166,6 +173,9 @@ extension Bytes {
     static func _unalignedRawBytes<R: ConvertibleFromBytes>(
         _: R.Type, in span: RawSpan, atByte byteOffset: Int, bit: Int, bitOrder: BitOrder
     ) -> R {
+        // Unsafe: assembles `R` in uninitialized stack memory. Safe: every one of its bytes is written before
+        // the load, and every bit pattern is a valid `R`. `R` is generic and only `ConvertibleFromBytes`,
+        // so there's no safe storage to assemble it in (that needs `ConvertibleToBytes` too).
         withUnsafeTemporaryAllocation(of: R.self, capacity: 1) { buffer in
             let bytes = UnsafeMutableRawBufferPointer(buffer)
             for index in 0..<MemoryLayout<R>.size {

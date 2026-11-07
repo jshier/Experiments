@@ -68,7 +68,7 @@ extension Bytes {
             // Too long first: more data can't fix it, so a streaming caller mustn't wait for any.
             guard index < maxByteCount else { throw .invalidValue }
             guard offset &+ index < span.byteCount else { throw .insufficientData }
-            let byte = unsafe Load.native(UInt8.self, from: span, at: offset &+ index)
+            let byte = span.load(fromByteOffset: offset &+ index, as: UInt8.self) // Rare: checked.
             // The tenth byte can hold only the 64th bit.
             guard index < 9 || byte <= 1 else { throw .invalidValue }
             value |= UInt64(byte & 0x7F) &<< UInt64(7 &* index)
@@ -87,24 +87,24 @@ extension BytesWriter {
         _assumeInvariant()
         if likely(value < 0x80) {
             guard likely(_byteOffset < _bytes.byteCount) else { throw .insufficientCapacity }
-            unsafe _bytes.storeBytes(of: UInt8(truncatingIfNeeded: value), toUncheckedByteOffset: _byteOffset, as: UInt8.self)
+            unsafe Store.little(UInt8(truncatingIfNeeded: value), to: &_bytes, at: _byteOffset) // Unchecked: see `Store`.
             _byteOffset &+= 1
             return
         }
         let byteCount = LEB128.byteCount(of: value)
         guard likely(_bytes.byteCount &- _byteOffset >= byteCount) else { throw .insufficientCapacity }
-        unsafe Self._storeLEB128(value, byteCount: byteCount, to: &_bytes, at: _byteOffset)
+        Self._storeLEB128(value, byteCount: byteCount, to: &_bytes, at: _byteOffset)
         _byteOffset &+= byteCount
     }
 
     /// Stores `value` as `byteCount` bytes of LEB128 (at least ``LEB128/byteCount(of:)``) at `offset`.
     /// Capacity already checked.
-    @unsafe @inlinable
+    @inlinable
     static func _storeLEB128(_ value: UInt64, byteCount: Int, to bytes: inout MutableRawSpan, at offset: Int) {
         var remaining = value
         for index in 0..<byteCount {
             let more: UInt8 = index &+ 1 < byteCount ? 0x80 : 0
-            unsafe bytes.storeBytes(of: UInt8(truncatingIfNeeded: remaining & 0x7F) | more, toUncheckedByteOffset: offset &+ index, as: UInt8.self)
+            bytes.storeBytes(of: UInt8(truncatingIfNeeded: remaining & 0x7F) | more, toByteOffset: offset &+ index, as: UInt8.self)
             remaining &>>= 7
         }
     }
@@ -344,13 +344,11 @@ extension BytesWriter {
         if prefixByteCount < maxByteCount, written > 0 {
             let source = prefixOffset &+ maxByteCount
             let destination = prefixOffset &+ prefixByteCount
-            _bytes.withUnsafeMutableBytes { bytes in
-                let base = bytes.baseAddress!
-                // Overlapping move: `copyMemory` is `memmove`.
-                unsafe (base + destination).copyMemory(from: base + source, byteCount: written)
-            }
+            // An overlapping move down, byte by byte from the front: the standard library has no safe
+            // `memmove` within a span. This path is rare (see above), so the loop costs nothing that matters.
+            for index in 0..<written { _bytes[destination &+ index] = _bytes[source &+ index] }
         }
-        unsafe Self._storeLEB128(UInt64(written), byteCount: prefixByteCount, to: &_bytes, at: prefixOffset)
+        Self._storeLEB128(UInt64(written), byteCount: prefixByteCount, to: &_bytes, at: prefixOffset)
         _byteOffset = prefixOffset &+ prefixByteCount &+ written
         return result
     }
@@ -361,8 +359,8 @@ extension BytesWriter {
     mutating func _writeSection<R: ~Copyable>(
         from start: Int, written: inout Int, _ body: (inout BytesWriter) throws(BytesError) -> R
     ) throws(BytesError) -> R {
-        var section = unsafe BytesWriter(
-            _bytes._mutatingExtracting(unchecked: Range(uncheckedBounds: (start, _bytes.byteCount))), bitOrder: bitOrder
+        var section = BytesWriter(
+            _bytes._mutatingExtracting(start...), bitOrder: bitOrder
         )
         let result = try body(&section)
         written = section.byteCount

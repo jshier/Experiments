@@ -64,6 +64,154 @@ fix brief is ready to file.
 The `let` form's threshold is 1, so a compiler fix shows up as an improvement.
 `Allocations:Read:_for-in_Bytes_(UInt8),_var_reader` holds the workaround at 0.
 
+## Integer literals for byte groups
+
+`let signature: Byte4 = 0x50_4B_03_04`: the literal's digits are the bytes in memory order, as a hex dump
+shows them. In other words, the literal is the group's big-endian value. That's the one reading that
+isn't ambiguous: the source shows the bytes in the order the file holds them, whatever byte order the
+format uses for its numbers.
+
+- **Width checks.** The literal type is the group's `Integer`, so a literal too wide is a compile error
+  for `Byte2`, `Byte4`, `Byte8`, and `Byte16`. For odd widths it's a precondition, since their integers
+  have spare bytes.
+- **Leading zero bytes** are kept, because the width is fixed (`0x00_04_4D_51_54_54` as a `Byte6`).
+- **Converted:** constants in NativeZip (signatures), MQTT (protocol name, `$share/`), the docs, and the
+  benchmarks. Array literals still work.
+
+The first version built the value with `init(bigEndian:)`, and `static let signature: Byte4 = 0x50_4B_01_02`
+then cost **41% more instructions** parsing fixed-size zip records (281 vs 199 K).
+
+- **Why:** with the array literal, the compiler evaluated the global's initializer at compile time, so
+  each use was a `mov`/`movk` constant. With the integer literal, the global stayed lazily initialized: a
+  `swift_once` check and a load on every use.
+- **The cause:** `init(bigEndian:)` byte-swaps, and the compile-time evaluator can't fold a byte swap (an
+  LLVM intrinsic). Swapping back to an interpolated precondition message didn't matter.
+- **The fix:** the literal initializer reverses the bytes with shifts. Constant again, no `swift_once`.
+
+Against `safe-final`: field parsing −3% instructions, fixed-size records −1%, signature search −4%.
+NativeZip's parsing (computed-property signatures) was unaffected either way.
+
+A `static let` built with a byte order still has the lazy-initialization cost. Checked:
+`static let signature = Byte4(0x504B_0102, .bigEndian)` compiles to the `swift_once` check again. Write
+constants as literals, or as computed properties.
+
+## Group operations: `ByteGroup` operators, `forEach` with a byte order, and the table CRC
+
+The table-driven CRC (the portable path) was written with hand shifts and masks:
+`tables[6][Int(word >> 8 & 0xFF)]`, eight times over. Rewritten with `Bytes` APIs:
+
+```swift
+reader.forEach(Byte8.self) { group in
+    let bytes = group ^ Byte8(UInt64(state), .littleEndian)        // new: byte-wise `^` on groups
+    state = 0
+    for index in 0..<8 { state ^= tables[7 &- index][Int(bytes[index])] }   // byte subscript, no shifts
+}
+reader.forEach(Byte.self) { byte in state = state >> 8 ^ tables[0][Int(state[Byte.self, at: 0] ^ byte)] }
+```
+
+Benchmarks `CRC-32 tables, …`, 32 MB per iteration:
+
+| Variant | 256 KB in cache | 64 B inputs |
+|---|---|---|
+| Original (shifts and masks, `[[UInt32]]`) | 336 M instructions, 14.0–15.0 ms | 364 M, 12.0–12.7 ms |
+| **Bytes APIs, `[[UInt32]]`** (kept) | **180 M**, 14.1–14.4 ms | **219–223 M, 8.8–9.4 ms** |
+| Bytes APIs, `InlineArray<8, InlineArray<256, UInt32>>` | 139 M, 15.3–15.7 ms | 167 M, 9.6–10.0 ms |
+| Bytes APIs, split into halves (`lowHalf`/`highHalf`) | 235 M, 14.4 ms | 261 M, 11.1 ms |
+
+- **The rewrite** halves the instructions (each byte becomes one `ubfx` and one indexed load). It's 27%
+  faster on short inputs and equal on long ones. Long inputs are bound by the latency of the lookup
+  chain, not by instructions.
+- **`InlineArray` tables** remove the bounds checks (a byte index can't pass 255) and cut instructions
+  further. They're still 7% slower: with one global table, each lookup is an `add` and then an
+  `ldr [x, #offset]`, one more cycle on the latency chain.
+  - With eight arrays, each table's base is a register, so a lookup is a single
+    `ldr w, [table, index, lsl #2]`, and LLVM checks the arrays' bounds once, before the loop.
+  - Padding the tables apart (1,056-byte stride) changed nothing, so cache conflicts aren't the cause.
+- **Splitting into halves** puts the four state-independent lookups off the critical path. It cost
+  instructions without gaining time.
+
+**`forEach(T.self, byteOrder) { integer in … }`** is new, the loop counterpart of `read(T.self, byteOrder)`.
+It's exactly as fast as converting in the body: identical instruction counts and times for `Byte2`,
+`Byte3`, `Byte4`, `Byte6`, and `Byte8` (benchmarks `forEach(ByteN.self …), 4 MB`). It's sugar, and the
+CRC's hardware tail uses it.
+
+**`ByteGroup` gets `^ & | ~`** (and the compound forms), byte by byte in memory order. No byte order is
+involved, so they can't be ambiguous the way integer literals or shifts on a group would be. That's why
+there are no shifts on groups: "shift by a byte" depends on which end is first, and the byte subscript
+and halves already say which byte is meant.
+
+## `CRC32` (measured in NativeZip's benchmarks, against zlib's `crc32_z`)
+
+| Input (32 MB per iteration) | `CRC32` | zlib | |
+|---|---|---|---|
+| 32 MB | 532 µs (63 GB/s), 10 M instructions | 888 µs (38 GB/s), 13 M | 1.7x |
+| 256 KB, in cache | 460 µs | 833 µs | 1.8x |
+| 1 KB | 665 µs | 1,279 µs | 1.9x |
+| 64 B | 3,084 µs | 6,963 µs | 2.3x |
+
+- **Large inputs:** eight 16-byte accumulators fold 128 bytes per step: per lane, a `pmull`, a `pmull2`,
+  and an `eor3` with the next 16 bytes, independent chains so the multiplies' latency overlaps. At the
+  end, the lanes fold into one, and the CPU's CRC32 instructions reduce its 16 bytes.
+  - The constants are x^(n ± 32) mod P, bit-reflected. A test derives them; the 128- and 512-bit ones
+    match Linux's.
+- **Below 256 bytes:** `crc32x`, 8 bytes at a time.
+- **Bytes tools do the reading:**
+  - Each 128-byte step is a fixed-size sub-cursor, so its eight loads compile to four `ldp q` with no
+    bounds checks.
+  - The tails are `forEach(Byte8.self)` and `forEach(Byte.self)`.
+  - The file has no `unsafe`: the C wrappers take and return values.
+- **First version 3.5x slower than zlib:**
+  - The nested helper that loaded each 16 bytes wasn't inlined. As a call per load, it spilled the eight
+    accumulators every time.
+  - `@inline(always)` on it gave the loop above (16 `pmull`, 8 `eor3`, 4 `ldp`, ~10 bookkeeping
+    instructions per 128 bytes).
+- **Other CPUs:** slicing-by-8 tables. The tests check them against a bit-at-a-time reference too.
+
+## Safe constructs instead of unsafe ones (baselines `pre-safety` → `safe-final`)
+
+Every `unsafe` site was tried with its safe standard-library counterpart (`RawSpan.load`,
+`MutableRawSpan.storeBytes(of:toByteOffset:as:)`, checked `extracting`, `MutableSpan` subscripts,
+`UniqueArray`, `bitCast`) and measured. Instruction counts are the deciding metric (deterministic).
+
+**Kept safe** (no cost, or faster):
+
+| Change | Effect |
+|---|---|
+| `read(byteCount:)` and `read(_:count:)` use checked `extracting` | Fixed-size records **−21% instructions, −31% time** (199 vs 253 K, 7.3 vs 10.6 µs); field-by-field +3% instructions (301 vs 291 K), same time |
+| `HuffmanTable`: `UniqueArray` storage, `Span`/`MutableSpan` indexing in decode and build, `InlineArray` scratch up to 320 symbols | Equal (NativeZip small files 239 vs 239 M) |
+| `Shuffle` reinterpretations: `unsafeBitCast` → `bitCast` | Equal |
+| Distance-1 match fill: `storeBytes(repeating:)` instead of `initializeMemory` | Equal |
+| LEB128 slow paths, section move, unaligned `store`, `BitBuffer` slow refill | Cold paths |
+
+Building `HuffmanTable` safely first cost 5% more instructions on small DEFLATE files. Not the checks:
+a nested function that captured the entry closures stopped them being inlined. As a static function, equal.
+
+**Kept unsafe** (each with a comment saying why), because the checked forms measured slower:
+
+| Site | Checked cost |
+|---|---|
+| `Load` (all cursor reads) | Field-by-field +24% instructions; `Byte3`/`Byte5`–`Byte15` 2–8x; bulk loops stop vectorizing |
+| `Store`, `_copy`, `_move` (all writer stores and match copies) | Odd widths +42–144% instructions, packed bit fields +28–47% |
+| `BitBuffer.refill` fast path | DEFLATE +10% instructions |
+| `lowBytes` (9–15-byte custom types) via `withUnsafeBytes(of:)` | Through an `InlineArray` span: +46% instructions |
+| Bulk reads into `OutputSpan`, `Iteration`'s buffer stores | Per-value checks stop vectorization |
+
+The pattern: the standard library's check is `UInt(offset) <= UInt(count) && size <= count - offset`,
+and the first half needs `offset >= 0`, which the cursor deliberately doesn't state (see "Making loops of
+single reads vectorize"). So it isn't folded into the cursor's own check, except where the offset is
+visibly non-negative (constants, or loops counting up from 0). With no safe in-place copy, no safe view of
+an `OutputSpan`'s uninitialized capacity, and no safe span-to-`Array` copy in the standard library,
+`memmove` in `write(_:RawSpan)`, `withBytesWriter`, and `[UInt8](copying:)` stay unsafe too.
+
+## Bit fields of values already read
+
+From a survey of MQTT's and NativeZip's integer escapes: `value[bit: i]`, `value[Bits<w>.self, at: i]`
+(as `Bits`), and `value[bits: range]` on integers, all settable; `Bits` fields (`flags[Crumb.self, at: 1]`);
+and `init?(rawBits:)` for raw-value types. They replace NativeZip's DOS date/time shifts and masks, its
+attribute and version tests, and MQTT's PUBLISH flags packing and `.rawValue` hops. Positions are
+constants, so the range checks fold: NativeZip's central-directory parse is 1% fewer instructions than
+before (4,907 vs 4,960 K, baseline `bytes` → `safe-parse`).
+
 ## Decoder support (driven by NativeZip's DEFLATE decoder)
 
 Writing a DEFLATE decoder on `Bytes` (`../NativeZipArchive`, `Inflater.swift`; it beats zlib, 13 vs 14 ms

@@ -30,7 +30,7 @@ public enum BytesError: Error, Hashable, Sendable {
 ///
 /// ```swift
 /// var reader = Bytes(span)
-/// try reader.expect([0x50, 0x4B, 0x03, 0x04] as Byte4)
+/// try reader.expect(0x50_4B_03_04 as Byte4)
 /// let version = try reader.read(Byte2.self, .littleEndian) // UInt16
 /// let length = try reader.read(Byte3.self, .bigEndian)     // UInt32
 /// let flag = try reader.read(Bit.self)
@@ -408,9 +408,7 @@ extension Bytes {
         precondition(_bitOffset == 0, "Reading a span requires byte alignment: call alignToByte() first")
         _assumeInvariant()
         guard likely(span.byteCount &- _byteOffset >= byteCount) else { throw .insufficientData }
-        // `uncheckedBounds`: `byteCount >= 0` is already checked, so skip `Range`'s own precondition.
-        let bounds = unsafe Range(uncheckedBounds: (_byteOffset, _byteOffset &+ byteCount))
-        let bytes = unsafe span.extracting(unchecked: bounds)
+        let bytes = span.extracting(_byteOffset..<(_byteOffset &+ byteCount))
         _byteOffset &+= byteCount
         return bytes
     }
@@ -448,6 +446,9 @@ extension Bytes {
         }
         let span = span
         let start = _byteOffset
+        // Unsafe: initializes the output's free capacity through a pointer. Safe: exactly `count` values,
+        // the free capacity, are initialized and counted. `OutputSpan.append` is the safe form, but its
+        // per-value capacity check and count update keep the loop from vectorizing.
         unsafe output.withUnsafeMutableBufferPointer { buffer, initializedCount in
             let destination = unsafe buffer.baseAddress! + initializedCount
             var unpacked = 0
@@ -506,6 +507,23 @@ extension Bytes {
     @_lifetime(self: copy self)
     public mutating func forEach<T: ByteGroup, E: Error>(_: T.Type, _ body: (T) throws(E) -> Void) throws(E) {
         try _forEach(T.self, limit: .max, body)
+    }
+
+    /// Reads every remaining whole `T` as an integer in `byteOrder`, in order, calling `body` with each: the
+    /// loop counterpart of ``read(_:_:)``.
+    ///
+    /// ```swift
+    /// var sum: UInt64 = 0
+    /// reader.forEach(Byte4.self, .bigEndian) { sum &+= UInt64($0) }
+    /// ```
+    ///
+    /// Exactly as fast as ``forEach(_:_:)-(T.Type,_)`` with the conversion in `body`, which is what it is.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    public mutating func forEach<T: ByteGroup, E: Error>(
+        _: T.Type, _ byteOrder: ByteOrder, _ body: (T.Integer) throws(E) -> Void
+    ) throws(E) {
+        try _forEach(T.self, limit: .max) { (group: T) throws(E) in try body(group.integer(byteOrder)) }
     }
 
     /// ``forEach(_:_:)-(T.Type,_)``, reading at most `limit` values.
@@ -739,6 +757,14 @@ extension Bytes {
 // MARK: - Unchecked loads
 
 /// Unchecked loads from a span. Callers check bounds first.
+///
+/// Unsafe, and the one place `Bytes` reads memory without a check of its own: every caller checks that the
+/// bytes it reads are in bounds first, once per read or once per bulk operation, and the offsets these take
+/// are derived from that check. Unchecked because the standard library's checked `RawSpan.load` measured
+/// far slower here (baseline `pre-safety` against `safe1`): its check also needs `offset >= 0`, which the
+/// cursor doesn't state to the optimizer (stating it stops loops of reads from vectorizing, see
+/// `_assumeInvariant`), so the check isn't folded into the caller's. Field-by-field parsing took 24% more
+/// instructions, two-load widths (`Byte3`, `Byte5`–`Byte15`) 2–8x more, and bulk loops stopped vectorizing.
 @usableFromInline @unsafe
 enum Load {
     /// The `I` at `offset`, in native byte order.
@@ -843,6 +869,9 @@ extension Array where Element == UInt8 {
     /// what a span read from ``Bytes`` borrows.
     @inlinable
     public init(copying bytes: RawSpan) {
+        // Unsafe: `memcpy` into the new array's uninitialized storage. Safe: the capacity is exactly
+        // `bytes.byteCount`, all of it is copied, then counted. The standard library has no safe bulk copy
+        // from a `RawSpan` into an `Array`.
         unsafe self.init(unsafeUninitializedCapacity: bytes.byteCount) { buffer, initializedCount in
             if bytes.byteCount > 0 {
                 bytes.withUnsafeBytes { source in

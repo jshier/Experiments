@@ -8,7 +8,7 @@ Both are `~Copyable`, `~Escapable` cursors.
 import Bytes
 
 var reader = Bytes(data.span)                                   // RawSpan or Span<UInt8>
-try reader.expect([0x50, 0x4B, 0x03, 0x04] as Byte4)            // a signature, or throws .mismatch
+try reader.expect(0x50_4B_03_04 as Byte4)            // a signature, or throws .mismatch
 let version = try reader.read(Byte2.self, .littleEndian)        // UInt16
 let length = try reader.read(Byte3.self, .bigEndian)            // UInt32, from 3 bytes
 let kind = try reader.read(Bits<3>.self)
@@ -19,7 +19,7 @@ let name = try reader.read(byteCount: 12)                       // a RawSpan of 
 
 let bytes = try [UInt8](capacity: 64) { output in
     try output.withBytesWriter { writer in                      // commits exactly what's written
-        try writer.write([0x50, 0x4B, 0x03, 0x04] as Byte4)
+        try writer.write(0x50_4B_03_04 as Byte4)
         try writer.write(version, as: Byte2.self, .littleEndian)
         try writer.write(qos, as: Crumb.self)
     }
@@ -40,11 +40,18 @@ Full documentation is in `Sources/Bytes/Bytes.docc`, including a guide to writin
   the length.
 - **`Bits<let width: Int>`** (1–8 bits), with aliases `Bit`, `Crumb` (2), `Nibble` (4), and `Byte` (8):
   integer and binary-string literals, single bits (`value[bit: 3] = true`, `toggleBit(at:)`), halves
-  (`byte.highHalf` is a `Nibble`, settable), bitwise operators, and conversions to integers, `Bool`, and
-  other widths.
+  (`byte.highHalf` is a `Nibble`, settable), fields (`flags[Crumb.self, at: 1]`, settable), bitwise
+  operators, and conversions to integers, `Bool`, and other widths.
+- **Fields of a value already read**: a multi-byte field's flags and sub-fields are numbered in its
+  integer, so integers get the same vocabulary: `flags[bit: 0]`, `date[Bits<7>.self, at: 9]` (as `Bits`),
+  `attributes[bits: 16..<32]` (wider, as the integer), all settable. `QualityOfService(rawBits: crumb)`
+  turns a field into a raw-value type.
 - **`Byte2` … `Byte16`** (`ByteGroup`): N bytes as they appear in memory. Interpret them with
-  `.littleEndian` or `.bigEndian` (the narrowest integer that fits: `Byte3` → `UInt32`), write constants as
-  array literals, and get or set bytes and halves.
+  `.littleEndian` or `.bigEndian` (the narrowest integer that fits: `Byte3` → `UInt32`), get or set bytes
+  (`group[3]`) and halves, and combine them byte by byte with `^`, `&`, `|`, and `~`, which need no byte
+  order (`payload ^ maskingKey`). Write constants as hex literals of the bytes in memory order, as a hex
+  dump shows them (`0x50_4B_03_04` is `50 4B 03 04`, whatever byte order the data uses; a literal too
+  wide is a compile error for 2, 4, 8, and 16 bytes), or as array literals (`[0x50, 0x4B, 0x03, 0x04]`).
 - **`ByteRepresentable`**: your own fixed-size types, such as an address backed by `InlineArray<4, UInt8>`.
   Conform with `var rawBytes` and `init(rawBytes:)`; reads and writes are then exactly as fast as the raw
   bytes (one load or store), vectorized in loops.
@@ -57,7 +64,8 @@ Full documentation is in `Sources/Bytes/Bytes.docc`, including a guide to writin
 ## Loops
 
 ```swift
-reader.forEach(Byte4.self) { sum &+= $0.bigEndian }                    // fused and vectorized
+reader.forEach(Byte4.self, .bigEndian) { sum &+= $0 }                  // fused and vectorized
+reader.forEach(Byte8.self) { group in … group[0] … }                   // or the groups themselves
 try writer.write(Byte4.self, .bigEndian, count: ids.count) { ids[$0] }  // the same, for writing
 for byte in reader { … }                                               // the unread bytes, zero-copy
 let lengths = reader.values(of: Byte3.self, .bigEndian)                 // typed views are `Iterable`;
@@ -114,6 +122,10 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
   `BytesWriter.copyOverrun` bytes past the end of what they copy, for fixed-size moves; keep that much
   room free, and they fall back to exact copies when there isn't.
 - `bitReversed` on `UInt8`–`UInt64` and `Bits` is one instruction (`rbit` on ARM).
+- `CRC32` is the zip/gzip/PNG checksum (`CRC32.checksum(span)`, or `update` a running one). On Apple
+  silicon it folds 128 bytes per step with carry-less multiplies (the small CBytesCRC C module wraps
+  `pmull`, `eor3`, and the CRC32 instructions, which Swift can't express): 1.7–2.3x zlib's `crc32`, from
+  63 GB/s on large inputs to 64-byte ones. Elsewhere, slicing-by-8 tables.
 - In a hot loop, keep the buffer and writer as locals of small functions, so they stay in registers.
   Passing them `inout` to a call the compiler doesn't inline puts them in memory: `@inline(__always)` is
   only a hint and was refused for a large function; `@inline(always)` (SE-0496) is guaranteed.
@@ -150,6 +162,13 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
   an `Allocations:<name>` benchmark that counts only allocations, checked against static thresholds in
   `Thresholds/`: `swift package --disable-sandbox benchmark thresholds check --filter 'Allocations:.*'`.
 
+- Memory safety: the package builds with strict memory safety, and its unchecked accesses are confined to
+  a few funnels (`Load`, `Store`, the copy helpers, the NEON shuffles), each behind the cursor's own
+  bounds check, with comments saying why. The standard library's checked loads and stores measured 24%
+  to 8x slower there, because their check isn't folded into the cursor's. Elsewhere it uses the checked
+  forms; for sub-cursors (`Bytes(try reader.read(byteCount: 46))`) the checked `extracting` made
+  fixed-size records 31% faster.
+
 `Benchmarks/RESULTS.md` has the measurements, the assembly review, and the experiments that didn't pay off.
 
 ## Caveats
@@ -167,6 +186,9 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
   `~Escapable` value). Copy the property into a local first.
 - `for x in reader.values(...)` with a temporary is rejected in Swift 6.4 ("lifetime-dependent variable
   escapes its scope"), as is the standard library's own `for x in array.span`. Bind the view first.
+- Write byte-group constants as literals (`static let magic: Byte4 = 0x50_4B_03_04`), not with a byte
+  order (`Byte4(0x504B_0304, .bigEndian)`): the compiler folds a literal into the code, but a `static let`
+  built by byte-swapping stays a lazily initialized global, checked on every use.
 - `Nibble("1010")` with a *literal* argument is literal coercion: non-optional, and it traps if invalid.
   Parse runtime strings with `Nibble(someString)`, which is failable.
 - Requires the 2027 OS releases and the experimental `Lifetimes` and `BuiltinModule` features.

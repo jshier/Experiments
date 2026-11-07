@@ -105,6 +105,7 @@ extension ZipArchive {
             let destination = String(decoding: try contents(of: entry, backend: options.backend), as: UTF8.self)
             options.onEvent?(.linking(entry, path: relative, destination: destination))
             // System has no symlink(2) wrapper, and Foundation's would normalize the name, so use Darwin.
+            // Unsafe: C strings. Safe: both are NUL-terminated and valid for the call only.
             let status = unsafe link.withPlatformString { link in
                 destination.withCString { unsafe symlink($0, link) }
             }
@@ -139,11 +140,14 @@ extension ZipArchive {
 
         do {
             if job.entry.method == Method.deflated, job.entry.uncompressedSize >= Self.pipelineThreshold {
-                // Write chunk N in a child task while chunk N+1 inflates.
+                // Write chunk N in a child task while chunk N+1 inflates. Unsafe: the chunk is a pointer into
+                // the decoder's buffer, sent across tasks. Safe: the decoder doesn't reuse a buffer until its
+                // consumer returns (see `ZipDecoder.inflatePipelined`).
                 try await unsafe contentsPipelined(of: job.entry, using: &decoder) { chunk in
                     _ = try unsafe descriptor.writeAll(chunk.bytes)
                 }
             } else {
+                // Unsafe: System's `writeAll` takes a buffer pointer, not a span. Safe: read within the call.
                 try contents(of: job.entry, using: &decoder) { chunk in
                     _ = try chunk.withUnsafeBytes { try unsafe descriptor.writeAll($0) }
                 }
@@ -207,7 +211,8 @@ struct DirectoryCache {
         guard !path.isEmpty, !known.contains(path) else { return }
         let parent = path.removingLastComponent()
         if parent != path { try create(parent) }
-        // Foundation's path APIs decompose Unicode (NFD), so call mkdir(2) with the exact bytes.
+        // Foundation's path APIs decompose Unicode (NFD), so call mkdir(2) with the exact bytes. Unsafe: a C
+        // string, NUL-terminated and valid for the call only.
         if unsafe path.withPlatformString({ unsafe mkdir($0, 0o755) }) != 0, errno != EEXIST {
             throw Errno(rawValue: errno)
         }
@@ -225,6 +230,7 @@ extension FileDescriptor {
             let seconds = date.timeIntervalSince1970.rounded(.down)
             let time = timespec(tv_sec: Int(seconds), tv_nsec: Int((date.timeIntervalSince1970 - seconds) * 1e9))
             let times: InlineArray<2, timespec> = [time, time] // access, modification
+            // Unsafe: a C array argument. Safe: exactly the two elements futimens(2) reads, during the call.
             let status = times.span.withUnsafeBufferPointer { unsafe futimens(rawValue, $0.baseAddress) }
             if status != 0 { throw Errno(rawValue: errno) }
         }

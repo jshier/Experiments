@@ -29,7 +29,8 @@ public struct ZipDecoder: ~Copyable {
     private let stream: UnsafeMutablePointer<z_stream>?
     private var inflater: Inflater
     /// Two output buffers, each history plus a chunk. The second is used only by the pipelined path; its
-    /// pages are untouched otherwise.
+    /// pages are untouched otherwise. Raw allocations rather than arrays because the pipelined path sends
+    /// chunks of them to child tasks (see ``Chunk``); freed in `deinit`, never reallocated.
     private let buffers: (UnsafeMutableRawBufferPointer, UnsafeMutableRawBufferPointer)
     /// The current entry's compressed input and how much of it has been handed to zlib.
     private var input = unsafe UnsafeRawBufferPointer(start: nil, count: 0)
@@ -148,7 +149,13 @@ public struct ZipDecoder: ~Copyable {
             }
             let (end, finished): (Int, Bool)
             do {
-                (end, finished) = try unsafe inflater.decode(RawSpan(_unsafeBytes: input), into: output, start: history)
+                // Unsafe: spans over memory this type owns. Safe: `buffers` are allocated for the decoder's
+                // lifetime, and `input` points into a mapped file that outlives the entry's decoding (see
+                // `inflatePipelined`); both spans end with this call. Owned buffers can't be safe types here:
+                // the pipelined path hands chunks to child tasks across suspension points, which a span or an
+                // `Array`'s storage can't outlive.
+                var span = unsafe MutableRawSpan(_unsafeBytes: output)
+                (end, finished) = try unsafe inflater.decode(RawSpan(_unsafeBytes: input), into: &span, start: history)
             } catch {
                 throw ZipError.corruptData(path)
             }
@@ -162,7 +169,8 @@ public struct ZipDecoder: ~Copyable {
         }
     }
 
-    /// Runs zlib until `output` is full or the stream ends.
+    /// Runs zlib until `output` is full or the stream ends. Unsafe: zlib's C API takes raw pointers and
+    /// lengths. Safe: they describe `input` and `output` exactly, and zlib doesn't keep them past the call.
     private mutating func zlibStep(into output: UnsafeMutableRawBufferPointer, path: String) throws -> (produced: Int, finished: Bool) {
         let stream = unsafe stream!
         // `avail_in` is 32 bits, so feed payloads larger than 4 GB in pieces.
@@ -193,6 +201,7 @@ public struct ZipDecoder: ~Copyable {
 @_spi(Benchmarking)
 public enum DeflateBackends {
     /// Compression.framework's one-shot decoder (COMPRESSION_ZLIB is raw DEFLATE). Returns bytes produced.
+    /// Unsafe: a C API of pointers and lengths, each describing a buffer valid for the call.
     public static func compressionOneShot(_ payload: RawSpan, into output: inout [UInt8]) -> Int {
         let scratchSize = compression_decode_scratch_buffer_size(COMPRESSION_ZLIB)
         return withUnsafeTemporaryAllocation(byteCount: scratchSize, alignment: 16) { scratch in
@@ -218,15 +227,32 @@ public enum DeflateBackends {
         return output
     }
 
-    /// CRC-32 as used for entry verification.
-    public static func crc32(_ bytes: RawSpan) -> UInt32 {
-        UInt32(truncatingIfNeeded: NativeZip.crc32(0, bytes))
+    /// CRC-32 of `bytes` with `backend`'s implementation, as entry verification computes it.
+    public static func crc32(_ bytes: RawSpan, backend: ZipDecoder.Backend) -> UInt32 {
+        UInt32(truncatingIfNeeded: ZipDecoder.crc32(0, bytes, backend: backend))
     }
 }
 
-/// CRC-32 via zlib (hardware-accelerated). Its C API isn't bounds-annotated, so it takes the span's pointer.
-@usableFromInline
-func crc32(_ crc: UInt, _ bytes: RawSpan) -> UInt {
+extension ZipDecoder {
+    /// `crc` (a CRC-32) updated with `bytes`, by `backend`'s implementation: `Bytes`' `CRC32` with the
+    /// `Bytes` decoder, zlib's with zlib's. Static, taking the backend, so it can run inside `inflate`'s
+    /// callbacks, which can't access the decoder. Not inlinable: `Bytes` is an internal import.
+    @usableFromInline
+    static func crc32(_ crc: UInt, _ bytes: RawSpan, backend: Backend) -> UInt {
+        switch backend {
+        case .bytes:
+            var checksum = CRC32(continuing: UInt32(truncatingIfNeeded: crc))
+            checksum.update(bytes)
+            return UInt(checksum.value)
+        case .zlib:
+            return zlibCRC32(crc, bytes)
+        }
+    }
+}
+
+/// CRC-32 via zlib (hardware-accelerated). Its C API isn't bounds-annotated, so it takes the span's pointer
+/// and count, valid for the call.
+func zlibCRC32(_ crc: UInt, _ bytes: RawSpan) -> UInt {
     bytes.withUnsafeBytes { buffer in
         unsafe UInt(zlib.crc32_z(uLong(crc), buffer.baseAddress?.assumingMemoryBound(to: Bytef.self), buffer.count))
     }

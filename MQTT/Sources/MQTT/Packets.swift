@@ -109,10 +109,10 @@ public struct MQTTConnect: ~Escapable {
 
     /// "MQTT" as an MQTT string.
     @inlinable
-    static var protocolName: Byte6 { [0x00, 0x04, 0x4D, 0x51, 0x54, 0x54] }
+    static var protocolName: Byte6 { 0x00_04_4D_51_54_54 }
 
     @inlinable
-    static var protocolVersion: UInt8 { 5 }
+    static var protocolVersion: Byte { 5 }
 
     @inlinable
     @_lifetime(copy body)
@@ -140,7 +140,7 @@ public struct MQTTConnect: ~Escapable {
             throw .malformed("connect header")
         }
         guard flags.reserved == 0 else { throw .malformed("reserved connect flag") }
-        guard let willQoS = MQTTQoS(rawValue: flags.willQoS.rawValue) else { throw .malformed("will QoS 3") }
+        guard let willQoS = MQTTQoS(rawBits: flags.willQoS) else { throw .malformed("will QoS 3") }
         guard flags.will || (willQoS == .atMostOnce && !flags.willRetain) else {
             throw .malformed("will QoS or retain without a will")
         }
@@ -190,7 +190,7 @@ public struct MQTTConnect: ~Escapable {
     @inlinable
     func writeBody(to writer: inout BytesWriter) throws(BytesError) {
         try writer.write(Self.protocolName)
-        try writer.write(Byte(Self.protocolVersion))
+        try writer.write(Self.protocolVersion)
         try writer.write(Bit(userName != nil))
         try writer.write(Bit(password != nil))
         try writer.write(Bit(will?.retain ?? false))
@@ -236,7 +236,7 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
         do throws(BytesError) {
             reserved = try body.read(Bits<7>.self)
             sessionPresent = try body.read(Bit.self).isSet
-            reasonCode = MQTTReasonCode(rawValue: try body.read(Byte.self).rawValue)
+            reasonCode = try body.read(MQTTReasonCode.self, as: Byte.self)
         } catch {
             throw .malformed("connect acknowledge flags")
         }
@@ -266,7 +266,7 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
     func writeBody(to writer: inout BytesWriter) throws(BytesError) {
         try writer.write(Bits<7>(0))
         try writer.write(Bit(sessionPresent))
-        try writer.write(Byte(reasonCode.rawValue))
+        try writer.write(reasonCode, as: Byte.self)
         try writer.write(properties)
     }
 }
@@ -307,7 +307,7 @@ public struct MQTTPublish: ~Escapable {
     init(reading body: inout Bytes, flags: Nibble) throws(MQTTError) {
         // The fixed header's flags: DUP, QoS (2 bits), RETAIN.
         duplicate = flags[bit: 3]
-        guard let qos = MQTTQoS(rawValue: (flags >> 1).lowHalf.rawValue) else { throw .malformed("QoS 3") }
+        guard let qos = MQTTQoS(rawBits: flags[Crumb.self, at: 1]) else { throw .malformed("QoS 3") }
         self.qos = qos
         retain = flags[bit: 0]
         guard qos != .atMostOnce || !duplicate else { throw .malformed("DUP set on a QoS 0 message") }
@@ -335,7 +335,11 @@ public struct MQTTPublish: ~Escapable {
 
     @inlinable
     var flags: Nibble {
-        Nibble(UInt8(duplicate ? 0b1000 : 0) | qos.rawValue &<< 1 | (retain ? 1 : 0))
+        var flags = Nibble.zero
+        flags[bit: 3] = duplicate
+        flags[Crumb.self, at: 1] = Crumb(qos.rawValue)
+        flags[bit: 0] = retain
+        return flags
     }
 
     @inlinable
@@ -375,7 +379,7 @@ public struct MQTTPublishResponse: ~Escapable {
     init(reading body: inout Bytes, reasonCodes: ReasonCodeSet) throws(MQTTError) {
         packetIdentifier = try body.readMQTTUInt16("packet identifier")
         // The reason code is omitted for success with no properties, and the properties when empty.
-        reasonCode = body.isAtEnd ? .success : MQTTReasonCode(rawValue: try body.readMQTTByte("reason code"))
+        reasonCode = body.isAtEnd ? .success : try body.readMQTTReasonCode()
         try Check.reasonCode(reasonCode, in: reasonCodes)
         properties = body.isAtEnd ? MQTTProperties() : try MQTTProperties(reading: &body, allowing: .acknowledgement)
         try body.expectMQTTEnd("publish response")
@@ -397,7 +401,7 @@ public struct MQTTPublishResponse: ~Escapable {
     func writeBody(to writer: inout BytesWriter) throws(BytesError) {
         try writer.write(packetIdentifier, as: Byte2.self, .bigEndian)
         if properties.isEmpty, reasonCode == .success { return }
-        try writer.write(Byte(reasonCode.rawValue))
+        try writer.write(reasonCode, as: Byte.self)
         if !properties.isEmpty { try writer.write(properties) }
     }
 }
@@ -665,7 +669,7 @@ public struct MQTTDisconnect: ~Escapable {
     @_lifetime(body: copy body)
     init(reading body: inout Bytes) throws(MQTTError) {
         // Remaining length 0: normal disconnection; 1: a reason code without properties [3.14.2.2.1].
-        reasonCode = body.isAtEnd ? .normalDisconnection : MQTTReasonCode(rawValue: try body.readMQTTByte("reason code"))
+        reasonCode = body.isAtEnd ? .normalDisconnection : try body.readMQTTReasonCode()
         try Check.reasonCode(reasonCode, in: .disconnect)
         properties = body.isAtEnd ? MQTTProperties() : try MQTTProperties(reading: &body, allowing: .disconnect)
         try body.expectMQTTEnd("disconnect")
@@ -686,7 +690,7 @@ public struct MQTTDisconnect: ~Escapable {
     @inlinable
     func writeBody(to writer: inout BytesWriter) throws(BytesError) {
         if properties.isEmpty, reasonCode == .normalDisconnection { return }
-        try writer.write(Byte(reasonCode.rawValue))
+        try writer.write(reasonCode, as: Byte.self)
         if !properties.isEmpty { try writer.write(properties) }
     }
 }
@@ -710,7 +714,7 @@ public struct MQTTAuthenticate: ~Escapable {
     @_lifetime(body: copy body)
     init(reading body: inout Bytes) throws(MQTTError) {
         // Remaining length 0: success without properties [3.15.2.1]. (A lone reason code is accepted too.)
-        reasonCode = body.isAtEnd ? .success : MQTTReasonCode(rawValue: try body.readMQTTByte("reason code"))
+        reasonCode = body.isAtEnd ? .success : try body.readMQTTReasonCode()
         try Check.reasonCode(reasonCode, in: .authenticate)
         properties = body.isAtEnd ? MQTTProperties() : try MQTTProperties(reading: &body, allowing: .authenticate)
         try body.expectMQTTEnd("authenticate")
@@ -731,7 +735,7 @@ public struct MQTTAuthenticate: ~Escapable {
     @inlinable
     func writeBody(to writer: inout BytesWriter) throws(BytesError) {
         if properties.isEmpty, reasonCode == .success { return }
-        try writer.write(Byte(reasonCode.rawValue))
+        try writer.write(reasonCode, as: Byte.self)
         try writer.write(properties)
     }
 }
