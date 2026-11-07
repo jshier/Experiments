@@ -26,6 +26,45 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
+    // The `Bytes` parser above against the original `ByteReader` one, which must agree on every entry.
+    for url in [Fixtures.smallFiles, Fixtures.largeText, Fixtures.largeRandom] {
+        let archive = try! ZipArchive(url: url)
+        let original = try! ZipArchive.entriesUsingByteReader(of: url)
+        precondition(archive.entries.count == original.count)
+        for (new, old) in zip(archive.entries, original) {
+            precondition(
+                new.path == old.path && new.kind == old.kind && new.method == old.method && new.flags == old.flags
+                    && new.crc32 == old.crc32 && new.compressedSize == old.compressedSize
+                    && new.uncompressedSize == old.uncompressedSize && new.localHeaderOffset == old.localHeaderOffset
+                    && new.posixPermissions == old.posixPermissions && new.modificationDate == old.modificationDate,
+                "Parsers disagree on \(new.path)"
+            )
+            precondition(try! archive.payloadCount(of: new) == (try! archive.payloadCountUsingByteReader(of: old)))
+        }
+    }
+
+    Benchmark("Parse central directory: original ByteReader") { benchmark in
+        for _ in benchmark.scaledIterations {
+            blackHole(try ZipArchive.entriesUsingByteReader(of: Fixtures.smallFiles))
+        }
+    }
+
+    Benchmark("Locate 2,000 payloads") { benchmark in
+        let archive = try ZipArchive(url: Fixtures.smallFiles)
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            for entry in archive.entries { blackHole(try archive.payloadCount(of: entry)) }
+        }
+    }
+
+    Benchmark("Locate 2,000 payloads: original ByteReader") { benchmark in
+        let archive = try ZipArchive(url: Fixtures.smallFiles)
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            for entry in archive.entries { blackHole(try archive.payloadCountUsingByteReader(of: entry)) }
+        }
+    }
+
     // MARK: Decompression (no filesystem writes)
 
     func firstFile(_ archive: ZipArchive) -> ZipEntry {
