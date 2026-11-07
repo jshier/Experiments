@@ -10,7 +10,7 @@ public enum BitOrder: Hashable, Sendable {
 public enum BytesError: Error, Hashable, Sendable {
     /// Fewer bits remain than the read needs.
     case insufficientData
-    /// ``Bytes/expect(_:)-(T)`` found a different value.
+    /// An `expect` found a different value.
     case mismatch
     /// ``Bytes/read(_:count:)`` was asked to view memory that isn't aligned for its element type.
     case misaligned
@@ -26,7 +26,7 @@ public enum BytesError: Error, Hashable, Sendable {
 /// A cursor that parses binary data from borrowed memory, field by field, at bit or byte granularity.
 ///
 /// Read fixed-width fields as ``ByteGroup`` values (``Byte2`` through ``Byte16``) or directly as integers in
-/// a ``ByteOrder``, and sub-byte fields as ``Bits`` (``Bit``, ``Crumb``, ``Nibble``, ``Byte``), in any mix:
+/// a `ByteOrder`, and sub-byte fields as ``Bits`` (``Bit``, ``Crumb``, ``Nibble``, ``Byte``), in any mix:
 ///
 /// ```swift
 /// var reader = Bytes(span)
@@ -48,7 +48,8 @@ public enum BytesError: Error, Hashable, Sendable {
 public struct Bytes: ~Copyable, ~Escapable {
     /// All the bytes being read, including those already consumed.
     public let span: RawSpan
-    /// The order of bits within each byte, for ``Bits`` and ``read(bitCount:)``.
+    /// The order of bits within each byte: for ``Bits``, ``read(bitCount:)``, and multi-byte reads that start
+    /// mid-byte.
     public let bitOrder: BitOrder
     @usableFromInline var _byteOffset: Int
     /// Bits already consumed from the byte at `_byteOffset`: always 0 through 7.
@@ -82,6 +83,11 @@ extension Bytes {
     /// The number of bits already consumed from the byte at ``byteOffset``, from 0 through 7.
     @inlinable
     public var bitOffset: Int { _bitOffset }
+
+    /// The position of the next bit in ``span``, counted in bits: `8 × byteOffset + bitOffset`. Matches
+    /// ``BitBuffer/bitPosition``, so a decoder can store either and resume with ``seek(toBitPosition:)``.
+    @inlinable
+    public var bitPosition: Int { _byteOffset &<< 3 | _bitOffset }
 
     /// Whether the next read starts at the beginning of a byte.
     @inlinable
@@ -118,15 +124,28 @@ extension Bytes {
 
     /// Moves to the start of the byte at `offset` in ``span``. `offset` may be `span.byteCount`, the end.
     ///
-    /// Throws ``BytesError/insufficientData`` if `offset` is past the end (offsets usually come from the data
-    /// itself, so that's a data error). A negative `offset` is a programming error.
+    /// Offsets usually come from the data itself, so a bad one throws: ``BytesError/insufficientData`` if
+    /// it's past the end, ``BytesError/invalidValue`` if it's negative.
     @inlinable
     @_lifetime(self: copy self)
     public mutating func seek(toByteOffset offset: Int) throws(BytesError) {
-        precondition(offset >= 0, "Negative byte offset")
+        guard offset >= 0 else { throw .invalidValue }
         guard offset <= span.byteCount else { throw .insufficientData }
         _byteOffset = offset
         _bitOffset = 0
+    }
+
+    /// Moves to bit `position` in ``span`` (see ``bitPosition``), which may be the end.
+    ///
+    /// Throws like ``seek(toByteOffset:)``: ``BytesError/insufficientData`` past the end,
+    /// ``BytesError/invalidValue`` if negative.
+    @inlinable
+    @_lifetime(self: copy self)
+    public mutating func seek(toBitPosition position: Int) throws(BytesError) {
+        guard position >= 0 else { throw .invalidValue }
+        guard position <= span.byteCount &<< 3 else { throw .insufficientData }
+        _byteOffset = position &>> 3
+        _bitOffset = position & 7
     }
 
     /// Skips the next `byteCount` bytes (`8 × byteCount` bits, if not byte-aligned).
@@ -299,6 +318,33 @@ extension Bytes {
         let value = try peek(bitCount: bitCount)
         _advance(bitCount: bitCount)
         return value
+    }
+
+    /// Returns the bits ahead of the cursor, as many as fit in 64 (at least 57, or all that remain), without
+    /// consuming them. Bits past the end of the data are zero.
+    ///
+    /// For decoders that look further ahead than they consume, such as Huffman decoders: index a table with
+    /// the window's next bits, then ``skip(bitCount:)`` the length of the code found. The next bit is bit 0 of
+    /// the window for ``BitOrder/leastSignificantFirst`` and bit 63 for ``BitOrder/mostSignificantFirst``.
+    ///
+    /// ```swift
+    /// let window = reader.peekBitWindow()            // DEFLATE: least significant bit first
+    /// let entry = table[Int(window & 0x3FF)]         // a 10-bit lookup
+    /// try reader.skip(bitCount: entry.codeLength)    // throws if the code runs past the end
+    /// ```
+    ///
+    /// One unaligned 8-byte load and a shift; within 8 bytes of the end, the remaining bytes, padded.
+    @inlinable @inline(__always)
+    public func peekBitWindow() -> UInt64 {
+        _assumeInvariant()
+        let window: UInt64
+        if likely(span.byteCount &- _byteOffset >= 8) {
+            let raw = unsafe Load.native(UInt64.self, from: span, at: _byteOffset)
+            window = bitOrder == .mostSignificantFirst ? UInt64(bigEndian: raw) : UInt64(littleEndian: raw)
+        } else {
+            window = Self._partialWindow(in: span, atByte: _byteOffset, bitOrder: bitOrder)
+        }
+        return bitOrder == .mostSignificantFirst ? window &<< _bitOffset : window &>> _bitOffset
     }
 
     /// `count` (1 through 8) bits starting `bit` bits into the byte at `byteOffset`. Bounds already checked.
@@ -786,6 +832,24 @@ enum Load {
             return T(littleEndian: T.Integer(truncatingIfNeeded: UInt128(high) &<< 64 | UInt128(low)))
         default:
             preconditionFailure("\(T.self).byteCount must be 2 through 16")
+        }
+    }
+}
+
+// MARK: - Copying out
+
+extension Array where Element == UInt8 {
+    /// Creates an array with a copy of `bytes`: the byte counterpart of `String(copying:)`, for keeping
+    /// what a span read from ``Bytes`` borrows.
+    @inlinable
+    public init(copying bytes: RawSpan) {
+        unsafe self.init(unsafeUninitializedCapacity: bytes.byteCount) { buffer, initializedCount in
+            if bytes.byteCount > 0 {
+                bytes.withUnsafeBytes { source in
+                    unsafe UnsafeMutableRawPointer(buffer.baseAddress!).copyMemory(from: source.baseAddress!, byteCount: source.count)
+                }
+            }
+            initializedCount = bytes.byteCount
         }
     }
 }

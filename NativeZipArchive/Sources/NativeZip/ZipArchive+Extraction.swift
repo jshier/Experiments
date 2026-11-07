@@ -29,6 +29,8 @@ public struct ExtractionOptions {
     public var onEvent: ((ExtractionEvent) -> Void)?
     /// How many files may be decompressed and written at once.
     public var maxConcurrency = ProcessInfo.processInfo.activeProcessorCount
+    /// Which DEFLATE implementation decompresses.
+    public var backend = ZipDecoder.Backend.bytes
 }
 
 /// Permissions and timestamps to apply to an extracted item.
@@ -93,14 +95,14 @@ extension ZipArchive {
         // with cores. So use up to 8 workers, plus one per large entry beyond that.
         let largeFiles = files.count { $0.entry.uncompressedSize >= Self.largeEntrySize }
         let width = min(options.maxConcurrency, max(Self.fileCreationWidth, largeFiles))
-        try await forEachConcurrently(files, maxConcurrency: width, weight: \.entry.uncompressedSize) {
+        try await forEachConcurrently(files, maxConcurrency: width, backend: options.backend, weight: \.entry.uncompressedSize) {
             [self] job, decoder in try await self.write(job, using: &decoder)
         }
 
         for (entry, relative, link) in symlinks {
             try directories.create(link.removingLastComponent())
             guard try Self.clearExisting(entry, relative: relative, at: link, options: options) else { continue }
-            let destination = String(decoding: try contents(of: entry), as: UTF8.self)
+            let destination = String(decoding: try contents(of: entry, backend: options.backend), as: UTF8.self)
             options.onEvent?(.linking(entry, path: relative, destination: destination))
             // System has no symlink(2) wrapper, and Foundation's would normalize the name, so use Darwin.
             let status = unsafe link.withPlatformString { link in

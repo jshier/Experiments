@@ -23,12 +23,13 @@ extension ZipArchive {
     func forEachConcurrently<Item: Sendable>(
         _ items: [Item],
         maxConcurrency: Int,
+        backend: ZipDecoder.Backend,
         weight: (Item) -> UInt64,
         _ body: @escaping @Sendable (Item, inout ZipDecoder) async throws -> Void
     ) async throws {
         let width = min(max(maxConcurrency, 1), items.count)
         guard width > 1 else {
-            var decoder = ZipDecoder()
+            var decoder = ZipDecoder(backend: backend)
             for item in items { try await body(item, &decoder) }
             return
         }
@@ -38,7 +39,7 @@ extension ZipArchive {
         try await withThrowingDiscardingTaskGroup { group in
             for _ in 0..<width {
                 group.addTask {
-                    var decoder = ZipDecoder()
+                    var decoder = ZipDecoder(backend: backend)
                     while !Task.isCancelled, let index = queue.claim() {
                         try await body(ordered[index], &decoder)
                     }

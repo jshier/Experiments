@@ -174,7 +174,7 @@ extension ZipArchive {
                 if compressedSize == 0xFFFF_FFFF { compressedSize = try field.read(Byte8.self, .littleEndian) }
                 if localHeaderOffset == 0xFFFF_FFFF { localHeaderOffset = try field.read(Byte8.self, .littleEndian) }
             case 0x5455: // Extended timestamp: a flags byte, then a UTC mtime if bit 0 is set.
-                if size >= 5, try field.read(Byte.self).isSet(at: 0) {
+                if size >= 5, try field.read(Byte.self)[bit: 0] {
                     let seconds = Int32(bitPattern: try field.read(Byte4.self, .littleEndian))
                     unixModificationTime = Date(timeIntervalSince1970: TimeInterval(seconds))
                 }
@@ -315,8 +315,8 @@ extension ZipArchive {
 
     /// Convenience that uses a temporary decoder. Prefer ``contents(of:using:_:)`` in loops.
     @inlinable
-    public func contents(of entry: ZipEntry, _ body: (RawSpan) throws -> Void) throws {
-        var decoder = ZipDecoder()
+    public func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, _ body: (RawSpan) throws -> Void) throws {
+        var decoder = ZipDecoder(backend: backend)
         try contents(of: entry, using: &decoder, body)
     }
 
@@ -349,9 +349,9 @@ extension ZipArchive {
     }
 
     /// The entry's full decompressed contents.
-    public func contents(of entry: ZipEntry) throws -> Data {
+    public func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes) throws -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
-        try contents(of: entry) { chunk in
+        try contents(of: entry, backend: backend) { chunk in
             chunk.withUnsafeBytes { unsafe result.append(contentsOf: $0) }
         }
         return result

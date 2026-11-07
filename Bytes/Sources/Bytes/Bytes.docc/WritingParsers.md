@@ -125,6 +125,30 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
 }
 ```
 
+### Variable-size parts
+
+Many formats prefix a part with its length: a string, a list, a nested message. Read the part as a
+section, a cursor of its own that every read inside is bounded to, and check it was fully consumed:
+
+```swift
+var message = try reader.read(sectionPrefixedBy: LEB128.self, maxByteCount: 4)
+let topic = try message.read(utf8PrefixedBy: Byte2.self, .bigEndian) // a validated UTF8Span
+let flags = try message.read(Byte.self)
+try message.expectEnd()                                             // .trailingData otherwise
+```
+
+These reads are atomic too: if the section isn't all there, nothing is consumed, not even its length.
+To write one, compute its size first and write the length directly, or let a section writer fill it in:
+
+```swift
+try writer.write(UInt64(size), as: LEB128.self)
+try writer.write(sectionPrefixedBy: Byte2.self, .bigEndian) { (section) throws(BytesError) in
+    try section.write(topic, prefixedBy: Byte2.self, .bigEndian)
+}
+```
+
+The MQTT package next to this one (`../MQTT`) parses and encodes every MQTT 5.0 packet this way.
+
 ### Keep it fast
 
 - **Keep cursors local, or pass them `inout` to inlinable code.** A cursor passed `inout` to a closure

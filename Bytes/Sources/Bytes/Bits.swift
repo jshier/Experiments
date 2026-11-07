@@ -123,8 +123,8 @@ extension Bits: ExpressibleByIntegerLiteral {
 extension Bits: LosslessStringConvertible, ExpressibleByStringLiteral {
     /// Parses binary digits, such as `"1010"`, `"0b1010"`, or `"1111_0000"`.
     ///
-    /// Leading zeros and `_` separators are allowed. Returns `nil` if `description` has no digits,
-    /// has any other character, or its value doesn't fit in `width` bits.
+    /// Leading zeros are allowed, and so is `_` after the first digit, as in Swift literals. Returns `nil`
+    /// if `description` has no digits, has any other character, or its value doesn't fit in `width` bits.
     @inlinable
     public init?(_ description: String) {
         var utf8 = Substring(description).utf8
@@ -171,7 +171,8 @@ extension Bits: LosslessStringConvertible, ExpressibleByStringLiteral {
 }
 
 extension BinaryInteger {
-    /// Creates an integer from the value of `bits`.
+    /// Creates an integer from the value of `bits`. Traps if it doesn't fit, as `Int8(byte)` does for 128
+    /// and above.
     @inlinable
     public init<let width: Int>(_ bits: Bits<width>) {
         self.init(bits.rawValue)
@@ -208,11 +209,18 @@ extension Bits {
         Self(_unchecked: UInt8(truncatingIfNeeded: Int(value.rawValue) << count) & mask)
     }
 
-    /// Shifts right by `count` bits, dropping the bits shifted past the bottom.
+    /// Shifts right by `count` bits, dropping the bits shifted past the bottom. (A negative `count` shifts
+    /// left, as for integers.)
     @inlinable
     public static func >> (value: Self, count: Int) -> Self {
-        Self(_unchecked: UInt8(truncatingIfNeeded: Int(value.rawValue) >> count))
+        Self(_unchecked: UInt8(truncatingIfNeeded: Int(value.rawValue) >> count) & mask)
     }
+
+    @inlinable
+    public static func <<= (value: inout Self, count: Int) { value = value << count }
+
+    @inlinable
+    public static func >>= (value: inout Self, count: Int) { value = value >> count }
 }
 
 // MARK: - Single bits
@@ -240,12 +248,6 @@ extension Bits {
             let bit = UInt8(1) &<< index
             _rawValue = newValue ? _rawValue | bit : _rawValue & ~bit
         }
-    }
-
-    /// Whether the bit at `index` is set, counting from the least significant bit (index 0).
-    @inlinable
-    public func isSet(at index: Int) -> Bool {
-        self[bit: index]
     }
 
     /// Flips the bit at `index`, counting from the least significant bit (index 0).
@@ -277,7 +279,8 @@ extension Bits where width == 8 {
         set { _rawValue = _rawValue & 0xF0 | newValue.rawValue }
     }
 
-    /// Creates a byte from its two nibbles.
+    /// Creates a byte from its two nibbles, high first, as they're written in a binary literal. (Byte groups
+    /// take their halves low first, in memory order.)
     @inlinable
     public init(highHalf: Nibble, lowHalf: Nibble) {
         self.init(_unchecked: highHalf.rawValue &<< 4 | lowHalf.rawValue)

@@ -71,14 +71,43 @@ let benchmarks: @Sendable () -> Void = {
         archive.entries.first { $0.kind == .file }!
     }
 
-    Benchmark("Inflate + CRC 32 MB text") { benchmark in
-        let archive = try ZipArchive(url: Fixtures.largeText)
-        let entry = firstFile(archive)
-        var decoder = ZipDecoder()
-        benchmark.startMeasurement()
-        for _ in benchmark.scaledIterations {
-            try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+    // Each DEFLATE benchmark runs with the `Bytes` decoder (the default) and with zlib.
+    for backend in [ZipDecoder.Backend.bytes, .zlib] {
+        let suffix = backend == .bytes ? "Bytes" : "zlib"
+
+        Benchmark("Inflate + CRC 32 MB text: \(suffix)") { benchmark in
+            let archive = try ZipArchive(url: Fixtures.largeText)
+            let entry = firstFile(archive)
+            var decoder = ZipDecoder(backend: backend)
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+            }
         }
+
+        Benchmark("Inflate + CRC 2,000 small files: \(suffix)") { benchmark in
+            let archive = try ZipArchive(url: Fixtures.smallFiles)
+            let files = archive.entries.filter { $0.kind == .file }
+            var decoder = ZipDecoder(backend: backend)
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                for entry in files {
+                    try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+                }
+            }
+        }
+
+        Benchmark("Verify 2,000 small files (parallel): \(suffix)") { benchmark in
+            let archive = try ZipArchive(url: Fixtures.smallFiles)
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                let failures = await archive.verify(backend: backend)
+                precondition(failures.isEmpty)
+            }
+        }
+
+        extractionBenchmark("Extract 32 MB text: \(suffix)", archive: Fixtures.largeText, backend: backend)
+        extractionBenchmark("Extract 2,000 small files: \(suffix)", archive: Fixtures.smallFiles, backend: backend)
     }
 
     Benchmark("Stored + CRC 32 MB random") { benchmark in
@@ -88,27 +117,6 @@ let benchmarks: @Sendable () -> Void = {
         benchmark.startMeasurement()
         for _ in benchmark.scaledIterations {
             try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
-        }
-    }
-
-    Benchmark("Inflate + CRC 2,000 small files") { benchmark in
-        let archive = try ZipArchive(url: Fixtures.smallFiles)
-        let files = archive.entries.filter { $0.kind == .file }
-        var decoder = ZipDecoder()
-        benchmark.startMeasurement()
-        for _ in benchmark.scaledIterations {
-            for entry in files {
-                try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
-            }
-        }
-    }
-
-    Benchmark("Verify 2,000 small files (parallel)") { benchmark in
-        let archive = try ZipArchive(url: Fixtures.smallFiles)
-        benchmark.startMeasurement()
-        for _ in benchmark.scaledIterations {
-            let failures = await archive.verify()
-            precondition(failures.isEmpty)
         }
     }
 
@@ -138,10 +146,11 @@ let benchmarks: @Sendable () -> Void = {
 
     // MARK: Extraction to disk
 
-    func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil) {
+    func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil, backend: ZipDecoder.Backend = .bytes) {
         Benchmark(name) { benchmark in
             let archive = try ZipArchive(url: url)
             var options = ExtractionOptions()
+            options.backend = backend
             if let maxConcurrency { options.maxConcurrency = maxConcurrency }
             for _ in benchmark.scaledIterations {
                 let destination = Fixtures.scratchDirectory()
@@ -153,7 +162,6 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
-    extractionBenchmark("Extract 2,000 small files", archive: Fixtures.smallFiles)
     for workers in [1, 2, 4, 8] {
         extractionBenchmark("Extract 2,000 small files (\(workers) worker\(workers == 1 ? "" : "s"))",
                             archive: Fixtures.smallFiles, maxConcurrency: workers)
@@ -209,7 +217,6 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
-    extractionBenchmark("Extract 32 MB text", archive: Fixtures.largeText)
     extractionBenchmark("Extract 32 MB random", archive: Fixtures.largeRandom)
 
     // Like the CLI: opening (mapping + parsing) is inside the measurement, so first-touch page faults count.

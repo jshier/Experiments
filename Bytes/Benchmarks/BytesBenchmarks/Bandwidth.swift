@@ -133,8 +133,9 @@ func randomBuffer(byteCount: Int) -> [UInt8] {
     }
 }
 
-func registerBandwidthBenchmarks() {
-    let workloads: [Workload] = [
+/// Every read workload: the bandwidth benchmarks, and their allocation counts (`Allocations.swift`).
+func readWorkloads() -> [Workload] {
+    [
         rawRead,
         bitsWorkload(Bits<1>.self, name: "Bit"),
         bitsWorkload(Bits<2>.self, name: "Crumb"),
@@ -166,6 +167,10 @@ func registerBandwidthBenchmarks() {
         forInGroupWorkload(Byte14.self), forInGroupWorkload(Byte15.self), forInGroupWorkload(Byte16.self),
         bulkReadWorkload(Byte3.self), bulkReadWorkload(Byte5.self), bulkReadWorkload(Byte6.self), bulkReadWorkload(Byte7.self),
     ] + ipv4Workloads()
+}
+
+func registerBandwidthBenchmarks() {
+    let workloads = readWorkloads()
 
     // 4 MB stays in a performance core's L2 (16 MB per cluster): the code's own ceiling.
     // 512 MB is far beyond every cache, so it measures reading DRAM.

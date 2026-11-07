@@ -112,8 +112,9 @@ func residentBuffer(byteCount: Int) -> UnsafeMutableRawBufferPointer {
 nonisolated(unsafe) let cachedWriteBuffer = residentBuffer(byteCount: 4 << 20)
 nonisolated(unsafe) let memoryWriteBuffer = residentBuffer(byteCount: 512 << 20)
 
-func registerWriteBenchmarks() {
-    let workloads: [WriteWorkload] = [
+/// Every write workload: the bandwidth benchmarks, and their allocation counts (`Allocations.swift`).
+func writeWorkloads() -> [WriteWorkload] {
+    [
         rawStore,
         memsetStore,
         bitsWriteWorkload(Bits<1>.self, name: "Bit"),
@@ -137,6 +138,10 @@ func registerWriteBenchmarks() {
             return writer.byteCount
         },
     ] + perValueWriteWorkloads
+}
+
+func registerWriteBenchmarks() {
+    let workloads = writeWorkloads()
     let cores = ProcessInfo.processInfo.activeProcessorCount
 
     func configuration(maxDuration: Duration) -> Benchmark.Configuration {

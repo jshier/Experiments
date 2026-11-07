@@ -95,6 +95,11 @@ struct NUnzip: AsyncParsableCommand {
     @Flag(name: [.customShort("q"), .customLong("quiet")], help: "Quiet mode; -qq is quieter.")
     var quiet: Int
 
+    @Flag(name: .customLong("zlib"), help: "Decompress with zlib instead of the built-in decoder (for comparison).")
+    var useZlib = false
+
+    private var backend: ZipDecoder.Backend { useZlib ? .zlib : .bytes }
+
     // MARK: Run
 
     func run() async throws {
@@ -165,6 +170,7 @@ struct NUnzip: AsyncParsableCommand {
         var options = ExtractionOptions()
         options.junkPaths = junkPaths
         options.restoreTimestamps = !noTimestamps
+        options.backend = backend
         switch overwrite {
         case .always: options.overwrite = .always
         case .never: options.overwrite = .never
@@ -286,7 +292,7 @@ struct NUnzip: AsyncParsableCommand {
     private func test(_ entries: [ZipEntry], in zip: ZipArchive) async throws {
         if quiet < 2 { Console.out("Archive:  \(archive)") }
         // Entries are verified in parallel; results are reported afterwards, in archive order.
-        let failed = await zip.verify(entries)
+        let failed = await zip.verify(entries, backend: backend)
         let errors = Dictionary(failed.map { ($0.entry.localHeaderOffset, $0.error) }, uniquingKeysWith: { first, _ in first })
         let width = min(entries.map(\.path.count).max() ?? 0, 60)
         for entry in entries where entry.kind != .directory {
@@ -308,7 +314,7 @@ struct NUnzip: AsyncParsableCommand {
     // MARK: Pipe
 
     private func pipe(_ entries: [ZipEntry], from zip: ZipArchive) throws {
-        var decoder = ZipDecoder()
+        var decoder = ZipDecoder(backend: backend)
         for entry in entries where entry.kind == .file {
             try zip.contents(of: entry, using: &decoder) { chunk in
                 _ = try chunk.withUnsafeBytes { try unsafe FileDescriptor.standardOutput.writeAll($0) }

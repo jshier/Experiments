@@ -148,3 +148,54 @@ Decoding, CRC, and verification are unchanged (they don't parse). Extraction mov
 run-to-run noise (±20%: the two `Floor:` benchmarks, which don't parse at all, moved −9% and −12% between
 the same two runs); the ~50 µs saved per archive open is far below that. CLI regression archives behave as
 before (Info-ZIP-identical trees; slip, absolute path, bad CRC, truncated, and non-zip inputs rejected).
+
+## step6: DEFLATE decoding with Bytes (`Inflater`), against zlib
+
+`Inflater` (Sources/NativeZip/Inflater.swift) is a DEFLATE decoder written with `Bytes`: block headers are
+`Bit`/`Crumb`/`Bits<5>`/`Nibble` fields read from a `BitBuffer`, stored-block lengths are `Byte2`s with
+`expect` for NLEN, Huffman tables are built by `HuffmanTable.build` with DEFLATE-specific packed entries,
+and matches are `BytesWriter.copy(fromDistance:count:allowingOverrun:)`. `ZipDecoder(backend:)` picks it
+(the default) or zlib, which stays for comparison (`nunzip --zlib`, `ExtractionOptions.backend`). Baseline
+`bytes-inflate`.
+
+| Benchmark (same run, p50) | Bytes | zlib |
+|---|---|---|
+| Inflate + CRC 32 MB text | 13 ms, 0 mallocs | 14 ms, 1 malloc |
+| Inflate + CRC 2,000 small files | 14 ms, 0 mallocs | 15 ms, 1 malloc |
+| Verify 2,000 small files (parallel) | 4.70 ms (a later run: 4.72) | 5.01 ms (a later run: 4.71) |
+| Extract 32 MB text | 15 ms | 15 ms |
+| Extract 2,000 small files | within noise (127–161 ms, both) | |
+
+By stream shape (`swift test -c release --filter PerfProbe`): literal-heavy data ties, default-level text
+and fixed-code blocks are ~4% faster, long runs (distance-1 matches) 3.5x faster, stored blocks equal.
+CLI (hyperfine, Bytes vs zlib): 320 MB text 148 vs 144 ms serial, 23.1 vs 22.5 ms parallel (noise);
+20,000 small files 172 vs 176 ms serial, 51.9 vs 53.2 ms parallel.
+
+Correctness: round trips of zlib output at every level and strategy, a 20,000-case mutation differential
+against zlib (same output or both reject), and malformed streams.
+
+### How it got from 2x slower to faster
+
+The first version was 2x slower than zlib. In order of payoff:
+
+1. **Inlining.** `@inline(__always)` is a hint, and the inliner refused it for the match copy ("not
+   profitable", cost 263 against benefit 45); the call took the writer by address, which put it in memory for
+   the whole loop. Splitting the decoder into small functions with their own local `BitBuffer` and
+   `BytesWriter`, and marking the hot `Bytes` APIs `@inline(always)` (SE-0496, guaranteed), kept both in
+   registers. `BitBuffer.init` had to be always-inlined too, so a literal bit order folds to a constant.
+2. **Register-only refill.** The slow refill (near the end) took the fields `inout`, which kept them in
+   memory on the fast path too; it now takes and returns values. Shift counts use `truncatingIfNeeded`,
+   removing sign checks.
+3. **libdeflate's table builder**: table building was 11% of small-file time. Codes are visited in
+   canonical order with the bit-reversed code incremented directly, only the first `2^length` root entries
+   are written, and they're doubled with `memcpy` at each longer length. Now `HuffmanTable.build` in Bytes.
+4. **Shortening the critical path.** The next symbol's entry is looked up before the current one is used;
+   the root lookup happens before the refill (11 bits are always buffered) and only the subtable step after
+   it; after a length code, the distance is decoded from the bits already buffered while the refill and the
+   match copy proceed. `totalBits` is masked to 6 bits in the entry so ARM's `lsr` takes the raw entry.
+5. **Overrun copies.** Matches copy 16 bytes at a time (8 for distances under 16) and may write up to 32
+   bytes past their end, kept free by the loop condition; distance 1 is a `memset`.
+
+Tried and reverted: 8-byte steps for all distances, unrolled byte copies, exact copies for distances
+under 32, decoding literal pairs from a combined table (small files 14 → 23 ms: building it costs more than
+it saves on short blocks), an adaptive literal-run loop, and gathering literals into a word store.

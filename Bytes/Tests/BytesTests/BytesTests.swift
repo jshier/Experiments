@@ -97,8 +97,14 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         #expect(Nibble(0b1100) & 0b1010 == 0b1000)
         #expect(Nibble(0b1100) | 0b1010 == 0b1110)
         #expect(Nibble(0b1100) ^ 0b1010 == 0b0110)
-        #expect(Nibble(0b0100).isSet(at: 2))
-        #expect(!Nibble(0b0100).isSet(at: 3))
+        #expect(Nibble(0b0100)[bit: 2])
+        #expect(!Nibble(0b0100)[bit: 3])
+        #expect(Nibble(0b1111) >> -1 == 0b1110) // A negative count shifts left, still masked.
+        var shifted: Nibble = 0b0011
+        shifted <<= 3
+        #expect(shifted == 0b1000)
+        shifted >>= 2
+        #expect(shifted == 0b0010)
         #expect(Crumb(1) < Crumb(2))
     }
 }
@@ -153,16 +159,16 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         // Incomplete or invalid: nothing consumed, not even the length.
         let incomplete: [UInt8] = [0x00, 0x05, 0x01, 0x02]
         var partial = Bytes(incomplete.span)
-        #expect(throws: BytesError.insufficientData) { try partial.read(bytesPrefixedBy: Byte2.self, .bigEndian) }
-        #expect(throws: BytesError.insufficientData) { try partial.read(sectionPrefixedBy: Byte2.self, .bigEndian) }
+        #expect(throws: BytesError.insufficientData) { _ = try partial.read(bytesPrefixedBy: Byte2.self, .bigEndian) }
+        #expect(throws: BytesError.insufficientData) { _ = try partial.read(sectionPrefixedBy: Byte2.self, .bigEndian) }
         #expect(partial.byteOffset == 0)
         let invalid: [UInt8] = [0x00, 0x02, 0xFF, 0xFE]
         var bad = Bytes(invalid.span)
-        #expect(throws: BytesError.invalidValue) { try bad.read(utf8PrefixedBy: Byte2.self, .bigEndian) }
+        #expect(throws: BytesError.invalidValue) { _ = try bad.read(utf8PrefixedBy: Byte2.self, .bigEndian) }
         #expect(bad.byteOffset == 0)
         let lebIncomplete: [UInt8] = [0x05, 0x01]
         var lebPartial = Bytes(lebIncomplete.span)
-        #expect(throws: BytesError.insufficientData) { try lebPartial.read(bytesPrefixedBy: LEB128.self) }
+        #expect(throws: BytesError.insufficientData) { _ = try lebPartial.read(bytesPrefixedBy: LEB128.self) }
         #expect(lebPartial.byteOffset == 0)
     }
 
@@ -758,7 +764,7 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
         var iterated = 0
         for address in addresses { iterated += Int(address[0]) }
         #expect(iterated == (0..<25).reduce(0) { $0 + Int(data[1 + 4 * $1]) })
-        #expect(throws: BytesError.insufficientData) { try reader.read(UInt8.self, count: 1) }
+        #expect(throws: BytesError.insufficientData) { _ = try reader.read(UInt8.self, count: 1) }
 
         // Alignment 4: viewable only where the memory is aligned; nothing consumed otherwise.
         let words: [UInt32] = (0..<16).map { $0 &* 0x0101_0101 } // An array of UInt32 is 4-byte aligned.
@@ -767,7 +773,7 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
         #expect(Array(0..<16).map { view[$0] } == words)
         var misaligned = Bytes(words.span.bytes)
         try misaligned.skip(byteCount: 1)
-        #expect(throws: BytesError.misaligned) { try misaligned.read(UInt32.self, count: 2) }
+        #expect(throws: BytesError.misaligned) { _ = try misaligned.read(UInt32.self, count: 2) }
         #expect(misaligned.byteOffset == 1)
     }
 }
@@ -1162,5 +1168,262 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         let short: [UInt8] = [1, 2]
         #expect(Bytes(short.span).lastByteOffset(of: pattern) == nil)
         #expect(Bytes(short.span).firstByteOffset(of: pattern) == nil)
+    }
+}
+
+/// A 5-byte group from outside the package with a wider `Integer` than the narrowest: the NEON paths must
+/// not store their 8-byte lanes into its 16-byte values.
+struct WideByte5: ByteGroup {
+    let littleEndian: UInt128
+    static var byteCount: Int { 5 }
+    init(littleEndian value: UInt128) { littleEndian = value & (1 << 40 - 1) }
+}
+
+@Suite struct OutsideConformanceTests {
+    @Test func bulkReadOfWideIntegerGroup() throws {
+        let data = (0..<80).map { UInt8(truncatingIfNeeded: $0 &* 37 &+ 11) }
+        var reader = Bytes(data.span)
+        let values = try [UInt128](capacity: 16) { try reader.read(WideByte5.self, .littleEndian, into: &$0) }
+        var single = Bytes(data.span)
+        var expected: [UInt128] = []
+        for _ in 0..<16 { expected.append(try single.read(WideByte5.self, .littleEndian)) }
+        #expect(values == expected)
+    }
+}
+
+@Suite struct ReviewRegressionTests {
+    /// Four continuation bytes with a 4-byte limit can never become valid: malformed, not incomplete.
+    @Test func overlongLEB128AtEndIsInvalid() {
+        let data: [UInt8] = [0x80, 0x80, 0x80, 0x80]
+        var reader = Bytes(data.span)
+        #expect(throws: BytesError.invalidValue) { try reader.read(LEB128.self, maxByteCount: 4) }
+        #expect(reader.byteOffset == 0)
+        let short: [UInt8] = [0x80, 0x80, 0x80]
+        var incomplete = Bytes(short.span)
+        #expect(throws: BytesError.insufficientData) { try incomplete.read(LEB128.self, maxByteCount: 4) }
+    }
+
+    /// A length that can't fit in an `Int` is malformed, not incomplete.
+    @Test func hugeLengthPrefixIsInvalid() {
+        let data: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x00]
+        var reader = Bytes(data.span)
+        #expect(throws: BytesError.invalidValue) { _ = try reader.read(bytesPrefixedBy: Byte8.self, .bigEndian) }
+        #expect(reader.byteOffset == 0)
+    }
+
+    @Test func negativeSeekThrows() {
+        let data: [UInt8] = [1, 2]
+        var reader = Bytes(data.span)
+        #expect(throws: BytesError.invalidValue) { try reader.seek(toByteOffset: -1) }
+    }
+}
+
+@Suite struct SpanWriteTests {
+    /// Every length through the inline small-copy sizes and past them, at several offsets, with guard bytes.
+    @Test func spanWritesCopyExactly() throws {
+        let source = (0..<80).map { UInt8(truncatingIfNeeded: $0 &* 29 &+ 7) }
+        for count in 0...70 {
+            for start in [0, 1, 5] {
+                var buffer = [UInt8](repeating: 0xEE, count: start + count + 3)
+                var span = buffer.mutableSpan
+                var writer = BytesWriter(&span)
+                for _ in 0..<start { try writer.write(Byte(0)) }
+                try writer.write(source.span.bytes.extracting(first: count))
+                #expect(writer.byteCount == start + count)
+                _ = consume writer
+                _ = consume span
+                #expect(Array(buffer[start..<start + count]) == Array(source[..<count]), "count \(count)")
+                #expect(buffer[(start + count)...].allSatisfy { $0 == 0xEE }, "count \(count) wrote past the end")
+            }
+        }
+    }
+}
+
+@Suite struct CopyingTests {
+    @Test func arrayCopyingRawSpan() {
+        let data: [UInt8] = [1, 2, 3, 4, 5]
+        #expect([UInt8](copying: data.span.bytes.extracting(1..<4)) == [2, 3, 4])
+        #expect([UInt8](copying: RawSpan()).isEmpty)
+    }
+}
+
+@Suite struct DecoderSupportTests {
+    /// Back-references against a byte-by-byte reference: every distance from 1 to 40 (and some long ones),
+    /// counts 0 through 300, with guard bytes after.
+    @Test func copyFromDistanceMatchesByteByByte() throws {
+        let prefix = (0..<64).map { UInt8(truncatingIfNeeded: $0 &* 37 &+ 11) }
+        for distance in Array(1...40) + [63, 64] {
+            for count in Array(0...40) + [64, 100, 258, 300] {
+                var expected = prefix
+                for _ in 0..<count { expected.append(expected[expected.count - distance]) }
+                var buffer = [UInt8](repeating: 0xEE, count: prefix.count + count + 20)
+                var span = buffer.mutableSpan
+                var writer = BytesWriter(&span)
+                try writer.write(prefix.span)
+                try writer.copy(fromDistance: distance, count: count)
+                #expect(writer.byteCount == expected.count)
+                _ = consume writer
+                _ = consume span
+                #expect(Array(buffer[..<expected.count]) == expected, "distance \(distance) count \(count)")
+                #expect(buffer[expected.count...].allSatisfy { $0 == 0xEE }, "distance \(distance) count \(count) overran")
+            }
+        }
+    }
+
+    @Test func copyFromDistanceThrows() throws {
+        var buffer = [UInt8](repeating: 0, count: 8)
+        var span = buffer.mutableSpan
+        var writer = BytesWriter(&span)
+        try writer.write([1, 2] as Byte2)
+        #expect(throws: BytesError.invalidValue) { try writer.copy(fromDistance: 0, count: 1) }
+        #expect(throws: BytesError.invalidValue) { try writer.copy(fromDistance: 3, count: 1) }
+        #expect(throws: BytesError.insufficientCapacity) { try writer.copy(fromDistance: 2, count: 7) }
+        #expect(writer.byteCount == 2)
+        try writer.skip(byteCount: 3)
+        #expect(writer.byteCount == 5)
+        #expect(throws: BytesError.insufficientCapacity) { try writer.skip(byteCount: 4) }
+    }
+
+    /// The window agrees with `peek(bitCount:)` at every bit position, in both bit orders, including the
+    /// last 8 bytes (zero-padded).
+    @Test(arguments: [BitOrder.leastSignificantFirst, .mostSignificantFirst])
+    func bitWindowMatchesPeek(order: BitOrder) throws {
+        let data = (0..<23).map { UInt8(truncatingIfNeeded: $0 &* 73 &+ 5) }
+        var reader = Bytes(data.span, bitOrder: order)
+        while !reader.isAtEnd {
+            let window = reader.peekBitWindow()
+            let available = min(reader.remainingBitCount, 57)
+            let expected = try reader.peek(bitCount: available)
+            switch order {
+            case .leastSignificantFirst:
+                #expect(window & ((1 << UInt64(available)) - 1) == expected)
+                if available < 57 { #expect(window >> UInt64(available) == 0) } // Zero past the end.
+            case .mostSignificantFirst:
+                #expect(window >> UInt64(64 - available) == expected)
+                if available < 57 { #expect(window << UInt64(available) == 0) }
+            }
+            try reader.skip(bitCount: 3)
+            if reader.remainingBitCount < 3 { break }
+        }
+        let empty = Bytes(RawSpan())
+        #expect(empty.peekBitWindow() == 0)
+    }
+}
+
+@Suite struct BitBufferTests {
+    /// Random-width reads match the cursor's, from every starting bit offset, in both bit orders, through
+    /// the end of the data; then the cursor it hands back is at the same place.
+    @Test(arguments: [BitOrder.leastSignificantFirst, .mostSignificantFirst])
+    func readsMatchCursor(order: BitOrder) throws {
+        let data = (0..<40).map { UInt8(truncatingIfNeeded: $0 &* 151 &+ 17) }
+        var rng = SystemRandomNumberGenerator()
+        for start in 0..<16 {
+            var reference = Bytes(data.span, bitOrder: order)
+            try reference.skip(bitCount: start)
+            var source = Bytes(data.span, bitOrder: order)
+            try source.skip(bitCount: start)
+            var buffer = BitBuffer(source)
+            while reference.remainingBitCount > 0 {
+                let width = min(Int.random(in: 0...25, using: &rng), reference.remainingBitCount)
+                #expect(buffer.read(bitCount: width) == (try reference.read(bitCount: width)), "start \(start) width \(width)")
+            }
+            let overrun = buffer.isOverrun
+            #expect(!overrun)
+            let back = try buffer.finish()
+            let atEnd = back.isAtEnd
+            #expect(atEnd)
+        }
+    }
+
+    @Test func refillGuaranteesBitsAndOverrunIsDetected() throws {
+        let data: [UInt8] = [0xFF, 0x00, 0xAA]
+        var buffer = BitBuffer(Bytes(data.span, bitOrder: .leastSignificantFirst))
+        buffer.refill()
+        let buffered = buffer.bufferedBitCount
+        #expect(buffered >= BitBuffer.minimumRefill)
+        let peeked = buffer.peek(bitCount: 24)
+        #expect(peeked == 0xAA00FF)
+        buffer.consume(bitCount: 20)
+        let before = buffer.isOverrun
+        #expect(!before)
+        buffer.consume(bitCount: 8) // 4 bits of padding
+        let after = buffer.isOverrun
+        #expect(after)
+        do { _ = try buffer.finish(); Issue.record("expected an overrun") } catch { #expect(error == .insufficientData) }
+    }
+
+    @Test func fieldsAndAlignment() throws {
+        // DEFLATE's stored-block header: final bit, 2-bit type, then align and read the length.
+        let data: [UInt8] = [0b0000_0001, 0x05, 0x00]
+        var reader = Bytes(data.span, bitOrder: .leastSignificantFirst)
+        let (final, type) = try reader.withBitBuffer { (buffer) throws(BytesError) in
+            let final = buffer.read(Bit.self).isSet
+            let type = buffer.read(Crumb.self)
+            buffer.alignToByte()
+            return (final, type)
+        }
+        #expect(final && type == 0)
+        #expect(try reader.read(Byte2.self, .littleEndian) == 5)
+    }
+}
+
+@Suite struct OverrunCopyTests {
+    /// The overrunning copy writes the same `count` bytes as the exact one, and only ever overwrites up to
+    /// `copyOverrun` bytes after them; without room, it's exact.
+    @Test func overrunCopyMatchesExactCopy() throws {
+        let prefix = (0..<64).map { UInt8(truncatingIfNeeded: $0 &* 37 &+ 11) }
+        for distance in [1, 3, 7, 8, 9, 15, 16, 17, 40, 64] {
+            for count in [0, 1, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 100, 258] {
+                var expected = prefix
+                for _ in 0..<count { expected.append(expected[expected.count - distance]) }
+                for room in [0, 15, 31, 32, 80] {
+                    var buffer = [UInt8](repeating: 0xEE, count: prefix.count + count + room)
+                    var span = buffer.mutableSpan
+                    var writer = BytesWriter(&span)
+                    try writer.write(prefix.span)
+                    try writer.copy(fromDistance: distance, count: count, allowingOverrun: true)
+                    let written = writer.byteCount
+                    _ = consume writer
+                    _ = consume span
+                    #expect(written == expected.count)
+                    #expect(Array(buffer[..<expected.count]) == expected, "distance \(distance) count \(count) room \(room)")
+                    // Untouched beyond the overrun allowance.
+                    let untouched = buffer.dropFirst(expected.count + BytesWriter.copyOverrun)
+                    #expect(untouched.allSatisfy { $0 == 0xEE }, "distance \(distance) count \(count) room \(room)")
+                    if room < BytesWriter.copyOverrun { #expect(buffer[expected.count...].allSatisfy { $0 == 0xEE }) } // Exact without room.
+                }
+            }
+        }
+    }
+}
+
+@Suite struct BitReversalTests {
+    @Test func reversesBits() {
+        #expect(UInt8(0b0000_0001).bitReversed == 0b1000_0000)
+        #expect(UInt16(0x0001).bitReversed == 0x8000)
+        #expect(UInt32(0x0000_00F1).bitReversed == 0x8F00_0000)
+        #expect(UInt64(1).bitReversed == 1 << 63)
+        #expect(Bits<5>(0b00011).bitReversed == 0b11000)
+        #expect(Nibble(0b0010).bitReversed == 0b0100)
+        for value in UInt16.min...UInt16.max where value % 97 == 0 { #expect(value.bitReversed.bitReversed == value) }
+    }
+}
+
+@Suite struct WordWriteTests {
+    @Test func writesLowBytesWithAndWithoutOverrun() throws {
+        for count in 0...8 {
+            for room in [0, 7, 8, 16] {
+                var buffer = [UInt8](repeating: 0xEE, count: count + room)
+                var span = buffer.mutableSpan
+                var writer = BytesWriter(&span)
+                try writer.write(0x0807_0605_0403_0201, byteCount: count, allowingOverrun: true)
+                let written = writer.byteCount
+                _ = consume writer
+                _ = consume span
+                #expect(written == count)
+                #expect(Array(buffer[..<count]) == Array([1, 2, 3, 4, 5, 6, 7, 8].prefix(count)))
+                if count + room < 8 { #expect(buffer[count...].allSatisfy { $0 == 0xEE }) } // Exact without room.
+            }
+        }
     }
 }

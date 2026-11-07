@@ -13,8 +13,13 @@ extension Bytes: Iterable {
     /// Iterates the whole unread bytes, without consuming them, as one span of the underlying memory.
     ///
     /// ```swift
+    /// var reader = Bytes(data.span)
     /// for byte in reader { checksum &+= UInt32(byte) }
     /// ```
+    ///
+    /// Declare the reader with `var` (or take it `borrowing`): in Swift 6.4, a loop over a `let` reader
+    /// heap-allocates the cursor once, because the compiler boxes a `~Copyable` `let` that an iterator
+    /// borrows.
     @inlinable
     @_lifetime(borrow self)
     public func makeBorrowingIterator() -> Span<UInt8>.BorrowingIterator {
@@ -170,7 +175,7 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
         public typealias Element = Bits<width>
 
         @usableFromInline var cursor: Bytes
-        /// 4,096 values per span (4 KB, from 512–3,584 bytes of input): a narrow width needs many values
+        /// 4,096 values per span (4 KB, from 512–4,096 bytes of input): a narrow width needs many values
         /// per span to amortize the per-span overhead.
         @usableFromInline var buffer = InlineArray<4096, Bits<width>>(repeating: .zero)
         @inlinable static var capacity: Int { 4096 }
@@ -187,7 +192,8 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
         public mutating func nextSpan(maxCount: Int) -> Span<Bits<width>> {
             var output = buffer.mutableSpan
             var count = 0
-            // 4,096 is a multiple of 8, so each span ends on a byte boundary and the next starts vectorized.
+            // 4,096 is a multiple of 8, so a view that starts byte-aligned ends each span on a byte boundary,
+            // and the next span starts vectorized.
             cursor._forEach(Bits<width>.self, limit: Swift.min(maxCount, Self.capacity)) { value in
                 unsafe output[unchecked: count] = value
                 count &+= 1

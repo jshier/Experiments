@@ -22,10 +22,11 @@ public enum LEB128 {
         (64 &- (value | 1).leadingZeroBitCount &+ 6) / 7
     }
 
-    /// The largest value that fits in `byteCount` bytes.
+    /// The largest value that fits in `byteCount` bytes, 1 through 10.
     @inlinable
     public static func maxValue(byteCount: Int) -> UInt64 {
-        byteCount >= 10 ? .max : (1 &<< UInt64(7 &* byteCount)) &- 1
+        precondition(byteCount >= 1 && byteCount <= 10, "LEB128 integers are 1 through 10 bytes")
+        return byteCount == 10 ? .max : (1 &<< UInt64(7 &* byteCount)) &- 1
     }
 }
 
@@ -36,6 +37,10 @@ extension Bytes {
     /// Throws ``BytesError/insufficientData`` if the data ends before the integer does, and
     /// ``BytesError/invalidValue`` if it's longer than `maxByteCount` bytes or doesn't fit in 64 bits.
     /// Either way, nothing is consumed. Single-byte values (below 128) take a fast path.
+    ///
+    /// Padded encodings, such as `80 00` for 0, are accepted, as DWARF and WebAssembly allow. If your
+    /// format requires the shortest encoding (MQTT does), compare the bytes consumed with
+    /// ``LEB128/byteCount(of:)``.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     public mutating func read(_: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> UInt64 {
@@ -60,8 +65,9 @@ extension Bytes {
         var value: UInt64 = 0
         var index = 0
         while true {
-            guard offset &+ index < span.byteCount else { throw .insufficientData }
+            // Too long first: more data can't fix it, so a streaming caller mustn't wait for any.
             guard index < maxByteCount else { throw .invalidValue }
+            guard offset &+ index < span.byteCount else { throw .insufficientData }
             let byte = unsafe Load.native(UInt8.self, from: span, at: offset &+ index)
             // The tenth byte can hold only the 64th bit.
             guard index < 9 || byte <= 1 else { throw .invalidValue }
@@ -116,7 +122,7 @@ extension Bytes {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read(section byteCount: Int) throws(BytesError) -> Bytes {
+    public mutating func readSection(byteCount: Int) throws(BytesError) -> Bytes {
         Bytes(try read(byteCount: byteCount), bitOrder: bitOrder)
     }
 
@@ -152,18 +158,16 @@ extension Bytes {
     }
 
     /// Reads bytes whose count comes first, as a `L` in `byteOrder`, as a span of the same memory. Requires
-    /// byte alignment. Throws ``BytesError/insufficientData`` without consuming anything if they aren't all
-    /// there.
+    /// byte alignment. Throws without consuming anything if they aren't all there
+    /// (``BytesError/insufficientData``) or the count doesn't fit in an `Int` (``BytesError/invalidValue``).
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
     public mutating func read<L: ByteGroup>(bytesPrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> RawSpan {
         precondition(_bitOffset == 0, "Reading a section requires byte alignment: call alignToByte() first")
         let length = try peek(L.self, byteOrder)
-        // A length that doesn't even fit in an `Int` can't be satisfied either.
-        guard let count = Int(exactly: length), likely(span.byteCount &- _byteOffset &- L.byteCount >= count) else {
-            throw .insufficientData
-        }
+        guard let count = Int(exactly: length) else { throw .invalidValue }
+        guard likely(span.byteCount &- _byteOffset &- L.byteCount >= count) else { throw .insufficientData }
         _byteOffset &+= L.byteCount
         return try read(byteCount: count)
     }
@@ -177,7 +181,11 @@ extension Bytes {
     public mutating func read(bytesPrefixedBy _: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> RawSpan {
         let start = _byteOffset
         let length = try read(LEB128.self, maxByteCount: maxByteCount)
-        guard let count = Int(exactly: length), likely(span.byteCount &- _byteOffset >= count) else {
+        guard let count = Int(exactly: length) else {
+            _byteOffset = start
+            throw .invalidValue
+        }
+        guard likely(span.byteCount &- _byteOffset >= count) else {
             _byteOffset = start
             throw .insufficientData
         }
@@ -247,6 +255,7 @@ extension BytesWriter {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     public mutating func write<L: ByteGroup>(_ bytes: RawSpan, prefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) {
+        precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
         guard let length = L.Integer(exactly: bytes.byteCount), length <= L._mask else { throw .invalidValue }
         guard likely(remainingByteCount &- L.byteCount >= bytes.byteCount) else { throw .insufficientCapacity }
         try write(length, as: L.self, byteOrder)
@@ -269,6 +278,7 @@ extension BytesWriter {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     public mutating func write(_ bytes: RawSpan, prefixedBy _: LEB128.Type) throws(BytesError) {
+        precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
         let count = UInt64(bytes.byteCount)
         guard likely(remainingByteCount &- LEB128.byteCount(of: count) >= bytes.byteCount) else { throw .insufficientCapacity }
         try write(count, as: LEB128.self)
@@ -310,16 +320,17 @@ extension BytesWriter {
     /// alignment.
     ///
     /// The count's length isn't known until the section is written, so this reserves `maxByteCount` bytes for
-    /// it and, if the count turns out shorter, moves the section down: a copy of the section. To avoid it,
-    /// compute the section's size first and write the count with ``write(_:as:)-(UInt64,_)`` (see
-    /// ``LEB128/byteCount(of:)``).
+    /// it, and `body` gets the capacity after them. If the count turns out shorter, the section is moved down
+    /// (a copy of it), leaving up to `maxByteCount - 1` stale bytes after the cursor. To avoid both, compute
+    /// the section's size first and write the count with ``write(_:as:)-(UInt64,_)`` (see
+    /// ``LEB128/byteCount(of:)``). Pick the smallest `maxByteCount` your format allows.
     ///
     /// If `body` throws, or the section is too long for `maxByteCount` bytes of LEB128
     /// (``BytesError/invalidValue``), the cursor doesn't move, though bytes after it may have been overwritten.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     public mutating func write<R: ~Copyable>(
-        sectionPrefixedBy _: LEB128.Type, maxByteCount: Int = 10, _ body: (inout BytesWriter) throws(BytesError) -> R
+        sectionPrefixedBy _: LEB128.Type, maxByteCount: Int, _ body: (inout BytesWriter) throws(BytesError) -> R
     ) throws(BytesError) -> R {
         precondition(maxByteCount >= 1 && maxByteCount <= 10, "LEB128 integers are 1 through 10 bytes")
         precondition(_bitOffset == 0, "Writing a section requires byte alignment: call alignToByte() first")

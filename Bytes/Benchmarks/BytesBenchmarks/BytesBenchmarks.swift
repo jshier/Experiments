@@ -122,4 +122,13 @@ let benchmarks: @Sendable () -> Void = {
             blackHole(found)
         }
     }
+
+    // MARK: Allocations: every workload that shouldn't allocate, counting only allocations (Allocations.swift)
+
+    registerAllocationBenchmarks([
+        ("Fields: Bytes", { blackHole(try! CentralDirectory.parseWithBytes(directory.span.bytes)) }),
+        ("Fields: Bytes, fixed-size records", { blackHole(try! CentralDirectory.parseWithBytesRecords(directory.span.bytes)) }),
+        ("Bits: Bytes", { blackHole(try! BitFields.parseWithBytes(bitStream.span)) }),
+        ("Search 64 KB backwards: lastByteOffset(of:)", { blackHole(Bytes(haystack.span).lastByteOffset(of: signature)) }),
+    ])
 }

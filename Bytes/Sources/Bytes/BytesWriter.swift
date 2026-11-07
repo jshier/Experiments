@@ -17,13 +17,14 @@
 /// write zeroes the rest of the byte it ends in, which is what appending wants.
 ///
 /// Every write stays within the bytes it writes (odd widths use two overlapping stores, never a wider
-/// one), so a writer over existing data (``init(_:bitOrder:)``) never touches memory past the byte its
-/// cursor is in.
+/// one), so a writer over existing data never touches memory past the byte its cursor is in. The
+/// exceptions are the section writers, whose `body` writes ahead of the length.
 ///
-/// Values too large for the field they're written as (`write(0x0100_0000, as: Byte3.self, .bigEndian)`)
-/// are a programming error: debug builds trap, and release builds write the low bytes, keeping loops
-/// free of checks so they vectorize. ``write(_:bitCount:)`` is different by design: it writes the low
-/// `bitCount` bits of its argument, like `init(truncatingIfNeeded:)`.
+/// A single value too large for the field it's written as (`write(0x0100_0000, as: Byte3.self,
+/// .bigEndian)`) is a programming error: debug builds trap, and release builds write the low bytes. Bulk
+/// and generating writes always write the low bytes, unchecked, so their loops vectorize, and so does
+/// ``write(_:bitCount:)``, by design, like `init(truncatingIfNeeded:)`.
+///
 /// A write that throws ``BytesError/insufficientCapacity`` writes nothing.
 @safe
 public struct BytesWriter: ~Copyable, ~Escapable {
@@ -117,14 +118,6 @@ extension BytesWriter {
         unsafe assume(_byteOffset <= _bytes.byteCount)
         unsafe assume(_bitOffset >= 0)
         unsafe assume(_bitOffset < 8)
-    }
-
-    @inlinable @inline(__always)
-    @_lifetime(self: copy self)
-    mutating func _advance(bitCount: Int) {
-        let total = _bitOffset &+ bitCount
-        _byteOffset &+= total &>> 3
-        _bitOffset = total & 7
     }
 }
 
@@ -304,16 +297,46 @@ extension BytesWriter {
         precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
         _assumeInvariant()
         guard likely(_bytes.byteCount &- _byteOffset >= bytes.byteCount) else { throw .insufficientCapacity }
-        // An empty span may have no memory behind it (`Data().span`): nothing to copy, nothing to unwrap.
-        guard bytes.byteCount > 0 else { return }
+        let count = bytes.byteCount
         let offset = _byteOffset
-        _bytes.withUnsafeMutableBytes { destination in
-            bytes.withUnsafeBytes { source in
-                unsafe destination.baseAddress!.advanced(by: offset)
-                    .copyMemory(from: source.baseAddress!, byteCount: source.count)
+        // Short spans (strings, small payloads) are copied inline with two overlapping loads and stores,
+        // as `memcpy` does internally: a call would cost more than the copy. Longer ones call `memmove`.
+        switch count {
+        case 0:
+            // An empty span may have no memory behind it (`Data().span`): nothing to copy, nothing to unwrap.
+            return
+        case 1...3:
+            unsafe Self._copy(UInt8.self, from: bytes, 0, to: &_bytes, offset)
+            unsafe Self._copy(UInt8.self, from: bytes, count &>> 1, to: &_bytes, offset)
+            unsafe Self._copy(UInt8.self, from: bytes, count &- 1, to: &_bytes, offset)
+        case 4...7:
+            unsafe Self._copy(UInt32.self, from: bytes, 0, to: &_bytes, offset)
+            unsafe Self._copy(UInt32.self, from: bytes, count &- 4, to: &_bytes, offset)
+        case 8...16:
+            unsafe Self._copy(UInt64.self, from: bytes, 0, to: &_bytes, offset)
+            unsafe Self._copy(UInt64.self, from: bytes, count &- 8, to: &_bytes, offset)
+        case 17...32:
+            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, 0, to: &_bytes, offset)
+            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, count &- 16, to: &_bytes, offset)
+        default:
+            _bytes.withUnsafeMutableBytes { destination in
+                bytes.withUnsafeBytes { source in
+                    unsafe destination.baseAddress!.advanced(by: offset)
+                        .copyMemory(from: source.baseAddress!, byteCount: source.count)
+                }
             }
         }
-        _byteOffset &+= bytes.byteCount
+        _byteOffset &+= count
+    }
+
+    /// Copies the `T` at `sourceOffset` in `source` to the same offset after `offset` in `destination`.
+    /// Bounds already checked.
+    @unsafe @inlinable @inline(__always)
+    static func _copy<T: BitwiseCopyable>(
+        _: T.Type, from source: RawSpan, _ sourceOffset: Int, to destination: inout MutableRawSpan, _ offset: Int
+    ) {
+        let value = unsafe source.unsafeLoadUnaligned(fromUncheckedByteOffset: sourceOffset, as: T.self)
+        unsafe destination.storeBytes(of: value, toUncheckedByteOffset: offset &+ sourceOffset, as: T.self)
     }
 
     /// Writes `bytes` as they are. Requires byte alignment.
@@ -321,6 +344,163 @@ extension BytesWriter {
     @_lifetime(self: copy self)
     public mutating func write(_ bytes: Span<UInt8>) throws(BytesError) {
         try write(bytes.bytes)
+    }
+}
+
+// MARK: - Skipping and back-references
+
+extension BytesWriter {
+    /// Moves the cursor forward over `byteCount` bytes, leaving them as they are: for writing after a prefix
+    /// that's already in place, such as a decompressor's history window. Requires byte alignment.
+    @inlinable @inline(always)
+    @_lifetime(self: copy self)
+    public mutating func skip(byteCount: Int) throws(BytesError) {
+        precondition(byteCount >= 0, "Negative byte count")
+        precondition(_bitOffset == 0, "Skipping requires byte alignment: call alignToByte() first")
+        _assumeInvariant()
+        guard likely(_bytes.byteCount &- _byteOffset >= byteCount) else { throw .insufficientCapacity }
+        _byteOffset &+= byteCount
+    }
+
+    /// Writes `count` bytes copied from `distance` bytes back in what's been written: an LZ77
+    /// back-reference, as in DEFLATE, LZ4, and Snappy. Requires byte alignment.
+    ///
+    /// When `count` exceeds `distance`, the copy reads bytes it has just written, repeating the last
+    /// `distance` bytes, as those formats require (`distance` 1 repeats one byte).
+    ///
+    /// ```swift
+    /// try writer.write(Byte(0x61))
+    /// try writer.copy(fromDistance: 1, count: 4) // "aaaaa"
+    /// ```
+    ///
+    /// Throws ``BytesError/invalidValue`` if `distance` is 0 or reaches before the start, and
+    /// ``BytesError/insufficientCapacity`` if there isn't room; either way nothing is written. Copies in
+    /// 16-, 8-, or 4-byte steps, with an overlapping last step, when `distance` allows it, and never writes
+    /// past the `count` bytes.
+    @inlinable @inline(always)
+    @_lifetime(self: copy self)
+    public mutating func copy(fromDistance distance: Int, count: Int) throws(BytesError) {
+        precondition(count >= 0, "Negative count")
+        precondition(_bitOffset == 0, "Copying requires byte alignment: call alignToByte() first")
+        _assumeInvariant()
+        guard likely(distance > 0 && distance <= _byteOffset) else { throw .invalidValue }
+        guard likely(_bytes.byteCount &- _byteOffset >= count) else { throw .insufficientCapacity }
+        unsafe Self._copyBack(distance: distance, count: count, in: &_bytes, at: _byteOffset)
+        _byteOffset &+= count
+    }
+
+    /// Writes the low `byteCount` bytes (0 through 8) of `value`, least significant first. With
+    /// `allowingOverrun` and 8 bytes of room, it's one 8-byte store, overwriting the `8 - byteCount` bytes
+    /// after them with arbitrary values: for decoders that produce a variable number of bytes at a time
+    /// (two literals or one, an LZ4 literal run), with no branch on how many. Otherwise exact.
+    @inlinable @inline(always)
+    @_lifetime(self: copy self)
+    public mutating func write(_ value: UInt64, byteCount: Int, allowingOverrun: Bool) throws(BytesError) {
+        precondition(byteCount >= 0 && byteCount <= 8, "Byte count must be 0 through 8")
+        precondition(_bitOffset == 0, "Writing bytes requires byte alignment: call alignToByte() first")
+        _assumeInvariant()
+        if allowingOverrun, likely(_bytes.byteCount &- _byteOffset >= 8) {
+            unsafe Store.little(value, to: &_bytes, at: _byteOffset)
+        } else {
+            guard likely(_bytes.byteCount &- _byteOffset >= byteCount) else { throw .insufficientCapacity }
+            if byteCount > 0 { unsafe Store.block(value, count: byteCount, to: &_bytes, at: _byteOffset) }
+        }
+        _byteOffset &+= byteCount
+    }
+
+    /// The most bytes after a copy that ``copy(fromDistance:count:allowingOverrun:)`` may overwrite: keep
+    /// this much room past the longest copy to always take its fast path.
+    public static var copyOverrun: Int { 32 }
+
+    /// Like ``copy(fromDistance:count:)``, but may also overwrite up to ``copyOverrun`` bytes after the copy
+    /// with arbitrary values, when `allowingOverrun` and there's room for them. Use it when the bytes after
+    /// the cursor are scratch, such as a decoder's output buffer.
+    ///
+    /// Then a copy of up to 32 bytes (most LZ77 matches) is two 16-byte moves, or four 8-byte moves for
+    /// distances 8 to 15, whatever its length: straight-line code with no branch on the length for the
+    /// processor to mispredict, as in libdeflate. Longer copies continue in a loop. Without room for the
+    /// overrun, or for distances below 8, it copies exactly.
+    @inlinable @inline(always)
+    @_lifetime(self: copy self)
+    public mutating func copy(fromDistance distance: Int, count: Int, allowingOverrun: Bool) throws(BytesError) {
+        guard allowingOverrun, distance >= 8, likely(_bytes.byteCount &- _byteOffset >= count &+ Self.copyOverrun) else {
+            try copy(fromDistance: distance, count: count)
+            return
+        }
+        precondition(count >= 0, "Negative count")
+        precondition(_bitOffset == 0, "Copying requires byte alignment: call alignToByte() first")
+        _assumeInvariant()
+        guard likely(distance <= _byteOffset) else { throw .invalidValue }
+        let source = _byteOffset &- distance
+        let destination = _byteOffset
+        // A move of n bytes at `index` reads up to `destination + index + n - distance`, at most
+        // `destination + index` when `distance >= n`: bytes already final. Moves past `count` write only
+        // the overrun.
+        if distance >= 16 {
+            unsafe Self._move(SIMD16<UInt8>.self, from: source, to: destination, in: &_bytes)
+            unsafe Self._move(SIMD16<UInt8>.self, from: source &+ 16, to: destination &+ 16, in: &_bytes)
+            var index = 32
+            while index < count {
+                unsafe Self._move(SIMD16<UInt8>.self, from: source &+ index, to: destination &+ index, in: &_bytes)
+                index &+= 16
+            }
+        } else {
+            unsafe Self._move(UInt64.self, from: source, to: destination, in: &_bytes)
+            unsafe Self._move(UInt64.self, from: source &+ 8, to: destination &+ 8, in: &_bytes)
+            unsafe Self._move(UInt64.self, from: source &+ 16, to: destination &+ 16, in: &_bytes)
+            unsafe Self._move(UInt64.self, from: source &+ 24, to: destination &+ 24, in: &_bytes)
+            var index = 32
+            while index < count {
+                unsafe Self._move(UInt64.self, from: source &+ index, to: destination &+ index, in: &_bytes)
+                index &+= 8
+            }
+        }
+        _byteOffset &+= count
+    }
+
+    /// Copies `count` bytes from `distance` before `offset` to `offset`, forward. Bounds already checked.
+    ///
+    /// Each step reads only bytes already final: a step of `n` bytes at `i` reads up to `offset + i + n -
+    /// distance`, which is at most `offset + i` when `distance >= n`. The last step overlaps the one before
+    /// it and rewrites the same values.
+    @unsafe @inlinable @inline(always)
+    static func _copyBack(distance: Int, count: Int, in bytes: inout MutableRawSpan, at offset: Int) {
+        let source = offset &- distance
+        if distance >= 16, count >= 16 {
+            var index = 0
+            while index < count &- 16 {
+                unsafe _move(SIMD16<UInt8>.self, from: source &+ index, to: offset &+ index, in: &bytes)
+                index &+= 16
+            }
+            unsafe _move(SIMD16<UInt8>.self, from: source &+ count &- 16, to: offset &+ count &- 16, in: &bytes)
+        } else if distance >= 8, count >= 8 {
+            var index = 0
+            while index < count &- 8 {
+                unsafe _move(UInt64.self, from: source &+ index, to: offset &+ index, in: &bytes)
+                index &+= 8
+            }
+            unsafe _move(UInt64.self, from: source &+ count &- 8, to: offset &+ count &- 8, in: &bytes)
+        } else if distance >= 4, count >= 4, count <= 8 {
+            unsafe _move(UInt32.self, from: source, to: offset, in: &bytes)
+            unsafe _move(UInt32.self, from: source &+ count &- 4, to: offset &+ count &- 4, in: &bytes)
+        } else if distance == 1, count > 0 {
+            let byte = unsafe bytes.bytes.unsafeLoad(fromUncheckedByteOffset: source, as: UInt8.self)
+            bytes.withUnsafeMutableBytes { buffer in
+                _ = unsafe buffer.baseAddress!.advanced(by: offset).initializeMemory(as: UInt8.self, repeating: byte, count: count)
+            }
+        } else {
+            // Short distances: the pattern repeats every `distance` bytes, so each byte depends on one just
+            // written. Byte by byte.
+            for index in 0..<count {
+                unsafe _move(UInt8.self, from: source &+ index, to: offset &+ index, in: &bytes)
+            }
+        }
+    }
+
+    @unsafe @inlinable @inline(always)
+    static func _move<T: BitwiseCopyable>(_: T.Type, from source: Int, to destination: Int, in bytes: inout MutableRawSpan) {
+        let value = unsafe bytes.bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: source, as: T.self)
+        unsafe bytes.storeBytes(of: value, toUncheckedByteOffset: destination, as: T.self)
     }
 }
 
@@ -335,6 +515,7 @@ extension BytesWriter {
 
 extension BytesWriter {
     /// Writes `count` values as `T` in `byteOrder`, each produced by `value` from its index, in order.
+    /// Values too large for `T` are truncated to its low bytes, unchecked.
     ///
     /// ```swift
     /// try writer.write(Byte4.self, .bigEndian, count: records.count) { records[$0].id }
@@ -380,7 +561,7 @@ extension BytesWriter {
         _byteOffset &+= count &* T.byteCount
     }
 
-    /// Writes each of `values` as a `T` in `byteOrder`.
+    /// Writes each of `values` as a `T` in `byteOrder`, truncated to its low bytes, unchecked.
     ///
     /// ```swift
     /// try writer.write(offsets.span, as: Byte4.self, .bigEndian)

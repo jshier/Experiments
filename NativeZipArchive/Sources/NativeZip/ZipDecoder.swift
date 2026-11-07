@@ -1,41 +1,67 @@
 import Compression
+internal import Bytes
 import zlib
 
-/// Reusable decompression state: a zlib inflate stream plus an output buffer.
+/// Reusable decompression state: a DEFLATE decoder plus output buffers.
 ///
-/// Create one per worker and pass it to ``ZipArchive/contents(of:using:_:)``. zlib's state is allocated
-/// once and reset with `inflateReset` between entries, so steady-state decoding performs no allocations.
-/// It's `~Copyable` because it uniquely owns C resources that are released in `deinit`.
+/// Create one per worker and pass it to ``ZipArchive/contents(of:using:_:)``. Everything is allocated once,
+/// so steady-state decoding performs no allocations. It's `~Copyable` because it uniquely owns its buffers.
 @safe
 public struct ZipDecoder: ~Copyable {
-    /// Output is handed to callers in chunks of at most this many bytes.
+    /// Which DEFLATE implementation decodes.
+    public enum Backend: Sendable, Hashable {
+        /// The decoder in this package, built on `Bytes` (``Inflater``).
+        case bytes
+        /// zlib's `inflate`, for comparison.
+        case zlib
+    }
+
+    public let backend: Backend
+
+    /// Output is handed to callers in chunks of at most about this many bytes.
     @usableFromInline static let chunkSize = 1 << 20
+    /// The DEFLATE window: how far back a back-reference can reach. The `Bytes` decoder keeps this much of
+    /// the previous output at the front of each buffer.
+    static let historySize = 32 << 10
 
     // zlib keeps a back-pointer to its `z_stream`, so the stream must live at a stable heap address
-    // rather than inline in this (movable) struct.
-    private let stream: UnsafeMutablePointer<z_stream>
-    private let buffer: UnsafeMutableRawBufferPointer
-    /// Second output buffer, used only by the pipelined path; its pages are untouched otherwise.
-    private let spare: UnsafeMutableRawBufferPointer
+    // rather than inline in this (movable) struct. `nil` for the `Bytes` backend.
+    private let stream: UnsafeMutablePointer<z_stream>?
+    private var inflater: Inflater
+    /// Two output buffers, each history plus a chunk. The second is used only by the pipelined path; its
+    /// pages are untouched otherwise.
+    private let buffers: (UnsafeMutableRawBufferPointer, UnsafeMutableRawBufferPointer)
     /// The current entry's compressed input and how much of it has been handed to zlib.
     private var input = unsafe UnsafeRawBufferPointer(start: nil, count: 0)
     private var consumed = 0
+    /// Where the last step's output ended, and in which buffer: the next step's history.
+    private var lastBuffer = 0
+    private var lastEnd = 0
 
-    public init() {
-        unsafe stream = .allocate(capacity: 1)
-        unsafe stream.initialize(to: z_stream())
-        // Negative window bits: raw DEFLATE (RFC 1951) with no zlib header, as zip method 8 stores it.
-        let status = unsafe inflateInit2_(stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
-        precondition(status == Z_OK, "inflateInit2 failed: \(status)")
-        unsafe buffer = .allocate(byteCount: Self.chunkSize, alignment: 16)
-        unsafe spare = .allocate(byteCount: Self.chunkSize, alignment: 16)
+    public init(backend: Backend = .bytes) {
+        self.backend = backend
+        inflater = Inflater()
+        if backend == .zlib {
+            let stream = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
+            unsafe stream.initialize(to: z_stream())
+            // Negative window bits: raw DEFLATE (RFC 1951) with no zlib header, as zip method 8 stores it.
+            let status = unsafe inflateInit2_(stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size))
+            precondition(status == Z_OK, "inflateInit2 failed: \(status)")
+            unsafe self.stream = stream
+        } else {
+            unsafe stream = nil
+        }
+        let size = Self.historySize + Self.chunkSize
+        unsafe buffers = (.allocate(byteCount: size, alignment: 16), .allocate(byteCount: size, alignment: 16))
     }
 
     deinit {
-        unsafe inflateEnd(stream)
-        unsafe stream.deallocate()
-        unsafe buffer.deallocate()
-        unsafe spare.deallocate()
+        if let stream = unsafe stream {
+            unsafe inflateEnd(stream)
+            unsafe stream.deallocate()
+        }
+        unsafe buffers.0.deallocate()
+        unsafe buffers.1.deallocate()
     }
 
     /// Inflates a complete raw-DEFLATE `payload`, calling `body` with each chunk of output.
@@ -44,10 +70,8 @@ public struct ZipDecoder: ~Copyable {
         try payload.withUnsafeBytes { input in
             try unsafe begin(input, path: path)
             while true {
-                let (produced, finished) = try unsafe step(into: buffer, path: path)
-                if produced > 0 {
-                    try body(unsafe UnsafeRawBufferPointer(rebasing: buffer[..<produced]).bytes)
-                }
+                let (chunk, finished) = try unsafe step(into: 0, path: path)
+                if chunk.count > 0 { try body(unsafe chunk.bytes) }
                 if finished { return }
             }
         }
@@ -63,8 +87,9 @@ public struct ZipDecoder: ~Copyable {
     /// Inflates `input`, overlapping `consume` of chunk N (in a child task) with inflating chunk N+1.
     ///
     /// Two buffers alternate: a buffer is decoded into only after the consumer of its previous contents
-    /// has finished, and consumers run one at a time, in order. `observe` sees each chunk first, in the
-    /// decoding task (for CRC and size accounting).
+    /// has finished, and consumers run one at a time, in order. Decoding into a buffer reads the other's
+    /// last 32 KB as history while its consumer may be reading it too: both only read. `observe` sees each
+    /// chunk first, in the decoding task (for CRC and size accounting).
     ///
     /// - Precondition: `input` stays valid for the whole call (it points into a ``MappedFile``).
     mutating func inflatePipelined(
@@ -75,23 +100,22 @@ public struct ZipDecoder: ~Copyable {
     ) async throws {
         try unsafe begin(input, path: path)
         try await withThrowingTaskGroup(of: Void.self) { group in
-            var useSpare = false
+            var target = 0
             var consumerRunning = false
             while true {
-                let output = unsafe useSpare ? spare : buffer
-                let (produced, finished) = try unsafe step(into: output, path: path)
-                if produced > 0 {
+                let (output, finished) = try unsafe step(into: target, path: path)
+                if output.count > 0 {
                     // Region isolation (rightly) sees this chunk as part of `self`, since it points into our
                     // buffer. Sending it is still race-free because of the hand-off protocol below: this
-                    // buffer isn't touched again until its consumer has finished.
-                    nonisolated(unsafe) let chunk = unsafe Chunk(bytes: UnsafeRawBufferPointer(rebasing: output[..<produced]))
+                    // buffer isn't written again until its consumer has finished.
+                    nonisolated(unsafe) let chunk = unsafe Chunk(bytes: output)
                     observe(unsafe chunk.bytes.bytes)
                     // The previous consumer must finish before the next starts (ordering), and before
                     // its buffer is decoded into again (which happens on the following iteration).
                     if consumerRunning { try await group.next() }
                     group.addTask { try unsafe consume(chunk) }
                     consumerRunning = true
-                    useSpare.toggle()
+                    target ^= 1
                 }
                 if finished { break }
             }
@@ -100,13 +124,47 @@ public struct ZipDecoder: ~Copyable {
     }
 
     private mutating func begin(_ input: UnsafeRawBufferPointer, path: String) throws {
-        guard unsafe inflateReset(stream) == Z_OK else { throw ZipError.corruptData(path) }
         unsafe self.input = input
         consumed = 0
+        lastEnd = 0
+        switch backend {
+        case .bytes:
+            inflater.reset()
+        case .zlib:
+            guard unsafe inflateReset(stream!) == Z_OK else { throw ZipError.corruptData(path) }
+        }
+    }
+
+    /// Decodes the next chunk into buffer `index` (0 or 1), returning it and whether the stream ended.
+    private mutating func step(into index: Int, path: String) throws -> (chunk: UnsafeRawBufferPointer, finished: Bool) {
+        let output = unsafe index == 0 ? buffers.0 : buffers.1
+        switch backend {
+        case .bytes:
+            // History: the last 32 KB of the previous step's output, moved to the front of this buffer.
+            let history = min(Self.historySize, lastEnd)
+            if history > 0 {
+                let previous = unsafe lastBuffer == 0 ? buffers.0 : buffers.1
+                unsafe output.baseAddress!.copyMemory(from: previous.baseAddress! + (lastEnd - history), byteCount: history)
+            }
+            let (end, finished): (Int, Bool)
+            do {
+                (end, finished) = try unsafe inflater.decode(RawSpan(_unsafeBytes: input), into: output, start: history)
+            } catch {
+                throw ZipError.corruptData(path)
+            }
+            lastBuffer = index
+            lastEnd = end
+            return unsafe (UnsafeRawBufferPointer(rebasing: output[history..<end]), finished)
+        case .zlib:
+            let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
+            let (produced, finished) = try unsafe zlibStep(into: chunk, path: path)
+            return unsafe (UnsafeRawBufferPointer(rebasing: chunk[..<produced]), finished)
+        }
     }
 
     /// Runs zlib until `output` is full or the stream ends.
-    private mutating func step(into output: UnsafeMutableRawBufferPointer, path: String) throws -> (produced: Int, finished: Bool) {
+    private mutating func zlibStep(into output: UnsafeMutableRawBufferPointer, path: String) throws -> (produced: Int, finished: Bool) {
+        let stream = unsafe stream!
         // `avail_in` is 32 bits, so feed payloads larger than 4 GB in pieces.
         if unsafe stream.pointee.avail_in == 0, unsafe consumed < input.count {
             let count = unsafe min(input.count - consumed, Int(UInt32.max))
@@ -131,7 +189,7 @@ public struct ZipDecoder: ~Copyable {
 
 // MARK: - Benchmarking hooks
 
-/// Alternative DEFLATE implementations, exposed only so benchmarks can compare them.
+/// Alternative DEFLATE implementations, exposed only so benchmarks and tests can compare them.
 @_spi(Benchmarking)
 public enum DeflateBackends {
     /// Compression.framework's one-shot decoder (COMPRESSION_ZLIB is raw DEFLATE). Returns bytes produced.
@@ -148,6 +206,16 @@ public enum DeflateBackends {
                 }
             }
         }
+    }
+
+    /// Inflates a raw-DEFLATE `payload` with `decoder`, returning the output (or, `discarding`, nothing:
+    /// for timing decoding alone).
+    public static func inflate(_ payload: RawSpan, using decoder: inout ZipDecoder, discarding: Bool = false) throws -> [UInt8] {
+        var output: [UInt8] = []
+        try decoder.inflate(payload, path: "payload") { chunk in
+            if !discarding { chunk.withUnsafeBytes { unsafe output.append(contentsOf: $0) } }
+        }
+        return output
     }
 
     /// CRC-32 as used for entry verification.

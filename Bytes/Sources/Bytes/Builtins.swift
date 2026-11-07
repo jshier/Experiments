@@ -21,3 +21,39 @@ func unlikely(_ condition: Bool) -> Bool {
 func assume(_ condition: Bool) {
     _ = Builtin.assume_Int1(condition._value)
 }
+
+// MARK: - Bit reversal
+
+// Reversing bits is common in decoders: DEFLATE stores Huffman codes most significant bit first in a stream
+// read least significant bit first, and reflected CRCs process bits in the other order. The standard
+// library has no operation for it; LLVM's `bitreverse` is one instruction (`rbit`) on ARM.
+
+extension UInt8 {
+    /// The bits in reverse order: bit 0 becomes bit 7.
+    @inlinable @_transparent
+    public var bitReversed: UInt8 { UInt8(Builtin.int_bitreverse_Int8(_value)) }
+}
+
+extension UInt16 {
+    /// The bits in reverse order: bit 0 becomes bit 15.
+    @inlinable @_transparent
+    public var bitReversed: UInt16 { UInt16(Builtin.int_bitreverse_Int16(_value)) }
+}
+
+extension UInt32 {
+    /// The bits in reverse order: bit 0 becomes bit 31.
+    @inlinable @_transparent
+    public var bitReversed: UInt32 { UInt32(Builtin.int_bitreverse_Int32(_value)) }
+}
+
+extension UInt64 {
+    /// The bits in reverse order: bit 0 becomes bit 63.
+    @inlinable @_transparent
+    public var bitReversed: UInt64 { UInt64(Builtin.int_bitreverse_Int64(_value)) }
+}
+
+extension Bits {
+    /// The `width` bits in reverse order: bit 0 becomes bit `width - 1`.
+    @inlinable
+    public var bitReversed: Self { Self(_unchecked: rawValue.bitReversed &>> UInt8(8 &- width)) }
+}
