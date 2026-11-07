@@ -19,7 +19,97 @@ Field-by-field parsing uses more instructions than at v3 (291 against 263 K) bec
 dropped so that loops of reads vectorize (see "Making loops of single reads vectorize"); wall time is
 unchanged.
 
-No benchmark allocates, apart from the output array in the bulk ones.
+No benchmark allocates, apart from the output array in the bulk ones and one `for`-`in` shape (below).
+
+## Allocation checks
+
+Every workload that shouldn't allocate is registered a second time as `Allocations:<name>`. These count
+only allocations (`mallocCountTotal`), for 10 iterations over 64 KB buffers. They cover:
+
+- every read and write bandwidth workload: all widths, `for`-`in`, bulk/NEON, custom types, and zero-copy
+  views;
+- the field, bit-field, and search parsers;
+- a section round trip: LEB128-prefixed sections, length-prefixed UTF-8, and LEB128 values.
+
+`Thresholds/` holds a static p90 threshold for each (109 files):
+
+```sh
+# Fails (nonzero exit) if any workload allocates more than its threshold.
+swift package --disable-sandbox benchmark thresholds check --filter 'Allocations:.*'
+# After adding a workload: record its threshold.
+swift package --disable-sandbox --allow-writing-to-package-directory benchmark thresholds update --filter 'Allocations:.*'
+```
+
+The check passes with the `NEONShuffle` trait on and off (`--disable-default-traits`). A planted
+`[UInt8]` allocation fails it ("WORSE than the defined thresholds", exit 1).
+
+The names have no spaces or slashes: `thresholds update` writes them as `_` in the file name, but
+`thresholds check` (benchmark 1.38.1) looks the file up by the unaltered name, so a name with a space
+always fails, or, if other files are found, is silently not checked (ordo-one/benchmark#373).
+
+**One allocation found:** `let reader = Bytes(span); for byte in reader { … }` allocates once per loop, not
+per byte. The cause is in the compiler (Swift 6.4.2, and `main` by inspection):
+
+1. SILGen puts a `~Copyable` `let` in a box: `alloc_box ${ let Bytes }`, then a `begin_borrow [var_decl]`.
+2. `Iterable` requires `@lifetime(borrow self)` on `makeBorrowingIterator()`. A `let` has no access scope,
+   so `LifetimeDependenceInsertion` bases the iterator's `mark_dependence` on the box's borrow.
+3. `AllocBoxToStack` has no case for a `mark_dependence` on the box, treats it as an escape, and leaves
+   the box on the heap: 56 bytes, the 40-byte cursor and a header.
+
+A `var` reader (its dependence is on a `begin_access`) or a `borrowing` parameter isn't boxed. A
+`copy self` witness would avoid the dependence, but the protocol rejects it. The same `AllocBoxToStack` gap
+is open as swiftlang/swift#93942 for `consuming` parameters; a report with a standalone reproducer and a
+fix brief is ready to file.
+
+The `let` form's threshold is 1, so a compiler fix shows up as an improvement.
+`Allocations:Read:_for-in_Bytes_(UInt8),_var_reader` holds the workaround at 0.
+
+## Decoder support (driven by NativeZip's DEFLATE decoder)
+
+Writing a DEFLATE decoder on `Bytes` (`../NativeZipArchive`, `Inflater.swift`; it beats zlib, 13 vs 14 ms
+for 32 MB of text, 0 allocations; details in that package's RESULTS.md, step6) needed these additions:
+
+- **`BitBuffer`**: 64 bits in a register, a branch-free refill (one unaligned load, `bits |= word << count`,
+  `next += (63 - count) >> 3`, `count |= 56`), and no per-read end check: past the data it reads zeros,
+  and `isOverrun`/`finish()` reports it once per block. Both bit orders. `Bytes.withBitBuffer` and
+  `finish()` convert back to a cursor.
+- **`HuffmanTable`**: a canonical-code table for both bit orders (DEFLATE/Brotli least significant bit
+  first, JPEG most), and the generic `HuffmanTable.build(…into:invalid:symbol:subtable:)` that fills a table
+  of the caller's own entry type. It's libdeflate's builder: root entries written once, doubled with
+  `memcpy`. Moving the inflater's private builder onto it cost nothing measurable (14 vs 14 ms small files).
+- **`BytesWriter.copy(fromDistance:count:)`** (exact) and the `allowingOverrun:` variant that moves 16 or
+  8 bytes at a time and may write `copyOverrun` (32) bytes past the copy; `write(_:byteCount:allowingOverrun:)`
+  for word-sized stores; `skip(byteCount:)`.
+- **`bitReversed`** on `UInt8`–`UInt64` and `Bits` (`Builtin.int_bitreverse`, one `rbit`).
+- **`peekBitWindow()`** on `Bytes`, **`bitPosition`** and **`seek(toBitPosition:)`** (a resumable decoder
+  stores one integer: `seek(toByteOffset:)` + `skip(bitCount:)` before).
+- **`[UInt8](copying: RawSpan)`**.
+
+Inlining was the main lesson: `@inline(__always)` is a hint, and LLVM's inliner refused it for the match
+copy in a large function, which then took the writer by address and kept it in memory: 2x slower. The hot
+decoder APIs are `@inline(always)` (SE-0496, guaranteed), and the decoder keeps its `BitBuffer` and
+`BytesWriter` as locals of small functions.
+
+API review afterwards: `BitBuffer.peek(_:)`/`consume(_:)` renamed `peek(bitCount:)`/`consume(bitCount:)`,
+matching `Bytes.peek(bitCount:)`, `read(bitCount:)`, and `skip(bitCount:)`. Considered and not added: a
+byte-sized write overload (`write(Byte(…))` is what the inflater's literal path uses), and a sliding-window helper
+for the writer (NativeZip alternates two buffers, which a single-writer helper doesn't fit).
+
+## Review fixes
+
+A review of the whole library found two bugs, both fixed with regression tests:
+
+- **Bulk reads of a `ByteGroup` defined outside the package** with a wider `Integer` than the lane (e.g. a
+  5-byte group over `UInt128`) stored NEON lanes into the wrong slots and left values uninitialized. The
+  NEON paths now also require the integer to be the lane size; the check folds to a constant.
+- **An over-long LEB128 at the end of the data** (`80 80 80 80`, limit 4) threw `insufficientData`, so a
+  streaming parser would wait for bytes that can't help. It now throws `invalidValue`. So does a length
+  prefix too large for an `Int`.
+
+Smaller fixes: `Bits >>` with a negative count is masked like `<<`; `<<=`/`>>=` added; `isSet(at:)` removed
+(the `bit:` subscript does it); `seek(toByteOffset:)` throws for a negative offset; `read(section:)` renamed
+`readSection(byteCount:)`; the LEB128 section writer's `maxByteCount` is now required (a default of 10
+always moved the section); unused code removed; docs corrected where they overstated guarantees.
 
 ## Writing (`BytesWriter`)
 
@@ -256,6 +346,9 @@ matters. Raising the span size from 256 values helped the narrow widths (`Byte` 
 
 Swift 6.4 rejects `for x in reader.values(...)` with a temporary: "lifetime-dependent variable escapes its
 scope". The standard library's own `for x in array.span` fails the same way. Bind the view to a `let` first.
+
+The views are `Copyable`, so a `let` costs nothing. `for byte in reader` over a `let reader` (`~Copyable`)
+heap-allocates the cursor once per loop: a compiler issue, see "Allocation checks". Use a `var` reader.
 
 ## `@frozen`
 

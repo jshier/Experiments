@@ -32,11 +32,12 @@ let bytes = try [UInt8](capacity: 64) { output in
 ```
 
 The cursors are `~Copyable` and `~Escapable`: they can't outlive the memory they work on, and a position
-can't be duplicated by accident. Reads and writes that throw consume or write nothing.
+can't be duplicated by accident. Reads and writes that throw consume or write nothing (section writers
+may leave bytes past the cursor).
 
 Every operation is `@inlinable` and compiles to what you'd write by hand: a byte-aligned `Byte4` read is
-one bounds check and one load, setting a nibble is two instructions, and loops over values
-(``Bytes/Bytes/forEach(_:_:)-(T.Type,_)``, generating writes, and loops of single reads) are vectorized.
+one bounds check and one load, and loops over values (`forEach`, generating writes, and loops of single
+reads) are vectorized.
 On an M3 Ultra, power-of-two widths and `InlineArray`-backed custom types read and write at a single
 core's memory bandwidth; with all cores, nearly every width reaches the CPU's memory ceiling.
 `Benchmarks/RESULTS.md` has the measurements.
@@ -61,9 +62,28 @@ core's memory bandwidth; with all cores, nearly every width reaches the CPU's me
 - ``Byte2``
 - ``Byte3``
 - ``Byte4``
+- ``Byte5``
+- ``Byte6``
+- ``Byte7``
 - ``Byte8``
+- ``Byte9``
+- ``Byte10``
+- ``Byte11``
+- ``Byte12``
+- ``Byte13``
+- ``Byte14``
+- ``Byte15``
 - ``Byte16``
 - ``ByteRepresentable``
+
+### Variable-size data
+
+- ``LEB128``
+
+### Decoders
+
+- ``BitBuffer``
+- ``HuffmanTable``
 
 ### Order
 

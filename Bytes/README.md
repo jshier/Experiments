@@ -32,10 +32,12 @@ Full documentation is in `Sources/Bytes/Bytes.docc`, including a guide to writin
 ## Types
 
 - **`Bytes`**: the reading cursor. It can't outlive the memory it reads, and every span it returns borrows
-  that memory. A read that throws (`BytesError`) consumes nothing.
+  that memory; copy what you keep with `String(copying:)` or `[UInt8](copying:)`. A read that throws
+  (`BytesError`) consumes nothing.
 - **`BytesWriter`**: the writing cursor, over a `MutableRawSpan`, or over uninitialized memory through
   `withBytesWriter` on `OutputSpan<UInt8>` and `OutputRawSpan`. A write that throws writes nothing, and
-  no write touches memory past the cursor.
+  no write touches memory past the cursor, except section writers (below), whose body writes ahead of
+  the length.
 - **`Bits<let width: Int>`** (1–8 bits), with aliases `Bit`, `Crumb` (2), `Nibble` (4), and `Byte` (8):
   integer and binary-string literals, single bits (`value[bit: 3] = true`, `toggleBit(at:)`), halves
   (`byte.highHalf` is a `Nibble`, settable), bitwise operators, and conversions to integers, `Bool`, and
@@ -64,6 +66,58 @@ for length in lengths { … }                                            // bind
 
 Iterating never moves the cursor; `forEach` consumes what it reads.
 
+## Variable-size data
+
+```swift
+let length = try reader.read(LEB128.self, maxByteCount: 4)                 // varints: MQTT, protobuf, Wasm
+var body = try reader.readSection(byteCount: Int(length))                  // a cursor bounded to the section
+var record = try reader.read(sectionPrefixedBy: Byte2.self, .bigEndian)    // length first, then the section
+let name = try record.read(utf8PrefixedBy: Byte2.self, .bigEndian)         // validated UTF8Span, no copy
+try record.expectEnd()                                                     // or throws .trailingData
+
+try writer.write(name, prefixedBy: Byte2.self, .bigEndian)
+try writer.write(sectionPrefixedBy: Byte2.self, .bigEndian) { (section) throws(BytesError) in
+    try section.write(id, as: Byte4.self, .bigEndian)                      // length filled in afterwards
+}
+```
+
+Reading a section as its own cursor bounds every read in it, and reads stay atomic: a section whose
+length or bytes haven't all arrived throws `.insufficientData` without consuming its length, so a
+streaming parser can wait and retry, while malformed data throws `.invalidValue`. A `ByteGroup`-prefixed
+section writer fills in the length in place; a LEB128-prefixed one reserves `maxByteCount` bytes and moves
+the section down if the length is shorter, so size the section first when you can (`LEB128.byteCount(of:)`)
+and write the length directly.
+
+## Decoders
+
+For entropy coders and LZ77 (DEFLATE, PNG, JPEG, Brotli), Bytes has a bit buffer, Huffman tables, and
+back-reference copies. They're what NativeZip's DEFLATE decoder is built on; it beats zlib.
+
+```swift
+var bits = BitBuffer(reader)                         // 64 bits in a register, refilled 8 bytes at a time
+var table = HuffmanTable(symbolCount: 288)
+try table.build(codeLengths: lengths.span, bitOrder: .leastSignificantFirst)
+bits.refill()                                        // ≥ 56 bits, branch-free; zeros past the end
+let symbol = try table.decode(&bits)                 // one lookup, two for codes longer than the root
+let extra = bits.read(bitCount: 5)                   // reads refill only when needed
+try writer.copy(fromDistance: 3, count: 10, allowingOverrun: true) // LZ77 match, 16 bytes at a time
+reader = try bits.finish()                           // back to a cursor; throws if it read past the end
+let resume = reader.bitPosition                      // save, then `seek(toBitPosition:)` next call
+```
+
+- `BitBuffer` doesn't check for the end per read: past the data it reads zeros, and `isOverrun` or
+  `finish()` reports it once, per block rather than per code.
+- `HuffmanTable.build(codeLengths:bitOrder:rootBits:…into:invalid:symbol:subtable:)` fills a table of
+  your own entry type, so an entry can carry more than a symbol (DEFLATE packs the length base and extra
+  bits in, so a match length is one lookup). It's libdeflate's builder: each root entry is written once.
+- `copy(fromDistance:count:allowingOverrun:)` and `write(_:byteCount:allowingOverrun:)` may write up to
+  `BytesWriter.copyOverrun` bytes past the end of what they copy, for fixed-size moves; keep that much
+  room free, and they fall back to exact copies when there isn't.
+- `bitReversed` on `UInt8`–`UInt64` and `Bits` is one instruction (`rbit` on ARM).
+- In a hot loop, keep the buffer and writer as locals of small functions, so they stay in registers.
+  Passing them `inout` to a call the compiler doesn't inline puts them in memory: `@inline(__always)` is
+  only a hint and was refused for a large function; `@inline(always)` (SE-0496) is guaranteed.
+
 ## Semantics
 
 - Bit order (`.mostSignificantFirst`, the default, or `.leastSignificantFirst` for DEFLATE) is set per
@@ -90,6 +144,11 @@ Iterating never moves the cursor; `forEach` consumes what it reads.
   with NEON table lookups, through a small C module (CBytesNEON) of `static inline` wrappers Swift inlines
   to single `tbl` instructions: bulk reads 1.8–2.5x and writes 1.3–2.4x faster on one core. Other CPUs
   get a portable fallback; `--disable-default-traits` turns it off.
+- Span writes up to 32 bytes (strings, small payloads) copy inline with two overlapping loads and stores;
+  longer ones call `memmove`.
+- Nothing allocates (one compiler-caused exception is under Caveats). Every workload is also registered as
+  an `Allocations:<name>` benchmark that counts only allocations, checked against static thresholds in
+  `Thresholds/`: `swift package --disable-sandbox benchmark thresholds check --filter 'Allocations:.*'`.
 
 `Benchmarks/RESULTS.md` has the measurements, the assembly review, and the experiments that didn't pay off.
 
@@ -101,6 +160,9 @@ Iterating never moves the cursor; `forEach` consumes what it reads.
   loops over it stop vectorizing. Keep cursors local, or in inlinable code.
 - Functions that take a cursor `inout` need `@_lifetime` annotations, which need the `Lifetimes`
   experimental feature in your target.
+- `for byte in reader` over a `let reader` heap-allocates the cursor once per loop (Swift 6.4.2: the
+  compiler boxes a `~Copyable` `let` that an iterator borrows). Declare the reader with `var`, or loop
+  in a function that takes it `borrowing`.
 - `#expect(reader.isAtEnd)` doesn't compile in Swift Testing (the macro can't inspect a `~Copyable`,
   `~Escapable` value). Copy the property into a local first.
 - `for x in reader.values(...)` with a temporary is rejected in Swift 6.4 ("lifetime-dependent variable

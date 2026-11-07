@@ -18,7 +18,7 @@ public import Bytes
 /// ```
 ///
 /// Nothing is copied: topics and other strings are validated `UTF8Span`s, and payloads and binary fields are
-/// spans of the input. Copy what you keep (`String(copying:)`, `Array(span)`).
+/// spans of the input. Copy what you keep (`String(copying:)`, `[UInt8](copying:)`).
 public enum MQTTPacket: ~Escapable {
     case connect(MQTTConnect)
     case connectAcknowledgement(MQTTConnectAcknowledgement)
@@ -30,11 +30,11 @@ public enum MQTTPacket: ~Escapable {
     case subscribe(MQTTSubscribe)
     case subscribeAcknowledgement(MQTTSubscribeAcknowledgement)
     case unsubscribe(MQTTUnsubscribe)
-    case unsubscribeAcknowledgement(MQTTSubscribeAcknowledgement)
+    case unsubscribeAcknowledgement(MQTTUnsubscribeAcknowledgement)
     case pingRequest
     case pingResponse
-    case disconnect(MQTTReason)
-    case authenticate(MQTTReason)
+    case disconnect(MQTTDisconnect)
+    case authenticate(MQTTAuthenticate)
 
     /// The largest remaining length: 4 bytes of Variable Byte Integer.
     public static let maximumRemainingLength = 268_435_455
@@ -42,11 +42,13 @@ public enum MQTTPacket: ~Escapable {
     /// Reads the next packet from `reader`, or returns `nil` without consuming anything if it isn't all there
     /// yet.
     ///
-    /// Throws ``MQTTError`` for a malformed packet or a protocol error, leaving the cursor where it was. Both
-    /// end the connection in MQTT, after sending a DISCONNECT with the matching reason code.
+    /// Throws ``MQTTError`` if the packet breaks a rule of MQTT 5.0, leaving the cursor where it was. MQTT then
+    /// ends the connection, sending the error's ``MQTTError/reasonCode`` in a DISCONNECT (or, for a CONNECT, a
+    /// CONNACK).
     ///
     /// - Parameter maximumPacketSize: The largest packet to accept, in bytes, such as the Maximum Packet
-    ///   Size you advertised. A larger one throws a protocol error as soon as its header arrives.
+    ///   Size you advertised. A larger one throws ``MQTTError/Kind/packetTooLarge`` as soon as its header
+    ///   arrives.
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
@@ -59,7 +61,7 @@ public enum MQTTPacket: ~Escapable {
         do throws(BytesError) {
             type = try reader.read(Nibble.self)
             flags = try reader.read(Nibble.self)
-            remainingLength = Int(try reader.read(LEB128.self, maxByteCount: 4))
+            remainingLength = Int(try reader.readMQTTVariableByteInteger())
         } catch {
             try! reader.seek(toByteOffset: start)
             if error == .insufficientData { return nil }
@@ -67,10 +69,10 @@ public enum MQTTPacket: ~Escapable {
         }
         guard reader.byteOffset &- start &+ remainingLength <= maximumPacketSize else {
             try! reader.seek(toByteOffset: start)
-            throw .protocolError("packet larger than the maximum packet size")
+            throw MQTTError(.packetTooLarge, "packet larger than the maximum packet size")
         }
         // The body, as its own cursor: every field read in it is bounded by the remaining length.
-        guard var body = try? reader.read(section: remainingLength) else {
+        guard var body = try? reader.readSection(byteCount: remainingLength) else {
             try! reader.seek(toByteOffset: start)
             return nil
         }
@@ -99,22 +101,28 @@ public enum MQTTPacket: ~Escapable {
         case .connect: return .connect(try MQTTConnect(reading: &body))
         case .connectAcknowledgement: return .connectAcknowledgement(try MQTTConnectAcknowledgement(reading: &body))
         case .publish: return .publish(try MQTTPublish(reading: &body, flags: flags))
-        case .publishAcknowledgement: return .publishAcknowledgement(try MQTTPublishResponse(reading: &body))
-        case .publishReceived: return .publishReceived(try MQTTPublishResponse(reading: &body))
-        case .publishRelease: return .publishRelease(try MQTTPublishResponse(reading: &body))
-        case .publishComplete: return .publishComplete(try MQTTPublishResponse(reading: &body))
+        case .publishAcknowledgement:
+            return .publishAcknowledgement(try MQTTPublishResponse(reading: &body, reasonCodes: .publishAcknowledgement))
+        case .publishReceived:
+            return .publishReceived(try MQTTPublishResponse(reading: &body, reasonCodes: .publishAcknowledgement))
+        case .publishRelease:
+            return .publishRelease(try MQTTPublishResponse(reading: &body, reasonCodes: .publishRelease))
+        case .publishComplete:
+            return .publishComplete(try MQTTPublishResponse(reading: &body, reasonCodes: .publishRelease))
         case .subscribe: return .subscribe(try MQTTSubscribe(reading: &body))
-        case .subscribeAcknowledgement: return .subscribeAcknowledgement(try MQTTSubscribeAcknowledgement(reading: &body))
+        case .subscribeAcknowledgement:
+            return .subscribeAcknowledgement(try MQTTSubscribeAcknowledgement(reading: &body, reasonCodes: .subscribeAcknowledgement))
         case .unsubscribe: return .unsubscribe(try MQTTUnsubscribe(reading: &body))
-        case .unsubscribeAcknowledgement: return .unsubscribeAcknowledgement(try MQTTSubscribeAcknowledgement(reading: &body))
+        case .unsubscribeAcknowledgement:
+            return .unsubscribeAcknowledgement(try MQTTSubscribeAcknowledgement(reading: &body, reasonCodes: .unsubscribeAcknowledgement))
         case .pingRequest:
             try body.expectMQTTEnd("ping request")
             return .pingRequest
         case .pingResponse:
             try body.expectMQTTEnd("ping response")
             return .pingResponse
-        case .disconnect: return .disconnect(try MQTTReason(reading: &body))
-        case .authenticate: return .authenticate(try MQTTReason(reading: &body))
+        case .disconnect: return .disconnect(try MQTTDisconnect(reading: &body))
+        case .authenticate: return .authenticate(try MQTTAuthenticate(reading: &body))
         }
     }
 
@@ -163,7 +171,8 @@ public enum MQTTPacket: ~Escapable {
         case .subscribeAcknowledgement(let packet), .unsubscribeAcknowledgement(let packet): packet.bodyByteCount
         case .unsubscribe(let packet): packet.bodyByteCount
         case .pingRequest, .pingResponse: 0
-        case .disconnect(let packet), .authenticate(let packet): packet.bodyByteCount
+        case .disconnect(let packet): packet.bodyByteCount
+        case .authenticate(let packet): packet.bodyByteCount
         }
     }
 
@@ -171,12 +180,42 @@ public enum MQTTPacket: ~Escapable {
     @inlinable
     public var encodedByteCount: Int { 1 &+ Size.lengthPrefixed(remainingLength) }
 
-    /// Writes the packet. Its size is computed first, so nothing is moved or copied twice.
+    /// Checks the rules a receiver enforces: everything ``read(from:maximumPacketSize:)`` would throw for,
+    /// except that properties and lists are checked when created (``MQTTProperties/init(validating:)``).
+    @inlinable
+    public func validate() throws(MQTTError) {
+        try validateFields()
+        guard remainingLength <= Self.maximumRemainingLength else { throw .malformed("packet too long for MQTT") }
+    }
+
+    /// ``validate()`` without the size check, which `write(to:)` makes with the size it computes anyway.
+    @inlinable
+    func validateFields() throws(MQTTError) {
+        switch self {
+        case .connect(let packet): try packet.validate()
+        case .connectAcknowledgement(let packet): try packet.validate()
+        case .publish(let packet): try packet.validate()
+        case .publishAcknowledgement(let packet), .publishReceived(let packet):
+            try packet.validate(reasonCodes: .publishAcknowledgement)
+        case .publishRelease(let packet), .publishComplete(let packet): try packet.validate(reasonCodes: .publishRelease)
+        case .subscribe(let packet): try packet.validate()
+        case .subscribeAcknowledgement(let packet): try packet.validate(reasonCodes: .subscribeAcknowledgement)
+        case .unsubscribe(let packet): try packet.validate()
+        case .unsubscribeAcknowledgement(let packet): try packet.validate(reasonCodes: .unsubscribeAcknowledgement)
+        case .pingRequest, .pingResponse: break
+        case .disconnect(let packet): try packet.validate()
+        case .authenticate(let packet): try packet.validate()
+        }
+    }
+
+    /// Writes the packet. It's checked and its size computed first, so nothing is written if it throws, and
+    /// nothing is moved or copied twice.
     ///
-    /// Throws ``BytesError/insufficientCapacity`` if `writer` doesn't have ``encodedByteCount`` bytes left,
-    /// and ``BytesError/invalidValue`` if a string or the packet is too long for MQTT.
+    /// Throws ``BytesError/invalidValue`` if ``validate()`` throws (call it for the reason), and
+    /// ``BytesError/insufficientCapacity`` if `writer` doesn't have ``encodedByteCount`` bytes left.
     @inlinable
     public func write(to writer: inout BytesWriter) throws(BytesError) {
+        do throws(MQTTError) { try validateFields() } catch { throw .invalidValue }
         let remainingLength = remainingLength
         guard remainingLength <= Self.maximumRemainingLength else { throw .invalidValue }
         guard writer.remainingByteCount >= 1 &+ Size.lengthPrefixed(remainingLength) else { throw .insufficientCapacity }
@@ -193,7 +232,8 @@ public enum MQTTPacket: ~Escapable {
         case .subscribeAcknowledgement(let packet), .unsubscribeAcknowledgement(let packet): try packet.writeBody(to: &writer)
         case .unsubscribe(let packet): try packet.writeBody(to: &writer)
         case .pingRequest, .pingResponse: break
-        case .disconnect(let packet), .authenticate(let packet): try packet.writeBody(to: &writer)
+        case .disconnect(let packet): try packet.writeBody(to: &writer)
+        case .authenticate(let packet): try packet.writeBody(to: &writer)
         }
     }
 }

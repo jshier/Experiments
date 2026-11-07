@@ -1,6 +1,6 @@
 /// A fixed run of 2 to 16 bytes, as they appear in memory, with no byte order applied yet.
 ///
-/// ``Byte2`` through ``Byte16`` conform. Read one with ``Bytes/read(_:)-(T.Type)``, then interpret it
+/// ``Byte2`` through ``Byte16`` conform. Read one with `read(_:)`, then interpret it
 /// with ``littleEndian`` or ``bigEndian``, or read the integer directly with
 /// ``Bytes/read(_:_:)``. Odd widths, such as the 24-bit lengths common in media and network formats,
 /// work the same as the standard ones:
@@ -14,6 +14,10 @@
 /// ```swift
 /// let signature: Byte4 = [0x50, 0x4B, 0x03, 0x04]
 /// ```
+///
+/// To conform your own type, use 2 through 16 bytes, the narrowest `Integer` that holds them, and make
+/// `init(littleEndian:)` keep only the low `byteCount` bytes. For fixed-size values that aren't integers,
+/// conform to ``ByteRepresentable`` instead.
 public protocol ByteGroup: BitwiseCopyable, Hashable, Sendable, ExpressibleByArrayLiteral, CustomStringConvertible
 where ArrayLiteralElement == UInt8 {
     /// The narrowest standard unsigned integer that holds `byteCount` bytes.

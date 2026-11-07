@@ -12,11 +12,13 @@ import CBytesNEON
 @usableFromInline
 enum Shuffle {
     /// Whether runs of `T` are shuffled: 3, 5, 6, and 7 bytes. (Power-of-two widths vectorize without
-    /// help, and 9 to 15 bytes would need lookups across more than 64 bytes.)
+    /// help, and 9 to 15 bytes would need lookups across more than 64 bytes.) Lanes are stored straight
+    /// into `T.Integer`s, so a conformance whose `Integer` isn't the lane size is excluded. Both checks fold
+    /// to a constant.
     @inlinable @inline(__always)
     static func handles<T: ByteGroup>(_: T.Type) -> Bool {
         switch T.byteCount {
-        case 3, 5, 6, 7: true
+        case 3, 5, 6, 7: MemoryLayout<T.Integer>.size == laneSize(T.byteCount)
         default: false
         }
     }
@@ -28,7 +30,7 @@ enum Shuffle {
     @inlinable @inline(__always)
     static func handlesIteration<T: ByteGroup>(_: T.Type) -> Bool {
         switch T.byteCount {
-        case 5, 6, 7: true
+        case 5, 6, 7: MemoryLayout<T.Integer>.size == laneSize(T.byteCount)
         default: false
         }
     }

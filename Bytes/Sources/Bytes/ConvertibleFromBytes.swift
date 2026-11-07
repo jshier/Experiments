@@ -2,7 +2,8 @@
 
 // Fields whose values map to a type through its raw value: enums with integer raw values, and option
 // sets. Reading converts after the field is read and throws `invalidValue` (consuming nothing) when the
-// raw value isn't valid; writing converts first.
+// raw value isn't valid; writing converts first. A field is an unsigned value, so negative raw values
+// can't be read or written.
 
 extension Bytes {
     /// Reads a `width`-bit field as an `R`, through its raw value.
@@ -68,7 +69,8 @@ extension BytesWriter {
 
 // Reading the standard library's `ConvertibleFromBytes` types: integers, `Float16`/`Float`/`Double`,
 // `Duration`, `SIMD2`–`SIMD64` vectors, and `InlineArray`s of them. Every bit pattern is a valid value of
-// these types, so they can be loaded from arbitrary bytes, or viewed in place, safely.
+// these types, so they can be loaded from arbitrary bytes, or viewed in place, safely. Each takes
+// `MemoryLayout<T>.size` bytes, which for 3-lane vectors includes a padding lane: `SIMD3<Float>` is 16.
 
 extension Bytes {
     /// Returns the next `T`, from its `MemoryLayout<T>.size` bytes in native byte order (little-endian on

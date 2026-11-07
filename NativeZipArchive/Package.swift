@@ -35,6 +35,12 @@ let package = Package(
             ],
             swiftSettings: strictSettings
         ),
+        .testTarget(
+            name: "NativeZipTests",
+            dependencies: ["NativeZip"],
+            // Not strict memory safety: the tests call zlib's C API directly to make reference streams.
+            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")]
+        ),
         .executableTarget(
             name: "NativeZipBenchmarks",
             dependencies: [

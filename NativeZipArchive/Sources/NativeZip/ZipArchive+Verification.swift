@@ -7,12 +7,13 @@ extension ZipArchive {
     /// - Returns: The entries that failed and why, in archive order. Empty means the archive is intact.
     public func verify(
         _ entries: [ZipEntry]? = nil,
-        maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount
+        maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount,
+        backend: ZipDecoder.Backend = .bytes
     ) async -> [(entry: ZipEntry, error: any Error)] {
         let indexed = Array((entries ?? self.entries).filter { $0.kind != .directory }.enumerated())
         let failures = FailureLog()
         // The body never throws (failures are recorded instead), so neither does the loop.
-        try? await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, weight: \.element.uncompressedSize) {
+        try? await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, backend: backend, weight: \.element.uncompressedSize) {
             [self] item, decoder in
             do {
                 try self.contents(of: item.element, using: &decoder) { _ in }
