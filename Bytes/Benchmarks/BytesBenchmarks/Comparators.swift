@@ -127,7 +127,7 @@ struct Fields {
 }
 
 enum CentralDirectory {
-    static let signature: Byte4 = [0x50, 0x4B, 0x01, 0x02]
+    static let signature: Byte4 = 0x50_4B_01_02
 
     static func parseWithBytes(_ span: RawSpan) throws(BytesError) -> UInt64 {
         var reader = Bytes(span)

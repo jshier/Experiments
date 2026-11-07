@@ -18,6 +18,8 @@ public struct ZipEntry: Sendable {
     public let posixPermissions: Int?
     public let modificationDate: Date?
 
+    // Bit 0. (A mask, not `Bytes`' `flags[bit: 0]`: `Bytes` is imported `internal`, so inlinable public code
+    // can't use it.)
     @inlinable public var isEncrypted: Bool { flags & 0x1 != 0 }
 }
 
@@ -26,11 +28,11 @@ public struct ZipEntry: Sendable {
 public struct ZipArchive: Sendable {
     /// Record signatures, in file order. Computed, so each use folds to a 32-bit constant.
     enum Signature {
-        static var localFile: Byte4 { [0x50, 0x4B, 0x03, 0x04] }
-        static var centralDirectory: Byte4 { [0x50, 0x4B, 0x01, 0x02] }
-        static var endOfCentralDirectory: Byte4 { [0x50, 0x4B, 0x05, 0x06] }
-        static var zip64EndOfCentralDirectory: Byte4 { [0x50, 0x4B, 0x06, 0x06] }
-        static var zip64Locator: Byte4 { [0x50, 0x4B, 0x06, 0x07] }
+        static var localFile: Byte4 { 0x50_4B_03_04 }
+        static var centralDirectory: Byte4 { 0x50_4B_01_02 }
+        static var endOfCentralDirectory: Byte4 { 0x50_4B_05_06 }
+        static var zip64EndOfCentralDirectory: Byte4 { 0x50_4B_06_06 }
+        static var zip64Locator: Byte4 { 0x50_4B_06_07 }
     }
 
     public enum Method {
@@ -62,7 +64,7 @@ extension ZipArchive {
         var size: UInt64
         var offset: UInt64
 
-        var isSaturated: Bool { entryCount == 0xFFFF || size == 0xFFFF_FFFF || offset == 0xFFFF_FFFF }
+        var isSaturated: Bool { entryCount == UInt16.max || size == UInt32.max || offset == UInt32.max }
     }
 
     private static func readEntries(_ archive: RawSpan) throws(ZipError) -> [ZipEntry] {
@@ -170,9 +172,9 @@ extension ZipArchive {
             var field = Bytes(try extra.read(byteCount: size))
             switch id {
             case 0x0001: // ZIP64 extended information: only the saturated fields are present, in this order.
-                if uncompressedSize == 0xFFFF_FFFF { uncompressedSize = try field.read(Byte8.self, .littleEndian) }
-                if compressedSize == 0xFFFF_FFFF { compressedSize = try field.read(Byte8.self, .littleEndian) }
-                if localHeaderOffset == 0xFFFF_FFFF { localHeaderOffset = try field.read(Byte8.self, .littleEndian) }
+                if uncompressedSize == UInt32.max { uncompressedSize = try field.read(Byte8.self, .littleEndian) }
+                if compressedSize == UInt32.max { compressedSize = try field.read(Byte8.self, .littleEndian) }
+                if localHeaderOffset == UInt32.max { localHeaderOffset = try field.read(Byte8.self, .littleEndian) }
             case 0x5455: // Extended timestamp: a flags byte, then a UTC mtime if bit 0 is set.
                 if size >= 5, try field.read(Byte.self)[bit: 0] {
                     let seconds = Int32(bitPattern: try field.read(Byte4.self, .littleEndian))
@@ -211,9 +213,10 @@ extension ZipArchive {
         modificationDate: Date?
     ) -> ZipEntry {
         // The high byte of "version made by" is the host OS; 3 is Unix, whose st_mode is the high 16 bits.
-        let mode = versionMadeBy >> 8 == 3 ? Int(externalAttributes >> 16) : 0
+        let mode = versionMadeBy[Byte.self, at: 8] == 3 ? Int(externalAttributes[bits: 16..<32]) : 0
         let fileType = mode & Int(S_IFMT)
-        let kind: ZipEntry.Kind = if name.hasSuffix("/") || fileType == Int(S_IFDIR) || externalAttributes & 0x10 != 0 {
+        // Bit 4 of the low (MS-DOS) attributes: a directory.
+        let kind: ZipEntry.Kind = if name.hasSuffix("/") || fileType == Int(S_IFDIR) || externalAttributes[bit: 4] {
             .directory
         } else if fileType == Int(S_IFLNK) {
             .symlink
@@ -260,12 +263,12 @@ extension ZipArchive {
 
     static func date(dosDate: UInt16, dosTime: UInt16) -> Date? {
         var components = DateComponents()
-        components.year = 1980 + Int(dosDate >> 9)
-        components.month = Int((dosDate >> 5) & 0xF)
-        components.day = Int(dosDate & 0x1F)
-        components.hour = Int(dosTime >> 11)
-        components.minute = Int((dosTime >> 5) & 0x3F)
-        components.second = Int(dosTime & 0x1F) * 2
+        components.year = 1980 + Int(dosDate[Bits<7>.self, at: 9])
+        components.month = Int(dosDate[Nibble.self, at: 5])
+        components.day = Int(dosDate[Bits<5>.self, at: 0])
+        components.hour = Int(dosTime[Bits<5>.self, at: 11])
+        components.minute = Int(dosTime[Bits<6>.self, at: 5])
+        components.second = Int(dosTime[Bits<5>.self, at: 0]) * 2
         // DOS timestamps have no time zone; by convention they're local time.
         return Calendar.current.date(from: components)
     }
@@ -285,17 +288,19 @@ extension ZipArchive {
         let payload = try Self.payload(of: entry, in: archive)
 
         // Closure literals (not a local func passed as a value), so `crc` and `written` stay on the
-        // stack instead of being boxed on the heap: measured 2 mallocs per entry before this.
+        // stack instead of being boxed on the heap: measured 2 mallocs per entry before this. The CRC is the
+        // backend's own (`Bytes`' or zlib's), so each backend is measured whole.
+        let backend = decoder.backend
         var crc: UInt = 0
         var written: UInt64 = 0
         switch entry.method {
         case Method.stored:
-            crc = crc32(0, payload)
+            crc = ZipDecoder.crc32(0, payload, backend: backend)
             written = UInt64(payload.byteCount)
             try body(payload)
         case Method.deflated:
             try decoder.inflate(payload, path: entry.path) { chunk in
-                crc = crc32(crc, chunk)
+                crc = ZipDecoder.crc32(crc, chunk, backend: backend)
                 written += UInt64(chunk.byteCount)
                 try body(chunk)
             }
@@ -336,9 +341,10 @@ extension ZipArchive {
 
         var crc: UInt = 0
         var written: UInt64 = 0
+        let backend = decoder.backend
         // The mapping outlives this call (`self` holds it), so its address is stable across suspensions.
         try await unsafe decoder.inflatePipelined(file.stableBuffer(range), path: entry.path, observe: { chunk in
-            crc = crc32(crc, chunk)
+            crc = ZipDecoder.crc32(crc, chunk, backend: backend)
             written += UInt64(chunk.byteCount)
         }, consume: consume)
 
@@ -352,6 +358,7 @@ extension ZipArchive {
     public func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes) throws -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
         try contents(of: entry, backend: backend) { chunk in
+            // Unsafe: `Data` has no `RawSpan` append. Safe: the buffer is only read, within the closure.
             chunk.withUnsafeBytes { unsafe result.append(contentsOf: $0) }
         }
         return result

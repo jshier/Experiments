@@ -53,7 +53,8 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
         return "\(kind): \(detail)"
     }
 
-    // By the detail's bytes, without building `String`s.
+    // By the detail's bytes, without building `String`s. Unsafe: `StaticString` exposes its bytes only as a
+    // buffer pointer. Safe: they're immutable static data, read only within the closure.
     public static func == (lhs: Self, rhs: Self) -> Bool {
         lhs.kind == rhs.kind && lhs.detail.withUTF8Buffer { a in rhs.detail.withUTF8Buffer { b in unsafe a.elementsEqual(b) } }
     }
@@ -244,8 +245,8 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
             throw .malformed("subscription options")
         }
         guard reserved == 0 else { throw .malformed("reserved subscription option bits") }
-        guard let handling = MQTTRetainHandling(rawValue: retainHandling.rawValue) else { throw .protocolError("retain handling 3") }
-        guard let qos = MQTTQoS(rawValue: maximumQoS.rawValue) else { throw .protocolError("maximum QoS 3") }
+        guard let handling = MQTTRetainHandling(rawBits: retainHandling) else { throw .protocolError("retain handling 3") }
+        guard let qos = MQTTQoS(rawBits: maximumQoS) else { throw .protocolError("maximum QoS 3") }
         self.retainHandling = handling
         self.maximumQoS = qos
     }
@@ -271,6 +272,9 @@ extension Bytes {
     @_lifetime(self: copy self)
     mutating func readMQTTText(checked: Bool) throws(BytesError) -> UTF8Span {
         guard checked else {
+            // Unsafe: skips UTF-8 validation, which is what makes iterating a validated packet's string lists
+            // cheap. Safe enough: only called on packets whose `validate()` already checked these strings, and
+            // validation is a precondition of the unchecked iterators. No safe construct skips the check.
             return unsafe UTF8Span(unchecked: Span(viewing: try read(bytesPrefixedBy: Byte2.self, .bigEndian)))
         }
         let text = try read(utf8PrefixedBy: Byte2.self, .bigEndian)
@@ -313,8 +317,15 @@ extension Bytes {
     /// A Byte.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func readMQTTByte(_ detail: StaticString) throws(MQTTError) -> UInt8 {
-        do throws(BytesError) { return try read(Byte.self).rawValue } catch { throw .malformed(detail) }
+    mutating func readMQTTByte(_ detail: StaticString) throws(MQTTError) -> Byte {
+        do throws(BytesError) { return try read(Byte.self) } catch { throw .malformed(detail) }
+    }
+
+    /// A reason code: a Byte, every value of which is representable (validity depends on the packet).
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func readMQTTReasonCode() throws(MQTTError) -> MQTTReasonCode {
+        do throws(BytesError) { return try read(MQTTReasonCode.self, as: Byte.self) } catch { throw .malformed("reason code") }
     }
 
     /// A Variable Byte Integer: LEB128 of at most 4 bytes, in the fewest bytes [MQTT-1.5.5-1]. Throws
@@ -378,22 +389,25 @@ enum Text {
     /// (`any`, `pointwiseMin`) compile to out-of-line calls.
     @inlinable @inline(__always)
     static func contains(in text: UTF8Span, _ words: (UInt64) -> UInt64, _ byteMatches: (UInt8) -> Bool) -> Bool {
+        // Checked loads. Against unchecked ones they measured 0.6% more instructions encoding PUBLISH packets
+        // (whose strings this checks), with no difference in time; most checks fold, as the offsets are in
+        // ranges the optimizer can see are in bounds.
         let bytes = text.span.bytes
         let count = bytes.byteCount
         guard count >= 8 else {
             var found: UInt8 = 0
             for offset in 0..<count {
-                found |= byteMatches(unsafe bytes.unsafeLoad(fromUncheckedByteOffset: offset, as: UInt8.self)) ? 1 : 0
+                found |= byteMatches(bytes.load(fromByteOffset: offset, as: UInt8.self)) ? 1 : 0
             }
             return found != 0
         }
         var found: UInt64 = 0
         var offset = 0
         while offset < count &- 8 {
-            found |= words(unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt64.self))
-            offset &+= 8
+            found |= words(bytes.load(fromByteOffset: offset, as: UInt64.self))
+            offset += 8 // Not `&+=`: a non-wrapping add tells the optimizer `offset` stays non-negative.
         }
-        found |= words(unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: count &- 8, as: UInt64.self))
+        found |= words(bytes.load(fromByteOffset: count &- 8, as: UInt64.self))
         return found != 0
     }
 
@@ -423,15 +437,12 @@ enum Text {
 
     /// Whether `text` is longer than a 2-byte length can describe.
     @inlinable @inline(__always)
-    static func isTooLong(_ count: Int) -> Bool { count > 0xFFFF }
+    static func isTooLong(_ count: Int) -> Bool { count > UInt16.max }
 
     /// Whether a topic filter names a shared subscription (`$share/…`).
     @inlinable
     static func isShared(_ filter: UTF8Span) -> Bool {
-        let bytes = filter.span
-        let prefix: InlineArray<7, UInt8> = [0x24, 0x73, 0x68, 0x61, 0x72, 0x65, 0x2F] // "$share/"
-        guard bytes.count >= 7 else { return false }
-        for index in prefix.indices where bytes[index] != prefix[index] { return false }
-        return true
+        let reader = Bytes(filter.span)
+        return (try? reader.peek(Byte7.self)) == 0x24_73_68_61_72_65_2F // "$share/"
     }
 }

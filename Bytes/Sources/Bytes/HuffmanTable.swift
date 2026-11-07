@@ -15,9 +15,8 @@
 /// (DEFLATE's length bases and extra-bit counts, say) with the generic
 /// ``build(codeLengths:bitOrder:rootBits:maximumCodeLength:allowingIncomplete:into:invalid:symbol:subtable:)``,
 /// which this table uses.
-@safe
 public struct HuffmanTable: ~Copyable {
-    @usableFromInline let entries: UnsafeMutableBufferPointer<UInt32>
+    @usableFromInline var entries: UniqueArray<UInt32>
     /// Codes up to this long decode with one lookup.
     public let rootBits: Int
     /// The most symbols a code can have.
@@ -44,12 +43,7 @@ public struct HuffmanTable: ~Copyable {
         self.maximumCodeLength = maximumCodeLength
         // At most one subtable per root prefix and per symbol, each at most as wide as the longest code needs.
         let subtableSpace = min(1 << maximumCodeLength, symbolCount << (maximumCodeLength - rootBits))
-        unsafe entries = .allocate(capacity: (1 << rootBits) + subtableSpace)
-        unsafe entries.initialize(repeating: Self.invalidKind << 5)
-    }
-
-    deinit {
-        unsafe entries.deallocate()
+        entries = UniqueArray(repeating: Self.invalidKind << 5, count: (1 << rootBits) + subtableSpace)
     }
 
     /// Builds the table for the canonical code with these code lengths: one per symbol, 0 if unused.
@@ -59,7 +53,7 @@ public struct HuffmanTable: ~Copyable {
     ) throws(BytesError) {
         guard lengths.count <= symbolCount else { throw .invalidValue }
         self.bitOrder = bitOrder
-        var table = unsafe MutableSpan(_unsafeElements: entries)
+        var table = entries.mutableSpan
         _ = try Self.build(
             codeLengths: lengths, bitOrder: bitOrder, rootBits: rootBits, maximumCodeLength: maximumCodeLength,
             allowingIncomplete: allowingIncomplete, into: &table, invalid: Self.invalidKind << 5,
@@ -75,21 +69,22 @@ public struct HuffmanTable: ~Copyable {
     @inlinable @inline(always)
     public func decode(_ buffer: inout BitBuffer) throws(BytesError) -> Int {
         let bits = buffer.bits
+        let entries = entries.span
         var entry: UInt32
         switch bitOrder {
         case .leastSignificantFirst:
-            entry = unsafe entries[Int(truncatingIfNeeded: bits) & ((1 &<< rootBits) &- 1)]
+            entry = entries[Int(truncatingIfNeeded: bits) & ((1 &<< rootBits) &- 1)]
             if entry >> 5 & 3 == Self.subtableKind {
                 let index = Int(truncatingIfNeeded: bits &>> UInt64(truncatingIfNeeded: rootBits))
                     & ((1 &<< Int(entry & 0x1F)) &- 1)
-                entry = unsafe entries[Int(entry >> 8) &+ index]
+                entry = entries[Int(entry >> 8) &+ index]
             }
         case .mostSignificantFirst:
-            entry = unsafe entries[Int(truncatingIfNeeded: bits &>> UInt64(truncatingIfNeeded: 64 &- rootBits))]
+            entry = entries[Int(truncatingIfNeeded: bits &>> UInt64(truncatingIfNeeded: 64 &- rootBits))]
             if entry >> 5 & 3 == Self.subtableKind {
                 let index = Int(truncatingIfNeeded:
                     (bits &<< UInt64(truncatingIfNeeded: rootBits)) &>> UInt64(truncatingIfNeeded: 64 &- Int(entry & 0x1F)))
-                entry = unsafe entries[Int(entry >> 8) &+ index]
+                entry = entries[Int(entry >> 8) &+ index]
             }
         }
         guard entry >> 5 & 3 == Self.symbolKind else { throw .invalidValue }
@@ -174,23 +169,44 @@ extension HuffmanTable {
             return rootSize
         }
 
-        // Symbols sorted by code length, then value: the order canonical codes are assigned in.
+        // Symbols sorted by code length, then value: the order canonical codes are assigned in. Scratch on
+        // the stack: an `InlineArray` big enough for the common alphabets (DEFLATE's 288 literal/lengths,
+        // JPEG's 256), and for bigger ones (Brotli's 704), the standard library's temporary allocation.
+        if lengths.count <= 320 {
+            var storage = InlineArray<320, UInt16>(repeating: 0)
+            var sorted = storage.mutableSpan
+            return try _sortAndBuild(lengths, &sorted, counts, bitOrder, rootBits, &table, makeSymbol, makeLink)
+        }
+        return try withUnsafeTemporaryAllocation(of: UInt16.self, capacity: lengths.count) { (buffer) throws(BytesError) -> Int in
+            // Unsafe: a span over stack memory. Safe: initialized here, and it lives only for this call. No
+            // safe stack storage has a size known only at run time.
+            _ = unsafe buffer.initialize(repeating: 0)
+            var sorted = unsafe MutableSpan(_unsafeElements: buffer)
+            return try _sortAndBuild(lengths, &sorted, counts, bitOrder, rootBits, &table, makeSymbol, makeLink)
+        }
+    }
+
+    /// Sorts the used symbols into `sorted` by code length, then builds the table. A function of its own
+    /// rather than a nested one: capturing the entry closures kept them from being inlined (5% more
+    /// instructions decoding small DEFLATE files).
+    @inlinable @inline(__always)
+    static func _sortAndBuild<Entry: BitwiseCopyable>(
+        _ lengths: Span<UInt8>, _ sorted: inout MutableSpan<UInt16>, _ counts: InlineArray<17, Int>,
+        _ bitOrder: BitOrder, _ rootBits: Int, _ table: inout MutableSpan<Entry>,
+        _ makeSymbol: (Int, Int) -> Entry, _ makeLink: (Int, Int) -> Entry
+    ) throws(BytesError) -> Int {
         var offsets = InlineArray<17, Int>(repeating: 0)
         for length in 1..<16 { offsets[length &+ 1] = offsets[length] &+ counts[length] }
-        return try withUnsafeTemporaryAllocation(of: UInt16.self, capacity: lengths.count) { (sorted) throws(BytesError) -> Int in
-            for symbol in lengths.indices where lengths[symbol] != 0 {
-                let length = Int(lengths[symbol])
-                unsafe sorted[offsets[length]] = UInt16(truncatingIfNeeded: symbol)
-                offsets[length] &+= 1
-            }
-            return try table.withUnsafeMutableBufferPointer { (table) throws(BytesError) -> Int in
-                switch bitOrder {
-                case .leastSignificantFirst:
-                    try unsafe _buildReversed(table, sorted, counts, rootBits: rootBits, makeSymbol, makeLink)
-                case .mostSignificantFirst:
-                    try unsafe _buildForward(table, sorted, counts, rootBits: rootBits, makeSymbol, makeLink)
-                }
-            }
+        for symbol in lengths.indices where lengths[symbol] != 0 {
+            let length = Int(lengths[symbol])
+            sorted[offsets[length]] = UInt16(truncatingIfNeeded: symbol)
+            offsets[length] &+= 1
+        }
+        switch bitOrder {
+        case .leastSignificantFirst:
+            return try _buildReversed(&table, sorted.span, counts, rootBits: rootBits, makeSymbol, makeLink)
+        case .mostSignificantFirst:
+            return try _buildForward(&table, sorted.span, counts, rootBits: rootBits, makeSymbol, makeLink)
         }
     }
 
@@ -209,13 +225,12 @@ extension HuffmanTable {
 
     /// Least significant bit first: codes bit-reversed, so a code's root entries are every `2^length`th.
     /// Requires a complete code with at least one symbol.
-    @inlinable @unsafe
+    @inlinable
     static func _buildReversed<Entry: BitwiseCopyable>(
-        _ table: UnsafeMutableBufferPointer<Entry>, _ sorted: UnsafeMutableBufferPointer<UInt16>,
+        _ table: inout MutableSpan<Entry>, _ sorted: Span<UInt16>,
         _ counts: InlineArray<17, Int>, rootBits: Int,
         _ makeSymbol: (Int, Int) -> Entry, _ makeLink: (Int, Int) -> Entry
     ) throws(BytesError) -> Int {
-        let base = table.baseAddress!
         let rootSize = 1 &<< rootBits
         /// The reversed code after `code` among codes of `length` bits (`code` isn't all ones): add one to
         /// the reversed value by clearing the trailing ones and setting the bit above them.
@@ -224,6 +239,12 @@ extension HuffmanTable {
             let differing = UInt32(truncatingIfNeeded: code ^ ((1 &<< length) &- 1))
             let bit = 1 &<< (31 &- differing.leadingZeroBitCount)
             return code & (bit &- 1) | bit
+        }
+        /// Doubles the filled entries: copies the first `end` to the next `end`. (Measured as fast as
+        /// `memcpy` here: the tables are small.)
+        @inline(__always)
+        func double(_ end: Int) {
+            for index in 0..<end { table[end &+ index] = table[index] }
         }
         var index = 0
         var length = 1
@@ -237,12 +258,12 @@ extension HuffmanTable {
         // Codes that fit in the root.
         while length <= rootBits {
             repeat {
-                unsafe base[code] = makeSymbol(Int(sorted[index]), length)
+                table[code] = makeSymbol(Int(sorted[index]), length)
                 index &+= 1
                 if code == end &- 1 {
                     // The last code (all ones): replicate up to the root's width.
                     while end < rootSize {
-                        unsafe (base + end).update(from: base, count: end)
+                        double(end)
                         end &<<= 1
                     }
                     return rootSize
@@ -253,7 +274,7 @@ extension HuffmanTable {
             repeat {
                 length &+= 1
                 if length <= rootBits {
-                    unsafe (base + end).update(from: base, count: end)
+                    double(end)
                     end &<<= 1
                 }
             } while counts[length] == 0
@@ -270,13 +291,13 @@ extension HuffmanTable {
                 let bits = _subtableBits(length: length, count: count, counts, rootBits: rootBits)
                 end = start &+ (1 &<< bits)
                 guard end <= table.count else { throw .invalidValue }
-                unsafe base[prefix] = makeLink(start, bits)
+                table[prefix] = makeLink(start, bits)
             }
-            let entry = makeSymbol(Int(unsafe sorted[index]), length)
+            let entry = makeSymbol(Int(sorted[index]), length)
             index &+= 1
             var slot = start &+ (code &>> rootBits)
             repeat {
-                unsafe base[slot] = entry
+                table[slot] = entry
                 slot &+= 1 &<< (length &- rootBits)
             } while slot < end
             if code == (1 &<< length) &- 1 { return end } // The last code.
@@ -291,13 +312,12 @@ extension HuffmanTable {
 
     /// Most significant bit first: codes as they are, so a code's entries are a contiguous run.
     /// Requires a complete code with at least one symbol.
-    @inlinable @unsafe
+    @inlinable
     static func _buildForward<Entry: BitwiseCopyable>(
-        _ table: UnsafeMutableBufferPointer<Entry>, _ sorted: UnsafeMutableBufferPointer<UInt16>,
+        _ table: inout MutableSpan<Entry>, _ sorted: Span<UInt16>,
         _ counts: InlineArray<17, Int>, rootBits: Int,
         _ makeSymbol: (Int, Int) -> Entry, _ makeLink: (Int, Int) -> Entry
     ) throws(BytesError) -> Int {
-        let base = table.baseAddress!
         var code = 0
         var index = 0
         var end = 1 &<< rootBits
@@ -307,7 +327,7 @@ extension HuffmanTable {
         for length in 1...16 {
             var count = counts[length]
             while count > 0 {
-                let entry = makeSymbol(Int(unsafe sorted[index]), length)
+                let entry = makeSymbol(Int(sorted[index]), length)
                 let first: Int
                 let run: Int
                 if length <= rootBits {
@@ -321,12 +341,12 @@ extension HuffmanTable {
                         width = _subtableBits(length: length, count: count, counts, rootBits: rootBits)
                         end = start &+ (1 &<< width)
                         guard end <= table.count else { throw .invalidValue }
-                        unsafe base[prefix] = makeLink(start, width)
+                        table[prefix] = makeLink(start, width)
                     }
                     run = 1 &<< (width &- tail)
                     first = start &+ (code & ((1 &<< tail) &- 1)) &* run
                 }
-                unsafe (base + first).update(repeating: entry, count: run)
+                for slot in first..<(first &+ run) { table[slot] = entry }
                 index &+= 1
                 code &+= 1
                 count &-= 1

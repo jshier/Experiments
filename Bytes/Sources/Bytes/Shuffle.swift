@@ -89,7 +89,9 @@ enum Shuffle {
 
     /// Writes whole steps of `count` values from `value`, packed as `T` in `bigEndian` or little-endian
     /// order, starting at `start`, and returns how many values it wrote (a multiple of the step). Capacity
-    /// already checked for all `count` values.
+    /// already checked for all `count` values. Unsafe: unchecked vector stores, like ``Store`` and for the
+    /// same reason (checked, they keep the loop from running at NEON speed). Each step writes within the
+    /// `count` values checked.
     @unsafe @inlinable @inline(__always)
     static func pack<T: ByteGroup>(
         _: T.Type, bigEndian: Bool, count: Int, to bytes: inout MutableRawSpan, at start: Int, _ value: (Int) -> T.Integer
@@ -116,7 +118,7 @@ enum Shuffle {
             }
             if stepBytes % 16 == 8 {
                 let last = table(lanes, stepBytes >= 48 ? indices.3 : indices.2)
-                let low = unsafe unsafeBitCast(last, to: SIMD2<UInt64>.self)[0]
+                let low = bitCast(last, to: SIMD2<UInt64>.self)[0]
                 unsafe bytes.storeBytes(of: low, toUncheckedByteOffset: offset &+ stepBytes &- 8, as: UInt64.self)
             }
         }
@@ -134,13 +136,13 @@ enum Shuffle {
                     UInt32(truncatingIfNeeded: value(base)), UInt32(truncatingIfNeeded: value(base &+ 1)),
                     UInt32(truncatingIfNeeded: value(base &+ 2)), UInt32(truncatingIfNeeded: value(base &+ 3))
                 )
-                return unsafe unsafeBitCast(lanes, to: SIMD16<UInt8>.self)
+                return bitCast(lanes, to: SIMD16<UInt8>.self)
             }
             return (vector(first), vector(first &+ 4), vector(first &+ 8), vector(first &+ 12))
         }
         func vector(_ base: Int) -> SIMD16<UInt8> {
             let lanes = SIMD2<UInt64>(UInt64(truncatingIfNeeded: value(base)), UInt64(truncatingIfNeeded: value(base &+ 1)))
-            return unsafe unsafeBitCast(lanes, to: SIMD16<UInt8>.self)
+            return bitCast(lanes, to: SIMD16<UInt8>.self)
         }
         return (vector(first), vector(first &+ 2), vector(first &+ 4), vector(first &+ 6))
     }
@@ -170,7 +172,8 @@ enum Shuffle {
     }
 
     /// Step `step`'s values from packed bytes at `start`, as 64 bytes of lanes. The caller ensures the
-    /// step's 64-byte load is in bounds (see ``unpackableSteps(_:count:availableBytes:)``).
+    /// step's 64-byte load is in bounds (see ``unpackableSteps(_:count:availableBytes:)``). Unsafe: unchecked
+    /// vector loads, like ``Load`` and for the same reason.
     @unsafe @inlinable @inline(__always)
     static func unpack<T: ByteGroup>(
         _: T.Type, step: Int, from span: RawSpan, at start: Int,
@@ -199,9 +202,9 @@ enum Shuffle {
         default: lanes.3
         }
         if laneSize(T.byteCount) == 4 {
-            return T.Integer(truncatingIfNeeded: unsafe unsafeBitCast(vector, to: SIMD4<UInt32>.self)[index % perVector])
+            return T.Integer(truncatingIfNeeded: bitCast(vector, to: SIMD4<UInt32>.self)[index % perVector])
         }
-        return T.Integer(truncatingIfNeeded: unsafe unsafeBitCast(vector, to: SIMD2<UInt64>.self)[index % perVector])
+        return T.Integer(truncatingIfNeeded: bitCast(vector, to: SIMD2<UInt64>.self)[index % perVector])
     }
 }
 #endif

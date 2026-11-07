@@ -5,6 +5,21 @@
 // raw value isn't valid; writing converts first. A field is an unsigned value, so negative raw values
 // can't be read or written.
 
+extension RawRepresentable where RawValue: BinaryInteger {
+    /// Creates a value from a field already read, through its raw value; `nil` if it isn't a valid one.
+    ///
+    /// ```swift
+    /// guard let qos = QualityOfService(rawBits: flags[Crumb.self, at: 1]) else { … }
+    /// ```
+    ///
+    /// To read a field as an `R` directly, use `read(_:as:)` on ``Bytes``.
+    @inlinable
+    public init?<let width: Int>(rawBits bits: Bits<width>) {
+        guard let raw = RawValue(exactly: bits.rawValue) else { return nil }
+        self.init(rawValue: raw)
+    }
+}
+
 extension Bytes {
     /// Reads a `width`-bit field as an `R`, through its raw value.
     ///
@@ -129,7 +144,7 @@ extension Bytes {
         _assumeInvariant()
         let (byteCount, overflow) = count.multipliedReportingOverflow(by: MemoryLayout<T>.stride)
         guard !overflow, likely(span.byteCount &- _byteOffset >= byteCount) else { throw .insufficientData }
-        let bytes = unsafe span.extracting(unchecked: Range(uncheckedBounds: (_byteOffset, _byteOffset &+ byteCount)))
+        let bytes = span.extracting(_byteOffset..<(_byteOffset &+ byteCount))
         // An empty view can't be misaligned, but `Span(viewing:)` checks alignment even when empty.
         guard byteCount > 0 else { return Span() }
         if MemoryLayout<T>.alignment > 1 {

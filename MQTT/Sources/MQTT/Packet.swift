@@ -88,7 +88,7 @@ public enum MQTTPacket: ~Escapable {
     @_lifetime(copy body)
     @_lifetime(body: copy body)
     static func parse(type: Nibble, flags: Nibble, body: inout Bytes) throws(MQTTError) -> MQTTPacket {
-        guard let packetType = MQTTPacketType(rawValue: type.rawValue) else { throw .malformed("reserved packet type") }
+        guard let packetType = MQTTPacketType(rawBits: type) else { throw .malformed("reserved packet type") }
         // PUBLISH uses its flags; PUBREL, SUBSCRIBE, and UNSUBSCRIBE require 0b0010; the rest, 0.
         switch packetType {
         case .publish: break
@@ -219,7 +219,7 @@ public enum MQTTPacket: ~Escapable {
         let remainingLength = remainingLength
         guard remainingLength <= Self.maximumRemainingLength else { throw .invalidValue }
         guard writer.remainingByteCount >= 1 &+ Size.lengthPrefixed(remainingLength) else { throw .insufficientCapacity }
-        try writer.write(Nibble(type.rawValue))
+        try writer.write(type, as: Nibble.self)
         try writer.write(flags)
         try writer.write(UInt64(remainingLength), as: LEB128.self)
         switch self {

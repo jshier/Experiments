@@ -78,6 +78,9 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     public mutating func refill() {
         let shift = UInt64(truncatingIfNeeded: _count)
         if likely(span.byteCount &- _nextByte >= 8) {
+            // Unsafe: an unchecked load. Safe: the branch just checked that 8 bytes remain. The checked load
+            // measured 10% more instructions in DEFLATE decoding: its check also needs `_nextByte >= 0`, which
+            // the optimizer can't see, so it isn't folded into this branch.
             let raw = unsafe span.unsafeLoadUnaligned(fromUncheckedByteOffset: _nextByte, as: UInt64.self)
             switch bitOrder {
             case .leastSignificantFirst: _bits |= UInt64(littleEndian: raw) &<< shift
@@ -102,8 +105,7 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         var count = count
         var nextByte = nextByte
         while count <= 56 {
-            let byte = nextByte < span.byteCount
-                ? UInt64(unsafe span.unsafeLoad(fromUncheckedByteOffset: nextByte, as: UInt8.self)) : 0
+            let byte = nextByte < span.byteCount ? UInt64(span.load(fromByteOffset: nextByte, as: UInt8.self)) : 0
             switch bitOrder {
             case .leastSignificantFirst: bits |= byte &<< UInt64(truncatingIfNeeded: count)
             case .mostSignificantFirst: bits |= byte &<< UInt64(truncatingIfNeeded: 56 &- count)

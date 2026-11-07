@@ -12,6 +12,8 @@
 import Foundation
 import NativeISO8601
 
+// Unsafe: global mutable state outside concurrency checking. Safe: the adapter is a single-threaded
+// read-eval loop on the main thread; nothing else touches these.
 nonisolated(unsafe) var parsed: [String: ISO8601.Timestamp] = [:]
 nonisolated(unsafe) var nextHandle = 0
 

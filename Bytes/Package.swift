@@ -30,9 +30,14 @@ let package = Package(
     targets: [
         // NEON `tbl` wrappers Swift inlines; a portable fallback elsewhere.
         .target(name: "CBytesNEON"),
+        // Carry-less multiply and CRC32 instruction wrappers for `CRC32`; empty on CPUs without them.
+        .target(name: "CBytesCRC"),
         .target(
             name: "Bytes",
-            dependencies: [.target(name: "CBytesNEON", condition: .when(traits: ["NEONShuffle"]))],
+            dependencies: [
+                .target(name: "CBytesNEON", condition: .when(traits: ["NEONShuffle"])),
+                "CBytesCRC",
+            ],
             // `import Builtin`, for branch-weight and value-range hints the standard library doesn't expose.
             swiftSettings: strictSettings + [.enableExperimentalFeature("BuiltinModule")]
         ),

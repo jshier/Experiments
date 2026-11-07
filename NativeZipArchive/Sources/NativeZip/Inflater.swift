@@ -113,9 +113,10 @@ struct Inflater: ~Copyable {
     /// The longest match, and so the room to keep free before decoding a symbol.
     static var maximumMatch: Int { 258 }
 
-    // Tables, in one allocation: the fixed code's two (built once) and the current dynamic block's two. The
+    // Tables, in one array: the fixed code's two (built once) and the current dynamic block's two. The
     // sizes cover the largest tables any valid code can need (from zlib's `enough`: 2,342 entries for
-    // 11-bit literal/length roots, 402 for 8-bit distance roots).
+    // 11-bit literal/length roots, 402 for 8-bit distance roots). Read through spans, so every lookup is
+    // bounds-checked; see `decodeSymbols` for why that costs nothing on the root lookups.
     static var tableSize: Int { 2560 }
     static var distanceTableSize: Int { 512 }
     static var fixedLiterals: Int { 0 }
@@ -124,7 +125,7 @@ struct Inflater: ~Copyable {
     static var dynamicDistances: Int { 2 * tableSize + distanceTableSize }
     static var totalSize: Int { 2 * tableSize + 2 * distanceTableSize }
 
-    private let tables: UnsafeMutablePointer<UInt32>
+    private var tables = [UInt32](repeating: 0, count: totalSize)
     /// The code-length code, which only headers use: `Bytes`' plain table, entries holding just the symbol.
     private var codeLengthTable = HuffmanTable(symbolCount: 19, maximumCodeLength: 7, rootBits: 7)
 
@@ -141,21 +142,14 @@ struct Inflater: ~Copyable {
     private var bitPosition = 0
 
     init() {
-        unsafe tables = .allocate(capacity: Self.totalSize)
         // The fixed code (RFC 1951, 3.2.6): literal/lengths 8, 9, 7, and 8 bits; 32 distance codes of 5 bits.
         var literalLengths = InlineArray<288, UInt8>(repeating: 8)
         for symbol in 144..<256 { literalLengths[symbol] = 9 }
         for symbol in 256..<280 { literalLengths[symbol] = 7 }
         let distanceLengths = InlineArray<32, UInt8>(repeating: 5)
         // The fixed code is valid, so building it can't throw.
-        try! unsafe Self.buildTable(literalLengths.span, .literalLength, into: tables + Self.fixedLiterals,
-                                    capacity: Self.tableSize, rootBits: Self.literalRootBits)
-        try! unsafe Self.buildTable(distanceLengths.span, .distance, into: tables + Self.fixedDistances,
-                                    capacity: Self.distanceTableSize, rootBits: Self.distanceRootBits)
-    }
-
-    deinit {
-        unsafe tables.deallocate()
+        try! buildTable(literalLengths.span, .literalLength, at: Self.fixedLiterals, rootBits: Self.literalRootBits)
+        try! buildTable(distanceLengths.span, .distance, at: Self.fixedDistances, rootBits: Self.distanceRootBits)
     }
 
     /// Prepares to decode a new stream.
@@ -177,7 +171,7 @@ struct Inflater: ~Copyable {
     /// function was too large for the inliner, so `BytesWriter.copy` stayed a call, and passing the writer to
     /// it kept the writer in memory: 2x slower.)
     mutating func decode(
-        _ input: RawSpan, into output: UnsafeMutableRawBufferPointer, start: Int
+        _ input: RawSpan, into output: inout MutableRawSpan, start: Int
     ) throws(BytesError) -> (end: Int, finished: Bool) {
         var position = start
         while true {
@@ -191,10 +185,10 @@ struct Inflater: ~Copyable {
                     try readBlockHeader(input)
                 }
             case .stored(let remaining):
-                let count = min(remaining, output.count &- position)
+                let count = min(remaining, output.byteCount &- position)
                 var reader = Bytes(input)
                 try reader.seek(toBitPosition: bitPosition)
-                var writer = BytesWriter(unsafe MutableRawSpan(_unsafeBytes: output))
+                var writer = BytesWriter(output._mutatingExtracting(...))
                 try writer.skip(byteCount: position)
                 try writer.write(try reader.read(byteCount: count))
                 bitPosition = reader.bitPosition
@@ -205,10 +199,14 @@ struct Inflater: ~Copyable {
                 }
                 state = .blockHeader
             case .huffman(let fixed):
-                let literals = unsafe tables + (fixed ? Self.fixedLiterals : Self.dynamicLiterals)
-                let distances = unsafe tables + (fixed ? Self.fixedDistances : Self.dynamicDistances)
-                let result = try unsafe Self.decodeSymbols(
-                    input, from: bitPosition, literals: literals, distances: distances, into: output, at: position
+                let literals = fixed ? Self.fixedLiterals : Self.dynamicLiterals
+                let distances = fixed ? Self.fixedDistances : Self.dynamicDistances
+                let tables = tables.span
+                let result = try Self.decodeSymbols(
+                    input, from: bitPosition,
+                    literals: tables.extracting(literals..<(literals &+ Self.tableSize)),
+                    distances: tables.extracting(distances..<(distances &+ Self.distanceTableSize)),
+                    into: &output, at: position
                 )
                 bitPosition = result.bitPosition
                 position = result.end
@@ -247,16 +245,20 @@ struct Inflater: ~Copyable {
 
     /// Decodes Huffman-coded symbols from `bitPosition` into `output` from `end`, until the block ends or
     /// fewer than ``maximumMatch`` bytes are free.
-    @unsafe
+    ///
+    /// Table lookups are bounds-checked. Stating the tables' sizes once, here, makes those checks free for
+    /// root lookups: with the count a known constant, the optimizer sees that a masked root index is in
+    /// bounds. Only subtable lookups (codes longer than the root, rare) keep a check.
     private static func decodeSymbols(
         _ input: RawSpan, from bitPosition: Int,
-        literals: UnsafeMutablePointer<UInt32>, distances: UnsafeMutablePointer<UInt32>,
-        into output: UnsafeMutableRawBufferPointer, at end: Int
+        literals: Span<UInt32>, distances: Span<UInt32>,
+        into output: inout MutableRawSpan, at end: Int
     ) throws(BytesError) -> (bitPosition: Int, end: Int, endOfBlock: Bool) {
+        precondition(literals.count == tableSize && distances.count == distanceTableSize)
         var reader = Bytes(input, bitOrder: .leastSignificantFirst)
         try reader.seek(toBitPosition: bitPosition)
         var bits = BitBuffer(reader)
-        var writer = BytesWriter(unsafe MutableRawSpan(_unsafeBytes: output))
+        var writer = BytesWriter(output._mutatingExtracting(...))
         try writer.skip(byteCount: end)
         var endOfBlock = false
 
@@ -264,7 +266,7 @@ struct Inflater: ~Copyable {
         // iteration it's ready, so decoding doesn't wait for a refill, a mask, and a table load first.
         // After a match, the next lookup happens before the match is copied, overlapping the two.
         bits.refill()
-        var entry = unsafe lookup(literals, bits.bits, rootBits: literalRootBits)
+        var entry = lookup(literals, bits.bits, rootBits: literalRootBits)
         // Room for three literals, a match, and its copy's overrun.
         symbols: while writer.remainingByteCount >= 3 &+ maximumMatch &+ BytesWriter.copyOverrun {
             if entry.kind == HuffmanEntry.Kind.literal.rawValue {
@@ -277,24 +279,24 @@ struct Inflater: ~Copyable {
                 try writer.write(Byte(truncatingIfNeeded: entry.value))
                 // Root entries first: a literal there can't be a subtable link, so the common case skips
                 // that check. Anything else is resolved below.
-                entry = unsafe rootEntry(literals, bits.bits, rootBits: literalRootBits)
+                entry = rootEntry(literals, bits.bits, rootBits: literalRootBits)
                 if entry.kind == HuffmanEntry.Kind.literal.rawValue {
                     bits.consume(bitCount: entry.totalBits)
                     try writer.write(Byte(truncatingIfNeeded: entry.value))
-                    entry = unsafe rootEntry(literals, bits.bits, rootBits: literalRootBits)
+                    entry = rootEntry(literals, bits.bits, rootBits: literalRootBits)
                     if entry.kind == HuffmanEntry.Kind.literal.rawValue {
                         bits.consume(bitCount: entry.totalBits)
                         try writer.write(Byte(truncatingIfNeeded: entry.value))
                         // 11 or more bits are left: enough for the root lookup, which then doesn't wait for the
                         // refill's load (only a long code's subtable lookup needs the refilled bits).
-                        let root = unsafe rootEntry(literals, bits.bits, rootBits: literalRootBits)
+                        let root = rootEntry(literals, bits.bits, rootBits: literalRootBits)
                         bits.refill()
-                        entry = unsafe resolve(root, literals, bits.bits, rootBits: literalRootBits)
+                        entry = resolve(root, literals, bits.bits, rootBits: literalRootBits)
                         continue
                     }
                 }
                 // 26 or more bits: enough to resolve any code.
-                entry = unsafe resolve(entry, literals, bits.bits, rootBits: literalRootBits)
+                entry = resolve(entry, literals, bits.bits, rootBits: literalRootBits)
                 // A match needs up to 48 bits: 15 + 5 for its length, 15 + 13 for its distance.
                 bits.refill()
             }
@@ -303,7 +305,7 @@ struct Inflater: ~Copyable {
                 // A long literal code, from a subtable: rare. 56 or more bits buffered.
                 bits.consume(bitCount: entry.totalBits)
                 try writer.write(Byte(truncatingIfNeeded: entry.value))
-                entry = unsafe lookup(literals, bits.bits, rootBits: literalRootBits)
+                entry = lookup(literals, bits.bits, rootBits: literalRootBits)
             case HuffmanEntry.Kind.lengthOrDistance.rawValue:
                 // 48 or more bits buffered. After the length, 28 or more: enough for the distance, decoded
                 // from a copy of them, so the refill started here overlaps it instead of delaying it. After
@@ -313,13 +315,13 @@ struct Inflater: ~Copyable {
                 bits.consume(bitCount: entry.totalBits)
                 let window = bits.bits
                 bits.refill()
-                let distanceEntry = unsafe lookup(distances, window, rootBits: distanceRootBits)
+                let distanceEntry = lookup(distances, window, rootBits: distanceRootBits)
                 guard distanceEntry.kind == HuffmanEntry.Kind.lengthOrDistance.rawValue else { throw .invalidValue }
                 let distance = distanceEntry.value &+ distanceEntry.extra(window)
                 bits.consume(bitCount: distanceEntry.totalBits)
-                let root = unsafe rootEntry(literals, bits.bits, rootBits: literalRootBits)
+                let root = rootEntry(literals, bits.bits, rootBits: literalRootBits)
                 bits.refill()
-                entry = unsafe resolve(root, literals, bits.bits, rootBits: literalRootBits)
+                entry = resolve(root, literals, bits.bits, rootBits: literalRootBits)
                 // Throws `invalidValue` for a distance reaching before the output's start.
                 try writer.copy(fromDistance: distance, count: length, allowingOverrun: true)
             case HuffmanEntry.Kind.endOfBlock.rawValue:
@@ -337,24 +339,24 @@ struct Inflater: ~Copyable {
 
     /// The entry for the code at the start of `bits`.
     @inline(__always)
-    private static func lookup(_ table: UnsafeMutablePointer<UInt32>, _ bits: UInt64, rootBits: Int) -> HuffmanEntry {
-        unsafe resolve(rootEntry(table, bits, rootBits: rootBits), table, bits, rootBits: rootBits)
+    private static func lookup(_ table: Span<UInt32>, _ bits: UInt64, rootBits: Int) -> HuffmanEntry {
+        resolve(rootEntry(table, bits, rootBits: rootBits), table, bits, rootBits: rootBits)
     }
 
     /// The root table's entry for the start of `bits`: needs only `rootBits` valid bits.
     @inline(__always)
-    private static func rootEntry(_ table: UnsafeMutablePointer<UInt32>, _ bits: UInt64, rootBits: Int) -> HuffmanEntry {
-        HuffmanEntry(raw: unsafe table[Int(truncatingIfNeeded: bits) & ((1 &<< rootBits) &- 1)])
+    private static func rootEntry(_ table: Span<UInt32>, _ bits: UInt64, rootBits: Int) -> HuffmanEntry {
+        HuffmanEntry(raw: table[Int(truncatingIfNeeded: bits) & ((1 &<< rootBits) &- 1)])
     }
 
     /// `entry`, or for a link to a subtable, the subtable's entry for the bits after the root's.
     @inline(__always)
     private static func resolve(
-        _ entry: HuffmanEntry, _ table: UnsafeMutablePointer<UInt32>, _ bits: UInt64, rootBits: Int
+        _ entry: HuffmanEntry, _ table: Span<UInt32>, _ bits: UInt64, rootBits: Int
     ) -> HuffmanEntry {
         guard entry.kind == HuffmanEntry.Kind.subtable.rawValue else { return entry }
         let index = Int(truncatingIfNeeded: bits &>> UInt64(rootBits)) & ((1 &<< entry.codeLength) &- 1)
-        return HuffmanEntry(raw: unsafe table[entry.value &+ index])
+        return HuffmanEntry(raw: table[entry.value &+ index])
     }
 
     // MARK: - Dynamic block headers
@@ -412,27 +414,26 @@ struct Inflater: ~Copyable {
         guard lengths[256] != 0 else { throw .invalidValue } // A block needs its end code.
 
         let span = lengths.span
-        try unsafe Self.buildTable(span.extracting(0..<literalCount), .literalLength, into: tables + Self.dynamicLiterals,
-                                   capacity: Self.tableSize, rootBits: Self.literalRootBits)
-        try unsafe Self.buildTable(span.extracting(literalCount..<total), .distance, into: tables + Self.dynamicDistances,
-                                   capacity: Self.distanceTableSize, rootBits: Self.distanceRootBits)
+        try buildTable(span.extracting(0..<literalCount), .literalLength, at: Self.dynamicLiterals, rootBits: Self.literalRootBits)
+        try buildTable(span.extracting(literalCount..<total), .distance, at: Self.dynamicDistances, rootBits: Self.distanceRootBits)
     }
 
     // MARK: - Tables
 
-    /// Builds a decoding table for the canonical Huffman code with code `lengths` (0 for unused symbols),
-    /// with `alphabet`'s packed entries, using `Bytes`' canonical-code builder.
+    /// Builds the decoding table at `offset` in ``tables`` for the canonical Huffman code with code `lengths`
+    /// (0 for unused symbols), with `alphabet`'s packed entries, using `Bytes`' canonical-code builder.
     ///
     /// Accepts the incomplete codes zlib does: an empty one (a block without matches) and a single 1-bit
     /// code (RFC 1951 allows it for distances, zlib for literals too).
-    @unsafe
-    private static func buildTable(
-        _ lengths: Span<UInt8>, _ alphabet: Alphabet, into table: UnsafeMutablePointer<UInt32>, capacity: Int, rootBits: Int
+    private mutating func buildTable(
+        _ lengths: Span<UInt8>, _ alphabet: Alphabet, at offset: Int, rootBits: Int
     ) throws(BytesError) {
-        var span = unsafe MutableSpan(_unsafeElements: UnsafeMutableBufferPointer(start: table, count: capacity))
+        let size = alphabet == .literalLength ? Self.tableSize : Self.distanceTableSize
+        var all = tables.mutableSpan
+        var table = all._mutatingExtracting(offset..<(offset &+ size))
         _ = try HuffmanTable.build(
             codeLengths: lengths, bitOrder: .leastSignificantFirst, rootBits: rootBits, maximumCodeLength: 15,
-            into: &span, invalid: HuffmanEntry.invalid.raw,
+            into: &table, invalid: HuffmanEntry.invalid.raw,
             symbol: { symbol, length in alphabet.entry(symbol, codeLength: length).raw },
             subtable: { offset, bits in HuffmanEntry(codeLength: bits, kind: .subtable, value: offset).raw }
         )

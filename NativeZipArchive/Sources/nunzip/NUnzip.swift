@@ -137,7 +137,8 @@ struct NUnzip: AsyncParsableCommand {
     private func select(from entries: [ZipEntry]) throws -> [ZipEntry] {
         let flags = ignoreCase ? FNM_CASEFOLD : 0
         func matches(_ pattern: String, _ path: String) -> Bool {
-            // libc's fnmatch(3). Without FNM_PATHNAME, `*` also matches `/`, as in Info-ZIP unzip.
+            // libc's fnmatch(3). Without FNM_PATHNAME, `*` also matches `/`, as in Info-ZIP unzip. Unsafe: C
+            // strings, bridged for the call only.
             unsafe fnmatch(pattern, path, flags) == 0
         }
 
@@ -317,6 +318,7 @@ struct NUnzip: AsyncParsableCommand {
         var decoder = ZipDecoder(backend: backend)
         for entry in entries where entry.kind == .file {
             try zip.contents(of: entry, using: &decoder) { chunk in
+                // Unsafe: System's `writeAll` takes a buffer pointer, not a span. Safe: read within the call.
                 _ = try chunk.withUnsafeBytes { try unsafe FileDescriptor.standardOutput.writeAll($0) }
             }
         }

@@ -199,3 +199,41 @@ The first version was 2x slower than zlib. In order of payoff:
 Tried and reverted: 8-byte steps for all distances, unrolled byte copies, exact copies for distances
 under 32, decoding literal pairs from a combined table (small files 14 → 23 ms: building it costs more than
 it saves on short blocks), an adaptive literal-run loop, and gathering literals into a word store.
+
+## step7: safe constructs (baselines `pre-safety` → `safe-final`, `bytes` → `safe-parse`)
+
+- **Inflater tables** moved from a raw allocation to a `[UInt32]` read through `Span`s. Every lookup is
+  bounds-checked; `decodeSymbols` states the tables' sizes once (`precondition`), after which the masked
+  root lookups' checks fold. Instruction counts identical (small files 238 → 239 M, 32 MB text 249 → 249 M).
+- **Output** reaches the inflater as a `MutableRawSpan` rather than a buffer pointer. `ZipDecoder` creates it
+  from its own buffers, which stay raw allocations: the pipelined path sends chunks of them to child tasks.
+- **The code-length table and the table builder** are `Bytes`' `HuffmanTable`, now safe throughout.
+- **`BitBuffer`'s refill load** stays unchecked: checked, DEFLATE took 10% more instructions.
+- **Zip fields with Bytes' bit-field APIs**: the DOS date and time (`date[Bits<7>.self, at: 9]` …), the Unix
+  mode (`attributes[bits: 16..<32]`), the directory attribute (`[bit: 4]`), and the host OS
+  (`versionMadeBy[Byte.self, at: 8]`); saturation tests compare against `UInt16.max`/`UInt32.max`. Parsing
+  the central directory is 1% fewer instructions (4,907 vs 4,960 K). `ZipEntry.isEncrypted` keeps its mask:
+  it's public and inlinable, and `Bytes` is imported `internal`.
+- **Remaining `unsafe`** has comments saying why: `mmap`/`munmap` (`MappedFile`), zlib's and
+  Compression's C APIs, `symlink`/`mkdir`/`futimens`/`fnmatch`, System's buffer-pointer `writeAll`,
+  `Data`'s buffer-pointer append, and the pipelined decoder's cross-task chunks.
+
+## step8: native CRC-32 for the Bytes backend (baseline `native-crc`)
+
+Entry verification uses each backend's own CRC: `Bytes`' `CRC32` with the `Bytes` decoder, zlib's
+`crc32_z` with zlib's, so each backend is measured whole (`ZipDecoder.crc32(_:_:backend:)`, static so it
+can run inside `inflate`'s callbacks). Stored entries follow the decoder's backend too. Direct
+comparisons are `CRC-32 <size>: Bytes / zlib` and `Stored + CRC 32 MB random: Bytes / zlib`.
+
+| Benchmark (p50) | Bytes | zlib |
+|---|---|---|
+| CRC-32 32 MB | 532 µs (63 GB/s) | 888 µs (38 GB/s) |
+| CRC-32 256 KB, in cache (×128) | 460 µs | 833 µs |
+| CRC-32 1 KB (×32 K) | 665 µs | 1,279 µs |
+| CRC-32 64 B (×512 K) | 3,084 µs | 6,963 µs |
+| Stored + CRC 32 MB random | 2.56 ms, 29 M instructions | 2.92 ms, 31 M |
+| Inflate + CRC 32 MB text | 12.9 ms | 13.6 ms |
+| Inflate + CRC 2,000 small files | 13.9 ms | 14.6 ms |
+
+CRC is about 4% of inflating time, so the decode benchmarks move by less than their noise (instructions
+−1%). How `CRC32` works is in Bytes' RESULTS.md.

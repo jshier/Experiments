@@ -4,7 +4,7 @@
 /// ```swift
 /// let packet = try [UInt8](capacity: 64) { output in
 ///     try output.withBytesWriter { writer in
-///         try writer.write([0x50, 0x4B, 0x03, 0x04] as Byte4)
+///         try writer.write(0x50_4B_03_04 as Byte4)
 ///         try writer.write(20, as: Byte2.self, .littleEndian)
 ///         try writer.write(Nibble(0b0011))
 ///         try writer.write(Nibble(0b0000))
@@ -283,10 +283,10 @@ extension BytesWriter {
             return
         }
         guard remainingByteCount >= size else { throw .insufficientCapacity }
-        withUnsafeBytes(of: value) { valueBytes in
-            for index in 0..<size {
-                _writeBits(UInt64(unsafe valueBytes[index]), count: 8)
-            }
+        let storage: InlineArray<1, T> = [value]
+        let valueBytes = storage.span.bytes
+        for index in 0..<size {
+            _writeBits(UInt64(valueBytes.load(fromByteOffset: index, as: UInt8.self)), count: 8)
         }
     }
 
@@ -319,6 +319,9 @@ extension BytesWriter {
             unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, 0, to: &_bytes, offset)
             unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, count &- 16, to: &_bytes, offset)
         default:
+            // Unsafe: `memmove`. Safe: the capacity check above covers the destination, and the source is
+            // the whole of `bytes`. The standard library has no safe copy from a `RawSpan` into a
+            // `MutableRawSpan`, and a loop of checked moves would be far slower than `memmove` for long spans.
             _bytes.withUnsafeMutableBytes { destination in
                 bytes.withUnsafeBytes { source in
                     unsafe destination.baseAddress!.advanced(by: offset)
@@ -332,7 +335,7 @@ extension BytesWriter {
     /// Copies the `T` at `sourceOffset` in `source` to the same offset after `offset` in `destination`.
     /// Bounds already checked.
     @unsafe @inlinable @inline(__always)
-    static func _copy<T: BitwiseCopyable>(
+    static func _copy<T: ConvertibleFromBytes & ConvertibleToBytes & BitwiseCopyable>(
         _: T.Type, from source: RawSpan, _ sourceOffset: Int, to destination: inout MutableRawSpan, _ offset: Int
     ) {
         let value = unsafe source.unsafeLoadUnaligned(fromUncheckedByteOffset: sourceOffset, as: T.self)
@@ -484,10 +487,9 @@ extension BytesWriter {
             unsafe _move(UInt32.self, from: source, to: offset, in: &bytes)
             unsafe _move(UInt32.self, from: source &+ count &- 4, to: offset &+ count &- 4, in: &bytes)
         } else if distance == 1, count > 0 {
-            let byte = unsafe bytes.bytes.unsafeLoad(fromUncheckedByteOffset: source, as: UInt8.self)
-            bytes.withUnsafeMutableBytes { buffer in
-                _ = unsafe buffer.baseAddress!.advanced(by: offset).initializeMemory(as: UInt8.self, repeating: byte, count: count)
-            }
+            let byte = bytes.load(fromByteOffset: source, as: UInt8.self)
+            var run = bytes._mutatingExtracting(offset..<(offset &+ count))
+            run.storeBytes(repeating: byte, count: count, as: UInt8.self) // `memset`
         } else {
             // Short distances: the pattern repeats every `distance` bytes, so each byte depends on one just
             // written. Byte by byte.
@@ -498,7 +500,7 @@ extension BytesWriter {
     }
 
     @unsafe @inlinable @inline(always)
-    static func _move<T: BitwiseCopyable>(_: T.Type, from source: Int, to destination: Int, in bytes: inout MutableRawSpan) {
+    static func _move<T: ConvertibleFromBytes & ConvertibleToBytes & BitwiseCopyable>(_: T.Type, from source: Int, to destination: Int, in bytes: inout MutableRawSpan) {
         let value = unsafe bytes.bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: source, as: T.self)
         unsafe bytes.storeBytes(of: value, toUncheckedByteOffset: destination, as: T.self)
     }
@@ -682,6 +684,9 @@ extension OutputSpan where Element == UInt8 {
         bitOrder: BitOrder = .mostSignificantFirst,
         _ body: (inout BytesWriter) throws(E) -> R
     ) throws(E) -> R {
+        // Unsafe: a span over the output's uninitialized capacity, which no safe API exposes. Safe: the span
+        // covers exactly that capacity and ends with the closure; `UInt8` needs no initialization beyond the
+        // stores, and only the bytes the writer reports writing are counted as initialized.
         try unsafe withUnsafeMutableBufferPointer { (buffer, initializedCount) throws(E) -> R in
             let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
             var writer = unsafe BytesWriter(MutableRawSpan(_unsafeBytes: free), bitOrder: bitOrder)
@@ -701,6 +706,7 @@ extension OutputRawSpan {
         bitOrder: BitOrder = .mostSignificantFirst,
         _ body: (inout BytesWriter) throws(E) -> R
     ) throws(E) -> R {
+        // Unsafe and safe as for `OutputSpan<UInt8>` above.
         try unsafe withUnsafeMutableBytes { (buffer, initializedCount) throws(E) -> R in
             let free = unsafe UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount...])
             var writer = unsafe BytesWriter(MutableRawSpan(_unsafeBytes: free), bitOrder: bitOrder)
@@ -715,10 +721,16 @@ extension OutputRawSpan {
 
 /// Unchecked stores into a mutable span, mirroring ``Load``. Callers check capacity first. Every store
 /// stays within `offset ..< offset + count`.
+///
+/// Unsafe for the same reason as ``Load``, with the same guarantee: each caller has checked the capacity
+/// for everything it stores. `MutableRawSpan`'s checked `storeBytes` measured 42–144% more instructions
+/// writing odd widths (`Byte3`, `Byte5`–`Byte15`), 28–47% more for packed bit fields, because its checks
+/// aren't folded into the writer's. The copies below (``BytesWriter/_copy(_:from:_:to:_:)``, `_move`) are
+/// unchecked for the same reason; the match copies they make are DEFLATE's hottest loop.
 @usableFromInline @unsafe
 enum Store {
     @inlinable @inline(__always)
-    static func little<I: FixedWidthInteger & BitwiseCopyable>(_ value: I, to bytes: inout MutableRawSpan, at offset: Int) {
+    static func little<I: FixedWidthInteger & ConvertibleToBytes & BitwiseCopyable>(_ value: I, to bytes: inout MutableRawSpan, at offset: Int) {
         unsafe bytes.storeBytes(of: value.littleEndian, toUncheckedByteOffset: offset, as: I.self)
     }
 

@@ -94,6 +94,20 @@ The cost, per PUBLISH:
 - **Encoding** pays mostly for scanning the topic, about 8 ns. The rest is checking each field against
   the packet type's rules.
 
+## Safe constructs and Bytes types (baseline `validated` → `safe-final2`)
+
+- **The SWAR string scan** uses checked `RawSpan.load`s instead of unchecked ones: 0.6% more instructions
+  encoding PUBLISH packets than unchecked (a wrapping `&+=` in its loop hid that the offset stays
+  non-negative; with `+=`, half the checks' cost folded away), no difference in time.
+- **Fewer integer escapes**, with Bytes' new field APIs: PUBLISH flags read as `flags[Crumb.self, at: 1]`
+  and built with `[bit:]` and field setters, enums from fields with `init?(rawBits:)`, reason codes read
+  and written `as: Byte.self`, the protocol version a `Byte`, property identifiers `Byte`s, and the
+  `$share/` prefix compared as one `Byte7`.
+- Against `validated`: encoding +1% instructions, mixed-stream parsing +2%, PUBLISH parsing equal; wall
+  times equal or better.
+- The remaining `unsafe` sites (UTF-8 validation skipped for already-validated strings, `StaticString`
+  bytes in `MQTTError`'s `==`) have comments saying why.
+
 ## Allocation checks
 
 The `Bytes` views and writer must not allocate. Each such workload is also registered as

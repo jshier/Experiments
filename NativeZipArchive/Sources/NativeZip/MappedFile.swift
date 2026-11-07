@@ -5,6 +5,11 @@ import System
 ///
 /// Unlike `Data(contentsOf:options: .alwaysMapped)`, the bytes have a stable address for the life of
 /// the object, so decoding can span `await`s (see ``ZipDecoder``'s pipelined path) without copying.
+///
+/// Unsafe throughout: `mmap`/`munmap` return and take raw pointers, and there's no safe owning type for a
+/// mapping. Contained here: the pointer is private, the mapping is read-only and immutable, and it's handed
+/// out only as a `RawSpan` bound to `self`'s lifetime, or (for the pipelined path) a range-checked buffer
+/// that callers must not use after `self` is gone.
 @usableFromInline
 @safe
 final class MappedFile: Sendable {

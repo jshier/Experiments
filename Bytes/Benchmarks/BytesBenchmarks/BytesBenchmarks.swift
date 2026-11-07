@@ -12,6 +12,7 @@ let benchmarks: @Sendable () -> Void = {
 
     registerBandwidthBenchmarks()
     registerWriteBenchmarks()
+    registerCRCBenchmarks()
 
     // MARK: Field parsing: a 2,000-entry zip central directory (~170 KB)
 
@@ -103,7 +104,7 @@ let benchmarks: @Sendable () -> Void = {
     var tail = (0..<65_557).map { UInt8(truncatingIfNeeded: $0 &* 7 &+ 3) }
     tail.replaceSubrange(0..<4, with: [0x50, 0x4B, 0x05, 0x06])
     let haystack = tail
-    let signature: Byte4 = [0x50, 0x4B, 0x05, 0x06]
+    let signature: Byte4 = 0x50_4B_05_06
 
     Benchmark("Search 64 KB backwards: lastByteOffset(of:)") { benchmark in
         for _ in benchmark.scaledIterations {
