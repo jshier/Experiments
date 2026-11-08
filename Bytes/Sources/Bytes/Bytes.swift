@@ -148,6 +148,30 @@ extension Bytes {
         _bitOffset = position & 7
     }
 
+    /// Runs `body` on a copy of this cursor, and moves this one past what it read only if `body` succeeds:
+    /// several reads that are all or nothing, as each single read is. A streaming parser can read a whole
+    /// message this way; if its later fields haven't arrived, the cursor is still at its start.
+    ///
+    /// ```swift
+    /// let message = try reader.atomically { (reader) throws(BytesError) in
+    ///     let type = try reader.read(Byte.self)
+    ///     let body = try reader.read(bytesPrefixedBy: Byte2.self, .bigEndian)
+    ///     return (type, body.byteCount)
+    /// }
+    /// ```
+    ///
+    /// When a read throws, the cursor's ``byteOffset`` is where the failing read started (it consumed
+    /// nothing), so it is also the error's location; inside `atomically`, check the copy's.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    public mutating func atomically<R: ~Copyable, E: Error>(_ body: (inout Bytes) throws(E) -> R) throws(E) -> R {
+        var copy = Bytes(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
+        let result = try body(&copy)
+        _byteOffset = copy._byteOffset
+        _bitOffset = copy._bitOffset
+        return result
+    }
+
     /// Skips the next `byteCount` bytes (`8 × byteCount` bits, if not byte-aligned).
     @inlinable @inline(__always)
     @_lifetime(self: copy self)

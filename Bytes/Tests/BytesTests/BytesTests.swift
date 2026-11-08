@@ -425,7 +425,7 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
         samples.reserveCapacity(count)
         var run = Bytes(try reader.read(byteCount: count * 3))
         run.forEach(Byte3.self) { sample in
-            samples.append(Int32(bitPattern: sample.bigEndian << 8) >> 8) // sign-extend 24 bits
+            samples.append(sample.signedInteger(.bigEndian, as: Int32.self)) // 24-bit, sign-extended
         }
 
         let sensor = try reader.read(SensorID.self)

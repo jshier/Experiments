@@ -68,6 +68,22 @@ extension ByteGroup {
         }
     }
 
+    /// The bytes as a two's-complement signed integer in `byteOrder`, sign-extended to `I`: for signed
+    /// fields of odd widths, such as 24-bit audio samples.
+    ///
+    /// ```swift
+    /// let sample = try reader.read(Byte3.self).signedInteger(.bigEndian, as: Int32.self) // FF FF FE → -2
+    /// ```
+    ///
+    /// - Precondition: `I` is at least as wide as the group.
+    @inlinable @inline(__always)
+    public func signedInteger<I: FixedWidthInteger & SignedInteger>(_ byteOrder: ByteOrder, as _: I.Type = Int.self) -> I {
+        precondition(I.bitWidth >= 8 &* Self.byteCount, "\(I.self) is narrower than \(Self.self)")
+        // The group's bits at the top of `I`, then an arithmetic shift back down copies the sign bit.
+        let shift = I.bitWidth &- 8 &* Self.byteCount
+        return (I(truncatingIfNeeded: integer(byteOrder)) &<< shift) &>> shift
+    }
+
     /// Creates a value from the low `byteCount` bytes of `value`, in `byteOrder`.
     @inlinable @inline(__always)
     public init(_ value: Integer, _ byteOrder: ByteOrder) {

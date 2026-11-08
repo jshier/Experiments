@@ -53,6 +53,26 @@ extension Bytes {
         _byteOffset &+= T.byteCount
         return value
     }
+
+    /// Reads a `T` field in `byteOrder` as an `I`: for sizes, counts, and offsets from untrusted data, which
+    /// should fail rather than trap when they don't fit.
+    ///
+    /// ```swift
+    /// let size = try reader.read(Int.self, as: Byte8.self, .littleEndian) // a zip64 size, as an Int
+    /// ```
+    ///
+    /// The field is its unsigned value. Throws ``BytesError/invalidValue``, without consuming anything, if
+    /// `I` can't represent it. For signed fields, read the group and use ``ByteGroup/signedInteger(_:as:)``.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    public mutating func read<I: FixedWidthInteger, T: ByteGroup>(
+        _: I.Type, as _: T.Type, _ byteOrder: ByteOrder
+    ) throws(BytesError) -> I {
+        let integer = try peek(T.self, byteOrder)
+        guard let value = I(exactly: integer) else { throw .invalidValue }
+        _byteOffset &+= T.byteCount
+        return value
+    }
 }
 
 extension BytesWriter {

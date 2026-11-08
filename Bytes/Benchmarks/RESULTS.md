@@ -64,6 +64,37 @@ fix brief is ready to file.
 The `let` form's threshold is 1, so a compiler fix shows up as an improvement.
 `Allocations:Read:_for-in_Bytes_(UInt8),_var_reader` holds the workaround at 0.
 
+## Against swift-binary-parsing (`../BinaryParsingComparison`, full write-up in its RESULTS.md)
+
+Apple's `BinaryParsing` 0.0.4 on the same work, both directions: our zip and integer parsers ported to
+`ParserSpan`, and its QOI and LZ4 example parsers ported to `Bytes`.
+
+| Workload | Bytes | `ParserSpan` |
+|---|---|---|
+| Zip directory, field by field / fixed-size records | 11 / 7 µs | 23 / 13 µs |
+| Big-endian `UInt32`s | equal (10 µs, vectorized) | equal |
+| 24-bit values | 55 µs (`forEach` 48) | 158 µs |
+| QOI, LZ4 (same algorithm) | within 5% either way | |
+
+- **`ParserSpan`'s field reads cost more** for three reasons:
+  - A trapping add for each advance, which its bounds check already makes redundant.
+  - Per-site error locations, which give each failing read its own throw path: 2.6x the code, and the
+    cursor spilled to the stack.
+  - An out-of-line generic `sliceSpan(byteCount:)`.
+- **Its odd widths** are a byte-by-byte loop; `Byte3` is two overlapping loads.
+- **Its published examples** are 4–42x slower than either port: `Data` appends per pixel, and an `Array`
+  per LZ4 match.
+
+**Adopted:**
+- `atomically { }` (all-or-nothing reads).
+- `read(Int.self, as: Byte8.self, .littleEndian)` (throws instead of trapping when an untrusted value
+  doesn't fit).
+- `ByteGroup.signedInteger(_:as:)` (sign extension for odd widths).
+
+**Learned:** cursors captured by closures that aren't inlined live in memory. That costs Bytes more than a
+byte-only cursor, because each byte read then re-checks the bit offset and bit order. The README's caveat
+covers it.
+
 ## Integer literals for byte groups
 
 `let signature: Byte4 = 0x50_4B_03_04`: the literal's digits are the bytes in memory order, as a hex dump

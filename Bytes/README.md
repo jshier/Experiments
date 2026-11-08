@@ -33,7 +33,9 @@ Full documentation is in `Sources/Bytes/Bytes.docc`, including a guide to writin
 
 - **`Bytes`**: the reading cursor. It can't outlive the memory it reads, and every span it returns borrows
   that memory; copy what you keep with `String(copying:)` or `[UInt8](copying:)`. A read that throws
-  (`BytesError`) consumes nothing.
+  (`BytesError`) consumes nothing, so `byteOffset` is the error's location; `atomically { reader in … }`
+  makes several reads all or nothing. Untrusted sizes read as `Int` throw rather than trap when they don't
+  fit: `read(Int.self, as: Byte8.self, .littleEndian)`.
 - **`BytesWriter`**: the writing cursor, over a `MutableRawSpan`, or over uninitialized memory through
   `withBytesWriter` on `OutputSpan<UInt8>` and `OutputRawSpan`. A write that throws writes nothing, and
   no write touches memory past the cursor, except section writers (below), whose body writes ahead of
@@ -49,9 +51,11 @@ Full documentation is in `Sources/Bytes/Bytes.docc`, including a guide to writin
 - **`Byte2` … `Byte16`** (`ByteGroup`): N bytes as they appear in memory. Interpret them with
   `.littleEndian` or `.bigEndian` (the narrowest integer that fits: `Byte3` → `UInt32`), get or set bytes
   (`group[3]`) and halves, and combine them byte by byte with `^`, `&`, `|`, and `~`, which need no byte
-  order (`payload ^ maskingKey`). Write constants as hex literals of the bytes in memory order, as a hex
-  dump shows them (`0x50_4B_03_04` is `50 4B 03 04`, whatever byte order the data uses; a literal too
-  wide is a compile error for 2, 4, 8, and 16 bytes), or as array literals (`[0x50, 0x4B, 0x03, 0x04]`).
+  order (`payload ^ maskingKey`). Signed odd widths sign-extend with
+  `signedInteger(.bigEndian, as: Int32.self)`. Write constants as hex literals of the bytes in memory
+  order, as a hex dump shows them (`0x50_4B_03_04` is `50 4B 03 04`, whatever byte order the data uses;
+  a literal too wide is a compile error for 2, 4, 8, and 16 bytes), or as array literals
+  (`[0x50, 0x4B, 0x03, 0x04]`).
 - **`ByteRepresentable`**: your own fixed-size types, such as an address backed by `InlineArray<4, UInt8>`.
   Conform with `var rawBytes` and `init(rawBytes:)`; reads and writes are then exactly as fast as the raw
   bytes (one load or store), vectorized in loops.
@@ -176,7 +180,9 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
 - The module and its main type share the name `Bytes`; with a name clash, use a module selector
   (`Bytes::Byte4`).
 - A cursor passed `inout` to a function or closure the compiler doesn't inline goes through memory, and
-  loops over it stop vectorizing. Keep cursors local, or in inlinable code.
+  loops over it stop vectorizing. Keep cursors local, or in inlinable code. That includes capturing one in
+  a closure, such as the body of `[UInt8](capacity:)` or `withBytesWriter`. In memory, each byte read
+  also re-checks the bit offset and bit order: a QOI decoder ran 27% faster with its cursors as locals.
 - Functions that take a cursor `inout` need `@_lifetime` annotations, which need the `Lifetimes`
   experimental feature in your target.
 - `for byte in reader` over a `let reader` heap-allocates the cursor once per loop (Swift 6.4.2: the
