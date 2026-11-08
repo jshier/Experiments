@@ -32,7 +32,7 @@ struct ParityTests {
             let hour = Int.random(in: 0...23, using: &generator)
             let minute = Int.random(in: 0...59, using: &generator)
             let second = Int.random(in: 0...59, using: &generator)
-            let offset: String = switch Int.random(in: 0..<3, using: &generator) {
+            let offset = switch Int.random(in: 0..<3, using: &generator) {
             case 0: "Z"
             case 1: "+" + pad(Int.random(in: 0...23), 2) + ":" + pad(Int.random(in: 0...59), 2)
             default: "-" + pad(Int.random(in: 0...23), 2) + pad(Int.random(in: 0...59), 2)

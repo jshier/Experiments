@@ -58,30 +58,30 @@ public enum CentralDirectory {
         var fields = Fields()
         while !reader.isAtEnd {
             try reader.expect(signature)
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // made by
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // made by
             try reader.skip(byteCount: 2)
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // flags
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // method
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // time
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // date
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // CRC
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // compressed
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // uncompressed
-            let nameLength = Int(try reader.read(Byte2.self, .littleEndian))
-            let extraLength = Int(try reader.read(Byte2.self, .littleEndian))
-            let commentLength = Int(try reader.read(Byte2.self, .littleEndian))
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // flags
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // method
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // time
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // date
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // CRC
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // compressed
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // uncompressed
+            let nameLength = try Int(reader.read(Byte2.self, .littleEndian))
+            let extraLength = try Int(reader.read(Byte2.self, .littleEndian))
+            let commentLength = try Int(reader.read(Byte2.self, .littleEndian))
             try reader.skip(byteCount: 4)
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // external attributes
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // local header offset
-            fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = BytesReader(try reader.read(byteCount: extraLength))
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // external attributes
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // local header offset
+            try fields.add(reader.read(byteCount: nameLength).byteCount)
+            var extra = try BytesReader(reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
                 let id = try extra.read(Byte2.self, .littleEndian)
-                let size = Int(try extra.read(Byte2.self, .littleEndian))
-                var field = BytesReader(try extra.read(byteCount: size))
+                let size = try Int(extra.read(Byte2.self, .littleEndian))
+                var field = try BytesReader(extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self)[bit: 0] {
-                    fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
+                    try fields.add(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
                 }
             }
         }
@@ -92,33 +92,33 @@ public enum CentralDirectory {
         var reader = BytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
-            var header = BytesReader(try reader.read(byteCount: 46))
+            var header = try BytesReader(reader.read(byteCount: 46))
             try header.expect(signature)
-            fields.add(try header.read(Byte2.self, .littleEndian)) // made by
+            try fields.add(header.read(Byte2.self, .littleEndian)) // made by
             try header.skip(byteCount: 2)
-            fields.add(try header.read(Byte2.self, .littleEndian)) // flags
-            fields.add(try header.read(Byte2.self, .littleEndian)) // method
-            fields.add(try header.read(Byte2.self, .littleEndian)) // time
-            fields.add(try header.read(Byte2.self, .littleEndian)) // date
-            fields.add(try header.read(Byte4.self, .littleEndian)) // CRC
-            fields.add(try header.read(Byte4.self, .littleEndian)) // compressed
-            fields.add(try header.read(Byte4.self, .littleEndian)) // uncompressed
-            let nameLength = Int(try header.read(Byte2.self, .littleEndian))
-            let extraLength = Int(try header.read(Byte2.self, .littleEndian))
-            let commentLength = Int(try header.read(Byte2.self, .littleEndian))
+            try fields.add(header.read(Byte2.self, .littleEndian)) // flags
+            try fields.add(header.read(Byte2.self, .littleEndian)) // method
+            try fields.add(header.read(Byte2.self, .littleEndian)) // time
+            try fields.add(header.read(Byte2.self, .littleEndian)) // date
+            try fields.add(header.read(Byte4.self, .littleEndian)) // CRC
+            try fields.add(header.read(Byte4.self, .littleEndian)) // compressed
+            try fields.add(header.read(Byte4.self, .littleEndian)) // uncompressed
+            let nameLength = try Int(header.read(Byte2.self, .littleEndian))
+            let extraLength = try Int(header.read(Byte2.self, .littleEndian))
+            let commentLength = try Int(header.read(Byte2.self, .littleEndian))
             try header.skip(byteCount: 4)
-            fields.add(try header.read(Byte4.self, .littleEndian)) // external attributes
-            fields.add(try header.read(Byte4.self, .littleEndian)) // local header offset
-            fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = BytesReader(try reader.read(byteCount: extraLength))
+            try fields.add(header.read(Byte4.self, .littleEndian)) // external attributes
+            try fields.add(header.read(Byte4.self, .littleEndian)) // local header offset
+            try fields.add(reader.read(byteCount: nameLength).byteCount)
+            var extra = try BytesReader(reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
-                var fieldHeader = BytesReader(try extra.read(byteCount: 4))
+                var fieldHeader = try BytesReader(extra.read(byteCount: 4))
                 let id = try fieldHeader.read(Byte2.self, .littleEndian)
-                let size = Int(try fieldHeader.read(Byte2.self, .littleEndian))
-                var field = BytesReader(try extra.read(byteCount: size))
+                let size = try Int(fieldHeader.read(Byte2.self, .littleEndian))
+                var field = try BytesReader(extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self)[bit: 0] {
-                    fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
+                    try fields.add(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
                 }
             }
         }
@@ -132,22 +132,22 @@ public enum CentralDirectory {
         var fields = Fields()
         while !input.isEmpty {
             guard try UInt32(parsingLittleEndian: &input) == 0x0201_4B50 else { throw BadSignature() }
-            fields.add(try UInt16(parsingLittleEndian: &input)) // made by
+            try fields.add(UInt16(parsingLittleEndian: &input)) // made by
             try input.seek(toRelativeOffset: 2)
-            fields.add(try UInt16(parsingLittleEndian: &input)) // flags
-            fields.add(try UInt16(parsingLittleEndian: &input)) // method
-            fields.add(try UInt16(parsingLittleEndian: &input)) // time
-            fields.add(try UInt16(parsingLittleEndian: &input)) // date
-            fields.add(try UInt32(parsingLittleEndian: &input)) // CRC
-            fields.add(try UInt32(parsingLittleEndian: &input)) // compressed
-            fields.add(try UInt32(parsingLittleEndian: &input)) // uncompressed
+            try fields.add(UInt16(parsingLittleEndian: &input)) // flags
+            try fields.add(UInt16(parsingLittleEndian: &input)) // method
+            try fields.add(UInt16(parsingLittleEndian: &input)) // time
+            try fields.add(UInt16(parsingLittleEndian: &input)) // date
+            try fields.add(UInt32(parsingLittleEndian: &input)) // CRC
+            try fields.add(UInt32(parsingLittleEndian: &input)) // compressed
+            try fields.add(UInt32(parsingLittleEndian: &input)) // uncompressed
             let nameLength = try Int(parsing: &input, storedAsLittleEndian: UInt16.self)
             let extraLength = try Int(parsing: &input, storedAsLittleEndian: UInt16.self)
             let commentLength = try Int(parsing: &input, storedAsLittleEndian: UInt16.self)
             try input.seek(toRelativeOffset: 4)
-            fields.add(try UInt32(parsingLittleEndian: &input)) // external attributes
-            fields.add(try UInt32(parsingLittleEndian: &input)) // local header offset
-            fields.add(try input.sliceSpan(byteCount: nameLength).count)
+            try fields.add(UInt32(parsingLittleEndian: &input)) // external attributes
+            try fields.add(UInt32(parsingLittleEndian: &input)) // local header offset
+            try fields.add(input.sliceSpan(byteCount: nameLength).count)
             var extra = try input.sliceSpan(byteCount: extraLength)
             try input.seek(toRelativeOffset: commentLength)
             while extra.count >= 4 {
@@ -155,7 +155,7 @@ public enum CentralDirectory {
                 let size = try Int(parsing: &extra, storedAsLittleEndian: UInt16.self)
                 var field = try extra.sliceSpan(byteCount: size)
                 if id == 0x5455, size >= 5, try UInt8(parsing: &field) & 1 != 0 {
-                    fields.add(try Int32(parsingLittleEndian: &field))
+                    try fields.add(Int32(parsingLittleEndian: &field))
                 }
             }
         }
@@ -168,22 +168,22 @@ public enum CentralDirectory {
         while !input.isEmpty {
             var header = try input.sliceSpan(byteCount: 46)
             guard try UInt32(parsingLittleEndian: &header) == 0x0201_4B50 else { throw BadSignature() }
-            fields.add(try UInt16(parsingLittleEndian: &header)) // made by
+            try fields.add(UInt16(parsingLittleEndian: &header)) // made by
             try header.seek(toRelativeOffset: 2)
-            fields.add(try UInt16(parsingLittleEndian: &header)) // flags
-            fields.add(try UInt16(parsingLittleEndian: &header)) // method
-            fields.add(try UInt16(parsingLittleEndian: &header)) // time
-            fields.add(try UInt16(parsingLittleEndian: &header)) // date
-            fields.add(try UInt32(parsingLittleEndian: &header)) // CRC
-            fields.add(try UInt32(parsingLittleEndian: &header)) // compressed
-            fields.add(try UInt32(parsingLittleEndian: &header)) // uncompressed
+            try fields.add(UInt16(parsingLittleEndian: &header)) // flags
+            try fields.add(UInt16(parsingLittleEndian: &header)) // method
+            try fields.add(UInt16(parsingLittleEndian: &header)) // time
+            try fields.add(UInt16(parsingLittleEndian: &header)) // date
+            try fields.add(UInt32(parsingLittleEndian: &header)) // CRC
+            try fields.add(UInt32(parsingLittleEndian: &header)) // compressed
+            try fields.add(UInt32(parsingLittleEndian: &header)) // uncompressed
             let nameLength = try Int(parsing: &header, storedAsLittleEndian: UInt16.self)
             let extraLength = try Int(parsing: &header, storedAsLittleEndian: UInt16.self)
             let commentLength = try Int(parsing: &header, storedAsLittleEndian: UInt16.self)
             try header.seek(toRelativeOffset: 4)
-            fields.add(try UInt32(parsingLittleEndian: &header)) // external attributes
-            fields.add(try UInt32(parsingLittleEndian: &header)) // local header offset
-            fields.add(try input.sliceSpan(byteCount: nameLength).count)
+            try fields.add(UInt32(parsingLittleEndian: &header)) // external attributes
+            try fields.add(UInt32(parsingLittleEndian: &header)) // local header offset
+            try fields.add(input.sliceSpan(byteCount: nameLength).count)
             var extra = try input.sliceSpan(byteCount: extraLength)
             try input.seek(toRelativeOffset: commentLength)
             while extra.count >= 4 {
@@ -192,7 +192,7 @@ public enum CentralDirectory {
                 let size = try Int(parsing: &fieldHeader, storedAsLittleEndian: UInt16.self)
                 var field = try extra.sliceSpan(byteCount: size)
                 if id == 0x5455, size >= 5, try UInt8(parsing: &field) & 1 != 0 {
-                    fields.add(try Int32(parsingLittleEndian: &field))
+                    try fields.add(Int32(parsingLittleEndian: &field))
                 }
             }
         }

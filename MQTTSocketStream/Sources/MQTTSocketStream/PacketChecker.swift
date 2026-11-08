@@ -35,7 +35,7 @@ public struct PacketChecker {
             // Frames, not `MQTTPacket.read(from:)`: dispatching on the type and parsing the PUBLISH directly
             // skips building `MQTTPacket`, a 153-byte enum, and testing its case.
             while let frame = try MQTTFrame.read(from: &reader) {
-                guard frame.type == .publish, isNext(try MQTTPublish(parsing: frame)) else {
+                guard frame.type == .publish, try isNext(MQTTPublish(parsing: frame)) else {
                     isExpected = false
                     break
                 }

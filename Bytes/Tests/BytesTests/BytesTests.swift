@@ -153,8 +153,8 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         try section.skip(byteCount: 2)
         try section.expectEnd()
         var text = try reader.read(sectionPrefixedBy: LEB128.self, maxByteCount: 4)
-        #expect(String(copying: try text.readUTF8(byteCount: 2)) == "hi")
-        #expect(String(copying: try reader.read(utf8PrefixedBy: Byte2.self, .bigEndian)) == "é")
+        #expect(try String(copying: text.readUTF8(byteCount: 2)) == "hi")
+        #expect(try String(copying: reader.read(utf8PrefixedBy: Byte2.self, .bigEndian)) == "é")
 
         // Incomplete or invalid: nothing consumed, not even the length.
         let incomplete: [UInt8] = [0x00, 0x05, 0x01, 0x02]
@@ -176,18 +176,18 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         let bytes = try [UInt8](capacity: 300) { output in
             try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in
                 // Fixed prefix: backpatched in place.
-                let returned = try writer.write(sectionPrefixedBy: Byte2.self, .bigEndian) { (section) throws(BytesError) in
+                let returned = try writer.write(sectionPrefixedBy: Byte2.self, .bigEndian) { section throws(BytesError) in
                     try section.write(0x0A0B, as: Byte2.self, .bigEndian)
                     try section.write("hi".utf8Span, prefixedBy: Byte2.self, .bigEndian)
                     return 42
                 }
                 #expect(returned == 42)
                 // LEB128 prefix: reserved 4 bytes, moved down to 1.
-                try writer.write(sectionPrefixedBy: LEB128.self, maxByteCount: 4) { (section) throws(BytesError) in
+                try writer.write(sectionPrefixedBy: LEB128.self, maxByteCount: 4) { section throws(BytesError) in
                     try section.write(Byte4(littleEndian: 0x0403_0201))
                 }
                 // LEB128 prefix that needs 2 bytes.
-                try writer.write(sectionPrefixedBy: LEB128.self, maxByteCount: 4) { (section) throws(BytesError) in
+                try writer.write(sectionPrefixedBy: LEB128.self, maxByteCount: 4) { section throws(BytesError) in
                     try section.write(Byte.self, count: 200) { Byte(truncatingIfNeeded: $0) }
                 }
             }
@@ -200,7 +200,7 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         var mutable = buffer.mutableSpan
         var writer = BytesWriter(&mutable)
         #expect(throws: BytesError.invalidValue) {
-            try writer.write(sectionPrefixedBy: LEB128.self, maxByteCount: 1) { (section) throws(BytesError) in
+            try writer.write(sectionPrefixedBy: LEB128.self, maxByteCount: 1) { section throws(BytesError) in
                 try section.write(Byte.self, count: 128) { _ in 0 }
             }
         }
@@ -230,7 +230,9 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
                 }
                 let single = try [UInt8](capacity: count * T.byteCount) { output in
                     try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in
-                        for value in values { try writer.write(value, as: T.self, order) }
+                        for value in values {
+                            try writer.write(value, as: T.self, order)
+                        }
                     }
                 }
                 #expect(bulk == single, "write \(T.self) \(order) × \(count)")
@@ -288,7 +290,9 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         var scalar = BytesReader(data.span)
         try scalar.skip(bitCount: 1)
         var expected: [Bits<3>] = []
-        while scalar.remainingBitCount >= 3 { expected.append(try scalar.read(Bits<3>.self)) }
+        while scalar.remainingBitCount >= 3 {
+            try expected.append(scalar.read(Bits<3>.self))
+        }
         #expect(values == expected)
     }
 }
@@ -388,9 +392,7 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
 enum Unit: UInt8 { case celsius, fahrenheit, kelvin }
 
 struct SensorID: ByteRepresentable, Equatable {
-    var rawBytes: InlineArray<6, UInt8>
-    init(rawBytes: InlineArray<6, UInt8>) { self.rawBytes = rawBytes }
-    static func == (lhs: Self, rhs: Self) -> Bool { (0..<6).allSatisfy { lhs.rawBytes[$0] == rhs.rawBytes[$0] } }
+    var rawBytes: InlineArray<6, UInt8> static func ==(lhs: Self, rhs: Self) -> Bool { (0..<6).allSatisfy { lhs.rawBytes[$0] == rhs.rawBytes[$0] } }
 }
 
 struct Reading {
@@ -409,21 +411,21 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
 
         // A fixed-size header read as its own cursor: its length is a constant the optimizer can see,
         // so every field read inside it needs no bounds check of its own.
-        var header = BytesReader(try reader.read(byteCount: 5))
+        var header = try BytesReader(reader.read(byteCount: 5))
         try header.expect([0x53, 0x52] as Byte2)
         let version = try header.read(Nibble.self)
         guard version == 1 else { throw .invalidValue }
-        let unit = try header.read(Unit.self, as: Crumb.self)  // throws .invalidValue for 3
+        let unit = try header.read(Unit.self, as: Crumb.self) // throws .invalidValue for 3
         let hasTimestamp = try header.read(Bit.self).isSet
-        try header.expect(Bit(0))                               // reserved
-        let count = Int(try header.read(Byte2.self, .bigEndian))
+        try header.expect(Bit(0)) // reserved
+        let count = try Int(header.read(Byte2.self, .bigEndian))
 
         let timestamp: UInt64? = if hasTimestamp { try reader.read(Byte8.self, .littleEndian) } else { nil }
 
         // A run of values: one bounds check, then a vectorized loop.
         var samples: [Int32] = []
         samples.reserveCapacity(count)
-        var run = BytesReader(try reader.read(byteCount: count * 3))
+        var run = try BytesReader(reader.read(byteCount: count * 3))
         run.forEach(Byte3.self) { sample in
             samples.append(sample.signedInteger(.bigEndian, as: Int32.self)) // 24-bit, sign-extended
         }
@@ -438,7 +440,7 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
 func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
     let size = 5 + (reading.timestamp == nil ? 0 : 8) + reading.samples.count * 3 + 6
     return try [UInt8](capacity: size) { (output) throws(BytesError) in
-        try output.withBytesWriter { (writer) throws(BytesError) in
+        try output.withBytesWriter { writer throws(BytesError) in
             try writer.write([0x53, 0x52] as Byte2)
             try writer.write(reading.version)
             try writer.write(reading.unit, as: Crumb.self)
@@ -564,14 +566,14 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
             guard reader.remainingBitCount >= width else { break }
             let expected = reference.bits(width, from: position)
             let actual: UInt64 = switch width {
-            case 1: UInt64(try reader.read(Bit.self))
-            case 2: UInt64(try reader.read(Crumb.self))
-            case 3: UInt64(try reader.read(Bits<3>.self))
-            case 4: UInt64(try reader.read(Nibble.self))
-            case 5: UInt64(try reader.read(Bits<5>.self))
-            case 6: UInt64(try reader.read(Bits<6>.self))
-            case 7: UInt64(try reader.read(Bits<7>.self))
-            case 8: UInt64(try reader.read(Byte.self))
+            case 1: try UInt64(reader.read(Bit.self))
+            case 2: try UInt64(reader.read(Crumb.self))
+            case 3: try UInt64(reader.read(Bits<3>.self))
+            case 4: try UInt64(reader.read(Nibble.self))
+            case 5: try UInt64(reader.read(Bits<5>.self))
+            case 6: try UInt64(reader.read(Bits<6>.self))
+            case 7: try UInt64(reader.read(Bits<7>.self))
+            case 8: try UInt64(reader.read(Byte.self))
             default: try reader.read(bitCount: width)
             }
             #expect(actual == expected, "\(width) bits at bit \(position)")
@@ -667,10 +669,8 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
 
 /// A custom type backed by `n` raw bytes, like an IPv4 (4), MAC (6), or IPv6 (16) address.
 struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
-    var rawBytes: InlineArray<n, UInt8>
-    init(rawBytes: InlineArray<n, UInt8>) { self.rawBytes = rawBytes }
-    var array: [UInt8] { (0..<n).map { rawBytes[$0] } }
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.array == rhs.array }
+    var rawBytes: InlineArray<n, UInt8> var array: [UInt8] { (0..<n).map { rawBytes[$0] } }
+    static func ==(lhs: Self, rhs: Self) -> Bool { lhs.array == rhs.array }
 }
 
 @Suite struct ByteRepresentableTests {
@@ -733,7 +733,7 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
         #expect(vector == SIMD4(data[5], data[6], data[7], data[8]))
         let address = try reader.load(InlineArray<4, UInt8>.self)
         #expect((0..<4).map { address[$0] } == Array(data[9..<13]))
-        #expect(try reader.peekLoad(Double.self).bitPattern == (try reader.read(Byte8.self)).littleEndian)
+        #expect(try reader.peekLoad(Double.self).bitPattern == (reader.read(Byte8.self)).littleEndian)
 
         // Mid-byte: each byte is the next 8 bits.
         var shifted = BytesReader(data.span)
@@ -759,10 +759,12 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
         let addresses = try reader.read(InlineArray<4, UInt8>.self, count: 25)
         #expect(addresses.count == 25 && reader.byteOffset == 101)
         for index in addresses.indices {
-            #expect((0..<4).map { addresses[index][$0] } == Array(data[1 + 4 * index ..< 5 + 4 * index]))
+            #expect((0..<4).map { addresses[index][$0] } == Array(data[1 + 4 * index..<5 + 4 * index]))
         }
         var iterated = 0
-        for address in addresses { iterated += Int(address[0]) }
+        for address in addresses {
+            iterated += Int(address[0])
+        }
         #expect(iterated == (0..<25).reduce(0) { $0 + Int(data[1 + 4 * $1]) })
         #expect(throws: BytesError.insufficientData) { _ = try reader.read(UInt8.self, count: 1) }
 
@@ -849,7 +851,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
             var buffer = [UInt8](repeating: 0xEE, count: 200 * 17)
             var mutable = buffer.mutableSpan
             var writer = BytesWriter(&mutable, bitOrder: order)
-            for trip in trips { try trip.write(&writer) }
+            for trip in trips {
+                try trip.write(&writer)
+            }
             let written = writer.byteCount
             _ = consume writer
             var reader = BytesReader(buffer.span.extracting(first: written), bitOrder: order)
@@ -939,7 +943,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
                                 if bulk {
                                     try writer.write(values.span)
                                 } else {
-                                    for value in values { try writer.write(value) }
+                                    for value in values {
+                                        try writer.write(value)
+                                    }
                                 }
                             }
                         }
@@ -983,7 +989,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
             var scalar = BytesReader(data.span)
             try scalar.skip(bitCount: bitShift)
             for value in values {
-                #expect(value == (try scalar.read(T.self, order)))
+                #expect(try value == (scalar.read(T.self, order)))
             }
             #expect(reader.byteOffset == scalar.byteOffset)
         }
@@ -1017,13 +1023,17 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         var scalar = BytesReader(data.span)
         try scalar.skip(bitCount: bitShift)
         var expected: [T] = []
-        while scalar.remainingByteCount >= T.byteCount { expected.append(try scalar.read(T.self)) }
+        while scalar.remainingByteCount >= T.byteCount {
+            try expected.append(scalar.read(T.self))
+        }
         #expect(values == expected, "\(T.self) shifted \(bitShift)")
         #expect(reader.byteOffset == scalar.byteOffset && reader.bitOffset == scalar.bitOffset)
         for value in values {
             // Big-endian, the slow way: the first byte is the most significant.
             var bigEndian: UInt128 = 0
-            for index in 0..<T.byteCount { bigEndian = bigEndian << 8 | UInt128(value[index]) }
+            for index in 0..<T.byteCount {
+                bigEndian = bigEndian << 8 | UInt128(value[index])
+            }
             #expect(UInt128(value.bigEndian) == bigEndian, "\(T.self).bigEndian")
             #expect(T(bigEndian: value.bigEndian) == value)
         }
@@ -1048,7 +1058,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         var scalar = BytesReader(data.span, bitOrder: order)
         try scalar.skip(bitCount: bitShift)
         var expected: [Bits<width>] = []
-        while scalar.remainingBitCount >= width { expected.append(try scalar.read(Bits<width>.self)) }
+        while scalar.remainingBitCount >= width {
+            try expected.append(scalar.read(Bits<width>.self))
+        }
         #expect(values == expected, "Bits<\(width)> \(order) shifted \(bitShift)")
         #expect(reader.byteOffset == scalar.byteOffset && reader.bitOffset == scalar.bitOffset)
     }
@@ -1058,7 +1070,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         var reader = BytesReader(data.span)
         try reader.skip(bitCount: 13) // Iteration starts at the next whole byte: offset 2.
         var bytes: [UInt8] = []
-        for byte in reader { bytes.append(byte) }
+        for byte in reader {
+            bytes.append(byte)
+        }
         #expect(bytes == Array(data[2...]))
         #expect(reader.byteOffset == 1 && reader.bitOffset == 5) // Not consumed.
     }
@@ -1084,7 +1098,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
             try reader.skip(bitCount: bitShift)
             var iterated: [T.Integer] = []
             let values = reader.values(of: T.self, byteOrder) // Swift 6.4 can't loop over the temporary.
-            for value in values { iterated.append(value) }
+            for value in values {
+                iterated.append(value)
+            }
             #expect(reader.byteOffset == bitShift / 8 && reader.bitOffset == bitShift % 8) // Not consumed.
             let underestimatedCount = values.underestimatedCount
             var expected: [T.Integer] = []
@@ -1099,7 +1115,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         try reader.skip(bitCount: bitShift)
         var iterated: [Bits<width>] = []
         let values = reader.values(of: Bits<width>.self)
-        for value in values { iterated.append(value) }
+        for value in values {
+            iterated.append(value)
+        }
         // Small, odd chunks (not multiples of 8), through the iterator directly.
         var chunked: [Bits<width>] = []
         let view = reader.values(of: Bits<width>.self)
@@ -1107,7 +1125,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         while true {
             let span = iterator.nextSpan(maxCount: 5)
             if span.isEmpty { break }
-            for index in span.indices { chunked.append(span[index]) }
+            for index in span.indices {
+                chunked.append(span[index])
+            }
         }
         var expected: [Bits<width>] = []
         reader.forEach(Bits<width>.self) { expected.append($0) }
@@ -1154,7 +1174,9 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         let pattern: Byte4 = [0x50, 0x4B, 0x05, 0x50]
         let bytes = (0..<4).map { pattern[$0] }
         for plant in [0, 15, 16, 31, 133, 296] {
-            for index in 0..<4 { data[plant + index] = bytes[index] }
+            for index in 0..<4 {
+                data[plant + index] = bytes[index]
+            }
         }
         for skip in [0, 1, 17, 200, 297] {
             var reader = BytesReader(data.span)
@@ -1162,7 +1184,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
             #expect(reader.firstByteOffset(of: pattern) == naive(bytes, in: data, skip..<data.count), "first from \(skip)")
             #expect(reader.lastByteOffset(of: pattern) == naive(bytes, in: data, (skip..<data.count).reversed()), "last from \(skip)")
         }
-        let wide: Byte16 = Byte16(littleEndian: 0x50)
+        let wide = Byte16(littleEndian: 0x50)
         let wideBytes = (0..<16).map { wide[$0] }
         #expect(BytesReader(data.span).firstByteOffset(of: wide) == naive(wideBytes, in: data, 0..<data.count))
         let short: [UInt8] = [1, 2]
@@ -1186,7 +1208,9 @@ struct WideByte5: ByteGroup {
         let values = try [UInt128](capacity: 16) { try reader.read(WideByte5.self, .littleEndian, into: &$0) }
         var single = BytesReader(data.span)
         var expected: [UInt128] = []
-        for _ in 0..<16 { expected.append(try single.read(WideByte5.self, .littleEndian)) }
+        for _ in 0..<16 {
+            try expected.append(single.read(WideByte5.self, .littleEndian))
+        }
         #expect(values == expected)
     }
 }
@@ -1227,7 +1251,9 @@ struct WideByte5: ByteGroup {
                 var buffer = [UInt8](repeating: 0xEE, count: start + count + 3)
                 var span = buffer.mutableSpan
                 var writer = BytesWriter(&span)
-                for _ in 0..<start { try writer.write(Byte(0)) }
+                for _ in 0..<start {
+                    try writer.write(Byte(0))
+                }
                 try writer.write(source.span.bytes.extracting(first: count))
                 #expect(writer.byteCount == start + count)
                 _ = consume writer
@@ -1255,7 +1281,9 @@ struct WideByte5: ByteGroup {
         for distance in Array(1...40) + [63, 64] {
             for count in Array(0...40) + [64, 100, 258, 300] {
                 var expected = prefix
-                for _ in 0..<count { expected.append(expected[expected.count - distance]) }
+                for _ in 0..<count {
+                    expected.append(expected[expected.count - distance])
+                }
                 var buffer = [UInt8](repeating: 0xEE, count: prefix.count + count + 20)
                 var span = buffer.mutableSpan
                 var writer = BytesWriter(&span)
@@ -1325,7 +1353,7 @@ struct WideByte5: ByteGroup {
             var buffer = BitBuffer(source)
             while reference.remainingBitCount > 0 {
                 let width = min(Int.random(in: 0...25, using: &rng), reference.remainingBitCount)
-                #expect(buffer.read(bitCount: width) == (try reference.read(bitCount: width)), "start \(start) width \(width)")
+                #expect(try buffer.read(bitCount: width) == (reference.read(bitCount: width)), "start \(start) width \(width)")
             }
             let overrun = buffer.isOverrun
             #expect(!overrun)
@@ -1356,7 +1384,7 @@ struct WideByte5: ByteGroup {
         // DEFLATE's stored-block header: final bit, 2-bit type, then align and read the length.
         let data: [UInt8] = [0b0000_0001, 0x05, 0x00]
         var reader = BytesReader(data.span, bitOrder: .leastSignificantFirst)
-        let (final, type) = try reader.withBitBuffer { (buffer) throws(BytesError) in
+        let (final, type) = try reader.withBitBuffer { buffer throws(BytesError) in
             let final = buffer.read(Bit.self).isSet
             let type = buffer.read(Crumb.self)
             buffer.alignToByte()
@@ -1375,7 +1403,9 @@ struct WideByte5: ByteGroup {
         for distance in [1, 3, 7, 8, 9, 15, 16, 17, 40, 64] {
             for count in [0, 1, 3, 7, 8, 9, 15, 16, 17, 31, 32, 33, 100, 258] {
                 var expected = prefix
-                for _ in 0..<count { expected.append(expected[expected.count - distance]) }
+                for _ in 0..<count {
+                    expected.append(expected[expected.count - distance])
+                }
                 for room in [0, 15, 31, 32, 80] {
                     var buffer = [UInt8](repeating: 0xEE, count: prefix.count + count + room)
                     var span = buffer.mutableSpan
@@ -1405,7 +1435,9 @@ struct WideByte5: ByteGroup {
         #expect(UInt64(1).bitReversed == 1 << 63)
         #expect(Bits<5>(0b00011).bitReversed == 0b11000)
         #expect(Nibble(0b0010).bitReversed == 0b0100)
-        for value in UInt16.min...UInt16.max where value % 97 == 0 { #expect(value.bitReversed.bitReversed == value) }
+        for value in UInt16.min...UInt16.max where value % 97 == 0 {
+            #expect(value.bitReversed.bitReversed == value)
+        }
     }
 }
 

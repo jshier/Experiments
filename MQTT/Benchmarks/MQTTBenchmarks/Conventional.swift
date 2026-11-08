@@ -49,7 +49,7 @@ enum Conventional {
     }
 
     static func readString(_ data: [UInt8], _ index: inout Int, end: Int) throws -> String {
-        let length = Int(try readUInt16(data, &index, end: end))
+        let length = try Int(readUInt16(data, &index, end: end))
         guard index + length <= end, let string = String(validating: data[index..<index + length], as: UTF8.self) else {
             throw ConventionalError.malformed
         }
@@ -82,12 +82,12 @@ enum Conventional {
             while index < propertiesEnd {
                 let identifier = try readVariableByteInteger(data, &index, end: propertiesEnd)
                 switch identifier {
-                case 0x02: properties.append(.messageExpiryInterval(try readUInt32(data, &index, end: propertiesEnd)))
-                case 0x03: properties.append(.contentType(try readString(data, &index, end: propertiesEnd)))
-                case 0x23: properties.append(.topicAlias(try readUInt16(data, &index, end: propertiesEnd)))
+                case 0x02: try properties.append(.messageExpiryInterval(readUInt32(data, &index, end: propertiesEnd)))
+                case 0x03: try properties.append(.contentType(readString(data, &index, end: propertiesEnd)))
+                case 0x23: try properties.append(.topicAlias(readUInt16(data, &index, end: propertiesEnd)))
                 case 0x26:
                     let name = try readString(data, &index, end: propertiesEnd)
-                    properties.append(.userProperty(name, try readString(data, &index, end: propertiesEnd)))
+                    try properties.append(.userProperty(name, readString(data, &index, end: propertiesEnd)))
                 default: throw ConventionalError.malformed
                 }
             }
@@ -104,17 +104,17 @@ enum Conventional {
         var properties: [UInt8] = []
         for property in publish.properties {
             switch property {
-            case .messageExpiryInterval(let value):
+            case let .messageExpiryInterval(value):
                 properties.append(0x02)
                 properties += [UInt8(value >> 24), UInt8(truncatingIfNeeded: value >> 16), UInt8(truncatingIfNeeded: value >> 8), UInt8(truncatingIfNeeded: value)]
-            case .userProperty(let name, let value):
+            case let .userProperty(name, value):
                 properties.append(0x26)
                 appendString(name, to: &properties)
                 appendString(value, to: &properties)
-            case .contentType(let value):
+            case let .contentType(value):
                 properties.append(0x03)
                 appendString(value, to: &properties)
-            case .topicAlias(let value):
+            case let .topicAlias(value):
                 properties.append(0x23)
                 properties += [UInt8(value >> 8), UInt8(truncatingIfNeeded: value)]
             }

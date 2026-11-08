@@ -98,7 +98,7 @@ public struct Bits<let width: Int>: RawRepresentable, BitwiseCopyable, Hashable,
     public static var max: Self { Self(_unchecked: mask) }
 
     @inlinable
-    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    public static func <(lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
 /// A single bit.
@@ -170,57 +170,57 @@ extension Bits: LosslessStringConvertible, ExpressibleByStringLiteral {
     }
 }
 
-extension BinaryInteger {
+public extension BinaryInteger {
     /// Creates an integer from the value of `bits`. Traps if it doesn't fit, as `Int8(byte)` does for 128
     /// and above.
     @inlinable
-    public init<let width: Int>(_ bits: Bits<width>) {
+    init<let width: Int>(_ bits: Bits<width>) {
         self.init(bits.rawValue)
     }
 }
 
 // MARK: - Bitwise operations
 
-extension Bits {
+public extension Bits {
     @inlinable
-    public static prefix func ~ (value: Self) -> Self { Self(_unchecked: ~value.rawValue & mask) }
+    static prefix func ~(value: Self) -> Self { Self(_unchecked: ~value.rawValue & mask) }
 
     @inlinable
-    public static func & (lhs: Self, rhs: Self) -> Self { Self(_unchecked: lhs.rawValue & rhs.rawValue) }
+    static func &(lhs: Self, rhs: Self) -> Self { Self(_unchecked: lhs.rawValue & rhs.rawValue) }
 
     @inlinable
-    public static func | (lhs: Self, rhs: Self) -> Self { Self(_unchecked: lhs.rawValue | rhs.rawValue) }
+    static func |(lhs: Self, rhs: Self) -> Self { Self(_unchecked: lhs.rawValue | rhs.rawValue) }
 
     @inlinable
-    public static func ^ (lhs: Self, rhs: Self) -> Self { Self(_unchecked: lhs.rawValue ^ rhs.rawValue) }
+    static func ^(lhs: Self, rhs: Self) -> Self { Self(_unchecked: lhs.rawValue ^ rhs.rawValue) }
 
     @inlinable
-    public static func &= (lhs: inout Self, rhs: Self) { lhs._rawValue &= rhs.rawValue }
+    static func &=(lhs: inout Self, rhs: Self) { lhs._rawValue &= rhs.rawValue }
 
     @inlinable
-    public static func |= (lhs: inout Self, rhs: Self) { lhs._rawValue |= rhs.rawValue }
+    static func |=(lhs: inout Self, rhs: Self) { lhs._rawValue |= rhs.rawValue }
 
     @inlinable
-    public static func ^= (lhs: inout Self, rhs: Self) { lhs._rawValue ^= rhs.rawValue }
+    static func ^=(lhs: inout Self, rhs: Self) { lhs._rawValue ^= rhs.rawValue }
 
     /// Shifts left by `count` bits, dropping the bits shifted past the top.
     @inlinable
-    public static func << (value: Self, count: Int) -> Self {
+    static func <<(value: Self, count: Int) -> Self {
         Self(_unchecked: UInt8(truncatingIfNeeded: Int(value.rawValue) << count) & mask)
     }
 
     /// Shifts right by `count` bits, dropping the bits shifted past the bottom. (A negative `count` shifts
     /// left, as for integers.)
     @inlinable
-    public static func >> (value: Self, count: Int) -> Self {
+    static func >>(value: Self, count: Int) -> Self {
         Self(_unchecked: UInt8(truncatingIfNeeded: Int(value.rawValue) >> count) & mask)
     }
 
     @inlinable
-    public static func <<= (value: inout Self, count: Int) { value = value << count }
+    static func <<=(value: inout Self, count: Int) { value = value << count }
 
     @inlinable
-    public static func >>= (value: inout Self, count: Int) { value = value >> count }
+    static func >>=(value: inout Self, count: Int) { value = value >> count }
 }
 
 // MARK: - Single bits
@@ -231,7 +231,7 @@ extension Bits {
 // month, and year, an MQTT header's QoS. Bits are numbered from the least significant (bit 0), in the
 // value's integer: for multi-byte fields, read it in its byte order first.
 
-extension Bits {
+public extension Bits {
     /// The `fieldWidth`-bit field starting at bit `offset`, counting from the least significant bit.
     ///
     /// ```swift
@@ -240,7 +240,7 @@ extension Bits {
     /// flags[Crumb.self, at: 1] = 0b01      // 0b0011
     /// ```
     @inlinable
-    public subscript<let fieldWidth: Int>(_: Bits<fieldWidth>.Type, at offset: Int) -> Bits<fieldWidth> {
+    subscript<let fieldWidth: Int>(_: Bits<fieldWidth>.Type, at offset: Int) -> Bits<fieldWidth> {
         @inline(__always) get {
             precondition(offset >= 0 && offset &+ fieldWidth <= width, "Field out of range for \(width) bits")
             return Bits<fieldWidth>(truncatingIfNeeded: rawValue &>> offset)
@@ -253,7 +253,7 @@ extension Bits {
     }
 }
 
-extension FixedWidthInteger {
+public extension FixedWidthInteger {
     /// The bit at `index`, counting from the least significant bit (index 0), as a `Bool`.
     ///
     /// ```swift
@@ -261,7 +261,7 @@ extension FixedWidthInteger {
     /// let isEncrypted = flags[bit: 0]
     /// ```
     @inlinable
-    public subscript(bit index: Int) -> Bool {
+    subscript(bit index: Int) -> Bool {
         @inline(__always) get {
             precondition(index >= 0 && index < Self.bitWidth, "Bit index \(index) out of range")
             return self &>> index & 1 != 0
@@ -282,7 +282,7 @@ extension FixedWidthInteger {
     /// let year = 1980 + Int(date[Bits<7>.self, at: 9])
     /// ```
     @inlinable
-    public subscript<let width: Int>(_: Bits<width>.Type, at offset: Int) -> Bits<width> {
+    subscript<let width: Int>(_: Bits<width>.Type, at offset: Int) -> Bits<width> {
         @inline(__always) get {
             precondition(offset >= 0 && offset &+ width <= Self.bitWidth, "Field out of range")
             return Bits<width>(truncatingIfNeeded: self &>> offset)
@@ -301,7 +301,7 @@ extension FixedWidthInteger {
     /// let mode = attributes[bits: 16..<32]
     /// ```
     @inlinable
-    public subscript(bits range: Range<Int>) -> Self {
+    subscript(bits range: Range<Int>) -> Self {
         @inline(__always) get {
             precondition(range.lowerBound >= 0 && range.upperBound <= Self.bitWidth, "Bit range out of range")
             return self &>> range.lowerBound & ~(~Self.zero << range.count)
@@ -316,9 +316,9 @@ extension FixedWidthInteger {
 
 // MARK: - Single bits
 
-extension Bits {
+public extension Bits {
     @inlinable @inline(__always)
-    static func _checkIndex(_ index: Int) {
+    internal static func _checkIndex(_ index: Int) {
         precondition(index >= 0 && index < width, "Bit index \(index) out of range for \(width) bits")
     }
 
@@ -329,7 +329,7 @@ extension Bits {
     /// flags[bit: 1] = true // 0b0000_0010
     /// ```
     @inlinable
-    public subscript(bit index: Int) -> Bool {
+    subscript(bit index: Int) -> Bool {
         @inline(__always) get {
             Self._checkIndex(index)
             return rawValue &>> index & 1 != 0
@@ -343,29 +343,29 @@ extension Bits {
 
     /// Flips the bit at `index`, counting from the least significant bit (index 0).
     @inlinable
-    public mutating func toggleBit(at index: Int) {
+    mutating func toggleBit(at index: Int) {
         Self._checkIndex(index)
         _rawValue ^= UInt8(1) &<< index
     }
 
     /// The number of set bits.
     @inlinable
-    public var nonzeroBitCount: Int { rawValue.nonzeroBitCount }
+    var nonzeroBitCount: Int { rawValue.nonzeroBitCount }
 }
 
 // MARK: - Halves
 
-extension Bits where width == 8 {
+public extension Bits where width == 8 {
     /// The high four bits.
     @inlinable
-    public var highHalf: Nibble {
+    var highHalf: Nibble {
         get { Nibble(_unchecked: rawValue &>> 4) }
         set { _rawValue = newValue.rawValue &<< 4 | _rawValue & 0x0F }
     }
 
     /// The low four bits.
     @inlinable
-    public var lowHalf: Nibble {
+    var lowHalf: Nibble {
         get { Nibble(_unchecked: rawValue & 0x0F) }
         set { _rawValue = _rawValue & 0xF0 | newValue.rawValue }
     }
@@ -373,73 +373,73 @@ extension Bits where width == 8 {
     /// Creates a byte from its two nibbles, high first, as they're written in a binary literal. (Byte groups
     /// take their halves low first, in memory order.)
     @inlinable
-    public init(highHalf: Nibble, lowHalf: Nibble) {
+    init(highHalf: Nibble, lowHalf: Nibble) {
         self.init(_unchecked: highHalf.rawValue &<< 4 | lowHalf.rawValue)
     }
 }
 
-extension Bits where width == 4 {
+public extension Bits where width == 4 {
     /// The high two bits.
     @inlinable
-    public var highHalf: Crumb {
+    var highHalf: Crumb {
         get { Crumb(_unchecked: rawValue &>> 2) }
         set { _rawValue = newValue.rawValue &<< 2 | _rawValue & 0b11 }
     }
 
     /// The low two bits.
     @inlinable
-    public var lowHalf: Crumb {
+    var lowHalf: Crumb {
         get { Crumb(_unchecked: rawValue & 0b11) }
         set { _rawValue = _rawValue & 0b1100 | newValue.rawValue }
     }
 
     /// Creates a nibble from its two crumbs.
     @inlinable
-    public init(highHalf: Crumb, lowHalf: Crumb) {
+    init(highHalf: Crumb, lowHalf: Crumb) {
         self.init(_unchecked: highHalf.rawValue &<< 2 | lowHalf.rawValue)
     }
 }
 
-extension Bits where width == 2 {
+public extension Bits where width == 2 {
     /// The high bit.
     @inlinable
-    public var highHalf: Bit {
+    var highHalf: Bit {
         get { Bit(_unchecked: rawValue &>> 1) }
         set { _rawValue = newValue.rawValue &<< 1 | _rawValue & 1 }
     }
 
     /// The low bit.
     @inlinable
-    public var lowHalf: Bit {
+    var lowHalf: Bit {
         get { Bit(_unchecked: rawValue & 1) }
         set { _rawValue = _rawValue & 0b10 | newValue.rawValue }
     }
 
     /// Creates a crumb from its two bits.
     @inlinable
-    public init(highHalf: Bit, lowHalf: Bit) {
+    init(highHalf: Bit, lowHalf: Bit) {
         self.init(_unchecked: highHalf.rawValue &<< 1 | lowHalf.rawValue)
     }
 }
 
 // MARK: - Bit and Bool
 
-extension Bits where width == 1 {
+public extension Bits where width == 1 {
     /// Creates `1` for `true` and `0` for `false`.
     @inlinable
-    public init(_ value: Bool) {
+    init(_ value: Bool) {
         self.init(_unchecked: value ? 1 : 0)
     }
 
     /// Whether the bit is `1`.
     @inlinable
-    public var isSet: Bool { rawValue != 0 }
+    var isSet: Bool { rawValue != 0 }
 }
 
-extension Bool {
+public extension Bool {
     /// Creates `true` for `1` and `false` for `0`.
     @inlinable
-    public init(_ bit: Bit) {
+    init(_ bit: Bit) {
         self = bit.rawValue != 0
     }
 }

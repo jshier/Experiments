@@ -6,13 +6,13 @@
 
   @Suite(
     .macros(
-      [
-        "DiscriminatedDecodable": MacroSpec(
-          type: DiscriminatedDecodableMacro.self,
-          conformances: ["Decodable", "CasePathable", "CasePathIterable"]
-        )
-      ],
-      record: .failed
+        [
+            "DiscriminatedDecodable": MacroSpec(
+                type: DiscriminatedDecodableMacro.self,
+                conformances: ["Decodable", "CasePathable", "CasePathIterable"]
+            ),
+        ],
+        record: .failed
     )
   )
   struct DiscriminatedDecodableMacroTests {
@@ -813,10 +813,10 @@
     @Test func alreadyDecodableOnlyAddsCasePaths() {
       assertMacro(
         [
-          "DiscriminatedDecodable": MacroSpec(
-            type: DiscriminatedDecodableMacro.self,
-            conformances: ["CasePathable", "CasePathIterable"]
-          )
+            "DiscriminatedDecodable": MacroSpec(
+                type: DiscriminatedDecodableMacro.self,
+                conformances: ["CasePathable", "CasePathIterable"]
+            ),
         ]
       ) {
         """

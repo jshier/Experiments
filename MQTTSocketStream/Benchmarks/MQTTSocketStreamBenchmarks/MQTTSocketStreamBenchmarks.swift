@@ -123,7 +123,7 @@ let benchmarks: @Sendable () -> Void = {
         Benchmark("Transfer allocations: \(packets) packets of 64 B payloads",
                   configuration: .init(metrics: [.mallocCountTotal], warmupIterations: 1, maxIterations: 5)) { benchmark in
             for _ in benchmark.scaledIterations {
-                blackHole(try await Transfer.run(Workload(payloadSize: 64, packetsPerConnection: packets), mode: .mqtt))
+                try await blackHole(Transfer.run(Workload(payloadSize: 64, packetsPerConnection: packets), mode: .mqtt))
             }
         }
     }
@@ -140,9 +140,13 @@ let benchmarks: @Sendable () -> Void = {
     // No spaces: `thresholds update` writes "_" for them in file names, but `thresholds check` looks files
     // up by the unaltered name (benchmark 1.38.1, ordo-one/benchmark#373).
     Benchmark("Allocations:Check_64_B_payload_packets", configuration: zeroAllocations) { benchmark in
-        for _ in benchmark.scaledIterations { blackHole(try checkStream()) }
+        for _ in benchmark.scaledIterations {
+            try blackHole(checkStream())
+        }
     }
     Benchmark("Allocations:Encode_64_B_payload_packets", configuration: zeroAllocations) { benchmark in
-        for _ in benchmark.scaledIterations { blackHole(encodeStream()) }
+        for _ in benchmark.scaledIterations {
+            blackHole(encodeStream())
+        }
     }
 }

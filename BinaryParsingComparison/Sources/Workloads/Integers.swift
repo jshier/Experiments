@@ -10,7 +10,9 @@ public enum Integers {
     public static func sum32Bytes(_ span: RawSpan) throws -> UInt64 {
         var reader = BytesReader(span)
         var sum: UInt64 = 0
-        while reader.remainingByteCount >= 4 { sum &+= UInt64(try reader.read(Byte4.self, .bigEndian)) }
+        while reader.remainingByteCount >= 4 {
+            try sum &+= UInt64(reader.read(Byte4.self, .bigEndian))
+        }
         return sum
     }
 
@@ -24,7 +26,9 @@ public enum Integers {
     public static func sum32ParserSpan(_ span: RawSpan) throws -> UInt64 {
         var input = ParserSpan(span)
         var sum: UInt64 = 0
-        while input.count >= 4 { sum &+= UInt64(try UInt32(parsingBigEndian: &input)) }
+        while input.count >= 4 {
+            try sum &+= UInt64(UInt32(parsingBigEndian: &input))
+        }
         return sum
     }
 
@@ -33,7 +37,9 @@ public enum Integers {
     public static func sum24Bytes(_ span: RawSpan) throws -> UInt64 {
         var reader = BytesReader(span)
         var sum: UInt64 = 0
-        while reader.remainingByteCount >= 3 { sum &+= UInt64(try reader.read(Byte3.self, .bigEndian)) }
+        while reader.remainingByteCount >= 3 {
+            try sum &+= UInt64(reader.read(Byte3.self, .bigEndian))
+        }
         return sum
     }
 
@@ -48,7 +54,7 @@ public enum Integers {
         var input = ParserSpan(span)
         var sum: UInt64 = 0
         while input.count >= 3 {
-            sum &+= UInt64(try UInt32(parsing: &input, endianness: .big, byteCount: 3))
+            try sum &+= UInt64(UInt32(parsing: &input, endianness: .big, byteCount: 3))
         }
         return sum
     }

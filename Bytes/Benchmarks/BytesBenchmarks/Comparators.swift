@@ -134,30 +134,30 @@ enum CentralDirectory {
         var fields = Fields()
         while !reader.isAtEnd {
             try reader.expect(signature)
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // made by
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // made by
             try reader.skip(byteCount: 2)
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // flags
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // method
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // time
-            fields.add(try reader.read(Byte2.self, .littleEndian)) // date
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // CRC
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // compressed
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // uncompressed
-            let nameLength = Int(try reader.read(Byte2.self, .littleEndian))
-            let extraLength = Int(try reader.read(Byte2.self, .littleEndian))
-            let commentLength = Int(try reader.read(Byte2.self, .littleEndian))
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // flags
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // method
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // time
+            try fields.add(reader.read(Byte2.self, .littleEndian)) // date
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // CRC
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // compressed
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // uncompressed
+            let nameLength = try Int(reader.read(Byte2.self, .littleEndian))
+            let extraLength = try Int(reader.read(Byte2.self, .littleEndian))
+            let commentLength = try Int(reader.read(Byte2.self, .littleEndian))
             try reader.skip(byteCount: 4)
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // external attributes
-            fields.add(try reader.read(Byte4.self, .littleEndian)) // local header offset
-            fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = BytesReader(try reader.read(byteCount: extraLength))
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // external attributes
+            try fields.add(reader.read(Byte4.self, .littleEndian)) // local header offset
+            try fields.add(reader.read(byteCount: nameLength).byteCount)
+            var extra = try BytesReader(reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
                 let id = try extra.read(Byte2.self, .littleEndian)
-                let size = Int(try extra.read(Byte2.self, .littleEndian))
-                var field = BytesReader(try extra.read(byteCount: size))
+                let size = try Int(extra.read(Byte2.self, .littleEndian))
+                var field = try BytesReader(extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self).rawValue & 1 != 0 {
-                    fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
+                    try fields.add(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
                 }
             }
         }
@@ -170,33 +170,33 @@ enum CentralDirectory {
         var reader = BytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
-            var header = BytesReader(try reader.read(byteCount: 46))
+            var header = try BytesReader(reader.read(byteCount: 46))
             try header.expect(signature)
-            fields.add(try header.read(Byte2.self, .littleEndian)) // made by
+            try fields.add(header.read(Byte2.self, .littleEndian)) // made by
             try header.skip(byteCount: 2)
-            fields.add(try header.read(Byte2.self, .littleEndian)) // flags
-            fields.add(try header.read(Byte2.self, .littleEndian)) // method
-            fields.add(try header.read(Byte2.self, .littleEndian)) // time
-            fields.add(try header.read(Byte2.self, .littleEndian)) // date
-            fields.add(try header.read(Byte4.self, .littleEndian)) // CRC
-            fields.add(try header.read(Byte4.self, .littleEndian)) // compressed
-            fields.add(try header.read(Byte4.self, .littleEndian)) // uncompressed
-            let nameLength = Int(try header.read(Byte2.self, .littleEndian))
-            let extraLength = Int(try header.read(Byte2.self, .littleEndian))
-            let commentLength = Int(try header.read(Byte2.self, .littleEndian))
+            try fields.add(header.read(Byte2.self, .littleEndian)) // flags
+            try fields.add(header.read(Byte2.self, .littleEndian)) // method
+            try fields.add(header.read(Byte2.self, .littleEndian)) // time
+            try fields.add(header.read(Byte2.self, .littleEndian)) // date
+            try fields.add(header.read(Byte4.self, .littleEndian)) // CRC
+            try fields.add(header.read(Byte4.self, .littleEndian)) // compressed
+            try fields.add(header.read(Byte4.self, .littleEndian)) // uncompressed
+            let nameLength = try Int(header.read(Byte2.self, .littleEndian))
+            let extraLength = try Int(header.read(Byte2.self, .littleEndian))
+            let commentLength = try Int(header.read(Byte2.self, .littleEndian))
             try header.skip(byteCount: 4)
-            fields.add(try header.read(Byte4.self, .littleEndian)) // external attributes
-            fields.add(try header.read(Byte4.self, .littleEndian)) // local header offset
-            fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = BytesReader(try reader.read(byteCount: extraLength))
+            try fields.add(header.read(Byte4.self, .littleEndian)) // external attributes
+            try fields.add(header.read(Byte4.self, .littleEndian)) // local header offset
+            try fields.add(reader.read(byteCount: nameLength).byteCount)
+            var extra = try BytesReader(reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
-                var fieldHeader = BytesReader(try extra.read(byteCount: 4))
+                var fieldHeader = try BytesReader(extra.read(byteCount: 4))
                 let id = try fieldHeader.read(Byte2.self, .littleEndian)
-                let size = Int(try fieldHeader.read(Byte2.self, .littleEndian))
-                var field = BytesReader(try extra.read(byteCount: size))
+                let size = try Int(fieldHeader.read(Byte2.self, .littleEndian))
+                var field = try BytesReader(extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self).rawValue & 1 != 0 {
-                    fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
+                    try fields.add(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
                 }
             }
         }
@@ -206,32 +206,32 @@ enum CentralDirectory {
     static func parseWithByteReader(_ span: RawSpan) throws(ComparatorError) -> UInt64 {
         var reader = ByteReader(span)
         var fields = Fields()
-        while reader.count > 0 {
+        while !reader.isEmpty {
             try reader.expect(0x0201_4B50)
-            fields.add(try reader.read(UInt16.self))
+            try fields.add(reader.read(UInt16.self))
             try reader.skip(2)
-            fields.add(try reader.read(UInt16.self))
-            fields.add(try reader.read(UInt16.self))
-            fields.add(try reader.read(UInt16.self))
-            fields.add(try reader.read(UInt16.self))
-            fields.add(try reader.read(UInt32.self))
-            fields.add(try reader.read(UInt32.self))
-            fields.add(try reader.read(UInt32.self))
-            let nameLength = Int(try reader.read(UInt16.self))
-            let extraLength = Int(try reader.read(UInt16.self))
-            let commentLength = Int(try reader.read(UInt16.self))
+            try fields.add(reader.read(UInt16.self))
+            try fields.add(reader.read(UInt16.self))
+            try fields.add(reader.read(UInt16.self))
+            try fields.add(reader.read(UInt16.self))
+            try fields.add(reader.read(UInt32.self))
+            try fields.add(reader.read(UInt32.self))
+            try fields.add(reader.read(UInt32.self))
+            let nameLength = try Int(reader.read(UInt16.self))
+            let extraLength = try Int(reader.read(UInt16.self))
+            let commentLength = try Int(reader.read(UInt16.self))
             try reader.skip(4)
-            fields.add(try reader.read(UInt32.self))
-            fields.add(try reader.read(UInt32.self))
-            fields.add(try reader.read(count: nameLength).byteCount)
-            var extra = ByteReader(try reader.read(count: extraLength))
+            try fields.add(reader.read(UInt32.self))
+            try fields.add(reader.read(UInt32.self))
+            try fields.add(reader.read(count: nameLength).byteCount)
+            var extra = try ByteReader(reader.read(count: extraLength))
             try reader.skip(commentLength)
             while extra.count >= 4 {
                 let id = try extra.read(UInt16.self)
-                let size = Int(try extra.read(UInt16.self))
-                var field = ByteReader(try extra.read(count: size))
+                let size = try Int(extra.read(UInt16.self))
+                var field = try ByteReader(extra.read(count: size))
                 if id == 0x5455, size >= 5, try field.read(UInt8.self) & 1 != 0 {
-                    fields.add(try field.read(Int32.self))
+                    try fields.add(field.read(Int32.self))
                 }
             }
         }
@@ -291,14 +291,14 @@ enum BitFields {
         var reader = BytesReader(span)
         var fields = Fields()
         while reader.remainingBitCount >= 64 {
-            fields.add(try reader.read(Bit.self).rawValue)
-            fields.add(try reader.read(Bits<3>.self).rawValue)
-            fields.add(try reader.read(Nibble.self).rawValue)
-            fields.add(try reader.read(Crumb.self).rawValue)
-            fields.add(try reader.read(Bits<6>.self).rawValue)
-            fields.add(try reader.read(bitCount: 13))
-            fields.add(try reader.read(Bits<3>.self).rawValue)
-            fields.add(try reader.read(bitCount: 32))
+            try fields.add(reader.read(Bit.self).rawValue)
+            try fields.add(reader.read(Bits<3>.self).rawValue)
+            try fields.add(reader.read(Nibble.self).rawValue)
+            try fields.add(reader.read(Crumb.self).rawValue)
+            try fields.add(reader.read(Bits<6>.self).rawValue)
+            try fields.add(reader.read(bitCount: 13))
+            try fields.add(reader.read(Bits<3>.self).rawValue)
+            try fields.add(reader.read(bitCount: 32))
         }
         return fields.checksum
     }
@@ -307,14 +307,14 @@ enum BitFields {
         var reader = BitBufferReader(span, mostSignificantFirst: true)
         var fields = Fields()
         for _ in 0..<span.count / 8 {
-            fields.add(try reader.read(1))
-            fields.add(try reader.read(3))
-            fields.add(try reader.read(4))
-            fields.add(try reader.read(2))
-            fields.add(try reader.read(6))
-            fields.add(try reader.read(13))
-            fields.add(try reader.read(3))
-            fields.add(try reader.read(32))
+            try fields.add(reader.read(1))
+            try fields.add(reader.read(3))
+            try fields.add(reader.read(4))
+            try fields.add(reader.read(2))
+            try fields.add(reader.read(6))
+            try fields.add(reader.read(13))
+            try fields.add(reader.read(3))
+            try fields.add(reader.read(32))
         }
         return fields.checksum
     }

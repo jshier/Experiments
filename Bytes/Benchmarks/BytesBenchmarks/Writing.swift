@@ -70,27 +70,37 @@ let memsetStore = WriteWorkload(name: "memset (reference)", unit: 1) { buffer in
 let perValueWriteWorkloads: [WriteWorkload] = [
     WriteWorkload(name: "per-value write(_:as:_:) Byte4", unit: 4, allCores: false) { buffer in
         var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
-        for index in 0..<buffer.count / 4 { try! writer.write(hashed(index), as: Byte4.self, .bigEndian) }
+        for index in 0..<buffer.count / 4 {
+            try! writer.write(hashed(index), as: Byte4.self, .bigEndian)
+        }
         return writer.byteCount
     },
     WriteWorkload(name: "per-value write(_:as:_:) Byte3", unit: 3, allCores: false) { buffer in
         var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
-        for index in 0..<buffer.count / 3 { try! writer.write(hashed(index), as: Byte3.self, .bigEndian) }
+        for index in 0..<buffer.count / 3 {
+            try! writer.write(hashed(index), as: Byte3.self, .bigEndian)
+        }
         return writer.byteCount
     },
     WriteWorkload(name: "per-value write(_:as:_:) Byte16", unit: 16, allCores: false) { buffer in
         var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
-        for index in 0..<buffer.count / 16 { try! writer.write(UInt128(hashedWide(index)), as: Byte16.self, .bigEndian) }
+        for index in 0..<buffer.count / 16 {
+            try! writer.write(UInt128(hashedWide(index)), as: Byte16.self, .bigEndian)
+        }
         return writer.byteCount
     },
     WriteWorkload(name: "per-value write(_:) Byte", unit: 1, allCores: false) { buffer in
         var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
-        for index in 0..<buffer.count { try! writer.write(Byte(truncatingIfNeeded: mixed(index))) }
+        for index in 0..<buffer.count {
+            try! writer.write(Byte(truncatingIfNeeded: mixed(index)))
+        }
         return writer.byteCount
     },
     WriteWorkload(name: "per-value write(_:) Nibble", unit: 1, allCores: false) { buffer in
         var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
-        for index in 0..<buffer.count * 2 { try! writer.write(Nibble(truncatingIfNeeded: mixed(index))) }
+        for index in 0..<buffer.count * 2 {
+            try! writer.write(Nibble(truncatingIfNeeded: mixed(index)))
+        }
         return writer.byteCount
     },
     WriteWorkload(name: "per-value write(_:) IPv4Address", unit: 4, allCores: false) { buffer in
@@ -173,7 +183,7 @@ func registerWriteBenchmarks() {
             for _ in benchmark.scaledIterations {
                 let start = clock.now
                 DispatchQueue.concurrentPerform(iterations: chunks) { index in
-                    let slice = UnsafeMutableRawBufferPointer(rebasing: memoryWriteBuffer[index * chunk ..< (index + 1) * chunk])
+                    let slice = UnsafeMutableRawBufferPointer(rebasing: memoryWriteBuffer[index * chunk..<(index + 1) * chunk])
                     blackHole(workload.write(slice))
                 }
                 benchmark.measurement(.bandwidth, megabytesPerSecond(chunk * chunks, clock.now - start))

@@ -166,14 +166,14 @@ func measureUnresumed() async -> (TimeInterval, PingResult) {
 func report(_ elapsed: TimeInterval, _ result: PingResult, interval: Int) {
     let t = String(format: "%.3f", elapsed)
     switch result {
-    case .callback(let err):
+    case let .callback(err):
         if let err {
             print("[\(ts())] sendPing CALLBACK — error  in \(t)s")
             print("          \(describe(err))")
         } else {
             print("[\(ts())] sendPing CALLBACK — success  in \(t)s")
         }
-    case .noCallback(let deadline):
+    case let .noCallback(deadline):
         print("[\(ts())] sendPing NO CALLBACK after \(Int(deadline))s deadline  (elapsed \(t)s)")
     }
 }

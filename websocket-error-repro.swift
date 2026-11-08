@@ -51,6 +51,7 @@ let dataTask = session.dataTask(with: httpsURL) { _, _, error in
     dataTaskError = error as NSError?
     group.leave()
 }
+
 dataTask.resume()
 
 // 2) WebSocket task hitting the identical TLS failure on the same host.
@@ -59,7 +60,7 @@ var wsError: NSError?
 let wsTask = session.webSocketTask(with: wssURL)
 wsTask.resume()
 wsTask.receive { result in
-    if case .failure(let error) = result {
+    if case let .failure(error) = result {
         wsError = error as NSError
     }
     group.leave()

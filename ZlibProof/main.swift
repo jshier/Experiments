@@ -24,6 +24,7 @@ print("Is valid RFC 1950 zlib header (CMF=0x78, CMF*256+FLG divisible by 31): \(
 let adler = input.withUnsafeBytes { buf in
     UInt32(adler32(1, buf.baseAddress, UInt32(buf.count)))
 }
+
 let adlerBigEndian = adler.bigEndian
 let adlerBytes = withUnsafeBytes(of: adlerBigEndian) { Data($0) }
 let lastFour = compressed.suffix(4)
@@ -37,10 +38,10 @@ print("\nRound-trip decompression matches original: \(decompressed == input)")
 
 // ── 4. Now demonstrate what DeflateRequestCompressor.deflate() actually does ─
 print("\n=== DeflateRequestCompressor.deflate() simulation ===")
-var output = Data([0x78, 0x5E])  // the header Alamofire prepends
-output.append(compressed)         // appends the FULL zlib stream (already has header+checksum)
+var output = Data([0x78, 0x5E]) // the header Alamofire prepends
+output.append(compressed) // appends the FULL zlib stream (already has header+checksum)
 var checksum = adler.bigEndian
-output.append(Data(bytes: &checksum, count: MemoryLayout<UInt32>.size))  // appends ANOTHER checksum
+output.append(Data(bytes: &checksum, count: MemoryLayout<UInt32>.size)) // appends ANOTHER checksum
 
 print("Alamofire deflate() output length: \(output.count) bytes")
 print("Bytes 0-1   (Alamofire header):    \(output.prefix(2).map { String(format: "0x%02X", $0) }.joined(separator: " "))")
@@ -58,7 +59,7 @@ do {
 
 // ── 6. Show what the CORRECT implementation should produce ─────────────────
 print("\n=== Correct implementation: just return compressed(using: .zlib) ===")
-let correct = compressed  // already a valid RFC 1950 zlib stream
+let correct = compressed // already a valid RFC 1950 zlib stream
 do {
     let verify = try (correct as NSData).decompressed(using: .zlib) as Data
     print("Correct output decompresses successfully: \(verify == input)")

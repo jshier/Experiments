@@ -1,7 +1,7 @@
+import Foundation
 @_spi(Benchmarking) import NativeZip
 import Testing
 import zlib
-import Foundation
 
 /// Not a test: times both backends on streams of different shapes, to see where each spends its time.
 /// Run with `swift test -c release --filter PerfProbe`.
@@ -10,7 +10,9 @@ import Foundation
         var rng = SplitMix64(state: 3)
         let words = ["swift", "byte", "span", "inflate", "huffman", "window", " ", "\n", "the", "a", "decoder", "table"]
         var text: [UInt8] = []
-        while text.count < 8 << 20 { text += Array(words.randomElement(using: &rng)!.utf8) }
+        while text.count < 8 << 20 {
+            text += Array(words.randomElement(using: &rng)!.utf8)
+        }
         let random = (0..<(8 << 20)).map { _ in UInt8.random(in: 0...255, using: &rng) }
         let runs = (0..<(8 << 20)).map { UInt8(($0 / 3000) % 5) }
         let shapes: [(String, [UInt8])] = [

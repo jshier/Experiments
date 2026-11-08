@@ -1,6 +1,7 @@
 import Foundation
 
 // MARK: - Experiment
+
 //
 // Question: What happens when URLSessionWebSocketTask.send() is called after the
 // connection is closed — either by the server or by the task itself?
@@ -81,7 +82,7 @@ func drainUntilClosedClosure(_ task: URLSessionWebSocketTask) async -> Int {
         switch result {
         case .success:
             count += 1
-        case .failure(let error):
+        case let .failure(error):
             print("[\(ts())] receive(completionHandler:) delivered error (connection closed): \(describe(error))")
             return count
         }

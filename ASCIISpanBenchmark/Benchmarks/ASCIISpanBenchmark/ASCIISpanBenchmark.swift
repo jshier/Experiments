@@ -7,7 +7,7 @@ extension Span<UInt8> {
     /// Reduces every byte through bitwise OR; the result's high bit is set iff any element was non-ASCII.
     var isASCII: Bool {
         var result: UInt8 = 0
-        for idx in self.indices {
+        for idx in indices {
             result |= self[unchecked: idx]
         }
         return result <= 127
@@ -57,6 +57,7 @@ private func makeRandomBytes(count: Int, seed: UInt64, in range: ClosedRange<UIn
 }
 
 // MARK: - Datasets
+
 //
 // Three shapes of input are benchmarked at every size:
 //   - "mixed": bytes drawn from the full `UInt8` range, so both implementations typically scan the whole span
@@ -105,6 +106,7 @@ private let candidates: [(name: String, fn: @Sendable (Span<UInt8>) -> Bool)] = 
 ]
 
 // MARK: - Correctness check
+
 //
 // Both implementations must agree on every dataset before their timings are worth comparing at all.
 

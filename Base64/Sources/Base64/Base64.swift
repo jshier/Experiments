@@ -45,9 +45,9 @@ public enum Base64 {
         var table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>) {
             // One initializer per vector: a constant, plus two inserts for the last. (An array literal changed
             // lane by lane compiled to 16 inserts.)
-            ([65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80],                                // "A"–"P"
-             [81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 97, 98, 99, 100, 101, 102],                            // "Q"–"Z", "a"–"f"
-             [103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118],              // "g"–"v"
+            ([65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80], // "A"–"P"
+             [81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 97, 98, 99, 100, 101, 102], // "Q"–"Z", "a"–"f"
+             [103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118], // "g"–"v"
              SIMD16(119, 120, 121, 122, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, character62, character63)) // "w"–"z", "0"–"9"
         }
 
@@ -88,7 +88,7 @@ public enum Base64 {
         if ByteLanes.isLookupVectorized {
             let table = alphabet.table
             let blocks = try reader.read(InlineArray<48, UInt8>.self, count: byteCount / 48)
-            try writer.write(InlineArray<64, UInt8>.self, count: blocks.count, filling: { (characters) in
+            try writer.write(InlineArray<64, UInt8>.self, count: blocks.count, filling: { characters in
                 encodeBlocks(blocks, into: &characters, table: table)
             })
             let rest = reader.remainingByteCount
@@ -96,17 +96,19 @@ public enum Base64 {
             var block = InlineArray<48, UInt8>(repeating: 0)
             var blockBytes = block.mutableSpan
             var blockWriter = BytesWriter(&blockBytes)
-            try blockWriter.write(try reader.read(byteCount: rest))
+            try blockWriter.write(reader.read(byteCount: rest))
             let characters = encodeBlock(block, table: table)
             try writer.write(characters.span.bytes.extracting(0..<encodedByteCount(of: rest, padding: false)))
             if padding {
-                for _ in 0..<((3 &- rest % 3) % 3) { try writer.write(0x3D as Byte) } // "="
+                for _ in 0..<((3 &- rest % 3) % 3) {
+                    try writer.write(0x3D as Byte)
+                } // "="
             }
             return
         }
         // Elsewhere: 3-byte groups with arithmetic, then the last 1 or 2 bytes.
         let groups = try reader.read(InlineArray<3, UInt8>.self, count: byteCount / 3)
-        try writer.write(InlineArray<4, UInt8>.self, count: groups.count, filling: { (characters) in
+        try writer.write(InlineArray<4, UInt8>.self, count: groups.count, filling: { characters in
             encode(groups, into: &characters, alphabet: alphabet)
         })
         // The last 1 or 2 bytes: 2 or 3 characters, then padding.
@@ -190,7 +192,6 @@ public enum Base64 {
         )
         return bitCast([c0, c1, c2, c3] as InlineArray<4, SIMD16<UInt8>>, to: InlineArray<64, UInt8>.self)
     }
-
 
     /// Encodes each 3-byte group into 4 characters. Compiled once, here, and checked to vectorize: a
     /// typed-span-to-typed-span loop with no table lookups (see the type's documentation).

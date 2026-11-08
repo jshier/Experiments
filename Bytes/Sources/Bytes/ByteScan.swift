@@ -49,11 +49,11 @@ public struct ByteMatches: Sendable {
 
     /// Lanes that match either.
     @inlinable @inline(__always)
-    public static func | (lhs: Self, rhs: Self) -> Self { Self(highBits: lhs.highBits | rhs.highBits) }
+    public static func |(lhs: Self, rhs: Self) -> Self { Self(highBits: lhs.highBits | rhs.highBits) }
 
     /// Lanes that match both.
     @inlinable @inline(__always)
-    public static func & (lhs: Self, rhs: Self) -> Self { Self(highBits: lhs.highBits & rhs.highBits) }
+    public static func &(lhs: Self, rhs: Self) -> Self { Self(highBits: lhs.highBits & rhs.highBits) }
 
     /// Whether any lane matches: the two halves ORed as 64-bit words, rather than a reduction across lanes.
     @inlinable @inline(__always)
@@ -63,7 +63,7 @@ public struct ByteMatches: Sendable {
     }
 }
 
-extension RawSpan {
+public extension RawSpan {
     /// Whether any byte passes `test`, tested 16 at a time: whole 16-byte blocks, then the last 16 bytes
     /// (overlapping the block before them), all ORed together and checked once at the end. A 32-byte
     /// string takes two tests and no branches but the loop's.
@@ -72,7 +72,7 @@ extension RawSpan {
     /// `count / 2`, and `count - 1`), which repeats some bytes but leaves none out, so they take one test
     /// too.
     @inlinable @inline(__always)
-    public func containsByte(where test: (ByteLanes) -> ByteMatches) -> Bool {
+    func containsByte(where test: (ByteLanes) -> ByteMatches) -> Bool {
         // Checked loads: the offsets are in bounds by construction, and the checks fold away.
         let count = byteCount
         guard count >= 16 else {
@@ -108,7 +108,7 @@ extension RawSpan {
     /// Whether `self` and `other` hold the same bytes, compared 16 at a time as
     /// ``containsByte(where:)`` scans: XOR each pair of blocks, OR the differences, and check once.
     @inlinable @inline(__always)
-    public func bytesEqual(_ other: RawSpan) -> Bool {
+    func bytesEqual(_ other: RawSpan) -> Bool {
         let count = byteCount
         guard count == other.byteCount else { return false }
         guard count >= 16 else {
@@ -141,7 +141,7 @@ extension RawSpan {
     }
 }
 
-extension UTF8Span {
+public extension UTF8Span {
     /// Views `bytes` as UTF-8 in which no byte matches `excluded`, checking both in one pass in the usual
     /// case, ASCII: bytes below 0x80 are each a whole, valid UTF-8 character, so text that's ASCII and has
     /// no `excluded` byte needs no other check. Anything else is validated in full, then scanned for
@@ -154,7 +154,7 @@ extension UTF8Span {
     /// Returns `nil` if the bytes aren't valid UTF-8 or any matches `excluded`.
     @inlinable @inline(__always)
     @_lifetime(copy bytes)
-    public init?(validating bytes: RawSpan, excluding excluded: (ByteLanes) -> ByteMatches) {
+    init?(validating bytes: RawSpan, excluding excluded: (ByteLanes) -> ByteMatches) {
         if !bytes.containsByte(where: { $0.nonASCII | excluded($0) }) {
             // Unsafe: skips the standard library's validation. Safe: every byte was just checked to be
             // below 0x80, and such bytes are valid UTF-8 in any order. No safe initializer skips the

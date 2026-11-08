@@ -27,7 +27,7 @@ enum Check {
     @inlinable
     static func topicName(_ topic: UTF8Span, hasTopicAlias: Bool) throws(MQTTError) {
         guard !Text.containsWildcardOrNull(topic) else { throw .malformed("wildcard or U+0000 in a topic name") }
-        guard topic.count > 0 || hasTopicAlias else { throw .protocolError("empty topic name without a topic alias") }
+        guard !topic.isEmpty || hasTopicAlias else { throw .protocolError("empty topic name without a topic alias") }
     }
 
     /// A reason code allowed in the packet.
@@ -157,10 +157,10 @@ public struct MQTTConnect: ~Escapable {
         if flags.will {
             let willProperties = try MQTTProperties(reading: &body, allowing: .will)
             let topic = try body.readMQTTTopicName("will topic")
-            guard topic.count > 0 else { throw .protocolError("empty will topic") }
-            will = MQTTWill(
+            guard !topic.isEmpty else { throw .protocolError("empty will topic") }
+            will = try MQTTWill(
                 qos: willQoS, retain: flags.willRetain, properties: willProperties, topic: topic,
-                payload: try body.readMQTTBinary("will payload")
+                payload: body.readMQTTBinary("will payload")
             )
         } else {
             will = nil
@@ -322,7 +322,7 @@ public struct MQTTPublish: ~Escapable {
         topic = try body.readMQTTTopicName("topic name")
         packetIdentifier = qos == .atMostOnce ? nil : try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .publish, repeatable: .repeatableInPublish)
-        guard topic.count > 0 || properties.identifiers.contains(0x23) else {
+        guard !topic.isEmpty || properties.identifiers.contains(0x23) else {
             throw .protocolError("empty topic name without a topic alias")
         }
         // The payload is the rest of the packet.
@@ -444,7 +444,7 @@ public struct MQTTSubscriptions: ~Escapable {
         guard !reader.isAtEnd else { throw .protocolError("no subscriptions") }
         while !reader.isAtEnd {
             let filter = try reader.readMQTTString("topic filter")
-            guard filter.count > 0 else { throw .protocolError("empty topic filter") }
+            guard !filter.isEmpty else { throw .protocolError("empty topic filter") }
             let options = try MQTTSubscriptionOptions(reading: &reader)
             guard !(options.noLocal && Text.isShared(filter)) else { throw .protocolError("no local on a shared subscription") }
         }
@@ -463,11 +463,11 @@ public struct MQTTSubscriptions: ~Escapable {
     }
 }
 
-extension BytesWriter {
+public extension BytesWriter {
     /// Writes a subscription, for building a list to view with ``MQTTSubscriptions/init(validating:)``.
     @inlinable
     @_lifetime(self: copy self)
-    public mutating func write(_ subscription: borrowing MQTTSubscription) throws(BytesError) {
+    mutating func write(_ subscription: borrowing MQTTSubscription) throws(BytesError) {
         try writeMQTTString(subscription.topicFilter)
         try subscription.options.write(to: &self)
     }
@@ -532,7 +532,7 @@ public struct MQTTTopicFilters: ~Escapable {
         var reader = BytesReader(bytes)
         guard !reader.isAtEnd else { throw .protocolError("no topic filters") }
         while !reader.isAtEnd {
-            guard try reader.readMQTTString("topic filter").count > 0 else { throw .protocolError("empty topic filter") }
+            guard try !reader.readMQTTString("topic filter").isEmpty else { throw .protocolError("empty topic filter") }
         }
         self.bytes = bytes
     }
@@ -623,7 +623,7 @@ public struct MQTTSubscribeAcknowledgement: ~Escapable {
         packetIdentifier = try body.readMQTTUInt16("packet identifier")
         properties = try MQTTProperties(reading: &body, allowing: .acknowledgement)
         do throws(BytesError) {
-            reasonCodes = Span(viewing: try body.read(byteCount: body.remainingByteCount))
+            reasonCodes = try Span(viewing: body.read(byteCount: body.remainingByteCount))
         } catch {
             throw .malformed("reason codes")
         }

@@ -184,14 +184,14 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     }
 }
 
-extension BytesReader {
+public extension BytesReader {
     /// A ``BitBuffer`` at this cursor's position, for decoding codes from it at full speed. Moves this cursor
     /// past what the buffer consumed when `body` returns.
     ///
     /// Throws ``BytesError/insufficientData`` if `body` consumed more bits than remain, or what `body` throws.
     @inlinable @inline(always)
     @_lifetime(self: copy self)
-    public mutating func withBitBuffer<R>(_ body: (inout BitBuffer) throws(BytesError) -> R) throws(BytesError) -> R {
+    mutating func withBitBuffer<R>(_ body: (inout BitBuffer) throws(BytesError) -> R) throws(BytesError) -> R {
         var buffer = BitBuffer(BytesReader(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder))
         let result = try body(&buffer)
         let position = buffer.bitPosition

@@ -94,13 +94,17 @@ func encodeWithScalarTable(_ count: Int) {
 /// Foundation: `Data.base64EncodedData()`, which allocates its result.
 func encodeWithFoundation(_ count: Int) {
     let data = inputData[count]!
-    for _ in 0..<repetitions(count) { blackHole(data.base64EncodedData()) }
+    for _ in 0..<repetitions(count) {
+        blackHole(data.base64EncodedData())
+    }
 }
 
 /// `Base64.encodedString`: one allocation, the `String`.
 func encodeToString(_ count: Int) {
     let input = inputs[count]!
-    for _ in 0..<repetitions(count) { blackHole(Base64.encodedString(input.span.bytes)) }
+    for _ in 0..<repetitions(count) {
+        blackHole(Base64.encodedString(input.span.bytes))
+    }
 }
 
 // MARK: - Benchmarks
@@ -159,7 +163,9 @@ func registerBenchmarks() {
     // up by the unaltered name (benchmark 1.38.1, ordo-one/benchmark#373).
     for (label, count) in sizes {
         Benchmark("Allocations:Encode_\(label.replacing(" ", with: "_"))", configuration: zeroAllocations) { (benchmark: Benchmark) in
-            for _ in benchmark.scaledIterations { encodeWithBytes(count) }
+            for _ in benchmark.scaledIterations {
+                encodeWithBytes(count)
+            }
         }
     }
 }

@@ -9,33 +9,33 @@ import Testing
         switch frame.type {
         case .connect:
             let packet = try MQTTConnect(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w) }
         case .connectAcknowledgement:
             let packet = try MQTTConnectAcknowledgement(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w) }
         case .publish:
             let packet = try MQTTPublish(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w) }
         case .publishAcknowledgement, .publishReceived, .publishRelease, .publishComplete:
             let type = frame.type
             let packet = try MQTTPublishResponse(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w, as: type) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w, as: type) }
         case .subscribe:
             let packet = try MQTTSubscribe(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w) }
         case .subscribeAcknowledgement, .unsubscribeAcknowledgement:
             let type = frame.type
             let packet = try MQTTSubscribeAcknowledgement(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w, as: type) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w, as: type) }
         case .unsubscribe:
             let packet = try MQTTUnsubscribe(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w) }
         case .disconnect:
             let packet = try MQTTDisconnect(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w) }
         case .authenticate:
             let packet = try MQTTAuthenticate(parsing: frame)
-            return try fieldBytes { (w) throws(BytesError) in try packet.write(to: &w) }
+            return try fieldBytes { w throws(BytesError) in try packet.write(to: &w) }
         case .pingRequest, .pingResponse:
             return try encoded(MQTTPacket(parsing: frame))
         }

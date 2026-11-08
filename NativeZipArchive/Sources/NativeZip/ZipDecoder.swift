@@ -1,5 +1,5 @@
-import Compression
 internal import Bytes
+import Compression
 import zlib
 
 /// Reusable decompression state: a DEFLATE decoder plus output buffers.
@@ -72,7 +72,7 @@ public struct ZipDecoder: ~Copyable {
             try unsafe begin(input, path: path)
             while true {
                 let (chunk, finished) = try unsafe step(into: 0, path: path)
-                if chunk.count > 0 { try body(unsafe chunk.bytes) }
+                if !chunk.isEmpty { try body(unsafe chunk.bytes) }
                 if finished { return }
             }
         }
@@ -105,7 +105,7 @@ public struct ZipDecoder: ~Copyable {
             var consumerRunning = false
             while true {
                 let (output, finished) = try unsafe step(into: target, path: path)
-                if output.count > 0 {
+                if !output.isEmpty {
                     // Region isolation (rightly) sees this chunk as part of `self`, since it points into our
                     // buffer. Sending it is still race-free because of the hand-off protocol below: this
                     // buffer isn't written again until its consumer has finished.

@@ -32,7 +32,7 @@ extension BytesReader: Iterable {
 
 // MARK: - Typed views
 
-extension BytesReader {
+public extension BytesReader {
     /// The remaining whole `T` groups, as integers in `byteOrder`, for `for`-`in` loops.
     ///
     /// ```swift
@@ -47,7 +47,7 @@ extension BytesReader {
     /// The cursor doesn't move. Trailing bytes too few for a whole `T` are skipped.
     @inlinable
     @_lifetime(copy self)
-    public func values<T: ByteGroup>(of _: T.Type, _ byteOrder: ByteOrder) -> ByteGroupValues<T> {
+    func values<T: ByteGroup>(of _: T.Type, _ byteOrder: ByteOrder) -> ByteGroupValues<T> {
         ByteGroupValues(span: span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder, byteOrder: byteOrder)
     }
 
@@ -62,14 +62,14 @@ extension BytesReader {
     /// move. Trailing bits too few for a whole value are skipped.
     @inlinable
     @_lifetime(copy self)
-    public func values<let width: Int>(of _: Bits<width>.Type) -> BitsValues<width> {
+    func values<let width: Int>(of _: Bits<width>.Type) -> BitsValues<width> {
         BitsValues(span: span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
     }
 
     /// A cursor at the given position, for iterators.
     @inlinable
     @_lifetime(copy span)
-    init(_ span: RawSpan, byteOffset: Int, bitOffset: Int, bitOrder: BitOrder) {
+    internal init(_ span: RawSpan, byteOffset: Int, bitOffset: Int, bitOrder: BitOrder) {
         self.init(span, bitOrder: bitOrder)
         _byteOffset = byteOffset
         _bitOffset = bitOffset

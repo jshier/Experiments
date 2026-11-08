@@ -53,10 +53,10 @@ public enum ISO8601 {
     }
 }
 
-extension Date {
+public extension Date {
     /// Creates a date from an ISO 8601 timestamp, or returns `nil` if it isn't one.
     /// Use ``ISO8601/date(from:)-(String)`` to learn why parsing failed.
-    public init?(iso8601 string: borrowing String) {
+    init?(iso8601 string: borrowing String) {
         guard let date = try? ISO8601.date(from: string) else { return nil }
         self = date
     }

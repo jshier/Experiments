@@ -5,8 +5,8 @@ enum Fixtures {
     static let version = 1
     static let root = URL(filePath: NSTemporaryDirectory()).appending(path: "NativeZipBenchmarkFixtures-v\(version)")
 
-    static var smallFiles: URL { root.appending(path: "small.zip") }   // 2,000 text files, ~4–16 KB each
-    static var largeText: URL { root.appending(path: "text.zip") }     // one 32 MB deflated text file
+    static var smallFiles: URL { root.appending(path: "small.zip") } // 2,000 text files, ~4–16 KB each
+    static var largeText: URL { root.appending(path: "text.zip") } // one 32 MB deflated text file
     static var largeRandom: URL { root.appending(path: "random.zip") } // one 32 MB stored (incompressible) file
 
     /// A per-iteration scratch directory for extraction output, always inside `root`.

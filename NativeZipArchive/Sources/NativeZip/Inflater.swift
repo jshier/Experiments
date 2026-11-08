@@ -87,13 +87,16 @@ enum Alphabet {
     static var lengthBases: InlineArray<29, UInt16> {
         [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
     }
+
     static var lengthExtraBits: InlineArray<29, UInt8> {
         [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
     }
+
     static var distanceBases: InlineArray<30, UInt16> {
         [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073,
          4097, 6145, 8193, 12289, 16385, 24577]
     }
+
     static var distanceExtraBits: InlineArray<30, UInt8> {
         [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
     }
@@ -136,6 +139,7 @@ struct Inflater: ~Copyable {
         case huffman(fixed: Bool)
         case done
     }
+
     private var state = State.blockHeader
     private var isFinalBlock = false
     /// The next bit to read, from the start of the input.
@@ -144,8 +148,12 @@ struct Inflater: ~Copyable {
     init() {
         // The fixed code (RFC 1951, 3.2.6): literal/lengths 8, 9, 7, and 8 bits; 32 distance codes of 5 bits.
         var literalLengths = InlineArray<288, UInt8>(repeating: 8)
-        for symbol in 144..<256 { literalLengths[symbol] = 9 }
-        for symbol in 256..<280 { literalLengths[symbol] = 7 }
+        for symbol in 144..<256 {
+            literalLengths[symbol] = 9
+        }
+        for symbol in 256..<280 {
+            literalLengths[symbol] = 7
+        }
         let distanceLengths = InlineArray<32, UInt8>(repeating: 5)
         // The fixed code is valid, so building it can't throw.
         try! buildTable(literalLengths.span, .literalLength, at: Self.fixedLiterals, rootBits: Self.literalRootBits)
@@ -184,13 +192,13 @@ struct Inflater: ~Copyable {
                 } else {
                     try readBlockHeader(input)
                 }
-            case .stored(let remaining):
+            case let .stored(remaining):
                 let count = min(remaining, output.byteCount &- position)
                 var reader = BytesReader(input)
                 try reader.seek(toBitPosition: bitPosition)
                 var writer = BytesWriter(output._mutatingExtracting(...))
                 try writer.skip(byteCount: position)
-                try writer.write(try reader.read(byteCount: count))
+                try writer.write(reader.read(byteCount: count))
                 bitPosition = reader.bitPosition
                 position = writer.byteCount
                 guard count == remaining else {
@@ -198,7 +206,7 @@ struct Inflater: ~Copyable {
                     return (position, false) // Output full.
                 }
                 state = .blockHeader
-            case .huffman(let fixed):
+            case let .huffman(fixed):
                 let literals = fixed ? Self.fixedLiterals : Self.dynamicLiterals
                 let distances = fixed ? Self.fixedDistances : Self.dynamicDistances
                 let tables = tables.span
@@ -368,9 +376,9 @@ struct Inflater: ~Copyable {
 
     /// Reads a dynamic block's header (RFC 1951, 3.2.7) and builds its two tables.
     private mutating func readDynamicTables(_ bits: inout BitBuffer) throws(BytesError) {
-        let literalCount = Int(bits.read(Bits<5>.self)) &+ 257   // HLIT
-        let distanceCount = Int(bits.read(Bits<5>.self)) &+ 1    // HDIST
-        let codeLengthCount = Int(bits.read(Nibble.self)) &+ 4   // HCLEN
+        let literalCount = Int(bits.read(Bits<5>.self)) &+ 257 // HLIT
+        let distanceCount = Int(bits.read(Bits<5>.self)) &+ 1 // HDIST
+        let codeLengthCount = Int(bits.read(Nibble.self)) &+ 4 // HCLEN
         guard literalCount <= 286, distanceCount <= 30 else { throw .invalidValue }
 
         // The code-length code: 3 bits per length, in a fixed order.
@@ -407,7 +415,9 @@ struct Inflater: ~Copyable {
                 count = 11 &+ Int(bits.read(Bits<7>.self))
             }
             guard index &+ count <= total else { throw .invalidValue }
-            for offset in index..<(index &+ count) { lengths[offset] = repeated }
+            for offset in index..<(index &+ count) {
+                lengths[offset] = repeated
+            }
             index &+= count
         }
         guard !bits.isOverrun else { throw .insufficientData }

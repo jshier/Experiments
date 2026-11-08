@@ -13,8 +13,8 @@ public enum ResumeDataInspector {
     public static func explore(resumeData: Data) throws {
         var format = PropertyListSerialization.PropertyListFormat.binary
         let rawPlist = try PropertyListSerialization.propertyList(from: resumeData,
-                                                                    options: [.mutableContainersAndLeaves],
-                                                                    format: &format)
+                                                                  options: [.mutableContainersAndLeaves],
+                                                                  format: &format)
         print("Top-level plist format: \(formatName(format))")
         if let rawDict = rawPlist as? [String: Any] {
             print("Raw (un-unarchived) shape — this is just the generic NSKeyedArchiver envelope:")
@@ -96,10 +96,10 @@ public enum ResumeDataInspector {
 
     private static func formatName(_ format: PropertyListSerialization.PropertyListFormat) -> String {
         switch format {
-        case .xml: return "xml"
-        case .binary: return "binary"
-        case .openStep: return "openStep"
-        @unknown default: return "unknown"
+        case .xml: "xml"
+        case .binary: "binary"
+        case .openStep: "openStep"
+        @unknown default: "unknown"
         }
     }
 }

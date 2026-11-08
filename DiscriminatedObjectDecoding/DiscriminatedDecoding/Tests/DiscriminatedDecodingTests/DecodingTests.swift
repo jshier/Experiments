@@ -45,7 +45,7 @@ private enum DynamicSection {
         ])
     }
 
-    @Test func appliesCasePathable() throws {
+    @Test func appliesCasePathable() {
         let section = Section.first(.init(id: firstID, description: "one"))
 
         #expect(section[case: \.first]?.description == "one")
@@ -53,7 +53,7 @@ private enum DynamicSection {
         #expect(Array(Section.allCasePaths).count == 2)
     }
 
-    @Test func supportsExplicitDynamicMemberLookup() throws {
+    @Test func supportsExplicitDynamicMemberLookup() {
         let section = DynamicSection.first(.init(id: firstID, description: "one"))
 
         #expect(section.first?.description == "one")

@@ -1,6 +1,7 @@
 import Benchmark
 
 // MARK: - Error types under test
+
 //
 // These mirror the fixtures used to validate Alamofire's `AFError` equality
 // behavior: a mix of `Equatable`/non-`Equatable`, struct/enum/class error
@@ -52,6 +53,7 @@ private final class NonEquatableClassError: Error {
 }
 
 // MARK: - Candidate A: Existential opening (`as? any Equatable`)
+
 //
 // The idiomatic, modern mechanism for attempting an `Equatable` comparison of two values whose static type is only
 // known to be `Error`. Downcasting to the `any Equatable` existential succeeds if and only if the value's *dynamic*
@@ -84,6 +86,7 @@ private func isEqualDirect(_ lhs: Error?, _ rhs: Error?) -> Bool {
 }
 
 // MARK: - Candidate B: `type(of:)`-guarded existential opening
+
 //
 // Two values of different dynamic type can never compare `==` under `Equatable` (the `as? Self` cast fails) and can
 // never be the same object under `AnyObject` identity (a single object can't have two dynamic types). A cheap
@@ -138,6 +141,7 @@ private func isEqualPartialTypeCast(_ lhs: Error?, _ rhs: Error?) -> Bool {
 }
 
 // MARK: - Candidate C: `ObjectIdentifier`-guarded existential opening
+
 //
 // A variant of the type-of guard that wraps each metatype in an `ObjectIdentifier` before comparing. Measures
 // whether the extra indirection changes anything relative to comparing the metatypes directly.
@@ -159,6 +163,7 @@ private func isEqualObjectIdentifierGuarded(_ lhs: Error?, _ rhs: Error?) -> Boo
 }
 
 // MARK: - Candidate D: type-erased `AnyEquatable` box
+
 //
 // A reusable, `Equatable`-conforming type-erasing wrapper (the shape Alamofire itself has historically used
 // internally for boxed equatable comparisons), built independently for each side of the comparison and then compared
@@ -175,7 +180,7 @@ private struct AnyEquatableBox: Equatable {
         equals = { ($0 as? T).map { value == $0 } ?? false }
     }
 
-    static func == (lhs: AnyEquatableBox, rhs: AnyEquatableBox) -> Bool {
+    static func ==(lhs: AnyEquatableBox, rhs: AnyEquatableBox) -> Bool {
         guard type(of: lhs.value) == type(of: rhs.value) else { return false }
         return lhs.equals(rhs.value)
     }
@@ -209,6 +214,7 @@ private func isEqualAnyEquatableBox(_ lhs: Error?, _ rhs: Error?) -> Bool {
 }
 
 // MARK: - Candidate E: `type(of:)`-guarded `AnyEquatable` box
+
 //
 // Same box-based approach as Candidate D, but with the same metatype fast-path guard as Candidate B, so a second
 // box (and its capturing closure) is never allocated when the two errors don't even share a concrete type.
@@ -231,6 +237,7 @@ private func isEqualTypeGuardedAnyEquatableBox(_ lhs: Error?, _ rhs: Error?) -> 
 }
 
 // MARK: - Candidates
+
 //
 // Excluded on purpose: a `String(reflecting:)`/`Mirror`-based "structural" comparison. It happens to pass a few of
 // the test cases below by coincidence (synthesized descriptions embed stored property values), but it is not a
@@ -248,6 +255,7 @@ private let candidates: [(name: String, fn: @Sendable (Error?, Error?) -> Bool)]
 ]
 
 // MARK: - Correctness matrix
+
 //
 // Every branch of the intended algorithm, exercised against every candidate before any benchmark runs, so a broken
 // candidate fails loudly instead of quietly reporting bogus "fastest" numbers.
@@ -302,6 +310,7 @@ private func verifyCandidatesAgree() {
 }
 
 // MARK: - Benchmark workloads
+
 //
 // Beyond the blended, realistic mix of comparisons, isolate the scenarios most likely to differ between candidates:
 // repeated same-type `Equatable` comparisons (favors the unguarded direct approach, since the guard is pure

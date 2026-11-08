@@ -4,7 +4,7 @@ import Workloads
 
 func dataFile(_ name: String) throws -> [UInt8] {
     let url = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../Data/\(name)")
-    return Array(try Data(contentsOf: url))
+    return try Array(Data(contentsOf: url))
 }
 
 /// Every variant of a workload produces the same result, so the benchmarks compare equal work.
@@ -41,14 +41,14 @@ func dataFile(_ name: String) throws -> [UInt8] {
     @Test func lz4MatchesOriginal() throws {
         let original = try dataFile("tricolor.qoi")
         let compressed = try dataFile("tricolor.qoi.lz4")
-        #expect([UInt8](try ExampleLZ4(parsing: compressed).data) == original)
+        #expect(try [UInt8](ExampleLZ4(parsing: compressed).data) == original)
         #expect(try LZ4.decodeWithBytes(compressed.span.bytes) == original)
         #expect(try LZ4.decodeWithParserSpan(compressed.span.bytes) == original)
     }
 
     @Test func lz4Large() throws {
         let compressed = try dataFile("swift-help.lz4")
-        let expected = [UInt8](try ExampleLZ4(parsing: compressed).data)
+        let expected = try [UInt8](ExampleLZ4(parsing: compressed).data)
         #expect(expected.count == 10_640_904)
         #expect(try LZ4.decodeWithBytes(compressed.span.bytes) == expected)
         #expect(try LZ4.decodeWithParserSpan(compressed.span.bytes) == expected)

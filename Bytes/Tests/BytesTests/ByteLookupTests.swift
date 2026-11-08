@@ -8,7 +8,9 @@ import Testing
     func vector(_ bytes: some Collection<UInt8>) -> SIMD16<UInt8> {
         precondition(bytes.count == 16)
         var vector = SIMD16<UInt8>()
-        for (lane, byte) in bytes.enumerated() { vector[lane] = byte }
+        for (lane, byte) in bytes.enumerated() {
+            vector[lane] = byte
+        }
         return vector
     }
 
@@ -56,7 +58,7 @@ import Testing
         var span = output.mutableSpan
         var writer = BytesWriter(&span)
         try writer.write(0x01 as Byte)
-        let count = try writer.write(InlineArray<4, UInt8>.self, count: 2, filling: { (values) -> Int in
+        let count = try writer.write(InlineArray<4, UInt8>.self, count: 2, filling: { values -> Int in
             values[0] = [2, 3, 4, 5]
             values[1] = [6, 7, 8, 9]
             return values.count

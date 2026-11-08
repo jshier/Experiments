@@ -15,6 +15,7 @@ let options: [String: String] = {
     }
     return options
 }()
+
 func option(_ name: String, _ fallback: Int) -> Int { options[name].flatMap(Int.init) ?? fallback }
 
 let mode = TransferMode(rawValue: options["mode"] ?? "mqtt")!
@@ -30,5 +31,5 @@ let workload = Workload(
 )
 print("\(mode), \(placement): \(workload), batches of \(workload.batchSize) B")
 for _ in 0..<option("runs", 3) {
-    print("  " + String(describing: try await Transfer.run(workload, mode: mode, placement: placement)))
+    try await print("  " + String(describing: Transfer.run(workload, mode: mode, placement: placement)))
 }

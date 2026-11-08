@@ -22,7 +22,7 @@ extension DiscriminatedDecodableMacro: ExtensionMacro {
     ) throws -> [ExtensionDeclSyntax] {
         guard let enumDecl = declaration.as(EnumDeclSyntax.self) else {
             throw DiagnosticsError(diagnostics: [
-                Diagnostic(node: Syntax(declaration), message: MacroDiagnostic(message: "@DiscriminatedDecodable can only be applied to an enum"))
+                Diagnostic(node: Syntax(declaration), message: MacroDiagnostic(message: "@DiscriminatedDecodable can only be applied to an enum")),
             ])
         }
 
@@ -51,8 +51,8 @@ extension DiscriminatedDecodableMacro: ExtensionMacro {
         guard protocols.contains(where: { $0.trimmedDescription == "Decodable" }) else { return extensions }
 
         let availability = declaration.attributes.compactMap { element -> AttributeListSyntax.Element? in
-            guard case .attribute(let attribute) = element,
-                attribute.attributeName.trimmedDescription == "available"
+            guard case let .attribute(attribute) = element,
+                  attribute.attributeName.trimmedDescription == "available"
             else { return nil }
             return element
         }

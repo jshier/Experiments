@@ -1,6 +1,6 @@
 import ArgumentParser
-import NativeZip
 import Foundation
+import NativeZip
 import System
 
 @main

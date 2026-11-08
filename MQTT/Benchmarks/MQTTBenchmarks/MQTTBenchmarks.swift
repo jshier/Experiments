@@ -117,7 +117,9 @@ let copyCount = ProcessInfo.processInfo.activeProcessorCount * 4
 func copies(of stream: [UInt8]) -> [UInt8] {
     var copies: [UInt8] = []
     copies.reserveCapacity(stream.count * copyCount)
-    for _ in 0..<copyCount { copies += stream }
+    for _ in 0..<copyCount {
+        copies += stream
+    }
     return copies
 }
 
@@ -142,13 +144,13 @@ func parsePublishes(copy index: Int, iteratingProperties: Bool) {
     var reader = BytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
-        guard case .publish(let publish) = packet else { fatalError() }
+        guard case let .publish(publish) = packet else { fatalError() }
         checksum &+= publish.topic.count &+ publish.payload.byteCount &+ Int(publish.packetIdentifier ?? 0)
         if iteratingProperties {
-            publish.properties.forEach { property in
+            for property in publish.properties {
                 switch property {
-                case .messageExpiryInterval(let seconds): checksum &+= Int(seconds)
-                case .userProperty(let name, let value): checksum &+= name.count &+ value.count
+                case let .messageExpiryInterval(seconds): checksum &+= Int(seconds)
+                case let .userProperty(name, value): checksum &+= name.count &+ value.count
                 default: break
                 }
             }
@@ -166,10 +168,10 @@ func parsePublishFrames(copy index: Int) {
         guard frame.type == .publish else { fatalError() }
         let publish = try! MQTTPublish(parsing: frame)
         checksum &+= publish.topic.count &+ publish.payload.byteCount &+ Int(publish.packetIdentifier ?? 0)
-        publish.properties.forEach { property in
+        for property in publish.properties {
             switch property {
-            case .messageExpiryInterval(let seconds): checksum &+= Int(seconds)
-            case .userProperty(let name, let value): checksum &+= name.count &+ value.count
+            case let .messageExpiryInterval(seconds): checksum &+= Int(seconds)
+            case let .userProperty(name, value): checksum &+= name.count &+ value.count
             default: break
             }
         }
@@ -183,8 +185,8 @@ func parseMixedStream(copy index: Int) {
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
         checksum &+= Int(packet.type.rawValue)
-        if case .publish(let publish) = packet { checksum &+= publish.payload.byteCount }
-        if case .subscribe(let subscribe) = packet { subscribe.subscriptions.forEach { checksum &+= $0.topicFilter.count } }
+        if case let .publish(publish) = packet { checksum &+= publish.payload.byteCount }
+        if case let .subscribe(subscribe) = packet { subscribe.subscriptions.forEach { checksum &+= $0.topicFilter.count } }
     }
     blackHole(checksum)
 }
@@ -225,12 +227,12 @@ func parsePublishesCopying(copy index: Int) {
     var reader = BytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
-        guard case .publish(let publish) = packet else { fatalError() }
+        guard case let .publish(publish) = packet else { fatalError() }
         let topic = String(copying: publish.topic)
         let body = publish.payload.withUnsafeBytes { Array($0) }
         checksum &+= topic.utf8.count &+ body.count
-        publish.properties.forEach { property in
-            if case .userProperty(let name, let value) = property {
+        for property in publish.properties {
+            if case let .userProperty(name, value) = property {
                 checksum &+= String(copying: name).utf8.count &+ String(copying: value).utf8.count
             }
         }
@@ -245,8 +247,8 @@ func parsePublishesConventionally(copy index: Int) {
         checksum &+= publish.topic.utf8.count &+ publish.payload.count &+ Int(publish.packetIdentifier ?? 0)
         for property in publish.properties {
             switch property {
-            case .messageExpiryInterval(let seconds): checksum &+= Int(seconds)
-            case .userProperty(let name, let value): checksum &+= name.utf8.count &+ value.utf8.count
+            case let .messageExpiryInterval(seconds): checksum &+= Int(seconds)
+            case let .userProperty(name, value): checksum &+= name.utf8.count &+ value.utf8.count
             default: break
             }
         }
@@ -263,9 +265,9 @@ let conventionalPublishCopies: [[ConventionalPublish]] = (0..<copyCount).map { _
     conventionalPublishes.map { publish in
         var copy = publish
         copy.topic = distinct(publish.topic)
-        copy.payload = publish.payload.map { $0 }
+        copy.payload = publish.payload.map(\.self)
         copy.properties = publish.properties.map { property in
-            guard case .userProperty(let name, let value) = property else { return property }
+            guard case let .userProperty(name, value) = property else { return property }
             return .userProperty(distinct(name), distinct(value))
         }
         return copy
@@ -279,14 +281,16 @@ struct EncodeInputs {
 }
 
 let encodeInputs: [EncodeInputs] = (0..<copyCount).map { _ in
-    EncodeInputs(topics: topics.map(distinct), payload: payload.map { $0 }, propertyBytes: propertyBytes.map { $0 })
+    EncodeInputs(topics: topics.map(distinct), payload: payload.map(\.self), propertyBytes: propertyBytes.map(\.self))
 }
 
 /// Encodes `publishes` with the conventional encoder, into a new array.
 func encodePublishesConventionally(_ publishes: [ConventionalPublish]) -> [UInt8] {
     var output: [UInt8] = []
     output.reserveCapacity(publishStream.count)
-    for publish in publishes { Conventional.appendPublish(publish, to: &output) }
+    for publish in publishes {
+        Conventional.appendPublish(publish, to: &output)
+    }
     precondition(output.count == publishStream.count)
     return output
 }
@@ -376,7 +380,9 @@ let benchmarks: @Sendable () -> Void = {
         // No spaces: `thresholds update` writes "_" for them in the file name, but `thresholds check` looks the
         // file up by the unaltered name (benchmark 1.38.1, ordo-one/benchmark#373).
         Benchmark("Allocations:\(workload.name.replacing(" ", with: "_"))", configuration: zeroAllocations) { benchmark in
-            for _ in benchmark.scaledIterations { workload.run(0) }
+            for _ in benchmark.scaledIterations {
+                workload.run(0)
+            }
         }
     }
 }

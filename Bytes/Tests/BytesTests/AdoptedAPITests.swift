@@ -8,7 +8,7 @@ import Testing
         let data: [UInt8] = [0x01, 0x00, 0x03, 0xAA, 0xBB] // type, then 3 bytes promised but only 2 present
         var reader = BytesReader(data.span)
         do {
-            _ = try reader.atomically { (reader) throws(BytesError) in
+            _ = try reader.atomically { reader throws(BytesError) in
                 _ = try reader.read(Byte.self)
                 return try reader.read(bytesPrefixedBy: Byte2.self, .bigEndian).byteCount
             }
@@ -19,7 +19,7 @@ import Testing
         let unmoved = reader.byteOffset
         #expect(unmoved == 0)
 
-        let count = try reader.atomically { (reader) throws(BytesError) in
+        let count = try reader.atomically { reader throws(BytesError) in
             _ = try reader.read(Byte.self)
             return try reader.read(Byte2.self, .bigEndian)
         }

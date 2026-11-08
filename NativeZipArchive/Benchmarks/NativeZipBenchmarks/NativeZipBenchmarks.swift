@@ -22,7 +22,7 @@ let benchmarks: @Sendable () -> Void = {
 
     Benchmark("Parse central directory (2,000 entries)") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try ZipArchive(url: Fixtures.smallFiles))
+            try blackHole(ZipArchive(url: Fixtures.smallFiles))
         }
     }
 
@@ -45,7 +45,7 @@ let benchmarks: @Sendable () -> Void = {
 
     Benchmark("Parse central directory: original ByteReader") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try ZipArchive.entriesUsingByteReader(of: Fixtures.smallFiles))
+            try blackHole(ZipArchive.entriesUsingByteReader(of: Fixtures.smallFiles))
         }
     }
 
@@ -53,7 +53,9 @@ let benchmarks: @Sendable () -> Void = {
         let archive = try ZipArchive(url: Fixtures.smallFiles)
         benchmark.startMeasurement()
         for _ in benchmark.scaledIterations {
-            for entry in archive.entries { blackHole(try archive.payloadCount(of: entry)) }
+            for entry in archive.entries {
+                try blackHole(archive.payloadCount(of: entry))
+            }
         }
     }
 
@@ -61,7 +63,9 @@ let benchmarks: @Sendable () -> Void = {
         let archive = try ZipArchive(url: Fixtures.smallFiles)
         benchmark.startMeasurement()
         for _ in benchmark.scaledIterations {
-            for entry in archive.entries { blackHole(try archive.payloadCountUsingByteReader(of: entry)) }
+            for entry in archive.entries {
+                try blackHole(archive.payloadCountUsingByteReader(of: entry))
+            }
         }
     }
 
@@ -221,7 +225,9 @@ let benchmarks: @Sendable () -> Void = {
                 try descriptor.closeAfter { _ = try descriptor.writeAll(payload) }
             }
             benchmark.stopMeasurement()
-            for descriptor in descriptors.values { try descriptor.close() }
+            for descriptor in descriptors.values {
+                try descriptor.close()
+            }
             Fixtures.removeScratch(destination)
         }
     }

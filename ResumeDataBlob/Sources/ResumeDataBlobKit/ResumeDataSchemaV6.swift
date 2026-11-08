@@ -17,8 +17,8 @@ public enum ResumeDataSchemaV6: ResumeDataSchemaVersion {
         public static let responseData = "NSURLSessionResumeResponse"
 
         static let all: Set<String> = [infoVersion, bytesReceived, downloadURL, tempFileName,
-                                        serverDownloadDate, currentRequestData,
-                                        originalRequestData, responseData]
+                                       serverDownloadDate, currentRequestData,
+                                       originalRequestData, responseData]
     }
 
     public static var downloadURLKey: String { Key.downloadURL }

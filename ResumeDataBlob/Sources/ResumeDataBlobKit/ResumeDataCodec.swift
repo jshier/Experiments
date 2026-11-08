@@ -35,10 +35,9 @@ public enum ResumeDataCodec {
     /// `PropertyListDecoder`. Comparison baseline only — fixed to `ResumeDataSchemaV6`'s keys via
     /// `ResumeDataEnvelope: Codable` and strictly more work than `decodeDirect`.
     public static func decodeCodable(from data: Data) -> ResumeDataEnvelope? {
-        guard let dict = KeyedArchiveCodec.decodeTopLevelDictionary(from: data) else { return nil }
-        guard let flatPlistData = try? PropertyListSerialization.data(fromPropertyList: dict,
-                                                                        format: .binary,
-                                                                        options: 0) else { return nil }
+        guard let dict = KeyedArchiveCodec.decodeTopLevelDictionary(from: data), let flatPlistData = try? PropertyListSerialization.data(fromPropertyList: dict,
+                                                                                                                                         format: .binary,
+                                                                                                                                         options: 0) else { return nil }
         return try? PropertyListDecoder().decode(ResumeDataEnvelope.self, from: flatPlistData)
     }
 
@@ -58,8 +57,8 @@ public enum ResumeDataCodec {
         guard let flatPlistData = try? PropertyListEncoder().encode(envelope) else { return nil }
         var format = PropertyListSerialization.PropertyListFormat.binary
         guard let dict = try? PropertyListSerialization.propertyList(from: flatPlistData,
-                                                                       options: [],
-                                                                       format: &format) as? [String: Any] else {
+                                                                     options: [],
+                                                                     format: &format) as? [String: Any] else {
             return nil
         }
         return KeyedArchiveCodec.encodeTopLevelDictionary(dict)

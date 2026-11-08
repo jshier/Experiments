@@ -80,25 +80,25 @@ public enum MQTTPacket: ~Escapable {
     @_lifetime(copy frame)
     public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         switch frame.type {
-        case .connect: self = .connect(try MQTTConnect(parsing: frame))
-        case .connectAcknowledgement: self = .connectAcknowledgement(try MQTTConnectAcknowledgement(parsing: frame))
-        case .publish: self = .publish(try MQTTPublish(parsing: frame))
-        case .publishAcknowledgement: self = .publishAcknowledgement(try MQTTPublishResponse(parsing: frame))
-        case .publishReceived: self = .publishReceived(try MQTTPublishResponse(parsing: frame))
-        case .publishRelease: self = .publishRelease(try MQTTPublishResponse(parsing: frame))
-        case .publishComplete: self = .publishComplete(try MQTTPublishResponse(parsing: frame))
-        case .subscribe: self = .subscribe(try MQTTSubscribe(parsing: frame))
-        case .subscribeAcknowledgement: self = .subscribeAcknowledgement(try MQTTSubscribeAcknowledgement(parsing: frame))
-        case .unsubscribe: self = .unsubscribe(try MQTTUnsubscribe(parsing: frame))
-        case .unsubscribeAcknowledgement: self = .unsubscribeAcknowledgement(try MQTTSubscribeAcknowledgement(parsing: frame))
+        case .connect: self = try .connect(MQTTConnect(parsing: frame))
+        case .connectAcknowledgement: self = try .connectAcknowledgement(MQTTConnectAcknowledgement(parsing: frame))
+        case .publish: self = try .publish(MQTTPublish(parsing: frame))
+        case .publishAcknowledgement: self = try .publishAcknowledgement(MQTTPublishResponse(parsing: frame))
+        case .publishReceived: self = try .publishReceived(MQTTPublishResponse(parsing: frame))
+        case .publishRelease: self = try .publishRelease(MQTTPublishResponse(parsing: frame))
+        case .publishComplete: self = try .publishComplete(MQTTPublishResponse(parsing: frame))
+        case .subscribe: self = try .subscribe(MQTTSubscribe(parsing: frame))
+        case .subscribeAcknowledgement: self = try .subscribeAcknowledgement(MQTTSubscribeAcknowledgement(parsing: frame))
+        case .unsubscribe: self = try .unsubscribe(MQTTUnsubscribe(parsing: frame))
+        case .unsubscribeAcknowledgement: self = try .unsubscribeAcknowledgement(MQTTSubscribeAcknowledgement(parsing: frame))
         case .pingRequest:
             try frame.body.expectMQTTEnd("ping request")
             self = .pingRequest
         case .pingResponse:
             try frame.body.expectMQTTEnd("ping response")
             self = .pingResponse
-        case .disconnect: self = .disconnect(try MQTTDisconnect(parsing: frame))
-        case .authenticate: self = .authenticate(try MQTTAuthenticate(parsing: frame))
+        case .disconnect: self = try .disconnect(MQTTDisconnect(parsing: frame))
+        case .authenticate: self = try .authenticate(MQTTAuthenticate(parsing: frame))
         }
     }
 
@@ -128,17 +128,17 @@ public enum MQTTPacket: ~Escapable {
     @inlinable
     public var remainingLength: Int {
         switch self {
-        case .connect(let packet): packet.bodyByteCount
-        case .connectAcknowledgement(let packet): packet.bodyByteCount
-        case .publish(let packet): packet.bodyByteCount
-        case .publishAcknowledgement(let packet), .publishReceived(let packet), .publishRelease(let packet),
-             .publishComplete(let packet): packet.bodyByteCount
-        case .subscribe(let packet): packet.bodyByteCount
-        case .subscribeAcknowledgement(let packet), .unsubscribeAcknowledgement(let packet): packet.bodyByteCount
-        case .unsubscribe(let packet): packet.bodyByteCount
+        case let .connect(packet): packet.bodyByteCount
+        case let .connectAcknowledgement(packet): packet.bodyByteCount
+        case let .publish(packet): packet.bodyByteCount
+        case let .publishAcknowledgement(packet), let .publishReceived(packet), let .publishRelease(packet),
+             let .publishComplete(packet): packet.bodyByteCount
+        case let .subscribe(packet): packet.bodyByteCount
+        case let .subscribeAcknowledgement(packet), let .unsubscribeAcknowledgement(packet): packet.bodyByteCount
+        case let .unsubscribe(packet): packet.bodyByteCount
         case .pingRequest, .pingResponse: 0
-        case .disconnect(let packet): packet.bodyByteCount
-        case .authenticate(let packet): packet.bodyByteCount
+        case let .disconnect(packet): packet.bodyByteCount
+        case let .authenticate(packet): packet.bodyByteCount
         }
     }
 
@@ -158,19 +158,19 @@ public enum MQTTPacket: ~Escapable {
     @inlinable
     func validateFields() throws(MQTTError) {
         switch self {
-        case .connect(let packet): try packet.validate()
-        case .connectAcknowledgement(let packet): try packet.validate()
-        case .publish(let packet): try packet.validate()
-        case .publishAcknowledgement(let packet), .publishReceived(let packet):
+        case let .connect(packet): try packet.validate()
+        case let .connectAcknowledgement(packet): try packet.validate()
+        case let .publish(packet): try packet.validate()
+        case let .publishAcknowledgement(packet), let .publishReceived(packet):
             try packet.validate(reasonCodes: .publishAcknowledgement)
-        case .publishRelease(let packet), .publishComplete(let packet): try packet.validate(reasonCodes: .publishRelease)
-        case .subscribe(let packet): try packet.validate()
-        case .subscribeAcknowledgement(let packet): try packet.validate(reasonCodes: .subscribeAcknowledgement)
-        case .unsubscribe(let packet): try packet.validate()
-        case .unsubscribeAcknowledgement(let packet): try packet.validate(reasonCodes: .unsubscribeAcknowledgement)
+        case let .publishRelease(packet), let .publishComplete(packet): try packet.validate(reasonCodes: .publishRelease)
+        case let .subscribe(packet): try packet.validate()
+        case let .subscribeAcknowledgement(packet): try packet.validate(reasonCodes: .subscribeAcknowledgement)
+        case let .unsubscribe(packet): try packet.validate()
+        case let .unsubscribeAcknowledgement(packet): try packet.validate(reasonCodes: .unsubscribeAcknowledgement)
         case .pingRequest, .pingResponse: break
-        case .disconnect(let packet): try packet.validate()
-        case .authenticate(let packet): try packet.validate()
+        case let .disconnect(packet): try packet.validate()
+        case let .authenticate(packet): try packet.validate()
         }
     }
 
@@ -185,21 +185,21 @@ public enum MQTTPacket: ~Escapable {
     @inlinable
     public func write(to writer: inout BytesWriter) throws(BytesError) {
         switch self {
-        case .connect(let packet): try packet.write(to: &writer)
-        case .connectAcknowledgement(let packet): try packet.write(to: &writer)
-        case .publish(let packet): try packet.write(to: &writer)
-        case .publishAcknowledgement(let packet): try packet.write(to: &writer, as: .publishAcknowledgement)
-        case .publishReceived(let packet): try packet.write(to: &writer, as: .publishReceived)
-        case .publishRelease(let packet): try packet.write(to: &writer, as: .publishRelease)
-        case .publishComplete(let packet): try packet.write(to: &writer, as: .publishComplete)
-        case .subscribe(let packet): try packet.write(to: &writer)
-        case .subscribeAcknowledgement(let packet): try packet.write(to: &writer, as: .subscribeAcknowledgement)
-        case .unsubscribe(let packet): try packet.write(to: &writer)
-        case .unsubscribeAcknowledgement(let packet): try packet.write(to: &writer, as: .unsubscribeAcknowledgement)
+        case let .connect(packet): try packet.write(to: &writer)
+        case let .connectAcknowledgement(packet): try packet.write(to: &writer)
+        case let .publish(packet): try packet.write(to: &writer)
+        case let .publishAcknowledgement(packet): try packet.write(to: &writer, as: .publishAcknowledgement)
+        case let .publishReceived(packet): try packet.write(to: &writer, as: .publishReceived)
+        case let .publishRelease(packet): try packet.write(to: &writer, as: .publishRelease)
+        case let .publishComplete(packet): try packet.write(to: &writer, as: .publishComplete)
+        case let .subscribe(packet): try packet.write(to: &writer)
+        case let .subscribeAcknowledgement(packet): try packet.write(to: &writer, as: .subscribeAcknowledgement)
+        case let .unsubscribe(packet): try packet.write(to: &writer)
+        case let .unsubscribeAcknowledgement(packet): try packet.write(to: &writer, as: .unsubscribeAcknowledgement)
         case .pingRequest: try writer.writeMQTTPacket(.pingRequest, flags: 0, bodyByteCount: 0, validate: {}, body: { _ in })
         case .pingResponse: try writer.writeMQTTPacket(.pingResponse, flags: 0, bodyByteCount: 0, validate: {}, body: { _ in })
-        case .disconnect(let packet): try packet.write(to: &writer)
-        case .authenticate(let packet): try packet.write(to: &writer)
+        case let .disconnect(packet): try packet.write(to: &writer)
+        case let .authenticate(packet): try packet.write(to: &writer)
         }
     }
 }

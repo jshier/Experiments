@@ -28,11 +28,15 @@ func forInGroupWorkload<T: ByteGroup>(_: T.Type) -> Workload {
         let values = reader.values(of: T.self, .bigEndian)
         if T.Integer.bitWidth > 64 {
             var sum: UInt64 = 0
-            for value in values { sum &+= fold(value) }
+            for value in values {
+                sum &+= fold(value)
+            }
             return sum
         }
         var sum: T.Integer = 0
-        for value in values { sum &+= value }
+        for value in values {
+            sum &+= value
+        }
         return UInt64(truncatingIfNeeded: sum)
     }
 }
@@ -42,7 +46,9 @@ func forInBitsWorkload<let width: Int>(_: Bits<width>.Type, name: String) -> Wor
         let reader = BytesReader(span)
         let values = reader.values(of: Bits<width>.self)
         var sum: UInt8 = 0
-        for value in values { sum &+= value.rawValue }
+        for value in values {
+            sum &+= value.rawValue
+        }
         return UInt64(sum)
     }
 }
@@ -67,7 +73,9 @@ func bulkReadWorkload<T: ByteGroup>(_: T.Type) -> Workload {
 let forInBytes = Workload(name: "for-in Bytes (UInt8)", unit: 1, allCores: false) { span in
     let reader = BytesReader(span)
     var sum: UInt8 = 0
-    for byte in reader { sum &+= byte }
+    for byte in reader {
+        sum &+= byte
+    }
     return UInt64(sum)
 }
 
@@ -128,7 +136,9 @@ func randomBuffer(byteCount: Int) -> [UInt8] {
             z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
             words.storeBytes(of: z ^ (z >> 31), toByteOffset: offset, as: UInt64.self)
         }
-        for offset in (byteCount & ~7)..<byteCount { buffer[offset] = 0xA5 }
+        for offset in (byteCount & ~7)..<byteCount {
+            buffer[offset] = 0xA5
+        }
         initializedCount = byteCount
     }
 }

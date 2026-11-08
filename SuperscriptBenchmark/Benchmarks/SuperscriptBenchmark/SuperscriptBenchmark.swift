@@ -2,6 +2,7 @@ import Benchmark
 import Foundation
 
 // MARK: - Implementations under test
+
 //
 // All four candidates assume a non-negative `Int`. The original, pasted implementation silently drops any
 // character it doesn't recognize (including "-"), so negative numbers would lose their sign rather than gain a
@@ -57,8 +58,8 @@ func superscriptScalar(forDigit d: Int) -> Unicode.Scalar {
 
 @inlinable
 func superscriptASCIIArithmetic(_ x: Int) -> String {
-    var result: String = ""
-    var divisor = Int(pow(10.0,floor(log10(Double(x)))))
+    var result = ""
+    var divisor = Int(pow(10.0, floor(log10(Double(x)))))
     if divisor == 0 { return "⁰" }
     while divisor > 0 {
         result.append(Character(superscriptScalar(forDigit: (x / divisor) % 10)))
@@ -69,21 +70,21 @@ func superscriptASCIIArithmetic(_ x: Int) -> String {
 
 @inlinable
 func superscriptASCIILookup(_ x: Int) -> String {
-    var result: String = ""
-    var divisor = Int(pow(10.0,floor(log10(Double(x)))))
+    var result = ""
+    var divisor = Int(pow(10.0, floor(log10(Double(x)))))
     if divisor == 0 { return "⁰" }
     while divisor > 0 {
         let digit: Character = switch (x / divisor) % 10 {
-            case 0: "⁰"
-            case 1: "¹"
-            case 2: "²"
-            case 3: "³"
-            case 4: "⁴"
-            case 5: "⁵"
-            case 6: "⁶"
-            case 7: "⁷"
-            case 8: "⁸"
-            default: "⁹"
+        case 0: "⁰"
+        case 1: "¹"
+        case 2: "²"
+        case 3: "³"
+        case 4: "⁴"
+        case 5: "⁵"
+        case 6: "⁶"
+        case 7: "⁷"
+        case 8: "⁸"
+        default: "⁹"
         }
         result.append(digit)
         divisor /= 10
@@ -93,9 +94,9 @@ func superscriptASCIILookup(_ x: Int) -> String {
 
 @inlinable
 func superscriptArrayLookup(_ x: Int) -> String {
-    let digits: [Character] = ["⁰","¹","²","³","⁴","⁵","⁶","⁷","⁸","⁹"]
-    var result: String = ""
-    var divisor = Int(pow(10.0,floor(log10(Double(x)))))
+    let digits: [Character] = ["⁰", "¹", "²", "³", "⁴", "⁵", "⁶", "⁷", "⁸", "⁹"]
+    var result = ""
+    var divisor = Int(pow(10.0, floor(log10(Double(x)))))
     if divisor == 0 { return "⁰" }
     while divisor > 0 {
         result.append(digits[(x / divisor) % 10])
@@ -107,12 +108,12 @@ func superscriptArrayLookup(_ x: Int) -> String {
 @inlinable
 func superscriptBufferBuild(_ x: Int) -> String {
     // if x < 10 { return ["⁰","¹","²","³","⁴","⁵","⁶","⁷","⁸","⁹"][x] }
-    
-    return withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 100) { buffer in
+
+    withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 100) { buffer in
         let end = buffer.baseAddress! + 99
         var pointer = end
         var x = x
-    
+
         while x > 0 {
             let digit = UInt8(x % 10)
             switch digit {
@@ -138,7 +139,7 @@ func superscriptBufferBuild(_ x: Int) -> String {
             x /= 10
             pointer -= 1
         }
-        return String(decoding: UnsafeBufferPointer(start: pointer+1, count: (end - pointer)), as: UTF8.self)
+        return String(decoding: UnsafeBufferPointer(start: pointer + 1, count: end - pointer), as: UTF8.self)
     }
 }
 
@@ -169,7 +170,7 @@ func superscriptDigitsNoString(_ x: Int) -> String {
 func superscriptMapNoLookup(_ x: Int) -> String {
     String(String(x).compactMap {
         guard let digit = $0.wholeNumberValue, (0...9).contains(digit) else { return nil }
-    
+
         let base = digit < 4 ? [0x2070, 0x00B9, 0x00B2, 0x00B3][digit] : 0x2070 + UInt32(digit)
         return Unicode.Scalar(base).map(String.init)
     }.joined())
@@ -195,6 +196,7 @@ private struct SplitMix64: RandomNumberGenerator {
 }
 
 // MARK: - Datasets
+
 //
 // Inputs are swept by decimal digit count (1...19, the range of a non-negative `Int`), since digit count is what
 // drives the length of the loop/map in every candidate. One deterministic, representative value is generated per
@@ -202,7 +204,9 @@ private struct SplitMix64: RandomNumberGenerator {
 
 private func pow10(_ exponent: Int) -> Int {
     var result = 1
-    for _ in 0..<exponent { result *= 10 }
+    for _ in 0..<exponent {
+        result *= 10
+    }
     return result
 }
 
@@ -239,6 +243,7 @@ private let candidates: [(name: String, fn: @Sendable (Int) -> String)] = [
 ]
 
 // MARK: - Correctness check
+
 //
 // Every candidate must agree on every dataset before their timings are worth comparing at all.
 
@@ -249,7 +254,7 @@ private func verifyCandidatesAgree() {
         for (name, actual) in results {
             precondition(actual == expected,
                          "\(name) disagreed at \(dataset.digitCount) digits (\(dataset.value)): " +
-                         "expected \(expected), got \(actual)")
+                             "expected \(expected), got \(actual)")
         }
     }
 }

@@ -8,6 +8,7 @@ func log(_ s: String) {
     print("[\(t)] [\(th)] \(s)")
     fflush(stdout)
 }
+
 func desc(_ e: Error?) -> String {
     guard let e = e as NSError? else { return "nil" }
     return "\(e.domain)#\(e.code) (\(e.localizedDescription))"
@@ -17,7 +18,7 @@ let isFG = CommandLine.arguments.contains("fg")
 
 func headerSummary(_ data: Data) -> String {
     guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any], let hs = j["headers"] as? [[String: String]] else { return "(no header echo)" }
-    let keep: Set<String> = ["cookie", "user-agent", "accept", "accept-language", "accept-encoding", "authorization", "content-length", "content-type", "connection"]
+    let keep: Set = ["cookie", "user-agent", "accept", "accept-language", "accept-encoding", "authorization", "content-length", "content-type", "connection"]
     return hs.compactMap { h in
         guard let n = h["name"], keep.contains(n.lowercased()) else { return nil }
         return "\(n)=\(h["value"] ?? "")"
@@ -44,45 +45,56 @@ final class Delegate: NSObject, URLSessionDataDelegate, URLSessionDownloadDelega
         log("\(tag) willBeginDelayedRequest id=\(task.taskIdentifier) \(r.url!.path) -> disposition \(willBeginDisposition.rawValue)")
         ch(willBeginDisposition, nil)
     }
+
     func urlSession(_ s: URLSession, taskIsWaitingForConnectivity t: URLSessionTask) { log("\(tag) taskIsWaitingForConnectivity id=\(t.taskIdentifier)") }
     func urlSession(_ s: URLSession, task: URLSessionTask, willPerformHTTPRedirection r: HTTPURLResponse, newRequest n: URLRequest, completionHandler ch: @escaping (URLRequest?) -> Void) {
         log("\(tag) willPerformHTTPRedirection id=\(task.taskIdentifier) \(r.statusCode) -> \(n.url!) follow=\(followRedirects)"); ch(followRedirects ? n : nil)
     }
+
     func urlSession(_ s: URLSession, task: URLSessionTask, didReceive c: URLAuthenticationChallenge, completionHandler ch: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         log("\(tag) task.didReceiveChallenge id=\(task.taskIdentifier) \(c.protectionSpace.authenticationMethod) prevFailures=\(c.previousFailureCount) -> \(challengeDisposition.rawValue)")
         ch(challengeDisposition, challengeDisposition == .useCredential ? URLCredential(user: "u", password: "p", persistence: .none) : nil)
     }
+
     func urlSession(_ s: URLSession, didReceive c: URLAuthenticationChallenge, completionHandler ch: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
         log("\(tag) session.didReceiveChallenge \(c.protectionSpace.authenticationMethod)"); ch(.performDefaultHandling, nil)
     }
+
     func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive r: URLResponse, completionHandler ch: @escaping (URLSession.ResponseDisposition) -> Void) {
         log("\(tag) didReceiveResponse id=\(dataTask.taskIdentifier) \((r as? HTTPURLResponse)?.statusCode ?? -1) len=\(r.expectedContentLength) -> disposition \(responseDisposition.rawValue)"); ch(responseDisposition)
     }
+
     func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didReceive d: Data) {
         bodies[dataTask.taskIdentifier, default: Data()].append(d)
         chunks[dataTask.taskIdentifier, default: []].append(d.count)
         if chunks[dataTask.taskIdentifier]!.count <= 3 { log("\(tag) didReceiveData id=\(dataTask.taskIdentifier) \(d.count)B received=\(dataTask.countOfBytesReceived)") }
     }
+
     func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didBecome dl: URLSessionDownloadTask) { log("\(tag) didBecomeDownloadTask old=\(dataTask.taskIdentifier) new=\(dl.taskIdentifier) state=\(dataTask.state.rawValue)") }
     func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, didBecome st: URLSessionStreamTask) { log("\(tag) didBecomeStreamTask") }
     func urlSession(_ s: URLSession, dataTask: URLSessionDataTask, willCacheResponse r: CachedURLResponse, completionHandler ch: @escaping (CachedURLResponse?) -> Void) {
         log("\(tag) willCacheResponse id=\(dataTask.taskIdentifier) storage=\(r.storagePolicy.rawValue)"); ch(r)
     }
+
     func urlSession(_ s: URLSession, task: URLSessionTask, needNewBodyStream ch: @escaping (InputStream?) -> Void) {
         log("\(tag) needNewBodyStream id=\(task.taskIdentifier)"); ch(InputStream(data: Data(repeating: 9, count: 1000)))
     }
+
     func urlSession(_ s: URLSession, task: URLSessionTask, needNewBodyStreamFrom offset: Int64, completionHandler ch: @escaping (InputStream?) -> Void) {
         log("\(tag) needNewBodyStreamFrom id=\(task.taskIdentifier) offset=\(offset)"); ch(nil)
     }
+
     func urlSession(_ s: URLSession, task: URLSessionTask, didReceiveInformationalResponse r: HTTPURLResponse) { log("\(tag) didReceiveInformationalResponse \(r.statusCode)") }
     func urlSession(_ s: URLSession, task: URLSessionTask, didSendBodyData b: Int64, totalBytesSent t: Int64, totalBytesExpectedToSend e: Int64) {
         sends[task.taskIdentifier, default: []].append(t)
         if sends[task.taskIdentifier]!.count <= 3 { log("\(tag) didSendBodyData id=\(task.taskIdentifier) +\(b) \(t)/\(e) task.sent=\(task.countOfBytesSent)") }
     }
+
     func urlSession(_ s: URLSession, task: URLSessionTask, didFinishCollecting m: URLSessionTaskMetrics) {
         let t = m.transactionMetrics.first
         log("\(tag) didFinishCollecting id=\(task.taskIdentifier) txns=\(m.transactionMetrics.count) redirects=\(m.redirectCount) proto=\(t?.networkProtocolName ?? "nil") fetchType=\(t?.resourceFetchType.rawValue ?? -1) reused=\(t?.isReusedConnection ?? false) remote=\(t?.remoteAddress != nil) dns=\(t?.domainLookupStartDate != nil) connect=\(t?.connectStartDate != nil) reqStart=\(t?.requestStartDate != nil) respBodyBytes=\(t?.countOfResponseBodyBytesReceived ?? -1) reqBodyBytes=\(t?.countOfRequestBodyBytesSent ?? -1) interval=\(String(format: "%.2f", m.taskInterval.duration))")
     }
+
     func urlSession(_ s: URLSession, task: URLSessionTask, didCompleteWithError e: Error?) {
         let id = task.taskIdentifier
         log("\(tag) didCompleteWithError id=\(id) \(desc(e)) status=\((task.response as? HTTPURLResponse)?.statusCode ?? -1) recv=\(task.countOfBytesReceived)/\(task.countOfBytesExpectedToReceive) sent=\(task.countOfBytesSent)/\(task.countOfBytesExpectedToSend) orig=\(task.originalRequest?.url?.path ?? "nil") cur=\(task.currentRequest?.url?.path ?? "nil") resp=\(task.response?.url?.path ?? "nil") progress=\(task.progress.fractionCompleted)")
@@ -93,10 +105,12 @@ final class Delegate: NSObject, URLSessionDataDelegate, URLSessionDownloadDelega
         if let ue = (e as NSError?)?.userInfo[NSURLSessionDownloadTaskResumeData] as? Data { log("\(tag) resumeData bytes=\(ue.count)") }
         pending -= 1; if pending <= 0 { onDone?() }
     }
+
     func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didWriteData b: Int64, totalBytesWritten t: Int64, totalBytesExpectedToWrite e: Int64) {
         writes[downloadTask.taskIdentifier, default: []].append(t)
         if writes[downloadTask.taskIdentifier]!.count <= 3 { log("\(tag) download.didWriteData +\(b) \(t)/\(e)") }
     }
+
     func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didResumeAtOffset o: Int64, expectedTotalBytes e: Int64) { log("\(tag) download.didResumeAtOffset \(o)/\(e)") }
     func urlSession(_ s: URLSession, downloadTask: URLSessionDownloadTask, didFinishDownloadingTo l: URL) {
         let data = try? Data(contentsOf: l)
@@ -105,6 +119,7 @@ final class Delegate: NSObject, URLSessionDataDelegate, URLSessionDownloadDelega
         if showHeaders, let d = data { log("\(tag) request headers: \(headerSummary(d))") }
         DispatchQueue.global().asyncAfter(deadline: .now() + 0.4) { log("\(self.tag) download file exists after delegate returned: \(FileManager.default.fileExists(atPath: l.path))") }
     }
+
     func urlSession(_ s: URLSession, streamTask: URLSessionStreamTask, didBecome i: InputStream, outputStream o: OutputStream) { log("\(tag) stream.didBecomeInputStream") }
     func urlSession(_ s: URLSession, readClosedFor streamTask: URLSessionStreamTask) { log("\(tag) stream.readClosed") }
     func urlSession(_ s: URLSession, writeClosedFor streamTask: URLSessionStreamTask) { log("\(tag) stream.writeClosed") }
@@ -120,12 +135,14 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
     func application(_ a: UIApplication, handleEventsForBackgroundURLSession id: String, completionHandler: @escaping () -> Void) {
         log("app.handleEventsForBackgroundURLSession \(id)"); completionHandler()
     }
+
     func application(_ a: UIApplication, didFinishLaunchingWithOptions o: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool { true }
     func application(_ a: UIApplication, configurationForConnecting c: UISceneSession, options: UIScene.ConnectionOptions) -> UISceneConfiguration {
         let cfg = UISceneConfiguration(name: "Default", sessionRole: c.role)
         cfg.delegateClass = SceneDelegate.self
         return cfg
     }
+
     func start() {
         let scenario = CommandLine.arguments.dropFirst().first ?? "data"
         log("launch scenario=\(scenario)")
@@ -143,10 +160,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
         keep.append(s); keep.append(d)
         return (s, d)
     }
+
     func finish(_ d: Delegate, _ n: Int) {
         d.pending = n
         d.onDone = { DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) { log("DONE"); exit(0) } }
     }
+
     func req(_ p: String) -> URLRequest { URLRequest(url: URL(string: base + p)!) }
     func after(_ s: Double, _ f: @escaping () -> Void) { DispatchQueue.main.asyncAfter(deadline: .now() + s, execute: f) }
 
@@ -191,7 +210,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let t = s.downloadTask(with: req("/bytes/100")); t.earliestBeginDate = Date().addingTimeInterval(2)
             t.resume()
         case "delayedTimeout":
-            let (s, d) = make(id, tag: "delayedTO", { $0.timeoutIntervalForRequest = 1 }); finish(d, 1)
+            let (s, d) = make(id, tag: "delayedTO") { $0.timeoutIntervalForRequest = 1 }; finish(d, 1)
             let t = s.dataTask(with: req("/get")); t.earliestBeginDate = Date().addingTimeInterval(3)
             t.resume()
         case "delayedCancelTask":
@@ -199,22 +218,22 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let t = s.dataTask(with: req("/get")); t.earliestBeginDate = Date().addingTimeInterval(5)
             t.resume(); after(1) { log("cancel() while delayed"); t.cancel() }
         case "waits":
-            let (s, d) = make(id, tag: "waits", { $0.waitsForConnectivity = true; $0.timeoutIntervalForResource = 6 }); finish(d, 1)
+            let (s, d) = make(id, tag: "waits") { $0.waitsForConnectivity = true; $0.timeoutIntervalForResource = 6 }; finish(d, 1)
             s.dataTask(with: URLRequest(url: URL(string: "http://127.0.0.1:1/")!)).resume()
         case "nowaits":
             let (s, d) = make(id, tag: "nowaits"); finish(d, 1)
             s.dataTask(with: URLRequest(url: URL(string: "http://127.0.0.1:1/")!)).resume()
         case "badhost":
-            let (s, d) = make(id, tag: "badhost", { $0.waitsForConnectivity = true; $0.timeoutIntervalForResource = 6 }); finish(d, 1)
+            let (s, d) = make(id, tag: "badhost") { $0.waitsForConnectivity = true; $0.timeoutIntervalForResource = 6 }; finish(d, 1)
             s.dataTask(with: URLRequest(url: URL(string: "http://nonexistent.invalid/")!)).resume()
         case "badhostNoWait":
             let (s, d) = make(id, tag: "badhostNW"); finish(d, 1)
             s.dataTask(with: URLRequest(url: URL(string: "http://nonexistent.invalid/")!)).resume()
         case "requestTimeout":
-            let (s, d) = make(id, tag: "reqTO", { $0.timeoutIntervalForRequest = 2 }); finish(d, 1)
+            let (s, d) = make(id, tag: "reqTO") { $0.timeoutIntervalForRequest = 2 }; finish(d, 1)
             s.dataTask(with: req("/delay/8")).resume()
         case "resourceTimeout":
-            let (s, d) = make(id, tag: "resTO", { $0.timeoutIntervalForResource = 2 }); finish(d, 1)
+            let (s, d) = make(id, tag: "resTO") { $0.timeoutIntervalForResource = 2 }; finish(d, 1)
             s.dataTask(with: req("/delay/8")).resume()
         case "cancel":
             let (s, d) = make(id, tag: "cancel"); finish(d, 1)
@@ -285,7 +304,7 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let (s, d) = make(id, tag: "cookies"); finish(d, 2); d.showHeaders = true
             s.dataTask(with: req("/response-headers?Set-Cookie=bgexp%3D1")).resume()
             after(1) {
-                log("shared cookies=\(HTTPCookieStorage.shared.cookies?.map { $0.name } ?? []) session cookies=\(s.configuration.httpCookieStorage?.cookies?.map { $0.name } ?? [])")
+                log("shared cookies=\(HTTPCookieStorage.shared.cookies?.map(\.name) ?? []) session cookies=\(s.configuration.httpCookieStorage?.cookies?.map(\.name) ?? [])")
                 s.dataTask(with: self.req("/get")).resume()
             }
         case "redirectCancel":
@@ -363,10 +382,12 @@ final class AppDelegate: UIResponder, UIApplicationDelegate {
             let (s, d) = make(id, tag: "dlResume"); finish(d, 1)
             s.downloadTask(withResumeData: Data([1, 2, 3])).resume()
         case "multi":
-            let (s, d) = make(id, tag: "multi", { $0.httpMaximumConnectionsPerHost = 1 }); finish(d, 3)
-            for i in 0..<3 { s.dataTask(with: req("/delay/\(i)")).resume() }
+            let (s, d) = make(id, tag: "multi") { $0.httpMaximumConnectionsPerHost = 1 }; finish(d, 3)
+            for i in 0..<3 {
+                s.dataTask(with: req("/delay/\(i)")).resume()
+            }
         case "discretionary":
-            let (s, d) = make(id, tag: "discr", { $0.isDiscretionary = true }); finish(d, 1)
+            let (s, d) = make(id, tag: "discr") { $0.isDiscretionary = true }; finish(d, 1)
             s.dataTask(with: req("/get")).resume()
         case "reconnect":
             // phase 1 (arg2 = "start"): start download on a fixed id then exit before it ends. phase 2: relaunch, reattach.
@@ -392,6 +413,7 @@ final class SceneDelegate: UIResponder, UIWindowSceneDelegate {
         window?.rootViewController = UIViewController(); window?.makeKeyAndVisible()
         (UIApplication.shared.delegate as! AppDelegate).start()
     }
+
     func sceneDidEnterBackground(_ scene: UIScene) { log("scene.didEnterBackground") }
     func sceneWillEnterForeground(_ scene: UIScene) { log("scene.willEnterForeground") }
 }

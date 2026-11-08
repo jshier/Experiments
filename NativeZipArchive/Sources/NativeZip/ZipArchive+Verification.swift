@@ -1,11 +1,11 @@
 import Foundation
 import Synchronization
 
-extension ZipArchive {
+public extension ZipArchive {
     /// Decompresses every entry (in parallel) and checks its size and CRC-32 without writing anything.
     ///
     /// - Returns: The entries that failed and why, in archive order. Empty means the archive is intact.
-    public func verify(
+    func verify(
         _ entries: [ZipEntry]? = nil,
         maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount,
         backend: ZipDecoder.Backend = .bytes
@@ -16,7 +16,7 @@ extension ZipArchive {
         try? await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, backend: backend, weight: \.element.uncompressedSize) {
             [self] item, decoder in
             do {
-                try self.contents(of: item.element, using: &decoder) { _ in }
+                try contents(of: item.element, using: &decoder) { _ in }
             } catch {
                 failures.record(index: item.offset, entry: item.element, error: error)
             }

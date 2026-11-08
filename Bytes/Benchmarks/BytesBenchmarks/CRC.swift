@@ -11,17 +11,23 @@ func registerCRCBenchmarks() {
     // The portable path (other CPUs), measured here. See RESULTS.md for the variants it was chosen from.
     Benchmark("CRC-32 tables, 256 KB") { benchmark in
         for _ in benchmark.scaledIterations {
-            for _ in 0..<repeats { blackHole(CRC32.tableChecksum(large.span.bytes)) }
+            for _ in 0..<repeats {
+                blackHole(CRC32.tableChecksum(large.span.bytes))
+            }
         }
     }
     Benchmark("CRC-32 tables, 64 B") { benchmark in
         for _ in benchmark.scaledIterations {
-            for _ in 0..<(repeats << 12) { blackHole(CRC32.tableChecksum(small.span.bytes)) }
+            for _ in 0..<(repeats << 12) {
+                blackHole(CRC32.tableChecksum(small.span.bytes))
+            }
         }
     }
     Benchmark("CRC-32 hardware, 256 KB") { benchmark in
         for _ in benchmark.scaledIterations {
-            for _ in 0..<repeats { blackHole(CRC32.checksum(large.span.bytes)) }
+            for _ in 0..<repeats {
+                blackHole(CRC32.checksum(large.span.bytes))
+            }
         }
     }
 
@@ -39,10 +45,14 @@ func registerCRCBenchmarks() {
     }
     func register<T: ByteGroup>(_: T.Type, _ name: String) {
         Benchmark("forEach(\(name).self) { $0.bigEndian }, 4 MB") { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(sum(T.self, ordered: false)) }
+            for _ in benchmark.scaledIterations {
+                blackHole(sum(T.self, ordered: false))
+            }
         }
         Benchmark("forEach(\(name).self, .bigEndian), 4 MB") { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(sum(T.self, ordered: true)) }
+            for _ in benchmark.scaledIterations {
+                blackHole(sum(T.self, ordered: true))
+            }
         }
     }
     register(Byte2.self, "Byte2")
