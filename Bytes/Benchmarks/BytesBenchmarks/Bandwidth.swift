@@ -24,7 +24,7 @@ struct Workload: Sendable {
 
 func forInGroupWorkload<T: ByteGroup>(_: T.Type) -> Workload {
     Workload(name: "for-in \(T.self)", unit: T.byteCount, allCores: false) { span in
-        let reader = Bytes(span)
+        let reader = BytesReader(span)
         let values = reader.values(of: T.self, .bigEndian)
         if T.Integer.bitWidth > 64 {
             var sum: UInt64 = 0
@@ -39,7 +39,7 @@ func forInGroupWorkload<T: ByteGroup>(_: T.Type) -> Workload {
 
 func forInBitsWorkload<let width: Int>(_: Bits<width>.Type, name: String) -> Workload {
     Workload(name: "for-in \(name)", unit: width, allCores: false) { span in
-        let reader = Bytes(span)
+        let reader = BytesReader(span)
         let values = reader.values(of: Bits<width>.self)
         var sum: UInt8 = 0
         for value in values { sum &+= value.rawValue }
@@ -53,7 +53,7 @@ nonisolated(unsafe) let bulkReadDestination = UnsafeMutableRawBufferPointer.allo
 
 func bulkReadWorkload<T: ByteGroup>(_: T.Type) -> Workload {
     Workload(name: "read(_:_:into:) \(T.self)", unit: T.byteCount, allCores: false) { span in
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         let count = span.byteCount / T.byteCount
         let destination = bulkReadDestination.bindMemory(to: T.Integer.self)
         var output = OutputSpan(buffer: UnsafeMutableBufferPointer(rebasing: destination[..<count]), initializedCount: 0)
@@ -63,9 +63,9 @@ func bulkReadWorkload<T: ByteGroup>(_: T.Type) -> Workload {
     }
 }
 
-/// `for byte in reader`: `Bytes`' own conformance, one zero-copy span of the memory.
+/// `for byte in reader`: `BytesReader`'s own conformance, one zero-copy span of the memory.
 let forInBytes = Workload(name: "for-in Bytes (UInt8)", unit: 1, allCores: false) { span in
-    let reader = Bytes(span)
+    let reader = BytesReader(span)
     var sum: UInt8 = 0
     for byte in reader { sum &+= byte }
     return UInt64(sum)
@@ -81,7 +81,7 @@ func fold<I: FixedWidthInteger>(_ value: I) -> UInt64 {
 
 func groupWorkload<T: ByteGroup>(_: T.Type) -> Workload {
     Workload(name: "\(T.self)", unit: T.byteCount) { span in
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         if T.Integer.bitWidth > 64 {
             // 128-bit adds need a carry between halves and can't vectorize; sum the halves as 64-bit lanes.
             var sum: UInt64 = 0
@@ -97,7 +97,7 @@ func groupWorkload<T: ByteGroup>(_: T.Type) -> Workload {
 func bitsWorkload<let width: Int>(_: Bits<width>.Type, name: String) -> Workload {
     // A block of `width` bytes holds exactly 8 values, so chunks split at multiples of `width`.
     Workload(name: name, unit: width) { span in
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var sum: UInt8 = 0
         reader.forEach(Bits<width>.self) { sum &+= $0.rawValue }
         return UInt64(sum)

@@ -69,7 +69,7 @@ extension CRC32 {
 
     static func _hardwareUpdate(_ state: UInt32, _ bytes: RawSpan) -> UInt32 {
         var state = state
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         if reader.remainingByteCount >= foldThreshold {
             state = _fold(state, &reader)
         }
@@ -85,17 +85,17 @@ extension CRC32 {
     /// accumulators each fold forward 128 bytes per step (two carry-less multiplies and a three-way XOR):
     /// independent chains, so the multiplies' latency overlaps. Each 128-byte step is read as a fixed-size
     /// sub-cursor, so its eight loads need no bounds checks of their own.
-    static func _fold(_ state: UInt32, _ reader: inout Bytes) -> UInt32 {
-        var block = Bytes(try! reader.read(byteCount: 128))
+    static func _fold(_ state: UInt32, _ reader: inout BytesReader) -> UInt32 {
+        var block = BytesReader(try! reader.read(byteCount: 128))
         // Always inlined: as a call, each load spilled the eight accumulators (3.5x slower).
-        @inline(always) func next(_ block: inout Bytes) -> SIMD16<UInt8> { try! block.load(SIMD16<UInt8>.self) }
+        @inline(always) func next(_ block: inout BytesReader) -> SIMD16<UInt8> { try! block.load(SIMD16<UInt8>.self) }
         var x0 = next(&block) ^ bitCast(SIMD4<UInt32>(state, 0, 0, 0), to: SIMD16<UInt8>.self)
         var x1 = next(&block), x2 = next(&block), x3 = next(&block)
         var x4 = next(&block), x5 = next(&block), x6 = next(&block), x7 = next(&block)
 
         let fold1024 = Self.fold1024
         while reader.remainingByteCount >= 128 {
-            block = Bytes(try! reader.read(byteCount: 128))
+            block = BytesReader(try! reader.read(byteCount: 128))
             x0 = bytes_crc_fold(x0, next(&block), fold1024)
             x1 = bytes_crc_fold(x1, next(&block), fold1024)
             x2 = bytes_crc_fold(x2, next(&block), fold1024)
@@ -155,7 +155,7 @@ extension CRC32 {
     static func _tableUpdate(_ state: UInt32, _ bytes: RawSpan) -> UInt32 {
         let tables = tables
         var state = state
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         reader.forEach(Byte8.self) { group in
             // The register joins the first 4 bytes. Each byte is then looked up in the table for the bytes
             // still after it (7 for the first), and the results combine.

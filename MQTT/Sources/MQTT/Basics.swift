@@ -231,7 +231,7 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
     /// (3 is a protocol error).
     @inlinable
     @_lifetime(reader: copy reader)
-    init(reading reader: inout Bytes) throws(MQTTError) {
+    init(reading reader: inout BytesReader) throws(MQTTError) {
         let reserved: Crumb
         let retainHandling: Crumb
         let maximumQoS: Crumb
@@ -264,7 +264,7 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
 // MARK: - Field encodings
 
 /// MQTT's data representations (section 1.5), on top of `Bytes`.
-extension Bytes {
+extension BytesReader {
     /// A UTF-8 Encoded String: a 2-byte big-endian length, then UTF-8 without U+0000 [MQTT-1.5.4-2].
     /// Unchecked, it trusts that the string was checked before: for iterating validated lists.
     @inlinable @inline(__always)
@@ -277,9 +277,8 @@ extension Bytes {
             // validation is a precondition of the unchecked iterators. No safe construct skips the check.
             return unsafe UTF8Span(unchecked: Span(viewing: try read(bytesPrefixedBy: Byte2.self, .bigEndian)))
         }
-        let text = try read(utf8PrefixedBy: Byte2.self, .bigEndian)
-        guard !Text.containsNull(text) else { throw .invalidValue }
-        return text
+        // One pass for ASCII: UTF-8 and U+0000 checked together, 16 bytes at a time.
+        return try read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: Text.null)
     }
 
     /// A UTF-8 Encoded String, throwing a malformed-packet error with `detail`.
@@ -377,63 +376,28 @@ enum Size {
     static func lengthPrefixed(_ count: Int) -> Int { LEB128.byteCount(of: UInt64(count)) &+ count }
 }
 
-/// Checks on strings' contents.
+/// Checks on strings' contents, 16 bytes at a time (Bytes' `containsByte(where:)`): a typical 32-byte topic
+/// is two vector tests, with no branches. Parsing checks a string's bytes with its UTF-8, in the same pass
+/// (`read(utf8PrefixedBy:_:excluding:)`).
 @usableFromInline
 enum Text {
-    /// Whether any byte of `text` matches, eight bytes at a time (SWAR) with an overlapping last word, so a
-    /// typical 32-byte topic takes four steps. `words` returns a word with a high bit set in each matching
-    /// byte (see ``zeroBytes(_:)``). Shorter strings take a branch-free byte loop.
-    ///
-    /// Strings are short, so this beats vectorizing: a plain loop vectorizes 64 bytes at a time and sends
-    /// these strings through its scalar remainder, and the standard library's `SIMDMask` reductions
-    /// (`any`, `pointwiseMin`) compile to out-of-line calls.
+    /// U+0000, which MQTT strings can't contain [MQTT-1.5.4-2].
     @inlinable @inline(__always)
-    static func contains(in text: UTF8Span, _ words: (UInt64) -> UInt64, _ byteMatches: (UInt8) -> Bool) -> Bool {
-        // Checked loads. Against unchecked ones they measured 0.6% more instructions encoding PUBLISH packets
-        // (whose strings this checks), with no difference in time; most checks fold, as the offsets are in
-        // ranges the optimizer can see are in bounds.
-        let bytes = text.span.bytes
-        let count = bytes.byteCount
-        guard count >= 8 else {
-            var found: UInt8 = 0
-            for offset in 0..<count {
-                found |= byteMatches(bytes.load(fromByteOffset: offset, as: UInt8.self)) ? 1 : 0
-            }
-            return found != 0
-        }
-        var found: UInt64 = 0
-        var offset = 0
-        while offset < count &- 8 {
-            found |= words(bytes.load(fromByteOffset: offset, as: UInt64.self))
-            offset += 8 // Not `&+=`: a non-wrapping add tells the optimizer `offset` stays non-negative.
-        }
-        found |= words(bytes.load(fromByteOffset: count &- 8, as: UInt64.self))
-        return found != 0
-    }
+    static func null(_ lanes: ByteLanes) -> ByteMatches { lanes.matching(0) }
 
-    /// A word with the high bit set in each zero byte of `word` (and possibly in bytes above one): nonzero
-    /// exactly when `word` has a zero byte.
+    /// A wildcard (`+` or `#`) or U+0000, which topic names can't contain [MQTT-3.3.2-2, MQTT-4.7.3-2].
     @inlinable @inline(__always)
-    static func zeroBytes(_ word: UInt64) -> UInt64 {
-        (word &- 0x0101_0101_0101_0101) & ~word & 0x8080_8080_8080_8080
+    static func wildcardOrNull(_ lanes: ByteLanes) -> ByteMatches {
+        lanes.matching(0) | lanes.matching(UInt8(ascii: "+")) | lanes.matching(UInt8(ascii: "#"))
     }
 
-    /// Whether `text` contains U+0000, which MQTT strings can't [MQTT-1.5.4-2].
+    /// Whether `text` contains U+0000.
     @inlinable
-    static func containsNull(_ text: UTF8Span) -> Bool {
-        contains(in: text, zeroBytes, { $0 == 0 })
-    }
+    static func containsNull(_ text: UTF8Span) -> Bool { text.span.bytes.containsByte(where: null) }
 
-    /// Whether `text` contains a wildcard (`+` or `#`) or U+0000, which topic names can't
-    /// [MQTT-3.3.2-2, MQTT-4.7.3-2].
+    /// Whether `text` contains a wildcard or U+0000.
     @inlinable
-    static func containsWildcardOrNull(_ text: UTF8Span) -> Bool {
-        contains(
-            in: text,
-            { zeroBytes($0) | zeroBytes($0 ^ 0x2B2B_2B2B_2B2B_2B2B) | zeroBytes($0 ^ 0x2323_2323_2323_2323) },
-            { $0 == UInt8(ascii: "+") || $0 == UInt8(ascii: "#") || $0 == 0 }
-        )
-    }
+    static func containsWildcardOrNull(_ text: UTF8Span) -> Bool { text.span.bytes.containsByte(where: wildcardOrNull) }
 
     /// Whether `text` is longer than a 2-byte length can describe.
     @inlinable @inline(__always)
@@ -442,7 +406,7 @@ enum Text {
     /// Whether a topic filter names a shared subscription (`$share/…`).
     @inlinable
     static func isShared(_ filter: UTF8Span) -> Bool {
-        let reader = Bytes(filter.span)
+        let reader = BytesReader(filter.span)
         return (try? reader.peek(Byte7.self)) == 0x24_73_68_61_72_65_2F // "$share/"
     }
 }

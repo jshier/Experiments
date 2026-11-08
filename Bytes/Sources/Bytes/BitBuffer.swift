@@ -1,7 +1,7 @@
 /// A bit reader for entropy decoders (Huffman, arithmetic, ANS): up to 64 bits held in a register and
 /// refilled 8 bytes at a time, so reading a code is a mask and a shift.
 ///
-/// Create one from a ``Bytes`` cursor, ``refill()`` it, decode from ``bits`` (look up a table with its
+/// Create one from a ``BytesReader`` cursor, ``refill()`` it, decode from ``bits`` (look up a table with its
 /// next bits, then ``consume(bitCount:)`` the code's length), and turn it back into a cursor with ``finish()``:
 ///
 /// ```swift
@@ -43,7 +43,7 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     /// Always inlined, so a bit order the caller writes as a literal is a constant in the decode loop.
     @inlinable @inline(always)
     @_lifetime(copy reader)
-    public init(_ reader: consuming Bytes) {
+    public init(_ reader: consuming BytesReader) {
         span = reader.span
         bitOrder = reader.bitOrder
         _nextByte = reader._byteOffset
@@ -177,14 +177,14 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     /// bits were consumed than the data has.
     @inlinable
     @_lifetime(copy self)
-    public consuming func finish() throws(BytesError) -> Bytes {
+    public consuming func finish() throws(BytesError) -> BytesReader {
         let position = bitPosition
         guard position <= span.byteCount &<< 3 else { throw .insufficientData }
-        return Bytes(span, byteOffset: position &>> 3, bitOffset: position & 7, bitOrder: bitOrder)
+        return BytesReader(span, byteOffset: position &>> 3, bitOffset: position & 7, bitOrder: bitOrder)
     }
 }
 
-extension Bytes {
+extension BytesReader {
     /// A ``BitBuffer`` at this cursor's position, for decoding codes from it at full speed. Moves this cursor
     /// past what the buffer consumed when `body` returns.
     ///
@@ -192,7 +192,7 @@ extension Bytes {
     @inlinable @inline(always)
     @_lifetime(self: copy self)
     public mutating func withBitBuffer<R>(_ body: (inout BitBuffer) throws(BytesError) -> R) throws(BytesError) -> R {
-        var buffer = BitBuffer(Bytes(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder))
+        var buffer = BitBuffer(BytesReader(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder))
         let result = try body(&buffer)
         let position = buffer.bitPosition
         guard position <= span.byteCount &<< 3 else { throw .insufficientData }

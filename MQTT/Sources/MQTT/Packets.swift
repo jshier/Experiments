@@ -43,17 +43,25 @@ enum Check {
     }
 }
 
-extension Bytes {
+extension BytesReader {
     /// A topic name, checked as ``Check/topicName(_:hasTopicAlias:)`` does except for the alias, which comes
-    /// later in the packet. One scan for wildcards and U+0000.
+    /// later in the packet. One pass for an ASCII topic: its UTF-8, wildcards, and U+0000 together.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
     mutating func readMQTTTopicName(_ detail: StaticString) throws(MQTTError) -> UTF8Span {
-        let topic: UTF8Span
-        do throws(BytesError) { topic = try read(utf8PrefixedBy: Byte2.self, .bigEndian) } catch { throw .malformed(detail) }
-        guard !Text.containsWildcardOrNull(topic) else { throw .malformed("wildcard or U+0000 in a topic name") }
-        return topic
+        do throws(BytesError) {
+            return try read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: Text.wildcardOrNull)
+        } catch {
+            // Which rule it broke, now that it's an error (nothing was consumed): if it's valid UTF-8, a
+            // wildcard or U+0000.
+            let start = byteOffset
+            guard error == .invalidValue, (try? read(utf8PrefixedBy: Byte2.self, .bigEndian)) != nil else {
+                throw .malformed(detail)
+            }
+            try! seek(toByteOffset: start)
+            throw .malformed("wildcard or U+0000 in a topic name")
+        }
     }
 }
 
@@ -117,7 +125,7 @@ public struct MQTTConnect: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes) throws(MQTTError) {
+    init(reading body: inout BytesReader) throws(MQTTError) {
         // A server answers another protocol name or version with CONNACK 0x84 [MQTT-3.1.2-2].
         do throws(BytesError) { try body.expect(Self.protocolName) } catch {
             throw error == .mismatch ? MQTTError(.unsupportedProtocolVersion, "protocol name") : .malformed("protocol name")
@@ -231,7 +239,7 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes) throws(MQTTError) {
+    init(reading body: inout BytesReader) throws(MQTTError) {
         let reserved: Bits<7>
         do throws(BytesError) {
             reserved = try body.read(Bits<7>.self)
@@ -304,7 +312,7 @@ public struct MQTTPublish: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes, flags: Nibble) throws(MQTTError) {
+    init(reading body: inout BytesReader, flags: Nibble) throws(MQTTError) {
         // The fixed header's flags: DUP, QoS (2 bits), RETAIN.
         duplicate = flags[bit: 3]
         guard let qos = MQTTQoS(rawBits: flags[Crumb.self, at: 1]) else { throw .malformed("QoS 3") }
@@ -376,7 +384,7 @@ public struct MQTTPublishResponse: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes, reasonCodes: ReasonCodeSet) throws(MQTTError) {
+    init(reading body: inout BytesReader, reasonCodes: ReasonCodeSet) throws(MQTTError) {
         packetIdentifier = try body.readMQTTUInt16("packet identifier")
         // The reason code is omitted for success with no properties, and the properties when empty.
         reasonCode = body.isAtEnd ? .success : try body.readMQTTReasonCode()
@@ -432,7 +440,7 @@ public struct MQTTSubscriptions: ~Escapable {
     @inlinable
     @_lifetime(copy bytes)
     public init(validating bytes: RawSpan) throws(MQTTError) {
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         guard !reader.isAtEnd else { throw .protocolError("no subscriptions") }
         while !reader.isAtEnd {
             let filter = try reader.readMQTTString("topic filter")
@@ -446,7 +454,7 @@ public struct MQTTSubscriptions: ~Escapable {
     /// Calls `body` with each subscription, in order.
     @inlinable
     public func forEach<E: Error>(_ body: (borrowing MQTTSubscription) throws(E) -> Void) throws(E) {
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         while !reader.isAtEnd {
             // Checked when the list was created, so reading can't fail, and needn't check again.
             let topicFilter = try! reader.readMQTTText(checked: false)
@@ -485,7 +493,7 @@ public struct MQTTSubscribe: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes) throws(MQTTError) {
+    init(reading body: inout BytesReader) throws(MQTTError) {
         packetIdentifier = try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .subscribe)
         let list: RawSpan
@@ -521,7 +529,7 @@ public struct MQTTTopicFilters: ~Escapable {
     @inlinable
     @_lifetime(copy bytes)
     public init(validating bytes: RawSpan) throws(MQTTError) {
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         guard !reader.isAtEnd else { throw .protocolError("no topic filters") }
         while !reader.isAtEnd {
             guard try reader.readMQTTString("topic filter").count > 0 else { throw .protocolError("empty topic filter") }
@@ -532,7 +540,7 @@ public struct MQTTTopicFilters: ~Escapable {
     /// Calls `body` with each topic filter, in order.
     @inlinable
     public func forEach<E: Error>(_ body: (UTF8Span) throws(E) -> Void) throws(E) {
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         while !reader.isAtEnd {
             try body(try! reader.readMQTTText(checked: false))
         }
@@ -559,7 +567,7 @@ public struct MQTTUnsubscribe: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes) throws(MQTTError) {
+    init(reading body: inout BytesReader) throws(MQTTError) {
         packetIdentifier = try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .unsubscribe)
         let list: RawSpan
@@ -611,7 +619,7 @@ public struct MQTTSubscribeAcknowledgement: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes, reasonCodes allowed: ReasonCodeSet) throws(MQTTError) {
+    init(reading body: inout BytesReader, reasonCodes allowed: ReasonCodeSet) throws(MQTTError) {
         packetIdentifier = try body.readMQTTUInt16("packet identifier")
         properties = try MQTTProperties(reading: &body, allowing: .acknowledgement)
         do throws(BytesError) {
@@ -667,7 +675,7 @@ public struct MQTTDisconnect: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes) throws(MQTTError) {
+    init(reading body: inout BytesReader) throws(MQTTError) {
         // Remaining length 0: normal disconnection; 1: a reason code without properties [3.14.2.2.1].
         reasonCode = body.isAtEnd ? .normalDisconnection : try body.readMQTTReasonCode()
         try Check.reasonCode(reasonCode, in: .disconnect)
@@ -712,7 +720,7 @@ public struct MQTTAuthenticate: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout Bytes) throws(MQTTError) {
+    init(reading body: inout BytesReader) throws(MQTTError) {
         // Remaining length 0: success without properties [3.15.2.1]. (A lone reason code is accepted too.)
         reasonCode = body.isAtEnd ? .success : try body.readMQTTReasonCode()
         try Check.reasonCode(reasonCode, in: .authenticate)

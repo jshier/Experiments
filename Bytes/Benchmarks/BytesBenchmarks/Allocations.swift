@@ -20,7 +20,7 @@ func sectionsRoundTrip(into buffer: UnsafeMutableRawBufferPointer, count: Int) -
             try section.write(UInt64(index), as: LEB128.self)
         }
     }
-    var reader = Bytes(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: buffer[..<writer.byteCount])))
+    var reader = BytesReader(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: buffer[..<writer.byteCount])))
     var sum: UInt64 = 0
     while !reader.isAtEnd {
         var section = try! reader.read(sectionPrefixedBy: LEB128.self, maxByteCount: 2)
@@ -56,12 +56,12 @@ func registerAllocationBenchmarks(_ others: [(name: String, run: () -> Void)]) {
         let byteCount = source.count / workload.unit * workload.unit
         register("Read: \(workload.name)") { blackHole(workload.read(source.span.bytes.extracting(first: byteCount))) }
     }
-    // "for-in Bytes (UInt8)" above, `let reader = Bytes(span); for byte in reader`, allocates once per loop
+    // "for-in Bytes (UInt8)" above, `let reader = BytesReader(span); for byte in reader`, allocates once per loop
     // (Swift 6.4.2): a `~Copyable` `let` is boxed, and the iterator's borrow dependence on the box keeps the
     // optimizer from moving it to the stack. Its threshold is 1, so the check reports the fix as an
     // improvement. A `var` reader isn't boxed:
     register("Read: for-in Bytes (UInt8), var reader") {
-        var reader = Bytes(source.span)
+        var reader = BytesReader(source.span)
         var sum: UInt8 = 0
         for byte in reader { sum &+= byte }
         try! reader.skip(byteCount: reader.remainingByteCount)

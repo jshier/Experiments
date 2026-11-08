@@ -1,5 +1,5 @@
 /// A cursor that writes binary data into borrowed memory, field by field, at bit or byte granularity: the
-/// counterpart of ``Bytes``.
+/// counterpart of ``BytesReader``.
 ///
 /// ```swift
 /// let packet = try [UInt8](capacity: 64) { output in
@@ -112,7 +112,7 @@ extension BytesWriter {
         }
     }
 
-    /// See ``Bytes/_assumeInvariant()``; the same reasoning applies.
+    /// See ``BytesReader/_assumeInvariant()``; the same reasoning applies.
     @inlinable @inline(__always)
     func _assumeInvariant() {
         unsafe assume(_byteOffset <= _bytes.byteCount)
@@ -270,7 +270,7 @@ extension BytesWriter {
     }
 
     /// Writes `value`'s `MemoryLayout<T>.size` bytes in native byte order (little-endian on Apple
-    /// platforms): the counterpart of ``Bytes/load(_:)``.
+    /// platforms): the counterpart of ``BytesReader/load(_:)``.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     public mutating func store<T: ConvertibleToBytes & BitwiseCopyable>(_ value: T) throws(BytesError) {
@@ -509,7 +509,7 @@ extension BytesWriter {
 // MARK: - Bulk
 
 // The generating forms (`count:` plus a closure from index to value) are the write-side counterpart of
-// `Bytes.forEach`: always inlined, so the closure is fused into one counted loop with a single capacity
+// `BytesReader.forEach`: always inlined, so the closure is fused into one counted loop with a single capacity
 // check, and nothing is staged in memory first. The span forms are thin wrappers over them. The closures
 // can't throw: capacity is checked once up front, so a write either happens in full or not at all.
 // Values too large for `T` are truncated without a check here, unlike single writes in debug builds: a

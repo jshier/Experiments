@@ -66,14 +66,14 @@ let benchmarks: @Sendable () -> Void = {
 
     Benchmark("Bulk BE32: read(_:_:into:)") { benchmark in
         for _ in benchmark.scaledIterations {
-            var reader = Bytes(words.span)
+            var reader = BytesReader(words.span)
             let values = try [UInt32](capacity: wordCount) { try reader.read(Byte4.self, .bigEndian, into: &$0) }
             blackHole(values)
         }
     }
     Benchmark("Bulk BE32: read(_:_:) per value") { benchmark in
         for _ in benchmark.scaledIterations {
-            var reader = Bytes(words.span)
+            var reader = BytesReader(words.span)
             let values = try [UInt32](capacity: wordCount) { output in
                 while !output.isFull { output.append(try reader.read(Byte4.self, .bigEndian)) }
             }
@@ -93,7 +93,7 @@ let benchmarks: @Sendable () -> Void = {
     }
     Benchmark("Bulk BE24: read(_:_:into:)") { benchmark in
         for _ in benchmark.scaledIterations {
-            var reader = Bytes(words.span)
+            var reader = BytesReader(words.span)
             let values = try [UInt32](capacity: words.count / 3) { try reader.read(Byte3.self, .bigEndian, into: &$0) }
             blackHole(values)
         }
@@ -108,7 +108,7 @@ let benchmarks: @Sendable () -> Void = {
 
     Benchmark("Search 64 KB backwards: lastByteOffset(of:)") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(Bytes(haystack.span).lastByteOffset(of: signature))
+            blackHole(BytesReader(haystack.span).lastByteOffset(of: signature))
         }
     }
     Benchmark("Search 64 KB backwards: RawSpan.load per offset") { benchmark in
@@ -130,6 +130,6 @@ let benchmarks: @Sendable () -> Void = {
         ("Fields: Bytes", { blackHole(try! CentralDirectory.parseWithBytes(directory.span.bytes)) }),
         ("Fields: Bytes, fixed-size records", { blackHole(try! CentralDirectory.parseWithBytesRecords(directory.span.bytes)) }),
         ("Bits: Bytes", { blackHole(try! BitFields.parseWithBytes(bitStream.span)) }),
-        ("Search 64 KB backwards: lastByteOffset(of:)", { blackHole(Bytes(haystack.span).lastByteOffset(of: signature)) }),
+        ("Search 64 KB backwards: lastByteOffset(of:)", { blackHole(BytesReader(haystack.span).lastByteOffset(of: signature)) }),
     ])
 }

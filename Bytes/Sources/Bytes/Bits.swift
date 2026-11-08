@@ -1,4 +1,4 @@
-/// A value made of `width` bits, where `width` is 1 through 8: the unit ``Bytes`` reads, and ``BytesWriter``
+/// A value made of `width` bits, where `width` is 1 through 8: the unit ``BytesReader`` reads, and ``BytesWriter``
 /// writes, below byte granularity.
 ///
 /// Use the aliases for the common widths: ``Bit``, ``Crumb``, ``Nibble``, and ``Byte``. Any other width

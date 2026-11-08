@@ -1,14 +1,15 @@
 # Bytes
 
 Parse and write binary formats field by field, at bit or byte granularity, with no copying and no
-allocation, at memory speed. `Bytes` reads borrowed memory; `BytesWriter` writes into memory you provide.
+allocation, at memory speed. `BytesReader` reads borrowed memory; `BytesWriter` writes into memory you
+provide.
 Both are `~Copyable`, `~Escapable` cursors.
 
 ```swift
 import Bytes
 
-var reader = Bytes(data.span)                                   // RawSpan or Span<UInt8>
-try reader.expect(0x50_4B_03_04 as Byte4)            // a signature, or throws .mismatch
+var reader = BytesReader(data.span)                             // RawSpan or Span<UInt8>
+try reader.expect(0x50_4B_03_04 as Byte4)                       // a signature, or throws .mismatch
 let version = try reader.read(Byte2.self, .littleEndian)        // UInt16
 let length = try reader.read(Byte3.self, .bigEndian)            // UInt32, from 3 bytes
 let kind = try reader.read(Bits<3>.self)
@@ -31,7 +32,7 @@ Full documentation is in `Sources/Bytes/Bytes.docc`, including a guide to writin
 
 ## Types
 
-- **`Bytes`**: the reading cursor. It can't outlive the memory it reads, and every span it returns borrows
+- **`BytesReader`**: the reading cursor. It can't outlive the memory it reads, and every span it returns borrows
   that memory; copy what you keep with `String(copying:)` or `[UInt8](copying:)`. A read that throws
   (`BytesError`) consumes nothing, so `byteOffset` is the error's location; `atomically { reader in … }`
   makes several reads all or nothing. Untrusted sizes read as `Int` throw rather than trap when they don't
@@ -100,6 +101,28 @@ section writer fills in the length in place; a LEB128-prefixed one reserves `max
 the section down if the length is shorter, so size the section first when you can (`LEB128.byteCount(of:)`)
 and write the length directly.
 
+### Scanning text and bytes, 16 at a time
+
+```swift
+let topic = try reader.read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: { lanes in
+    lanes.matching(0) | lanes.matching(UInt8(ascii: "+")) | lanes.matching(UInt8(ascii: "#"))
+})                                                                         // UTF-8 and the bytes, one pass
+let hasNull = bytes.containsByte { $0.matching(0) }                        // any RawSpan
+let same = topic.span.bytes.bytesEqual(expected)                           // XOR 16 bytes at a time
+```
+
+- Validating UTF-8 checks for ASCII first, inline, 16 bytes at a time: ASCII is valid UTF-8 as it is,
+  so short ASCII strings (protocol names, topics, keys) skip the standard library's out-of-line
+  validation. `excluding:` checks for bytes a format forbids in the same pass. Other text is validated
+  in full, then scanned for those bytes.
+- `containsByte(where:)` tests 16-byte blocks (and an overlapping last block) with a `ByteLanes` test
+  built from `matching(_:)` and `nonASCII`, combined with `|` and `&`. Shorter spans fill one block with
+  overlapping loads, so a 32-byte string is two tests and no branches.
+- The tests are lanewise wrapping arithmetic and bitwise operations, which compile to a few NEON (or SSE)
+  instructions with Swift 6.4 and 6.5. Not the standard library's lane comparisons (`.==`) and `any()`:
+  Swift 6.5 vectorizes those too, but 6.4 compiles them a lane at a time and reduces with an out-of-line
+  call.
+
 ## Decoders
 
 For entropy coders and LZ77 (DEFLATE, PNG, JPEG, Brotli), Bytes has a bit buffer, Huffman tables, and
@@ -146,7 +169,7 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
 
 - A byte-aligned read or write is one bounds check and one or two unaligned loads or stores. Odd widths use
   two overlapping accesses of the next smaller power of two, so they never go out of bounds.
-- To parse a fixed-size record, read it as a sub-cursor first (`Bytes(try reader.read(byteCount: 46))`):
+- To parse a fixed-size record, read it as a sub-cursor first (`BytesReader(try reader.read(byteCount: 46))`):
   its length is a constant the optimizer can see, so field reads inside it need no bounds checks.
 - Loops of single reads or writes vectorize when the cursor is a local; so do `forEach`, generating writes,
   and bulk reads and writes, at every width.
@@ -170,15 +193,13 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
   a few funnels (`Load`, `Store`, the copy helpers, the NEON shuffles), each behind the cursor's own
   bounds check, with comments saying why. The standard library's checked loads and stores measured 24%
   to 8x slower there, because their check isn't folded into the cursor's. Elsewhere it uses the checked
-  forms; for sub-cursors (`Bytes(try reader.read(byteCount: 46))`) the checked `extracting` made
+  forms; for sub-cursors (`BytesReader(try reader.read(byteCount: 46))`) the checked `extracting` made
   fixed-size records 31% faster.
 
 `Benchmarks/RESULTS.md` has the measurements, the assembly review, and the experiments that didn't pay off.
 
 ## Caveats
 
-- The module and its main type share the name `Bytes`; with a name clash, use a module selector
-  (`Bytes::Byte4`).
 - A cursor passed `inout` to a function or closure the compiler doesn't inline goes through memory, and
   loops over it stop vectorizing. Keep cursors local, or in inlinable code. That includes capturing one in
   a closure, such as the body of `[UInt8](capacity:)` or `withBytesWriter`. In memory, each byte read

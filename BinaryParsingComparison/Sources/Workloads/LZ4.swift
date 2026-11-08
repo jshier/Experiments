@@ -16,7 +16,7 @@ public enum LZ4 {
     // MARK: Bytes
 
     public static func decodeWithBytes(_ data: RawSpan) throws -> [UInt8] {
-        var reader = Bytes(data)
+        var reader = BytesReader(data)
         try reader.expect(0x04_22_4D_18 as Byte4) // 0x184D2204, little-endian
         let flags = try reader.read(Byte.self)
         let descriptor = try reader.read(Byte.self)
@@ -57,7 +57,7 @@ public enum LZ4 {
     /// and the match. The last sequence has literals only.
     @inline(always)
     static func decodeBlock(_ block: RawSpan, into writer: inout BytesWriter) throws(BytesError) {
-        var reader = Bytes(block)
+        var reader = BytesReader(block)
         while true {
             let token = try reader.read(Byte.self)
             let literalCount = try length(Int(token.highHalf), &reader)
@@ -72,7 +72,7 @@ public enum LZ4 {
 
     /// A length: the token's nibble, plus following bytes while they're 255 if the nibble is 15.
     @inline(always)
-    static func length(_ nibble: Int, _ reader: inout Bytes) throws(BytesError) -> Int {
+    static func length(_ nibble: Int, _ reader: inout BytesReader) throws(BytesError) -> Int {
         guard nibble == 15 else { return nibble }
         var length = nibble
         while true {

@@ -64,13 +64,13 @@ import Testing
     /// `forEach` with a byte order gives each group's integer, like `read(_:_:)`.
     @Test func forEachInByteOrder() {
         let data: [UInt8] = [0x00, 0x01, 0x00, 0x02, 0x00, 0x03, 0xFF]
-        var reader = Bytes(data.span)
+        var reader = BytesReader(data.span)
         var values: [UInt16] = []
         reader.forEach(Byte2.self, .bigEndian) { values.append($0) }
         #expect(values == [1, 2, 3])
         let remaining = reader.remainingByteCount
         #expect(remaining == 1)
-        var little = Bytes(data.span)
+        var little = BytesReader(data.span)
         values = []
         little.forEach(Byte2.self, .littleEndian) { values.append($0) }
         #expect(values == [0x0100, 0x0200, 0x0300])

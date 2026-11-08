@@ -30,7 +30,7 @@ public enum LEB128 {
     }
 }
 
-extension Bytes {
+extension BytesReader {
     /// Reads an unsigned LEB128 integer of at most `maxByteCount` bytes (1 through 10). Requires byte
     /// alignment.
     ///
@@ -112,7 +112,7 @@ extension BytesWriter {
 
 // MARK: - Sections
 
-extension Bytes {
+extension BytesReader {
     /// Reads the next `byteCount` bytes as a cursor of their own, with the same bit order: a section to parse
     /// separately, such as a record, a message body, or a list. Requires byte alignment.
     ///
@@ -122,8 +122,8 @@ extension Bytes {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func readSection(byteCount: Int) throws(BytesError) -> Bytes {
-        Bytes(try read(byteCount: byteCount), bitOrder: bitOrder)
+    public mutating func readSection(byteCount: Int) throws(BytesError) -> BytesReader {
+        BytesReader(try read(byteCount: byteCount), bitOrder: bitOrder)
     }
 
     /// Reads a section whose byte count comes first, as a `L` in `byteOrder`. Requires byte alignment.
@@ -137,8 +137,8 @@ extension Bytes {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read<L: ByteGroup>(sectionPrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> Bytes {
-        Bytes(try read(bytesPrefixedBy: L.self, byteOrder), bitOrder: bitOrder)
+    public mutating func read<L: ByteGroup>(sectionPrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> BytesReader {
+        BytesReader(try read(bytesPrefixedBy: L.self, byteOrder), bitOrder: bitOrder)
     }
 
     /// Reads a section whose byte count comes first, as LEB128 of at most `maxByteCount` bytes. Requires byte
@@ -153,8 +153,8 @@ extension Bytes {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read(sectionPrefixedBy _: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> Bytes {
-        Bytes(try read(bytesPrefixedBy: LEB128.self, maxByteCount: maxByteCount), bitOrder: bitOrder)
+    public mutating func read(sectionPrefixedBy _: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> BytesReader {
+        BytesReader(try read(bytesPrefixedBy: LEB128.self, maxByteCount: maxByteCount), bitOrder: bitOrder)
     }
 
     /// Reads bytes whose count comes first, as a `L` in `byteOrder`, as a span of the same memory. Requires
@@ -202,7 +202,7 @@ extension Bytes {
 
 // MARK: - Strings
 
-extension Bytes {
+extension BytesReader {
     /// Reads the next `byteCount` bytes as validated UTF-8, viewing the same memory. Requires byte alignment.
     ///
     /// Throws ``BytesError/invalidValue`` without consuming anything if they aren't valid UTF-8. Convert
@@ -211,14 +211,26 @@ extension Bytes {
     @_lifetime(copy self)
     @_lifetime(self: copy self)
     public mutating func readUTF8(byteCount: Int) throws(BytesError) -> UTF8Span {
+        try readUTF8(byteCount: byteCount, excluding: { _ in .none })
+    }
+
+    /// Reads the next `byteCount` bytes as validated UTF-8 in which no byte matches `excluded`, viewing
+    /// the same memory. Requires byte alignment. ASCII text is checked for both in one pass, 16 bytes at a
+    /// time (see ``Swift/UTF8Span/init(validating:excluding:)``).
+    ///
+    /// Throws ``BytesError/invalidValue`` without consuming anything if they aren't valid UTF-8 or one
+    /// matches `excluded`.
+    @inlinable @inline(__always)
+    @_lifetime(copy self)
+    @_lifetime(self: copy self)
+    public mutating func readUTF8(byteCount: Int, excluding excluded: (ByteLanes) -> ByteMatches) throws(BytesError) -> UTF8Span {
         let start = _byteOffset
         let bytes = try read(byteCount: byteCount)
-        do {
-            return try UTF8Span(validating: Span(viewing: bytes))
-        } catch {
+        guard let text = UTF8Span(validating: bytes, excluding: excluded) else {
             _byteOffset = start
             throw .invalidValue
         }
+        return text
     }
 
     /// Reads UTF-8 whose byte count comes first, as a `L` in `byteOrder`, viewing the same memory. Requires
@@ -234,14 +246,32 @@ extension Bytes {
     @_lifetime(copy self)
     @_lifetime(self: copy self)
     public mutating func read<L: ByteGroup>(utf8PrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> UTF8Span {
+        try read(utf8PrefixedBy: L.self, byteOrder, excluding: { _ in .none })
+    }
+
+    /// Reads UTF-8 whose byte count comes first, as a `L` in `byteOrder`, in which no byte matches
+    /// `excluded`, viewing the same memory. Requires byte alignment. ASCII text is checked for both in one
+    /// pass, 16 bytes at a time (see ``Swift/UTF8Span/init(validating:excluding:)``).
+    ///
+    /// ```swift
+    /// let name = try reader.read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: { $0.matching(0) })
+    /// ```
+    ///
+    /// Throws without consuming anything if the bytes aren't all there (``BytesError/insufficientData``),
+    /// or aren't valid UTF-8 or one matches `excluded` (``BytesError/invalidValue``).
+    @inlinable @inline(__always)
+    @_lifetime(copy self)
+    @_lifetime(self: copy self)
+    public mutating func read<L: ByteGroup>(
+        utf8PrefixedBy _: L.Type, _ byteOrder: ByteOrder, excluding excluded: (ByteLanes) -> ByteMatches
+    ) throws(BytesError) -> UTF8Span {
         let start = _byteOffset
         let bytes = try read(bytesPrefixedBy: L.self, byteOrder)
-        do {
-            return try UTF8Span(validating: Span(viewing: bytes))
-        } catch {
+        guard let text = UTF8Span(validating: bytes, excluding: excluded) else {
             _byteOffset = start
             throw .invalidValue
         }
+        return text
     }
 }
 

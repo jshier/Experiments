@@ -35,7 +35,7 @@ public enum QOI {
     // MARK: Bytes
 
     public static func decodeWithBytes(_ data: RawSpan) throws -> DecodedImage {
-        var reader = Bytes(data)
+        var reader = BytesReader(data)
         try reader.expect(0x71_6F_69_66 as Byte4) // "qoif"
         let width = Int(try reader.read(Byte4.self, .bigEndian))
         let height = Int(try reader.read(Byte4.self, .bigEndian))

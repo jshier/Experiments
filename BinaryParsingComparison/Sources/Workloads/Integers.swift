@@ -8,14 +8,14 @@ public enum Integers {
     // MARK: 32-bit
 
     public static func sum32Bytes(_ span: RawSpan) throws -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var sum: UInt64 = 0
         while reader.remainingByteCount >= 4 { sum &+= UInt64(try reader.read(Byte4.self, .bigEndian)) }
         return sum
     }
 
     public static func sum32BytesForEach(_ span: RawSpan) -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var sum: UInt64 = 0
         reader.forEach(Byte4.self, .bigEndian) { sum &+= UInt64($0) }
         return sum
@@ -31,14 +31,14 @@ public enum Integers {
     // MARK: 24-bit
 
     public static func sum24Bytes(_ span: RawSpan) throws -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var sum: UInt64 = 0
         while reader.remainingByteCount >= 3 { sum &+= UInt64(try reader.read(Byte3.self, .bigEndian)) }
         return sum
     }
 
     public static func sum24BytesForEach(_ span: RawSpan) -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var sum: UInt64 = 0
         reader.forEach(Byte3.self, .bigEndian) { sum &+= UInt64($0) }
         return sum

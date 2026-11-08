@@ -1,19 +1,19 @@
-// `for`-`in` over `Bytes`, through the standard library's `Iterable` (macOS 27 and aligned releases).
+// `for`-`in` over `BytesReader`, through the standard library's `Iterable` (macOS 27 and aligned releases).
 //
 // `Iterable` iterators hand out a whole `Span` of elements per step, not one element per `next()` call, so a
 // `for`-`in` loop compiles to an outer loop over spans and an inner loop over contiguous memory that the
 // compiler vectorizes. Iterating never moves the cursor: it reads from the cursor's position onward.
 
-// MARK: - Bytes
+// MARK: - BytesReader
 
-extension Bytes: Iterable {
+extension BytesReader: Iterable {
     public typealias Element = UInt8
     public typealias BorrowingIterator = Span<UInt8>.BorrowingIterator
 
     /// Iterates the whole unread bytes, without consuming them, as one span of the underlying memory.
     ///
     /// ```swift
-    /// var reader = Bytes(data.span)
+    /// var reader = BytesReader(data.span)
     /// for byte in reader { checksum &+= UInt32(byte) }
     /// ```
     ///
@@ -32,7 +32,7 @@ extension Bytes: Iterable {
 
 // MARK: - Typed views
 
-extension Bytes {
+extension BytesReader {
     /// The remaining whole `T` groups, as integers in `byteOrder`, for `for`-`in` loops.
     ///
     /// ```swift
@@ -76,7 +76,7 @@ extension Bytes {
     }
 }
 
-/// The whole `T` groups from a position in a span, as integers in a byte order. See ``Bytes/values(of:_:)``.
+/// The whole `T` groups from a position in a span, as integers in a byte order. See ``BytesReader/values(of:_:)``.
 public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
     public typealias Element = T.Integer
 
@@ -99,19 +99,19 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
     @inlinable
     @_lifetime(borrow self)
     public func makeBorrowingIterator() -> Iterator {
-        Iterator(cursor: Bytes(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder), byteOrder: byteOrder)
+        Iterator(cursor: BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder), byteOrder: byteOrder)
     }
 
     @inlinable
     public var underestimatedCount: Int {
-        Bytes(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder).remainingByteCount / T.byteCount
+        BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder).remainingByteCount / T.byteCount
     }
 
     /// Decodes up to 1,024 values at a time into its own buffer, and hands out a span of them.
     public struct Iterator: BorrowingIteratorProtocol, ~Copyable, ~Escapable {
         public typealias Element = T.Integer
 
-        @usableFromInline var cursor: Bytes
+        @usableFromInline var cursor: BytesReader
         @usableFromInline let byteOrder: ByteOrder
         /// 1,024 values per span (2–16 KB): enough that per-span overhead is amortized, small enough to
         /// stay in L1 between being decoded and being read by the loop body.
@@ -120,7 +120,7 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
 
         @inlinable
         @_lifetime(copy cursor)
-        init(cursor: consuming Bytes, byteOrder: ByteOrder) {
+        init(cursor: consuming BytesReader, byteOrder: ByteOrder) {
             self.cursor = cursor
             self.byteOrder = byteOrder
         }
@@ -144,7 +144,7 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
     }
 }
 
-/// The whole `Bits<width>` values from a position in a span. See ``Bytes/values(of:)``.
+/// The whole `Bits<width>` values from a position in a span. See ``BytesReader/values(of:)``.
 public struct BitsValues<let width: Int>: Iterable, ~Escapable {
     public typealias Element = Bits<width>
 
@@ -165,19 +165,19 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
     @inlinable
     @_lifetime(borrow self)
     public func makeBorrowingIterator() -> Iterator {
-        Iterator(cursor: Bytes(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder))
+        Iterator(cursor: BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder))
     }
 
     @inlinable
     public var underestimatedCount: Int {
-        Bytes(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder).remainingBitCount / width
+        BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder).remainingBitCount / width
     }
 
     /// Decodes up to 4,096 values at a time into its own buffer, and hands out a span of them.
     public struct Iterator: BorrowingIteratorProtocol, ~Copyable, ~Escapable {
         public typealias Element = Bits<width>
 
-        @usableFromInline var cursor: Bytes
+        @usableFromInline var cursor: BytesReader
         /// 4,096 values per span (4 KB, from 512–4,096 bytes of input): a narrow width needs many values
         /// per span to amortize the per-span overhead.
         @usableFromInline var buffer = InlineArray<4096, Bits<width>>(repeating: .zero)
@@ -185,7 +185,7 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
 
         @inlinable
         @_lifetime(copy cursor)
-        init(cursor: consuming Bytes) {
+        init(cursor: consuming BytesReader) {
             self.cursor = cursor
         }
 

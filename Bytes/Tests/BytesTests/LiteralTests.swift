@@ -39,7 +39,7 @@ import Testing
     /// Literals work wherever a group is expected: reading, comparing, and matching.
     @Test func literalsInUse() throws {
         let data: [UInt8] = [0x50, 0x4B, 0x03, 0x04, 0x14, 0x00]
-        var reader = Bytes(data.span)
+        var reader = BytesReader(data.span)
         try reader.expect(0x50_4B_03_04 as Byte4)
         let version = try reader.read(Byte2.self)
         #expect(version == 0x14_00)

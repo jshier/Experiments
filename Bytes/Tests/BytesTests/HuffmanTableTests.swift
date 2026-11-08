@@ -83,7 +83,7 @@ struct ReferenceCode {
                 let symbols = lengths.indices.filter { lengths[$0] > 0 }
                 let message = (0..<500).map { _ in symbols.randomElement(using: &rng)! }
                 let data = ReferenceCode(lengths: lengths).encode(message, order: order)
-                var reader = Bytes(data.span, bitOrder: order)
+                var reader = BytesReader(data.span, bitOrder: order)
                 let decoded = try reader.withBitBuffer { (buffer) throws(BytesError) in
                     var decoded: [Int] = []
                     for _ in message.indices {
@@ -105,7 +105,7 @@ struct ReferenceCode {
         try table.build(codeLengths: lengths.span, bitOrder: order)
         let message = [0, 2047, 1024, 7, 1500]
         let data = ReferenceCode(lengths: lengths).encode(message, order: order)
-        var buffer = BitBuffer(Bytes(data.span, bitOrder: order))
+        var buffer = BitBuffer(BytesReader(data.span, bitOrder: order))
         for symbol in message {
             buffer.refill()
             #expect(try table.decode(&buffer) == symbol)
@@ -133,15 +133,15 @@ struct ReferenceCode {
         var table = HuffmanTable(symbolCount: 3, maximumCodeLength: 7)
         try table.build(codeLengths: [0, 1, 0].span, bitOrder: order)
         let zero: [UInt8] = [0x00], one: [UInt8] = [0xFF]
-        var buffer = BitBuffer(Bytes(zero.span, bitOrder: order))
+        var buffer = BitBuffer(BytesReader(zero.span, bitOrder: order))
         buffer.refill()
         #expect(try table.decode(&buffer) == 1)
-        buffer = BitBuffer(Bytes(one.span, bitOrder: order))
+        buffer = BitBuffer(BytesReader(one.span, bitOrder: order))
         buffer.refill()
         #expect(throws: BytesError.invalidValue) { try table.decode(&buffer) }
 
         try table.build(codeLengths: [0, 0, 0].span, bitOrder: order)
-        buffer = BitBuffer(Bytes(zero.span, bitOrder: order))
+        buffer = BitBuffer(BytesReader(zero.span, bitOrder: order))
         buffer.refill()
         #expect(throws: BytesError.invalidValue) { try table.decode(&buffer) }
 
@@ -177,7 +177,7 @@ struct ReferenceCode {
 
         let message = [7, 0, 5, 2, 6, 1]
         let data = ReferenceCode(lengths: lengths).encode(message, order: .leastSignificantFirst)
-        var buffer = BitBuffer(Bytes(data.span, bitOrder: .leastSignificantFirst))
+        var buffer = BitBuffer(BytesReader(data.span, bitOrder: .leastSignificantFirst))
         for symbol in message {
             buffer.refill()
             var entry = entries[Int(buffer.bits & 0b111)]
@@ -193,11 +193,11 @@ struct ReferenceCode {
 @Suite struct BitPositionTests {
     @Test func bitPositionRoundTrips() throws {
         let data = [UInt8](repeating: 0xA5, count: 4)
-        var reader = Bytes(data.span)
+        var reader = BytesReader(data.span)
         try reader.skip(bitCount: 13)
         let position = reader.bitPosition
         #expect(position == 13)
-        var other = Bytes(data.span)
+        var other = BytesReader(data.span)
         try other.seek(toBitPosition: position)
         let (byte, bit) = (other.byteOffset, other.bitOffset)
         #expect(byte == 1 && bit == 5)
