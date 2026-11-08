@@ -14,13 +14,13 @@ import System
 @safe
 final class MappedFile: Sendable {
     // Immutable, read-only memory that lives exactly as long as `self`, so sharing it is safe.
-    nonisolated(unsafe) private let base: UnsafeRawPointer?
+    private nonisolated(unsafe) let base: UnsafeRawPointer?
     @usableFromInline let count: Int
 
     init(path: FilePath) throws {
         let descriptor = try FileDescriptor.open(path, .readOnly, options: [.closeOnExec])
         defer { try? descriptor.close() }
-        let size = Int(try descriptor.stat().size)
+        let size = try Int(descriptor.stat().size)
         guard size > 0 else {
             unsafe base = nil
             count = 0

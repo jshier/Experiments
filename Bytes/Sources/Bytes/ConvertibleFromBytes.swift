@@ -5,7 +5,7 @@
 // raw value isn't valid; writing converts first. A field is an unsigned value, so negative raw values
 // can't be read or written.
 
-extension RawRepresentable where RawValue: BinaryInteger {
+public extension RawRepresentable where RawValue: BinaryInteger {
     /// Creates a value from a field already read, through its raw value; `nil` if it isn't a valid one.
     ///
     /// ```swift
@@ -14,13 +14,13 @@ extension RawRepresentable where RawValue: BinaryInteger {
     ///
     /// To read a field as an `R` directly, use `read(_:as:)` on ``BytesReader``.
     @inlinable
-    public init?<let width: Int>(rawBits bits: Bits<width>) {
+    init?<let width: Int>(rawBits bits: Bits<width>) {
         guard let raw = RawValue(exactly: bits.rawValue) else { return nil }
         self.init(rawValue: raw)
     }
 }
 
-extension BytesReader {
+public extension BytesReader {
     /// Reads a `width`-bit field as an `R`, through its raw value.
     ///
     /// ```swift
@@ -31,7 +31,7 @@ extension BytesReader {
     /// Throws ``BytesError/invalidValue`` without consuming anything if the field isn't a valid raw value.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func read<R: RawRepresentable, let width: Int>(
+    mutating func read<R: RawRepresentable, let width: Int>(
         _: R.Type, as _: Bits<width>.Type
     ) throws(BytesError) -> R where R.RawValue: BinaryInteger {
         let bits = try peek(Bits<width>.self)
@@ -45,7 +45,7 @@ extension BytesReader {
     /// Throws ``BytesError/invalidValue`` without consuming anything if the field isn't a valid raw value.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func read<R: RawRepresentable, T: ByteGroup>(
+    mutating func read<R: RawRepresentable, T: ByteGroup>(
         _: R.Type, as _: T.Type, _ byteOrder: ByteOrder
     ) throws(BytesError) -> R where R.RawValue: BinaryInteger {
         let integer = try peek(T.self, byteOrder)
@@ -65,7 +65,7 @@ extension BytesReader {
     /// `I` can't represent it. For signed fields, read the group and use ``ByteGroup/signedInteger(_:as:)``.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func read<I: FixedWidthInteger, T: ByteGroup>(
+    mutating func read<I: FixedWidthInteger, T: ByteGroup>(
         _: I.Type, as _: T.Type, _ byteOrder: ByteOrder
     ) throws(BytesError) -> I {
         let integer = try peek(T.self, byteOrder)
@@ -75,12 +75,12 @@ extension BytesReader {
     }
 }
 
-extension BytesWriter {
+public extension BytesWriter {
     /// Writes `value`'s raw value as a `width`-bit field. A raw value that doesn't fit is a programming
     /// error: debug builds trap, release builds write its low `width` bits.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write<R: RawRepresentable, let width: Int>(
+    mutating func write<R: RawRepresentable, let width: Int>(
         _ value: R, as _: Bits<width>.Type
     ) throws(BytesError) where R.RawValue: BinaryInteger {
         assert(Bits<width>(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in \(width) bits")
@@ -91,7 +91,7 @@ extension BytesWriter {
     /// programming error: debug builds trap, release builds write its low `T.byteCount` bytes.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write<R: RawRepresentable, T: ByteGroup>(
+    mutating func write<R: RawRepresentable, T: ByteGroup>(
         _ value: R, as _: T.Type, _ byteOrder: ByteOrder
     ) throws(BytesError) where R.RawValue: BinaryInteger {
         assert(T.Integer(exactly: value.rawValue).map { $0 <= T._mask } ?? false,
@@ -107,14 +107,14 @@ extension BytesWriter {
 // these types, so they can be loaded from arbitrary bytes, or viewed in place, safely. Each takes
 // `MemoryLayout<T>.size` bytes, which for 3-lane vectors includes a padding lane: `SIMD3<Float>` is 16.
 
-extension BytesReader {
+public extension BytesReader {
     /// Returns the next `T`, from its `MemoryLayout<T>.size` bytes in native byte order (little-endian on
     /// Apple platforms), without consuming them.
     ///
     /// For data in a specific byte order, read integers with ``read(_:_:)`` instead (`Byte4` and so on), and
     /// floating-point values from their bits: `Float(bitPattern: try reader.read(Byte4.self, .bigEndian))`.
     @inlinable @inline(__always)
-    public func peekLoad<T: ConvertibleFromBytes>(_: T.Type = T.self) throws(BytesError) -> T {
+    func peekLoad<T: ConvertibleFromBytes>(_: T.Type = T.self) throws(BytesError) -> T {
         _assumeInvariant()
         let size = MemoryLayout<T>.size
         if likely(_bitOffset == 0) {
@@ -135,7 +135,7 @@ extension BytesReader {
     /// ```
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func load<T: ConvertibleFromBytes>(_: T.Type = T.self) throws(BytesError) -> T {
+    mutating func load<T: ConvertibleFromBytes>(_: T.Type = T.self) throws(BytesError) -> T {
         let value = try peekLoad(T.self)
         _byteOffset &+= MemoryLayout<T>.size // Whole bytes leave the bit offset unchanged.
         return value
@@ -158,7 +158,7 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read<T: ConvertibleFromBytes>(_: T.Type, count: Int) throws(BytesError) -> Span<T> {
+    mutating func read<T: ConvertibleFromBytes>(_: T.Type, count: Int) throws(BytesError) -> Span<T> {
         precondition(count >= 0, "Negative count")
         precondition(_bitOffset == 0, "Reading a span requires byte alignment: call alignToByte() first")
         _assumeInvariant()

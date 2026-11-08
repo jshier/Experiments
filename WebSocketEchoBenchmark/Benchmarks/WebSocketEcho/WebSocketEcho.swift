@@ -36,17 +36,17 @@ private final class AlamofireSocket: @unchecked Sendable {
 }
 
 // MARK: - Shared benchmark state
+
 //
 // nonisolated(unsafe) lets setup and teardown hooks (which run outside the benchmark closure)
 // share state with each other. Benchmarks run serially so there is no actual data race.
 
-nonisolated(unsafe) private var urlSocket: URLSessionSocket?
-nonisolated(unsafe) private var afSocket: AlamofireSocket?
+private nonisolated(unsafe) var urlSocket: URLSessionSocket?
+private nonisolated(unsafe) var afSocket: AlamofireSocket?
 
 // MARK: - Benchmarks
 
 let benchmarks: @Sendable () -> Void = {
-
     // Each benchmark iteration performs 1 000 round-trips (scalingFactor: .kilo).
     // package-benchmark derives throughput as (scalingFactor × iterations) / wall-time,
     // which gives messages-per-second — matching the original hand-rolled benchmark.

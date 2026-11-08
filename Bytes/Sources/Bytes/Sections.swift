@@ -112,7 +112,7 @@ extension BytesWriter {
 
 // MARK: - Sections
 
-extension BytesReader {
+public extension BytesReader {
     /// Reads the next `byteCount` bytes as a cursor of their own, with the same bit order: a section to parse
     /// separately, such as a record, a message body, or a list. Requires byte alignment.
     ///
@@ -122,8 +122,8 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func readSection(byteCount: Int) throws(BytesError) -> BytesReader {
-        BytesReader(try read(byteCount: byteCount), bitOrder: bitOrder)
+    mutating func readSection(byteCount: Int) throws(BytesError) -> BytesReader {
+        try BytesReader(read(byteCount: byteCount), bitOrder: bitOrder)
     }
 
     /// Reads a section whose byte count comes first, as a `L` in `byteOrder`. Requires byte alignment.
@@ -137,8 +137,8 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read<L: ByteGroup>(sectionPrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> BytesReader {
-        BytesReader(try read(bytesPrefixedBy: L.self, byteOrder), bitOrder: bitOrder)
+    mutating func read<L: ByteGroup>(sectionPrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> BytesReader {
+        try BytesReader(read(bytesPrefixedBy: L.self, byteOrder), bitOrder: bitOrder)
     }
 
     /// Reads a section whose byte count comes first, as LEB128 of at most `maxByteCount` bytes. Requires byte
@@ -153,8 +153,8 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read(sectionPrefixedBy _: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> BytesReader {
-        BytesReader(try read(bytesPrefixedBy: LEB128.self, maxByteCount: maxByteCount), bitOrder: bitOrder)
+    mutating func read(sectionPrefixedBy _: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> BytesReader {
+        try BytesReader(read(bytesPrefixedBy: LEB128.self, maxByteCount: maxByteCount), bitOrder: bitOrder)
     }
 
     /// Reads bytes whose count comes first, as a `L` in `byteOrder`, as a span of the same memory. Requires
@@ -163,7 +163,7 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read<L: ByteGroup>(bytesPrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> RawSpan {
+    mutating func read<L: ByteGroup>(bytesPrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> RawSpan {
         precondition(_bitOffset == 0, "Reading a section requires byte alignment: call alignToByte() first")
         let length = try peek(L.self, byteOrder)
         guard let count = Int(exactly: length) else { throw .invalidValue }
@@ -178,7 +178,7 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read(bytesPrefixedBy _: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> RawSpan {
+    mutating func read(bytesPrefixedBy _: LEB128.Type, maxByteCount: Int = 10) throws(BytesError) -> RawSpan {
         let start = _byteOffset
         let length = try read(LEB128.self, maxByteCount: maxByteCount)
         guard let count = Int(exactly: length) else {
@@ -195,14 +195,14 @@ extension BytesReader {
     /// Throws ``BytesError/trailingData`` unless every byte has been read: for checking that a section was
     /// fully consumed.
     @inlinable @inline(__always)
-    public func expectEnd() throws(BytesError) {
+    func expectEnd() throws(BytesError) {
         guard likely(_byteOffset == span.byteCount) else { throw .trailingData }
     }
 }
 
 // MARK: - Strings
 
-extension BytesReader {
+public extension BytesReader {
     /// Reads the next `byteCount` bytes as validated UTF-8, viewing the same memory. Requires byte alignment.
     ///
     /// Throws ``BytesError/invalidValue`` without consuming anything if they aren't valid UTF-8. Convert
@@ -210,7 +210,7 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func readUTF8(byteCount: Int) throws(BytesError) -> UTF8Span {
+    mutating func readUTF8(byteCount: Int) throws(BytesError) -> UTF8Span {
         try readUTF8(byteCount: byteCount, excluding: { _ in .none })
     }
 
@@ -223,7 +223,7 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func readUTF8(byteCount: Int, excluding excluded: (ByteLanes) -> ByteMatches) throws(BytesError) -> UTF8Span {
+    mutating func readUTF8(byteCount: Int, excluding excluded: (ByteLanes) -> ByteMatches) throws(BytesError) -> UTF8Span {
         let start = _byteOffset
         let bytes = try read(byteCount: byteCount)
         guard let text = UTF8Span(validating: bytes, excluding: excluded) else {
@@ -245,7 +245,7 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read<L: ByteGroup>(utf8PrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> UTF8Span {
+    mutating func read<L: ByteGroup>(utf8PrefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> UTF8Span {
         try read(utf8PrefixedBy: L.self, byteOrder, excluding: { _ in .none })
     }
 
@@ -262,7 +262,7 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    public mutating func read<L: ByteGroup>(
+    mutating func read<L: ByteGroup>(
         utf8PrefixedBy _: L.Type, _ byteOrder: ByteOrder, excluding excluded: (ByteLanes) -> ByteMatches
     ) throws(BytesError) -> UTF8Span {
         let start = _byteOffset
@@ -277,14 +277,14 @@ extension BytesReader {
 
 // MARK: - Writing sections
 
-extension BytesWriter {
+public extension BytesWriter {
     /// Writes `bytes` preceded by their byte count as a `L` in `byteOrder`. Requires byte alignment.
     ///
     /// Throws ``BytesError/invalidValue`` if the count doesn't fit in `L`, and
     /// ``BytesError/insufficientCapacity`` if there isn't room; either way nothing is written.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write<L: ByteGroup>(_ bytes: RawSpan, prefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) {
+    mutating func write<L: ByteGroup>(_ bytes: RawSpan, prefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) {
         precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
         guard let length = L.Integer(exactly: bytes.byteCount), length <= L._mask else { throw .invalidValue }
         guard likely(remainingByteCount &- L.byteCount >= bytes.byteCount) else { throw .insufficientCapacity }
@@ -299,7 +299,7 @@ extension BytesWriter {
     /// ```
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write<L: ByteGroup>(_ text: UTF8Span, prefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) {
+    mutating func write<L: ByteGroup>(_ text: UTF8Span, prefixedBy _: L.Type, _ byteOrder: ByteOrder) throws(BytesError) {
         try write(text.span.bytes, prefixedBy: L.self, byteOrder)
     }
 
@@ -307,7 +307,7 @@ extension BytesWriter {
     /// it throws.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write(_ bytes: RawSpan, prefixedBy _: LEB128.Type) throws(BytesError) {
+    mutating func write(_ bytes: RawSpan, prefixedBy _: LEB128.Type) throws(BytesError) {
         precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
         let count = UInt64(bytes.byteCount)
         guard likely(remainingByteCount &- LEB128.byteCount(of: count) >= bytes.byteCount) else { throw .insufficientCapacity }
@@ -330,7 +330,7 @@ extension BytesWriter {
     /// move, though bytes after it may have been overwritten.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write<L: ByteGroup, R: ~Copyable>(
+    mutating func write<L: ByteGroup, R: ~Copyable>(
         sectionPrefixedBy _: L.Type, _ byteOrder: ByteOrder, _ body: (inout BytesWriter) throws(BytesError) -> R
     ) throws(BytesError) -> R {
         precondition(_bitOffset == 0, "Writing a section requires byte alignment: call alignToByte() first")
@@ -359,7 +359,7 @@ extension BytesWriter {
     /// (``BytesError/invalidValue``), the cursor doesn't move, though bytes after it may have been overwritten.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write<R: ~Copyable>(
+    mutating func write<R: ~Copyable>(
         sectionPrefixedBy _: LEB128.Type, maxByteCount: Int, _ body: (inout BytesWriter) throws(BytesError) -> R
     ) throws(BytesError) -> R {
         precondition(maxByteCount >= 1 && maxByteCount <= 10, "LEB128 integers are 1 through 10 bytes")
@@ -376,7 +376,9 @@ extension BytesWriter {
             let destination = prefixOffset &+ prefixByteCount
             // An overlapping move down, byte by byte from the front: the standard library has no safe
             // `memmove` within a span. This path is rare (see above), so the loop costs nothing that matters.
-            for index in 0..<written { _bytes[destination &+ index] = _bytes[source &+ index] }
+            for index in 0..<written {
+                _bytes[destination &+ index] = _bytes[source &+ index]
+            }
         }
         Self._storeLEB128(UInt64(written), byteCount: prefixByteCount, to: &_bytes, at: prefixOffset)
         _byteOffset = prefixOffset &+ prefixByteCount &+ written
@@ -386,7 +388,7 @@ extension BytesWriter {
     /// Runs `body` with a writer over the free bytes from `start`, sets `written` to how many bytes it wrote,
     /// and returns its result. Capacity for `start` already checked.
     @inlinable @inline(__always)
-    mutating func _writeSection<R: ~Copyable>(
+    internal mutating func _writeSection<R: ~Copyable>(
         from start: Int, written: inout Int, _ body: (inout BytesWriter) throws(BytesError) -> R
     ) throws(BytesError) -> R {
         var section = BytesWriter(

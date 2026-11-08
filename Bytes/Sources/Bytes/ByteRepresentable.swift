@@ -76,10 +76,10 @@ extension Load {
     }
 }
 
-extension BytesReader {
+public extension BytesReader {
     /// Returns the next `T`, from its `MemoryLayout<T.RawBytes>.size` bytes, without consuming them.
     @inlinable @inline(__always)
-    public func peek<T: ByteRepresentable>(_: T.Type = T.self) throws(BytesError) -> T {
+    func peek<T: ByteRepresentable>(_: T.Type = T.self) throws(BytesError) -> T {
         _assumeInvariant()
         let size = MemoryLayout<T.RawBytes>.size
         precondition(size > 0, "\(T.self).RawBytes has no bytes") // Constant-folded.
@@ -94,7 +94,7 @@ extension BytesReader {
     /// Reads the next `T`, from its `MemoryLayout<T.RawBytes>.size` bytes.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func read<T: ByteRepresentable>(_: T.Type = T.self) throws(BytesError) -> T {
+    mutating func read<T: ByteRepresentable>(_: T.Type = T.self) throws(BytesError) -> T {
         let value = try peek(T.self)
         _byteOffset &+= MemoryLayout<T.RawBytes>.size // Whole bytes leave the bit offset unchanged.
         return value
@@ -105,7 +105,7 @@ extension BytesReader {
     /// loads the compiler vectorizes together with `body`. Consumes what it reads.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func forEach<T: ByteRepresentable, E: Error>(_: T.Type, _ body: (T) throws(E) -> Void) throws(E) {
+    mutating func forEach<T: ByteRepresentable, E: Error>(_: T.Type, _ body: (T) throws(E) -> Void) throws(E) {
         _assumeInvariant()
         let size = MemoryLayout<T.RawBytes>.size
         precondition(size > 0, "\(T.self).RawBytes has no bytes") // Constant-folded.
@@ -137,7 +137,7 @@ extension BytesReader {
     /// stores that vectorizes.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func read<T: ByteRepresentable>(_: T.Type, into output: inout OutputSpan<T>) throws(BytesError) {
+    mutating func read<T: ByteRepresentable>(_: T.Type, into output: inout OutputSpan<T>) throws(BytesError) {
         _assumeInvariant()
         let size = MemoryLayout<T.RawBytes>.size
         precondition(size > 0, "\(T.self).RawBytes has no bytes") // Constant-folded.
@@ -147,7 +147,7 @@ extension BytesReader {
         guard count > 0 else { return }
         guard likely(_bitOffset == 0) else {
             for _ in 0..<count {
-                output.append(try read(T.self))
+                try output.append(read(T.self))
             }
             return
         }
@@ -170,7 +170,7 @@ extension BytesReader {
     /// Never inlined, so its stack buffer (and the stack-protector check that comes with it) stays out of
     /// the callers' fast paths.
     @inlinable @inline(never)
-    static func _unalignedRawBytes<R: ConvertibleFromBytes>(
+    internal static func _unalignedRawBytes<R: ConvertibleFromBytes>(
         _: R.Type, in span: RawSpan, atByte byteOffset: Int, bit: Int, bitOrder: BitOrder
     ) -> R {
         // Unsafe: assembles `R` in uninitialized stack memory. Safe: every one of its bytes is written before

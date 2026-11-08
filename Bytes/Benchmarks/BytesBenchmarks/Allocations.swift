@@ -47,7 +47,9 @@ func registerAllocationBenchmarks(_ others: [(name: String, run: () -> Void)]) {
         // the file up by the unaltered name (benchmark 1.38.1), so the names have neither.
         let name = name.replacing(" ", with: "_").replacing("/", with: "_")
         Benchmark("Allocations:\(name)", configuration: configuration) { benchmark in
-            for _ in benchmark.scaledIterations { run() }
+            for _ in benchmark.scaledIterations {
+                run()
+            }
         }
     }
 
@@ -63,7 +65,9 @@ func registerAllocationBenchmarks(_ others: [(name: String, run: () -> Void)]) {
     register("Read: for-in Bytes (UInt8), var reader") {
         var reader = BytesReader(source.span)
         var sum: UInt8 = 0
-        for byte in reader { sum &+= byte }
+        for byte in reader {
+            sum &+= byte
+        }
         try! reader.skip(byteCount: reader.remainingByteCount)
         blackHole(sum)
     }
@@ -76,5 +80,7 @@ func registerAllocationBenchmarks(_ others: [(name: String, run: () -> Void)]) {
 
     register("Sections: LEB128-prefixed write and read") { blackHole(sectionsRoundTrip(into: target, count: 1_000)) }
 
-    for (name, run) in others { register(name, run) }
+    for (name, run) in others {
+        register(name, run)
+    }
 }

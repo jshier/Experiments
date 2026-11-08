@@ -65,8 +65,8 @@ import Testing
         #expect(check(Array("capteurs/bâtiment-1/étage-2/température".utf8)) == "capteurs/bâtiment-1/étage-2/température")
         #expect(check(Array("sensors/#".utf8)) == nil)
         #expect(check(Array("bâtiment/#".utf8)) == nil)
-        #expect(check([0x61, 0xC3]) == nil)            // A truncated sequence.
-        #expect(check([0x61, 0xC0, 0xAF]) == nil)      // An overlong encoding.
+        #expect(check([0x61, 0xC3]) == nil) // A truncated sequence.
+        #expect(check([0x61, 0xC0, 0xAF]) == nil) // An overlong encoding.
         #expect(check([]) == "")
 
         // Known ASCII when it took the one-pass path.

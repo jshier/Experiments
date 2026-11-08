@@ -56,10 +56,10 @@ public final class CancellingDownloadDelegate: NSObject, URLSessionDownloadDeleg
         hasCancelled = true
         downloadTask.cancel { [weak self] resumeData in
             guard let self else { return }
-            self.finish(CancelledDownloadResult(resumeData: resumeData,
-                                                 bytesWrittenBeforeCancel: totalBytesWritten,
-                                                 totalBytesExpected: totalBytesExpectedToWrite,
-                                                 completionError: nil))
+            finish(CancelledDownloadResult(resumeData: resumeData,
+                                           bytesWrittenBeforeCancel: totalBytesWritten,
+                                           totalBytesExpected: totalBytesExpectedToWrite,
+                                           completionError: nil))
         }
     }
 

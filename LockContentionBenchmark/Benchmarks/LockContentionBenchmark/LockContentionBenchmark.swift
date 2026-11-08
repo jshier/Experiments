@@ -5,6 +5,7 @@ import os
 import Synchronization
 
 // MARK: - Lock abstraction
+
 //
 // Every candidate protects a single `Int` counter. `increment(work:)` takes the lock, does `work` rounds of cheap
 // arithmetic inside the critical section, bumps the counter, and releases. Callers are generic over `Counter`, so
@@ -19,7 +20,9 @@ protocol Counter: AnyObject, Sendable {
 @inline(never)
 func criticalSectionWork(_ rounds: Int, _ seed: Int) -> Int {
     var x = seed
-    for _ in 0..<rounds { x = x &* 6364136223846793005 &+ 1442695040888963407 }
+    for _ in 0..<rounds {
+        x = x &* 6364136223846793005 &+ 1442695040888963407
+    }
     return x
 }
 
@@ -32,6 +35,7 @@ final class MutexCounter: Counter {
             v += 1
         }
     }
+
     var value: Int { state.withLock { $0 } }
 }
 
@@ -44,6 +48,7 @@ final class OSAllocatedUnfairLockCounter: Counter {
             v += 1
         }
     }
+
     var value: Int { state.withLock { $0 } }
 }
 
@@ -60,6 +65,7 @@ final class UnfairLockCounter: Counter, @unchecked Sendable {
         p.initialize(to: Locked(lock: os_unfair_lock(), count: 0))
         return p
     }()
+
     init() {}
     deinit { block.deallocate() }
     @inline(__always) func increment(work: Int) {
@@ -69,6 +75,7 @@ final class UnfairLockCounter: Counter, @unchecked Sendable {
         block.pointee.count += 1
         os_unfair_lock_unlock(lock)
     }
+
     var value: Int {
         let lock = UnsafeMutableRawPointer(block).assumingMemoryBound(to: os_unfair_lock.self)
         os_unfair_lock_lock(lock); defer { os_unfair_lock_unlock(lock) }
@@ -86,6 +93,7 @@ final class NSLockCounter: Counter, @unchecked Sendable {
         count += 1
         lock.unlock()
     }
+
     var value: Int { lock.withLock { count } }
 }
 
@@ -99,6 +107,7 @@ final class NSRecursiveLockCounter: Counter, @unchecked Sendable {
         count += 1
         lock.unlock()
     }
+
     var value: Int { lock.withLock { count } }
 }
 
@@ -112,6 +121,7 @@ final class NSConditionCounter: Counter, @unchecked Sendable {
         count += 1
         lock.unlock()
     }
+
     var value: Int { lock.lock(); defer { lock.unlock() }; return count }
 }
 
@@ -122,11 +132,13 @@ final class PthreadMutexCounter: Counter, @unchecked Sendable {
         pthread_mutex_init(UnsafeMutableRawPointer(p).assumingMemoryBound(to: pthread_mutex_t.self), nil)
         return p
     }()
+
     init() {}
     deinit {
         pthread_mutex_destroy(UnsafeMutableRawPointer(block).assumingMemoryBound(to: pthread_mutex_t.self))
         block.deallocate()
     }
+
     @inline(__always) func increment(work: Int) {
         let mutex = UnsafeMutableRawPointer(block).assumingMemoryBound(to: pthread_mutex_t.self)
         pthread_mutex_lock(mutex)
@@ -134,6 +146,7 @@ final class PthreadMutexCounter: Counter, @unchecked Sendable {
         block.pointee.count += 1
         pthread_mutex_unlock(mutex)
     }
+
     var value: Int {
         let mutex = UnsafeMutableRawPointer(block).assumingMemoryBound(to: pthread_mutex_t.self)
         pthread_mutex_lock(mutex); defer { pthread_mutex_unlock(mutex) }
@@ -148,11 +161,13 @@ final class PthreadRWLockCounter: Counter, @unchecked Sendable {
         pthread_rwlock_init(UnsafeMutableRawPointer(p).assumingMemoryBound(to: pthread_rwlock_t.self), nil)
         return p
     }()
+
     init() {}
     deinit {
         pthread_rwlock_destroy(UnsafeMutableRawPointer(block).assumingMemoryBound(to: pthread_rwlock_t.self))
         block.deallocate()
     }
+
     @inline(__always) func increment(work: Int) {
         let lock = UnsafeMutableRawPointer(block).assumingMemoryBound(to: pthread_rwlock_t.self)
         pthread_rwlock_wrlock(lock)
@@ -160,6 +175,7 @@ final class PthreadRWLockCounter: Counter, @unchecked Sendable {
         block.pointee.count += 1
         pthread_rwlock_unlock(lock)
     }
+
     var value: Int {
         let lock = UnsafeMutableRawPointer(block).assumingMemoryBound(to: pthread_rwlock_t.self)
         pthread_rwlock_rdlock(lock); defer { pthread_rwlock_unlock(lock) }
@@ -177,6 +193,7 @@ final class SerialQueueCounter: Counter, @unchecked Sendable {
             count += 1
         }
     }
+
     var value: Int { queue.sync { count } }
 }
 
@@ -191,6 +208,7 @@ final class SerialQueueAsyncCounter: Counter, @unchecked Sendable {
             count += 1
         }
     }
+
     var value: Int { queue.sync { count } }
 }
 
@@ -204,6 +222,7 @@ final class SemaphoreCounter: Counter, @unchecked Sendable {
         count += 1
         sem.signal()
     }
+
     var value: Int { sem.wait(); defer { sem.signal() }; return count }
 }
 
@@ -215,6 +234,7 @@ final class AtomicCounter: Counter {
         if work > 0 { blackHole(criticalSectionWork(work, 0)) }
         state.wrappingAdd(1, ordering: .relaxed)
     }
+
     var value: Int { state.load(ordering: .relaxed) }
 }
 
@@ -267,7 +287,9 @@ func runContended<C: Counter>(_ type: C.Type, threads: Int, opsPerThread: Int, w
         let body: @Sendable () -> Void = {
             gate.arrived.add(1, ordering: .acquiringAndReleasing)
             while !gate.go.load(ordering: .acquiring) {}
-            for _ in 0..<opsPerThread { counter.increment(work: work) }
+            for _ in 0..<opsPerThread {
+                counter.increment(work: work)
+            }
             if gate.finished.add(1, ordering: .acquiringAndReleasing).newValue == threads {
                 gate.allFinished.signal()
             }
@@ -281,13 +303,17 @@ func runContended<C: Counter>(_ type: C.Type, threads: Int, opsPerThread: Int, w
         }, box.toOpaque())
         handles.append(tid!)
     }
-    while gate.arrived.load(ordering: .acquiring) < threads { sched_yield() }
+    while gate.arrived.load(ordering: .acquiring) < threads {
+        sched_yield()
+    }
     measure.start()
     gate.go.store(true, ordering: .releasing)
     gate.allFinished.wait()
     let value = counter.value
     measure.stop()
-    for h in handles { pthread_join(h, nil) }
+    for h in handles {
+        pthread_join(h, nil)
+    }
     return value
 }
 
@@ -301,7 +327,9 @@ func runUncontended<C: Counter>(_ type: C.Type, ops: Int, measure: (start: () ->
     // lock word and state are separate fields (`OSAllocatedUnfairLock`), so those candidates do less work per op.
     blackHole(counter)
     measure.start()
-    for _ in 0..<ops { counter.increment(work: 0) }
+    for _ in 0..<ops {
+        counter.increment(work: 0)
+    }
     let value = counter.value
     measure.stop()
     return value
@@ -312,7 +340,9 @@ func runUncontended<C: Counter>(_ type: C.Type, ops: Int, measure: (start: () ->
 /// Specialized per candidate so no closure or metatype dispatch sits between the loop and `init`.
 @inline(never)
 func runCreate<C: Counter>(_ type: C.Type, count: Int) {
-    for _ in 0..<count { blackHole(C()) }
+    for _ in 0..<count {
+        blackHole(C())
+    }
 }
 
 struct Candidate {

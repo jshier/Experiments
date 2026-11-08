@@ -1,11 +1,11 @@
 import Foundation
 
-extension ISO8601 {
+public extension ISO8601 {
     /// A parsed ISO 8601 timestamp: the components exactly as written, validated, together with the
     /// instant they denote.
     ///
     /// Use ``ISO8601/date(from:)-(String)`` when only the instant matters; it skips building this.
-    public struct Timestamp: Sendable, Hashable {
+    struct Timestamp: Sendable, Hashable {
         /// The date part as written.
         public enum DateValue: Sendable, Hashable {
             /// `1985-04-12` / `19850412`.
@@ -97,28 +97,28 @@ extension ISO8601 {
     }
 
     /// Parses a timestamp from UTF-8 bytes, keeping its components.
-    public static func timestamp(from bytes: RawSpan) throws(ISO8601ParseError) -> Timestamp {
+    static func timestamp(from bytes: RawSpan) throws(ISO8601ParseError) -> Timestamp {
         let raw = try Lexer(bytes).lex()
-        return Timestamp(raw, date: try raw.resolve())
+        return try Timestamp(raw, date: raw.resolve())
     }
 
     /// Parses a timestamp from UTF-8 bytes, keeping its components.
-    public static func timestamp(from bytes: Span<UInt8>) throws(ISO8601ParseError) -> Timestamp {
+    static func timestamp(from bytes: Span<UInt8>) throws(ISO8601ParseError) -> Timestamp {
         try timestamp(from: bytes.bytes)
     }
 
     /// Parses a timestamp from validated UTF-8, keeping its components.
-    public static func timestamp(from text: UTF8Span) throws(ISO8601ParseError) -> Timestamp {
+    static func timestamp(from text: UTF8Span) throws(ISO8601ParseError) -> Timestamp {
         try timestamp(from: text.span)
     }
 
     /// Parses a timestamp from a string, keeping its components.
-    public static func timestamp(from string: borrowing String) throws(ISO8601ParseError) -> Timestamp {
+    static func timestamp(from string: borrowing String) throws(ISO8601ParseError) -> Timestamp {
         try timestamp(from: string.utf8.span)
     }
 
     /// Parses a timestamp from UTF-8 encoded data, keeping its components.
-    public static func timestamp(from data: borrowing Data) throws(ISO8601ParseError) -> Timestamp {
+    static func timestamp(from data: borrowing Data) throws(ISO8601ParseError) -> Timestamp {
         try timestamp(from: data.bytes)
     }
 }

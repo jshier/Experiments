@@ -108,7 +108,7 @@ enum Shuffle {
         )
         for step in 0..<steps {
             let first = step &* perStep
-            let lanes = self.lanes(T.self, first, value)
+            let lanes = lanes(T.self, first, value)
             let offset = start &+ step &* stepBytes
             // 48 bytes: three vectors. 40 and 56 bytes: two or three vectors, then 8 bytes.
             unsafe bytes.storeBytes(of: table(lanes, indices.0), toUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)

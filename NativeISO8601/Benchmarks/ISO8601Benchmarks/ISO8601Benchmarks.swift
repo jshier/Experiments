@@ -63,7 +63,7 @@ let benchmarks: @Sendable () -> Void = {
     for (name, input) in samples {
         Benchmark("Native String (\(name))") { benchmark in
             for _ in benchmark.scaledIterations {
-                blackHole(try ISO8601.date(from: identity(input)))
+                try blackHole(ISO8601.date(from: identity(input)))
             }
         }
     }
@@ -95,7 +95,7 @@ let benchmarks: @Sendable () -> Void = {
     Benchmark("Native Data (UTC)") { benchmark in
         let data = Data(samples[0].input.utf8)
         for _ in benchmark.scaledIterations {
-            blackHole(try ISO8601.date(from: identity(data)))
+            try blackHole(ISO8601.date(from: identity(data)))
         }
     }
 
@@ -105,7 +105,7 @@ let benchmarks: @Sendable () -> Void = {
         let storage = Array(samples[0].input.utf8)
         let span = storage.span
         for _ in benchmark.scaledIterations {
-            blackHole(try ISO8601.date(from: span))
+            try blackHole(ISO8601.date(from: span))
         }
     }
 
@@ -113,7 +113,7 @@ let benchmarks: @Sendable () -> Void = {
         let storage = Array(samples[0].input.utf8)
         let bytes = storage.span.bytes
         for _ in benchmark.scaledIterations {
-            blackHole(try ISO8601.date(from: bytes))
+            try blackHole(ISO8601.date(from: bytes))
         }
     }
 
@@ -121,7 +121,7 @@ let benchmarks: @Sendable () -> Void = {
         let input = samples[0].input
         let text = input.utf8Span
         for _ in benchmark.scaledIterations {
-            blackHole(try ISO8601.date(from: text))
+            try blackHole(ISO8601.date(from: text))
         }
     }
 
@@ -130,7 +130,7 @@ let benchmarks: @Sendable () -> Void = {
         let bytes = Array(samples[0].input.utf8)
         for _ in benchmark.scaledIterations {
             let bytes = identity(bytes)
-            blackHole(try ISO8601.date(from: bytes.span))
+            try blackHole(ISO8601.date(from: bytes.span))
         }
     }
 
@@ -144,7 +144,7 @@ let benchmarks: @Sendable () -> Void = {
     for (name, input) in generalSamples {
         Benchmark("Native String (\(name))") { benchmark in
             for _ in benchmark.scaledIterations {
-                blackHole(try ISO8601.date(from: identity(input)))
+                try blackHole(ISO8601.date(from: identity(input)))
             }
         }
     }
@@ -153,14 +153,14 @@ let benchmarks: @Sendable () -> Void = {
     Benchmark("Native Timestamp (offset)") { benchmark in
         let input = samples[2].input
         for _ in benchmark.scaledIterations {
-            blackHole(try ISO8601.timestamp(from: identity(input)))
+            try blackHole(ISO8601.timestamp(from: identity(input)))
         }
     }
 
     Benchmark("Native String (mixed corpus)") { benchmark in
         for _ in 0..<benchmark.scaledIterations.count / corpus.count {
             for input in corpus {
-                blackHole(try ISO8601.date(from: input))
+                try blackHole(ISO8601.date(from: input))
             }
         }
     }
@@ -193,7 +193,7 @@ let benchmarks: @Sendable () -> Void = {
         Benchmark("Date.ISO8601FormatStyle (\(name))") { benchmark in
             let style = Date.ISO8601FormatStyle(includingFractionalSeconds: name == "fractional")
             for _ in benchmark.scaledIterations {
-                blackHole(try style.parse(identity(input)))
+                try blackHole(style.parse(identity(input)))
             }
         }
     }

@@ -53,7 +53,7 @@ final class Delegate: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, 
             completionHandler(.useNewRequest, r)
         case .cancel: completionHandler(.cancel, nil)
         case .never: log("(not calling completionHandler)")
-        case .afterDelay(let d):
+        case let .afterDelay(d):
             DispatchQueue.global().asyncAfter(deadline: .now() + d) {
                 log("calling completionHandler after \(d)s")
                 completionHandler(.continueLoading, nil)
@@ -73,6 +73,7 @@ final class Delegate: NSObject, URLSessionDataDelegate, URLSessionTaskDelegate, 
         let m = metrics.transactionMetrics.last
         log("metrics: fetchStart=\(fmt(m?.fetchStartDate)) connectStart=\(fmt(m?.connectStartDate)) reqStart=\(fmt(m?.requestStartDate)) respEnd=\(fmt(m?.responseEndDate)) taskInterval=\(String(format: "%.3f", metrics.taskInterval.duration))")
     }
+
     func fmt(_ d: Date?) -> String { d.map { String(format: "%.3f", $0.timeIntervalSince(t0)) } ?? "nil" }
 
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
@@ -97,9 +98,9 @@ struct Options {
     var waiting = true
     var disposition: DelayedDisposition = .continue
     var background = false
-    var cancelAfter: TimeInterval? = nil
-    var suspendFor: TimeInterval? = nil
-    var perRequestTimeout: TimeInterval? = nil
+    var cancelAfter: TimeInterval?
+    var suspendFor: TimeInterval?
+    var perRequestTimeout: TimeInterval?
     var wait: TimeInterval = 20
 }
 

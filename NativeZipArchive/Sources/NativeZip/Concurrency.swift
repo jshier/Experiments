@@ -30,7 +30,9 @@ extension ZipArchive {
         let width = min(max(maxConcurrency, 1), items.count)
         guard width > 1 else {
             var decoder = ZipDecoder(backend: backend)
-            for item in items { try await body(item, &decoder) }
+            for item in items {
+                try await body(item, &decoder)
+            }
             return
         }
 

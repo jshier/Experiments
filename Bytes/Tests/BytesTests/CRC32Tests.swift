@@ -7,7 +7,9 @@ import Testing
         var state = ~crc
         for byte in bytes {
             state ^= UInt32(byte)
-            for _ in 0..<8 { state = state & 1 == 1 ? state >> 1 ^ 0xEDB8_8320 : state >> 1 }
+            for _ in 0..<8 {
+                state = state & 1 == 1 ? state >> 1 ^ 0xEDB8_8320 : state >> 1
+            }
         }
         return ~state
     }

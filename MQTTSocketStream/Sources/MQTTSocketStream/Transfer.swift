@@ -11,6 +11,7 @@ public struct TransferResult: Sendable, CustomStringConvertible {
     public var seconds: Double {
         Double(duration.components.seconds) + Double(duration.components.attoseconds) * 1e-18
     }
+
     /// Payload-agnostic throughput: every byte of every packet, MQTT headers included.
     public var gigabytesPerSecond: Double { Double(bytes) / seconds / 1e9 }
     public var packetsPerSecond: Double { Double(packets) / seconds }
@@ -117,7 +118,7 @@ public enum Transfer {
             let connection = try await listener.accept()
             let (received, packets) = switch mode {
             case .mqtt: try await receivePackets(workload, on: connection)
-            case .raw: (try await receiveRaw(workload, on: connection), 0)
+            case .raw: try await (receiveRaw(workload, on: connection), 0)
             }
             let sent = try await group.next()!
             return (sent, received, packets)
@@ -205,7 +206,7 @@ public enum Transfer {
             let count = try await buffer.read(from: &connection)
             if count == 0 { break }
             bytes += count
-            buffer.consume(try checker.check(buffer.unread))
+            try buffer.consume(checker.check(buffer.unread))
         }
         try await connection.close()
         guard buffer.isEmpty else { throw TransferError(description: "The stream ended inside a packet") }

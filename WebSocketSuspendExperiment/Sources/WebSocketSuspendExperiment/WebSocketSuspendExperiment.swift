@@ -40,6 +40,7 @@ final class SocketDelegate: NSObject, URLSessionWebSocketDelegate, URLSessionTas
         let reason: String?
         let at: ContinuousClock.Instant
     }
+
     struct CompleteEvent {
         let error: Error?
         let at: ContinuousClock.Instant
@@ -47,7 +48,7 @@ final class SocketDelegate: NSObject, URLSessionWebSocketDelegate, URLSessionTas
 
     private(set) var closeEvent: CloseEvent?
     private(set) var completeEvent: CompleteEvent?
-    private(set) var openProtocol: String??  // nil = not yet opened; .some(nil) = opened with no protocol
+    private(set) var openProtocol: String?? // nil = not yet opened; .some(nil) = opened with no protocol
 
     init(name: String) { self.name = name }
 
@@ -126,10 +127,10 @@ final class SocketDelegate: NSObject, URLSessionWebSocketDelegate, URLSessionTas
 extension URLSessionTask.State {
     var name: String {
         switch self {
-        case .running:    "running"
-        case .suspended:  "suspended"
-        case .canceling:  "canceling"
-        case .completed:  "completed"
+        case .running: "running"
+        case .suspended: "suspended"
+        case .canceling: "canceling"
+        case .completed: "completed"
         @unknown default: "unknown(\(rawValue))"
         }
     }
@@ -194,9 +195,9 @@ func runEchoExperiment() async {
     do {
         let msg = try await task.receive()
         switch msg {
-        case .string(let t): log("Received echo: \"\(t)\"")
-        case .data(let d):   log("Received binary echo (\(d.count) bytes)")
-        @unknown default:    log("Received unknown message type")
+        case let .string(t): log("Received echo: \"\(t)\"")
+        case let .data(d): log("Received binary echo (\(d.count) bytes)")
+        @unknown default: log("Received unknown message type")
         }
     } catch {
         log("receive() threw: \(error.localizedDescription)")
@@ -222,8 +223,8 @@ func runEchoExperiment() async {
 
 struct PayloadScenario {
     let name: String
-    let messageDelayMs: Int  // ms between server sends; passed as ?messageDelay=
-    let suspendDuration: Double  // seconds the task stays suspended
+    let messageDelayMs: Int // ms between server sends; passed as ?messageDelay=
+    let suspendDuration: Double // seconds the task stays suspended
     let total: Int
     let suspendAfter: Int
 
@@ -286,11 +287,10 @@ func runPayloadsScenario(_ scenario: PayloadScenario) async {
             let msg = try await task.receive()
             received += 1
             let elapsed = receiveStart.duration(to: .now)
-            let size: String
-            switch msg {
-            case .string(let t): size = "\(t.count) chars"
-            case .data(let d):   size = "\(d.count) bytes"
-            @unknown default:    size = "unknown"
+            let size = switch msg {
+            case let .string(t): "\(t.count) chars"
+            case let .data(d): "\(d.count) bytes"
+            @unknown default: "unknown"
             }
             // Note whether this message arrived instantly (buffered) or after a delay (live).
             let receiveNote = elapsed < .milliseconds(50) ? "instant" : "\(elapsed)"
@@ -304,7 +304,7 @@ func runPayloadsScenario(_ scenario: PayloadScenario) async {
                 suspendedAt = .now
                 task.suspend()
                 log("  → Suspended (state: \(task.state.name)); server will send \(scenario.total - received) more frames")
-                log("    Server delivery window: msgs \(received+1)–\(scenario.total) at \(scenario.messageDelayMs)ms intervals")
+                log("    Server delivery window: msgs \(received + 1)–\(scenario.total) at \(scenario.messageDelayMs)ms intervals")
                 log("    Sleeping \(scenario.suspendDuration)s before resume")
                 try await Task.sleep(for: .seconds(scenario.suspendDuration))
                 let suspendElapsed = suspendedAt!.duration(to: .now)
@@ -320,11 +320,10 @@ func runPayloadsScenario(_ scenario: PayloadScenario) async {
         }
     }
 
-    let verdict: String
-    if received == scenario.total {
-        verdict = "✓ ALL \(scenario.total) messages received"
+    let verdict = if received == scenario.total {
+        "✓ ALL \(scenario.total) messages received"
     } else {
-        verdict = "✗ Only \(received)/\(scenario.total) messages received — \(scenario.total - received) lost"
+        "✗ Only \(received)/\(scenario.total) messages received — \(scenario.total - received) lost"
     }
     log("  Result: \(verdict)")
 
@@ -342,7 +341,7 @@ func runPayloadsScenario(_ scenario: PayloadScenario) async {
             log("  didCloseWith: NOT called")
         }
         if let e = delegate.completeEvent {
-            log("  didCompleteWithError: fired \(elapsed(from: suspendedAt, to: e.at)), error=\(e.error.map { $0.localizedDescription } ?? "nil")")
+            log("  didCompleteWithError: fired \(elapsed(from: suspendedAt, to: e.at)), error=\(e.error.map(\.localizedDescription) ?? "nil")")
         } else {
             log("  didCompleteWithError: NOT called yet")
         }
@@ -448,9 +447,9 @@ func runPreOpenExperiment() async {
             do {
                 let msg = try await task.receive()
                 switch msg {
-                case .string(let t): log("  Received echo: \"\(t)\"")
-                case .data(let d):   log("  Received binary echo (\(d.count) bytes)")
-                @unknown default:    log("  Received unknown message type")
+                case let .string(t): log("  Received echo: \"\(t)\"")
+                case let .data(d): log("  Received binary echo (\(d.count) bytes)")
+                @unknown default: log("  Received unknown message type")
                 }
             } catch {
                 log("  receive() threw: \(error.localizedDescription)")
@@ -564,9 +563,9 @@ func runNeverResumedExperiment() async {
                 do {
                     let msg = try await task.receive()
                     switch msg {
-                    case .string(let t): log("  Received echo: \"\(t)\"")
-                    case .data(let d):   log("  Received binary echo (\(d.count) bytes)")
-                    @unknown default:    log("  Received unknown message type")
+                    case let .string(t): log("  Received echo: \"\(t)\"")
+                    case let .data(d): log("  Received binary echo (\(d.count) bytes)")
+                    @unknown default: log("  Received unknown message type")
                     }
                 } catch {
                     log("  receive() threw: \(error.localizedDescription)")
@@ -589,7 +588,6 @@ func runNeverResumedExperiment() async {
         log("── Sub-experiment \(variant.label) complete ──")
     }
 }
-
 
 // MARK: - Entry point
 
@@ -614,4 +612,3 @@ struct WebSocketSuspendExperiment {
         }
     }
 }
-

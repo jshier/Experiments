@@ -5,7 +5,6 @@ import Bytes
 import MQTT
 import Testing
 
-
 enum Outcome: Equatable, CustomStringConvertible {
     case incomplete
     case accepted(MQTTPacketType, consumed: Int)
@@ -14,8 +13,8 @@ enum Outcome: Equatable, CustomStringConvertible {
     var description: String {
         switch self {
         case .incomplete: "nil"
-        case .accepted(let type, let consumed): "accepted \(type) (\(consumed) bytes)"
-        case .failed(let kind, let detail): "\(kind): \(detail)"
+        case let .accepted(type, consumed): "accepted \(type) (\(consumed) bytes)"
+        case let .failed(kind, detail): "\(kind): \(detail)"
         }
     }
 }
@@ -40,25 +39,27 @@ func isAccepted(_ o: Outcome) -> Bool { if case .accepted = o { true } else { fa
 func visitAndReencode(_ packet: borrowing MQTTPacket) throws -> [UInt8] {
     var count = 0
     switch packet {
-    case .connect(let c):
+    case let .connect(c):
         c.properties.forEach { _ in count += 1 }
-        if case .some(let will) = c.will { will.properties.forEach { _ in count += 1 } }
-    case .connectAcknowledgement(let p): p.properties.forEach { _ in count += 1 }
-    case .publish(let p): p.properties.forEach { _ in count += 1 }
-    case .publishAcknowledgement(let p), .publishReceived(let p), .publishRelease(let p), .publishComplete(let p):
+        if case let .some(will) = c.will { will.properties.forEach { _ in count += 1 } }
+    case let .connectAcknowledgement(p): p.properties.forEach { _ in count += 1 }
+    case let .publish(p): p.properties.forEach { _ in count += 1 }
+    case let .publishAcknowledgement(p), let .publishReceived(p), let .publishRelease(p), let .publishComplete(p):
         p.properties.forEach { _ in count += 1 }
-    case .subscribe(let p):
+    case let .subscribe(p):
         p.properties.forEach { _ in count += 1 }
         p.subscriptions.forEach { _ in count += 1 }
-    case .subscribeAcknowledgement(let p), .unsubscribeAcknowledgement(let p):
+    case let .subscribeAcknowledgement(p), let .unsubscribeAcknowledgement(p):
         p.properties.forEach { _ in count += 1 }
-        for i in 0..<p.reasonCodes.count { _ = p.reasonCode(at: i) }
-    case .unsubscribe(let p):
+        for i in 0..<p.reasonCodes.count {
+            _ = p.reasonCode(at: i)
+        }
+    case let .unsubscribe(p):
         p.properties.forEach { _ in count += 1 }
         p.topicFilters.forEach { _ in count += 1 }
     case .pingRequest, .pingResponse: break
-    case .disconnect(let p): p.properties.forEach { _ in count += 1 }
-    case .authenticate(let p): p.properties.forEach { _ in count += 1 }
+    case let .disconnect(p): p.properties.forEach { _ in count += 1 }
+    case let .authenticate(p): p.properties.forEach { _ in count += 1 }
     }
     _ = count
     return try encoded(packet)
@@ -66,17 +67,17 @@ func visitAndReencode(_ packet: borrowing MQTTPacket) throws -> [UInt8] {
 
 /// One encoded packet of every type, most with properties.
 func corpus() throws -> [[UInt8]] {
-    let p = try fieldBytes { (w) throws(BytesError) in
+    let p = try fieldBytes { w throws(BytesError) in
         try w.write(MQTTProperty.userProperty(name: "k".utf8Span, value: "v".utf8Span))
         try w.write(MQTTProperty.reasonString("r".utf8Span))
     }
-    let u = try fieldBytes { (w) throws(BytesError) in try w.write(MQTTProperty.userProperty(name: "k".utf8Span, value: "v".utf8Span)) }
-    let willProps = try fieldBytes { (w) throws(BytesError) in try w.write(MQTTProperty.willDelayInterval(5)) }
-    let subs = try fieldBytes { (w) throws(BytesError) in
+    let u = try fieldBytes { w throws(BytesError) in try w.write(MQTTProperty.userProperty(name: "k".utf8Span, value: "v".utf8Span)) }
+    let willProps = try fieldBytes { w throws(BytesError) in try w.write(MQTTProperty.willDelayInterval(5)) }
+    let subs = try fieldBytes { w throws(BytesError) in
         try w.write(MQTTSubscription(topicFilter: "a/+".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .exactlyOnce, noLocal: true)))
         try w.write(MQTTSubscription(topicFilter: "b/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .atMostOnce, retainHandling: .doNotSend)))
     }
-    let filters = try fieldBytes { (w) throws(BytesError) in
+    let filters = try fieldBytes { w throws(BytesError) in
         try w.write("a/b".utf8Span, prefixedBy: Byte2.self, .bigEndian)
         try w.write("c".utf8Span, prefixedBy: Byte2.self, .bigEndian)
     }
@@ -84,29 +85,30 @@ func corpus() throws -> [[UInt8]] {
     let codes: [UInt8] = [0x00, 0x01, 0x80]
     let unsubscribeCodes: [UInt8] = [0x00, 0x11, 0x80]
     let password: [UInt8] = [1, 2, 3]
-    return [
-        try encoded(.connect(MQTTConnect(
+    return try [
+        encoded(.connect(MQTTConnect(
             cleanStart: true, keepAlive: 30, properties: MQTTProperties(validating: u.span.bytes), clientIdentifier: "id".utf8Span,
             will: MQTTWill(qos: .atLeastOnce, retain: true, properties: MQTTProperties(validating: willProps.span.bytes),
                            topic: "w".utf8Span, payload: payload.span.bytes),
-            userName: "u".utf8Span, password: password.span.bytes))),
-        try encoded(.connectAcknowledgement(MQTTConnectAcknowledgement(sessionPresent: true, reasonCode: .success, properties: MQTTProperties(validating: p.span.bytes)))),
-        try encoded(.publish(MQTTPublish(qos: .atMostOnce, topic: "t/0".utf8Span, packetIdentifier: nil, properties: MQTTProperties(), payload: payload.span.bytes))),
-        try encoded(.publish(MQTTPublish(duplicate: true, qos: .exactlyOnce, retain: true, topic: "t/2".utf8Span, packetIdentifier: 7,
-                                         properties: MQTTProperties(validating: u.span.bytes), payload: payload.span.bytes))),
-        try encoded(.publishAcknowledgement(MQTTPublishResponse(packetIdentifier: 1, properties: MQTTProperties()))),
-        try encoded(.publishReceived(MQTTPublishResponse(packetIdentifier: 2, reasonCode: .noMatchingSubscribers, properties: MQTTProperties()))),
-        try encoded(.publishRelease(MQTTPublishResponse(packetIdentifier: 3, reasonCode: .packetIdentifierNotFound, properties: MQTTProperties(validating: p.span.bytes)))),
-        try encoded(.publishComplete(MQTTPublishResponse(packetIdentifier: 4, properties: MQTTProperties(validating: p.span.bytes)))),
-        try encoded(.subscribe(MQTTSubscribe(packetIdentifier: 5, properties: MQTTProperties(validating: u.span.bytes), subscriptions: MQTTSubscriptions(validating: subs.span.bytes)))),
-        try encoded(.subscribeAcknowledgement(MQTTSubscribeAcknowledgement(packetIdentifier: 5, properties: MQTTProperties(validating: p.span.bytes), reasonCodes: codes.span))),
-        try encoded(.unsubscribe(MQTTUnsubscribe(packetIdentifier: 6, properties: MQTTProperties(), topicFilters: MQTTTopicFilters(validating: filters.span.bytes)))),
-        try encoded(.unsubscribeAcknowledgement(MQTTSubscribeAcknowledgement(packetIdentifier: 6, properties: MQTTProperties(), reasonCodes: unsubscribeCodes.span))),
-        try encoded(.pingRequest),
-        try encoded(.pingResponse),
-        try encoded(.disconnect(MQTTDisconnect())),
-        try encoded(.disconnect(MQTTDisconnect(reasonCode: .serverBusy, properties: MQTTProperties(validating: p.span.bytes)))),
-        try encoded(.authenticate(MQTTAuthenticate(reasonCode: .continueAuthentication, properties: MQTTProperties(validating: p.span.bytes)))),
+            userName: "u".utf8Span, password: password.span.bytes
+        ))),
+        encoded(.connectAcknowledgement(MQTTConnectAcknowledgement(sessionPresent: true, reasonCode: .success, properties: MQTTProperties(validating: p.span.bytes)))),
+        encoded(.publish(MQTTPublish(qos: .atMostOnce, topic: "t/0".utf8Span, packetIdentifier: nil, properties: MQTTProperties(), payload: payload.span.bytes))),
+        encoded(.publish(MQTTPublish(duplicate: true, qos: .exactlyOnce, retain: true, topic: "t/2".utf8Span, packetIdentifier: 7,
+                                     properties: MQTTProperties(validating: u.span.bytes), payload: payload.span.bytes))),
+        encoded(.publishAcknowledgement(MQTTPublishResponse(packetIdentifier: 1, properties: MQTTProperties()))),
+        encoded(.publishReceived(MQTTPublishResponse(packetIdentifier: 2, reasonCode: .noMatchingSubscribers, properties: MQTTProperties()))),
+        encoded(.publishRelease(MQTTPublishResponse(packetIdentifier: 3, reasonCode: .packetIdentifierNotFound, properties: MQTTProperties(validating: p.span.bytes)))),
+        encoded(.publishComplete(MQTTPublishResponse(packetIdentifier: 4, properties: MQTTProperties(validating: p.span.bytes)))),
+        encoded(.subscribe(MQTTSubscribe(packetIdentifier: 5, properties: MQTTProperties(validating: u.span.bytes), subscriptions: MQTTSubscriptions(validating: subs.span.bytes)))),
+        encoded(.subscribeAcknowledgement(MQTTSubscribeAcknowledgement(packetIdentifier: 5, properties: MQTTProperties(validating: p.span.bytes), reasonCodes: codes.span))),
+        encoded(.unsubscribe(MQTTUnsubscribe(packetIdentifier: 6, properties: MQTTProperties(), topicFilters: MQTTTopicFilters(validating: filters.span.bytes)))),
+        encoded(.unsubscribeAcknowledgement(MQTTSubscribeAcknowledgement(packetIdentifier: 6, properties: MQTTProperties(), reasonCodes: unsubscribeCodes.span))),
+        encoded(.pingRequest),
+        encoded(.pingResponse),
+        encoded(.disconnect(MQTTDisconnect())),
+        encoded(.disconnect(MQTTDisconnect(reasonCode: .serverBusy, properties: MQTTProperties(validating: p.span.bytes)))),
+        encoded(.authenticate(MQTTAuthenticate(reasonCode: .continueAuthentication, properties: MQTTProperties(validating: p.span.bytes)))),
     ]
 }
 
@@ -180,7 +182,9 @@ struct SplitMix64: RandomNumberGenerator {
             }
         }
         print("mutations: accepted \(accepted), failed \(failed), incomplete \(incomplete), accepted-but-not-round-tripping \(notRoundTripping)")
-        for line in reencodedRejected { print("re-encoded rejected: \(line)") }
+        for line in reencodedRejected {
+            print("re-encoded rejected: \(line)")
+        }
         #expect(reencodedRejected.isEmpty)
     }
 }

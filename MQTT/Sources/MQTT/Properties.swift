@@ -49,37 +49,37 @@ public enum MQTTProperty: ~Escapable {
     @_lifetime(reader: copy reader)
     static func read(_ identifier: UInt64, from reader: inout BytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
         switch identifier {
-        case 0x01: .payloadFormatIndicator(try reader.read(Byte.self).rawValue)
-        case 0x02: .messageExpiryInterval(try reader.read(Byte4.self, .bigEndian))
-        case 0x03: .contentType(try reader.readMQTTText(checked: checked))
-        case 0x08: .responseTopic(try reader.readMQTTText(checked: checked))
-        case 0x09: .correlationData(try reader.read(bytesPrefixedBy: Byte2.self, .bigEndian))
+        case 0x01: try .payloadFormatIndicator(reader.read(Byte.self).rawValue)
+        case 0x02: try .messageExpiryInterval(reader.read(Byte4.self, .bigEndian))
+        case 0x03: try .contentType(reader.readMQTTText(checked: checked))
+        case 0x08: try .responseTopic(reader.readMQTTText(checked: checked))
+        case 0x09: try .correlationData(reader.read(bytesPrefixedBy: Byte2.self, .bigEndian))
         case 0x0B:
-            .subscriptionIdentifier(UInt32(
-                checked ? try reader.readMQTTVariableByteInteger() : try reader.read(LEB128.self, maxByteCount: 4)
+            try .subscriptionIdentifier(UInt32(
+                checked ? reader.readMQTTVariableByteInteger() : reader.read(LEB128.self, maxByteCount: 4)
             ))
-        case 0x11: .sessionExpiryInterval(try reader.read(Byte4.self, .bigEndian))
-        case 0x12: .assignedClientIdentifier(try reader.readMQTTText(checked: checked))
-        case 0x13: .serverKeepAlive(try reader.read(Byte2.self, .bigEndian))
-        case 0x15: .authenticationMethod(try reader.readMQTTText(checked: checked))
-        case 0x16: .authenticationData(try reader.read(bytesPrefixedBy: Byte2.self, .bigEndian))
-        case 0x17: .requestProblemInformation(try reader.read(Byte.self).rawValue)
-        case 0x18: .willDelayInterval(try reader.read(Byte4.self, .bigEndian))
-        case 0x19: .requestResponseInformation(try reader.read(Byte.self).rawValue)
-        case 0x1A: .responseInformation(try reader.readMQTTText(checked: checked))
-        case 0x1C: .serverReference(try reader.readMQTTText(checked: checked))
-        case 0x1F: .reasonString(try reader.readMQTTText(checked: checked))
-        case 0x21: .receiveMaximum(try reader.read(Byte2.self, .bigEndian))
-        case 0x22: .topicAliasMaximum(try reader.read(Byte2.self, .bigEndian))
-        case 0x23: .topicAlias(try reader.read(Byte2.self, .bigEndian))
-        case 0x24: .maximumQoS(try reader.read(Byte.self).rawValue)
-        case 0x25: .retainAvailable(try reader.read(Byte.self).rawValue)
+        case 0x11: try .sessionExpiryInterval(reader.read(Byte4.self, .bigEndian))
+        case 0x12: try .assignedClientIdentifier(reader.readMQTTText(checked: checked))
+        case 0x13: try .serverKeepAlive(reader.read(Byte2.self, .bigEndian))
+        case 0x15: try .authenticationMethod(reader.readMQTTText(checked: checked))
+        case 0x16: try .authenticationData(reader.read(bytesPrefixedBy: Byte2.self, .bigEndian))
+        case 0x17: try .requestProblemInformation(reader.read(Byte.self).rawValue)
+        case 0x18: try .willDelayInterval(reader.read(Byte4.self, .bigEndian))
+        case 0x19: try .requestResponseInformation(reader.read(Byte.self).rawValue)
+        case 0x1A: try .responseInformation(reader.readMQTTText(checked: checked))
+        case 0x1C: try .serverReference(reader.readMQTTText(checked: checked))
+        case 0x1F: try .reasonString(reader.readMQTTText(checked: checked))
+        case 0x21: try .receiveMaximum(reader.read(Byte2.self, .bigEndian))
+        case 0x22: try .topicAliasMaximum(reader.read(Byte2.self, .bigEndian))
+        case 0x23: try .topicAlias(reader.read(Byte2.self, .bigEndian))
+        case 0x24: try .maximumQoS(reader.read(Byte.self).rawValue)
+        case 0x25: try .retainAvailable(reader.read(Byte.self).rawValue)
         case 0x26:
-            .userProperty(name: try reader.readMQTTText(checked: checked), value: try reader.readMQTTText(checked: checked))
-        case 0x27: .maximumPacketSize(try reader.read(Byte4.self, .bigEndian))
-        case 0x28: .wildcardSubscriptionAvailable(try reader.read(Byte.self).rawValue)
-        case 0x29: .subscriptionIdentifierAvailable(try reader.read(Byte.self).rawValue)
-        case 0x2A: .sharedSubscriptionAvailable(try reader.read(Byte.self).rawValue)
+            try .userProperty(name: reader.readMQTTText(checked: checked), value: reader.readMQTTText(checked: checked))
+        case 0x27: try .maximumPacketSize(reader.read(Byte4.self, .bigEndian))
+        case 0x28: try .wildcardSubscriptionAvailable(reader.read(Byte.self).rawValue)
+        case 0x29: try .subscriptionIdentifierAvailable(reader.read(Byte.self).rawValue)
+        case 0x2A: try .sharedSubscriptionAvailable(reader.read(Byte.self).rawValue)
         default: throw .invalidValue
         }
     }
@@ -90,13 +90,13 @@ public enum MQTTProperty: ~Escapable {
     @inlinable
     func checkValue() throws(MQTTError) {
         switch self {
-        case .topicAlias(let value), .receiveMaximum(let value):
+        case let .topicAlias(value), let .receiveMaximum(value):
             guard value != 0 else { throw .protocolError("property value 0") }
-        case .subscriptionIdentifier(let value), .maximumPacketSize(let value):
+        case let .subscriptionIdentifier(value), let .maximumPacketSize(value):
             guard value != 0 else { throw .protocolError("property value 0") }
-        case .maximumQoS(let value), .retainAvailable(let value), .wildcardSubscriptionAvailable(let value),
-             .subscriptionIdentifierAvailable(let value), .sharedSubscriptionAvailable(let value),
-             .requestProblemInformation(let value), .requestResponseInformation(let value):
+        case let .maximumQoS(value), let .retainAvailable(value), let .wildcardSubscriptionAvailable(value),
+             let .subscriptionIdentifierAvailable(value), let .sharedSubscriptionAvailable(value),
+             let .requestProblemInformation(value), let .requestResponseInformation(value):
             guard value <= 1 else { throw .protocolError("property flag other than 0 or 1") }
         default:
             break
@@ -157,37 +157,37 @@ extension BytesWriter {
     @_lifetime(self: copy self)
     public mutating func write(_ property: borrowing MQTTProperty) throws(BytesError) {
         switch property {
-        case .payloadFormatIndicator(let value): try writeProperty(0x01, byte: value)
-        case .messageExpiryInterval(let value): try writeProperty(0x02, four: value)
-        case .contentType(let value): try writeProperty(0x03, string: value)
-        case .responseTopic(let value): try writeProperty(0x08, string: value)
-        case .correlationData(let value): try writeProperty(0x09, binary: value)
-        case .subscriptionIdentifier(let value):
+        case let .payloadFormatIndicator(value): try writeProperty(0x01, byte: value)
+        case let .messageExpiryInterval(value): try writeProperty(0x02, four: value)
+        case let .contentType(value): try writeProperty(0x03, string: value)
+        case let .responseTopic(value): try writeProperty(0x08, string: value)
+        case let .correlationData(value): try writeProperty(0x09, binary: value)
+        case let .subscriptionIdentifier(value):
             try write(UInt64(0x0B), as: LEB128.self)
             try write(UInt64(value), as: LEB128.self)
-        case .sessionExpiryInterval(let value): try writeProperty(0x11, four: value)
-        case .assignedClientIdentifier(let value): try writeProperty(0x12, string: value)
-        case .serverKeepAlive(let value): try writeProperty(0x13, two: value)
-        case .authenticationMethod(let value): try writeProperty(0x15, string: value)
-        case .authenticationData(let value): try writeProperty(0x16, binary: value)
-        case .requestProblemInformation(let value): try writeProperty(0x17, byte: value)
-        case .willDelayInterval(let value): try writeProperty(0x18, four: value)
-        case .requestResponseInformation(let value): try writeProperty(0x19, byte: value)
-        case .responseInformation(let value): try writeProperty(0x1A, string: value)
-        case .serverReference(let value): try writeProperty(0x1C, string: value)
-        case .reasonString(let value): try writeProperty(0x1F, string: value)
-        case .receiveMaximum(let value): try writeProperty(0x21, two: value)
-        case .topicAliasMaximum(let value): try writeProperty(0x22, two: value)
-        case .topicAlias(let value): try writeProperty(0x23, two: value)
-        case .maximumQoS(let value): try writeProperty(0x24, byte: value)
-        case .retainAvailable(let value): try writeProperty(0x25, byte: value)
-        case .userProperty(let name, let value):
+        case let .sessionExpiryInterval(value): try writeProperty(0x11, four: value)
+        case let .assignedClientIdentifier(value): try writeProperty(0x12, string: value)
+        case let .serverKeepAlive(value): try writeProperty(0x13, two: value)
+        case let .authenticationMethod(value): try writeProperty(0x15, string: value)
+        case let .authenticationData(value): try writeProperty(0x16, binary: value)
+        case let .requestProblemInformation(value): try writeProperty(0x17, byte: value)
+        case let .willDelayInterval(value): try writeProperty(0x18, four: value)
+        case let .requestResponseInformation(value): try writeProperty(0x19, byte: value)
+        case let .responseInformation(value): try writeProperty(0x1A, string: value)
+        case let .serverReference(value): try writeProperty(0x1C, string: value)
+        case let .reasonString(value): try writeProperty(0x1F, string: value)
+        case let .receiveMaximum(value): try writeProperty(0x21, two: value)
+        case let .topicAliasMaximum(value): try writeProperty(0x22, two: value)
+        case let .topicAlias(value): try writeProperty(0x23, two: value)
+        case let .maximumQoS(value): try writeProperty(0x24, byte: value)
+        case let .retainAvailable(value): try writeProperty(0x25, byte: value)
+        case let .userProperty(name, value):
             try writeProperty(0x26, string: name)
             try writeMQTTString(value)
-        case .maximumPacketSize(let value): try writeProperty(0x27, four: value)
-        case .wildcardSubscriptionAvailable(let value): try writeProperty(0x28, byte: value)
-        case .subscriptionIdentifierAvailable(let value): try writeProperty(0x29, byte: value)
-        case .sharedSubscriptionAvailable(let value): try writeProperty(0x2A, byte: value)
+        case let .maximumPacketSize(value): try writeProperty(0x27, four: value)
+        case let .wildcardSubscriptionAvailable(value): try writeProperty(0x28, byte: value)
+        case let .subscriptionIdentifierAvailable(value): try writeProperty(0x29, byte: value)
+        case let .sharedSubscriptionAvailable(value): try writeProperty(0x2A, byte: value)
         }
     }
 
@@ -328,11 +328,11 @@ public struct MQTTProperties: ~Escapable {
     var encodedByteCount: Int { Size.lengthPrefixed(bytes.byteCount) }
 }
 
-extension BytesWriter {
+public extension BytesWriter {
     /// Writes a property list: its length, then the properties.
     @inlinable
     @_lifetime(self: copy self)
-    public mutating func write(_ properties: borrowing MQTTProperties) throws(BytesError) {
+    mutating func write(_ properties: borrowing MQTTProperties) throws(BytesError) {
         try write(properties.bytes, prefixedBy: LEB128.self)
     }
 }

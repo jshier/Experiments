@@ -24,22 +24,22 @@ let benchmarks: @Sendable () -> Void = {
 
     Benchmark("Fields: Bytes") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try CentralDirectory.parseWithBytes(directory.span.bytes))
+            try blackHole(CentralDirectory.parseWithBytes(directory.span.bytes))
         }
     }
     Benchmark("Fields: Bytes, fixed-size records") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try CentralDirectory.parseWithBytesRecords(directory.span.bytes))
+            try blackHole(CentralDirectory.parseWithBytesRecords(directory.span.bytes))
         }
     }
     Benchmark("Fields: original ByteReader") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try CentralDirectory.parseWithByteReader(directory.span.bytes))
+            try blackHole(CentralDirectory.parseWithByteReader(directory.span.bytes))
         }
     }
     Benchmark("Fields: hand-written offsets") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try CentralDirectory.parseWithOffsets(directory.span.bytes))
+            try blackHole(CentralDirectory.parseWithOffsets(directory.span.bytes))
         }
     }
 
@@ -50,12 +50,12 @@ let benchmarks: @Sendable () -> Void = {
 
     Benchmark("Bits: Bytes") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try BitFields.parseWithBytes(bitStream.span))
+            try blackHole(BitFields.parseWithBytes(bitStream.span))
         }
     }
     Benchmark("Bits: 64-bit buffer reader") { benchmark in
         for _ in benchmark.scaledIterations {
-            blackHole(try BitFields.parseWithBitBuffer(bitStream.span))
+            try blackHole(BitFields.parseWithBitBuffer(bitStream.span))
         }
     }
 
@@ -75,7 +75,9 @@ let benchmarks: @Sendable () -> Void = {
         for _ in benchmark.scaledIterations {
             var reader = BytesReader(words.span)
             let values = try [UInt32](capacity: wordCount) { output in
-                while !output.isFull { output.append(try reader.read(Byte4.self, .bigEndian)) }
+                while !output.isFull {
+                    try output.append(reader.read(Byte4.self, .bigEndian))
+                }
             }
             blackHole(values)
         }

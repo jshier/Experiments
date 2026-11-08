@@ -61,7 +61,7 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
         do throws(BytesError) {
             typeBits = try reader.read(Nibble.self)
             flags = try reader.read(Nibble.self)
-            remainingLength = Int(try reader.readMQTTVariableByteInteger())
+            remainingLength = try Int(reader.readMQTTVariableByteInteger())
         } catch {
             try! reader.seek(toByteOffset: start)
             if error == .insufficientData { return nil }
@@ -135,44 +135,44 @@ extension BytesWriter {
 // A frame is consumed when it's parsed, so if parsing throws, the stream's cursor is past the packet; MQTT
 // ends the connection then anyway.
 
-extension MQTTConnect {
+public extension MQTTConnect {
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         frame.expect(.connect)
         var body = frame.body
         try self.init(reading: &body)
     }
 
     @inlinable
-    public func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.connect, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 }
 
-extension MQTTConnectAcknowledgement {
+public extension MQTTConnectAcknowledgement {
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         frame.expect(.connectAcknowledgement)
         var body = frame.body
         try self.init(reading: &body)
     }
 
     @inlinable
-    public func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.connectAcknowledgement, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 }
 
-extension MQTTPublish {
+public extension MQTTPublish {
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         frame.expect(.publish)
         let flags = frame.flags
         var body = frame.body
@@ -180,18 +180,18 @@ extension MQTTPublish {
     }
 
     @inlinable
-    public func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.publish, flags: flags, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 }
 
-extension MQTTPublishResponse {
+public extension MQTTPublishResponse {
     /// PUBACK, PUBREC, PUBREL, or PUBCOMP, as the frame's type says.
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         let reasonCodes = Self.reasonCodes(for: frame.type)
         var body = frame.body
         try self.init(reading: &body, reasonCodes: reasonCodes)
@@ -199,15 +199,15 @@ extension MQTTPublishResponse {
 
     /// Writes it as `type`: PUBACK, PUBREC, PUBREL, or PUBCOMP.
     @inlinable
-    public func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
+    func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
         let reasonCodes = Self.reasonCodes(for: type)
         try writer.writeMQTTPacket(type, flags: type.requiredFlags, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate(reasonCodes: reasonCodes) },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 
     @inlinable @inline(__always)
-    static func reasonCodes(for type: MQTTPacketType) -> ReasonCodeSet {
+    internal static func reasonCodes(for type: MQTTPacketType) -> ReasonCodeSet {
         switch type {
         case .publishAcknowledgement, .publishReceived: .publishAcknowledgement
         case .publishRelease, .publishComplete: .publishRelease
@@ -216,45 +216,45 @@ extension MQTTPublishResponse {
     }
 }
 
-extension MQTTSubscribe {
+public extension MQTTSubscribe {
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         frame.expect(.subscribe)
         var body = frame.body
         try self.init(reading: &body)
     }
 
     @inlinable
-    public func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.subscribe, flags: 0b0010, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 }
 
-extension MQTTUnsubscribe {
+public extension MQTTUnsubscribe {
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         frame.expect(.unsubscribe)
         var body = frame.body
         try self.init(reading: &body)
     }
 
     @inlinable
-    public func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.unsubscribe, flags: 0b0010, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 }
 
-extension MQTTSubscribeAcknowledgement {
+public extension MQTTSubscribeAcknowledgement {
     /// SUBACK or UNSUBACK, as the frame's type says.
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         let reasonCodes = Self.reasonCodes(for: frame.type)
         var body = frame.body
         try self.init(reading: &body, reasonCodes: reasonCodes)
@@ -262,15 +262,15 @@ extension MQTTSubscribeAcknowledgement {
 
     /// Writes it as `type`: SUBACK or UNSUBACK.
     @inlinable
-    public func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
+    func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
         let allowed = Self.reasonCodes(for: type)
         try writer.writeMQTTPacket(type, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate(reasonCodes: allowed) },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 
     @inlinable @inline(__always)
-    static func reasonCodes(for type: MQTTPacketType) -> ReasonCodeSet {
+    internal static func reasonCodes(for type: MQTTPacketType) -> ReasonCodeSet {
         switch type {
         case .subscribeAcknowledgement: .subscribeAcknowledgement
         case .unsubscribeAcknowledgement: .unsubscribeAcknowledgement
@@ -279,36 +279,36 @@ extension MQTTSubscribeAcknowledgement {
     }
 }
 
-extension MQTTDisconnect {
+public extension MQTTDisconnect {
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         frame.expect(.disconnect)
         var body = frame.body
         try self.init(reading: &body)
     }
 
     @inlinable
-    public func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.disconnect, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 }
 
-extension MQTTAuthenticate {
+public extension MQTTAuthenticate {
     @inlinable
     @_lifetime(copy frame)
-    public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
+    init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
         frame.expect(.authenticate)
         var body = frame.body
         try self.init(reading: &body)
     }
 
     @inlinable
-    public func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.authenticate, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
-                                   body: { (writer) throws(BytesError) in try writeBody(to: &writer) })
+                                   body: { writer throws(BytesError) in try writeBody(to: &writer) })
     }
 }

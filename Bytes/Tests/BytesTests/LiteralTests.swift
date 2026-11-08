@@ -27,7 +27,9 @@ import Testing
         func check<T: ByteGroup>(_: T.Type) {
             let bytes = (0..<T.byteCount).map { UInt8(0xA0 &+ $0) }
             var integer: T.Integer = 0
-            for byte in bytes { integer = integer << 8 | T.Integer(byte) }
+            for byte in bytes {
+                integer = integer << 8 | T.Integer(byte)
+            }
             let value = T(integerLiteral: integer)
             #expect((0..<T.byteCount).allSatisfy { value[$0] == bytes[$0] }, "\(T.self)")
         }

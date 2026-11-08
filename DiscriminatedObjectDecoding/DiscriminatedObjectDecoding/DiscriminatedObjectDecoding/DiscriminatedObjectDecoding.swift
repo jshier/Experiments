@@ -1,11 +1,11 @@
-import Foundation
 import CasePaths
 import DiscriminatedDecoding
+import Foundation
 
 @main
 struct DiscriminatedObjectDecoding {
     static func main() async throws {
-        print(try JSONDecoder().decode(Screen.self, from: screenJSON))
+        try print(JSONDecoder().decode(Screen.self, from: screenJSON))
     }
 }
 
@@ -17,12 +17,12 @@ struct Screen {
     enum Section {
         case first(First)
         case second(Second)
-        
+
         struct First: Decodable {
             var id: UUID
             var description: String
         }
-        
+
         struct Second: Decodable {
             var id: UUID
             var title: String
@@ -33,8 +33,8 @@ struct Screen {
 extension Screen.Section: Identifiable {
     var id: UUID {
         switch self {
-        case .first(let first): first.id
-        case .second(let second): second.id
+        case let .first(first): first.id
+        case let .second(second): second.id
         }
     }
 }

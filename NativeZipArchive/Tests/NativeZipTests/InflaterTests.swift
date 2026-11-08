@@ -33,7 +33,7 @@ enum Outcome: Equatable {
 func inflate(_ payload: [UInt8], backend: ZipDecoder.Backend) -> Outcome {
     var decoder = ZipDecoder(backend: backend)
     do {
-        return .decoded(try DeflateBackends.inflate(payload.span.bytes, using: &decoder))
+        return try .decoded(DeflateBackends.inflate(payload.span.bytes, using: &decoder))
     } catch {
         return .failed
     }
@@ -55,13 +55,17 @@ func samples() -> [(name: String, bytes: [UInt8])] {
     var rng = SplitMix64(state: 7)
     let words = ["swift", "byte", "span", "inflate", "huffman", "window", " ", "\n", "the", "a"]
     var text: [UInt8] = []
-    while text.count < 200_000 { text += Array(words.randomElement(using: &rng)!.utf8) }
+    while text.count < 200_000 {
+        text += Array(words.randomElement(using: &rng)!.utf8)
+    }
     let random = (0..<100_000).map { _ in UInt8.random(in: 0...255, using: &rng) }
-    let runs = (0..<100_000).map { UInt8(($0 / 1000) % 3) }                     // Long runs: distance-1 matches.
-    let periodic = (0..<100_000).map { UInt8(truncatingIfNeeded: $0 % 7) }      // Short distances.
+    let runs = (0..<100_000).map { UInt8(($0 / 1000) % 3) } // Long runs: distance-1 matches.
+    let periodic = (0..<100_000).map { UInt8(truncatingIfNeeded: $0 % 7) } // Short distances.
     // Several megabytes, so output spans chunks and back-references reach across them.
     var large: [UInt8] = []
-    while large.count < 3 << 20 { large += text.prefix(Int.random(in: 1_000...50_000, using: &rng)); large += random.prefix(500) }
+    while large.count < 3 << 20 {
+        large += text.prefix(Int.random(in: 1_000...50_000, using: &rng)); large += random.prefix(500)
+    }
     return [
         ("empty", []), ("one byte", [0x41]), ("text", text), ("random", random), ("runs", runs),
         ("periodic", periodic), ("large", large),
@@ -109,13 +113,13 @@ func samples() -> [(name: String, bytes: [UInt8])] {
     }
 
     @Test func rejectsMalformedStreams() {
-        #expect(inflate([0x07], backend: .bytes) == .failed)                         // Block type 3.
+        #expect(inflate([0x07], backend: .bytes) == .failed) // Block type 3.
         #expect(inflate([0x01, 0x05, 0x00, 0x00, 0x00], backend: .bytes) == .failed) // Stored: NLEN isn't ~LEN.
-        #expect(inflate([], backend: .bytes) == .failed)                             // No block at all.
+        #expect(inflate([], backend: .bytes) == .failed) // No block at all.
         // A fixed block whose first symbol is a match reaching before the start: final bit 1, type 01,
         // length code 257 (0000001), distance code 0 (00000), packed least significant bit first.
         #expect(inflate([0x03, 0x02], backend: .bytes) == .failed)
         #expect(inflate([0x03, 0x02], backend: .zlib) == .failed)
-        #expect(inflate([0x03, 0x00], backend: .bytes) == .decoded([]))               // An empty fixed block.
+        #expect(inflate([0x03, 0x00], backend: .bytes) == .decoded([])) // An empty fixed block.
     }
 }

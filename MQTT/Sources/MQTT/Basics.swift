@@ -55,7 +55,7 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
 
     // By the detail's bytes, without building `String`s. Unsafe: `StaticString` exposes its bytes only as a
     // buffer pointer. Safe: they're immutable static data, read only within the closure.
-    public static func == (lhs: Self, rhs: Self) -> Bool {
+    public static func ==(lhs: Self, rhs: Self) -> Bool {
         lhs.kind == rhs.kind && lhs.detail.withUTF8Buffer { a in rhs.detail.withUTF8Buffer { b in unsafe a.elementsEqual(b) } }
     }
 
@@ -92,7 +92,7 @@ public enum MQTTQoS: UInt8, Sendable, Comparable {
     case atLeastOnce
     case exactlyOnce
 
-    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    public static func <(lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
 /// A reason code: the outcome of an operation, 0x80 and above for failures. Each packet type allows a
@@ -275,7 +275,7 @@ extension BytesReader {
             // Unsafe: skips UTF-8 validation, which is what makes iterating a validated packet's string lists
             // cheap. Safe enough: only called on packets whose `validate()` already checked these strings, and
             // validation is a precondition of the unchecked iterators. No safe construct skips the check.
-            return unsafe UTF8Span(unchecked: Span(viewing: try read(bytesPrefixedBy: Byte2.self, .bigEndian)))
+            return unsafe try UTF8Span(unchecked: Span(viewing: read(bytesPrefixedBy: Byte2.self, .bigEndian)))
         }
         // One pass for ASCII: UTF-8 and U+0000 checked together, 16 bytes at a time.
         return try read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: Text.null)

@@ -9,7 +9,9 @@ struct ReferenceCode {
     init(lengths: [UInt8]) {
         self.lengths = lengths
         var counts = [Int](repeating: 0, count: 17)
-        for length in lengths where length > 0 { counts[Int(length)] += 1 }
+        for length in lengths where length > 0 {
+            counts[Int(length)] += 1
+        }
         var next = [Int](repeating: 0, count: 17)
         var code = 0
         for length in 1...16 {
@@ -29,7 +31,9 @@ struct ReferenceCode {
         var bits: [Bool] = []
         for symbol in message {
             let length = Int(lengths[symbol])
-            for index in stride(from: length - 1, through: 0, by: -1) { bits.append(codes[symbol] >> index & 1 == 1) }
+            for index in stride(from: length - 1, through: 0, by: -1) {
+                bits.append(codes[symbol] >> index & 1 == 1)
+            }
         }
         var bytes = [UInt8](repeating: 0, count: (bits.count + 7) / 8 + 8)
         for (index, bit) in bits.enumerated() where bit {
@@ -49,7 +53,9 @@ struct ReferenceCode {
             leaves.append(leaves[leaf])
         }
         var lengths = [UInt8](repeating: 0, count: symbolCount)
-        for (symbol, length) in zip(Array(0..<symbolCount).shuffled(using: &rng), leaves) { lengths[symbol] = UInt8(length) }
+        for (symbol, length) in zip(Array(0..<symbolCount).shuffled(using: &rng), leaves) {
+            lengths[symbol] = UInt8(length)
+        }
         return lengths
     }
 }
@@ -61,11 +67,11 @@ struct ReferenceCode {
     }
 
     static let shapes = [
-        Shape(symbolCount: 288, used: 288, maximumLength: 15, rootBits: 9),   // DEFLATE literal/length
-        Shape(symbolCount: 30, used: 30, maximumLength: 15, rootBits: 6),     // DEFLATE distance
-        Shape(symbolCount: 19, used: 19, maximumLength: 7, rootBits: 7),      // DEFLATE code length
-        Shape(symbolCount: 256, used: 162, maximumLength: 16, rootBits: 9),   // JPEG AC
-        Shape(symbolCount: 704, used: 600, maximumLength: 15, rootBits: 4),   // Brotli-sized, deep subtables
+        Shape(symbolCount: 288, used: 288, maximumLength: 15, rootBits: 9), // DEFLATE literal/length
+        Shape(symbolCount: 30, used: 30, maximumLength: 15, rootBits: 6), // DEFLATE distance
+        Shape(symbolCount: 19, used: 19, maximumLength: 7, rootBits: 7), // DEFLATE code length
+        Shape(symbolCount: 256, used: 162, maximumLength: 16, rootBits: 9), // JPEG AC
+        Shape(symbolCount: 704, used: 600, maximumLength: 15, rootBits: 4), // Brotli-sized, deep subtables
         Shape(symbolCount: 2, used: 2, maximumLength: 1, rootBits: 1),
     ]
 
@@ -84,11 +90,11 @@ struct ReferenceCode {
                 let message = (0..<500).map { _ in symbols.randomElement(using: &rng)! }
                 let data = ReferenceCode(lengths: lengths).encode(message, order: order)
                 var reader = BytesReader(data.span, bitOrder: order)
-                let decoded = try reader.withBitBuffer { (buffer) throws(BytesError) in
+                let decoded = try reader.withBitBuffer { buffer throws(BytesError) in
                     var decoded: [Int] = []
                     for _ in message.indices {
                         buffer.refill()
-                        decoded.append(try table.decode(&buffer))
+                        try decoded.append(table.decode(&buffer))
                     }
                     return decoded
                 }
@@ -115,8 +121,8 @@ struct ReferenceCode {
     @Test func rejectsInvalidCodes() {
         var table = HuffmanTable(symbolCount: 4, maximumCodeLength: 7)
         let invalid: [[UInt8]] = [
-            [1, 1, 1],    // Over-subscribed.
-            [1, 2],       // Incomplete, and not a single code.
+            [1, 1, 1], // Over-subscribed.
+            [1, 2], // Incomplete, and not a single code.
             [1, 2, 3, 8], // Longer than the table's maximum.
             [2, 2, 2, 2, 0], // More symbols than the table holds.
         ]

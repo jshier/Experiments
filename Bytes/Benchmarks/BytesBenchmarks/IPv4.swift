@@ -6,8 +6,6 @@ import Bytes
 
 struct IPv4Address: ByteRepresentable {
     var rawBytes: InlineArray<4, UInt8>
-    init(rawBytes: InlineArray<4, UInt8>) { self.rawBytes = rawBytes }
-
     /// The four bytes as one integer, in memory order, for checksums: a free reinterpretation.
     var memoryOrderValue: UInt32 { bitCast(rawBytes, to: UInt32.self) }
 }
@@ -15,11 +13,11 @@ struct IPv4Address: ByteRepresentable {
 /// A 6-byte custom type (MAC-address shaped): an odd size, built from two overlapping loads.
 struct MACAddress: ByteRepresentable {
     var rawBytes: InlineArray<6, UInt8>
-    init(rawBytes: InlineArray<6, UInt8>) { self.rawBytes = rawBytes }
-
     var memoryOrderValue: UInt64 {
         var value: UInt64 = 0
-        for index in 0..<6 { value |= UInt64(rawBytes[index]) << (8 * index) }
+        for index in 0..<6 {
+            value |= UInt64(rawBytes[index]) << (8 * index)
+        }
         return value
     }
 }
@@ -27,8 +25,6 @@ struct MACAddress: ByteRepresentable {
 /// A 16-byte custom type (IPv6-address shaped).
 struct IPv6Address: ByteRepresentable {
     var rawBytes: InlineArray<16, UInt8>
-    init(rawBytes: InlineArray<16, UInt8>) { self.rawBytes = rawBytes }
-
     var memoryOrderValue: UInt128 { bitCast(rawBytes, to: UInt128.self) }
 }
 
@@ -36,11 +32,11 @@ struct IPv6Address: ByteRepresentable {
 /// `MACAddress`.
 struct CustomBytes<let n: Int>: ByteRepresentable {
     var rawBytes: InlineArray<n, UInt8>
-    init(rawBytes: InlineArray<n, UInt8>) { self.rawBytes = rawBytes }
-
     var memoryOrderValue: UInt128 {
         var value: UInt128 = 0
-        for index in 0..<n { value |= UInt128(rawBytes[index]) << (8 * index) }
+        for index in 0..<n {
+            value |= UInt128(rawBytes[index]) << (8 * index)
+        }
         return value
     }
 }
@@ -69,41 +65,53 @@ func zeroCopyWorkloads() -> [Workload] {
             var reader = BytesReader(span)
             let addresses = try! reader.read(InlineArray<4, UInt8>.self, count: span.byteCount / 4)
             var sum: UInt32 = 0
-            for address in addresses { sum &+= bitCast(address, to: UInt32.self) }
+            for address in addresses {
+                sum &+= bitCast(address, to: UInt32.self)
+            }
             return UInt64(sum)
         },
         Workload(name: "Zero-copy: for-in Span<RawBytes> → IPv4Address", unit: 4, allCores: false) { span in
             var reader = BytesReader(span)
             let addresses = try! reader.read(IPv4Address.RawBytes.self, count: span.byteCount / 4)
             var sum: UInt32 = 0
-            for rawBytes in addresses { sum &+= IPv4Address(rawBytes: rawBytes).memoryOrderValue }
+            for rawBytes in addresses {
+                sum &+= IPv4Address(rawBytes: rawBytes).memoryOrderValue
+            }
             return UInt64(sum)
         },
         Workload(name: "Zero-copy: for-in Span<UInt32> (aligned)", unit: 4, allCores: false) { span in
             var reader = BytesReader(span)
             let words = try! reader.read(UInt32.self, count: span.byteCount / 4)
             var sum: UInt32 = 0
-            for word in words { sum &+= word }
+            for word in words {
+                sum &+= word
+            }
             return UInt64(sum)
         },
         Workload(name: "Zero-copy: for-in Span<InlineArray<6, UInt8>> (MAC bytes)", unit: 6, allCores: false) { span in
             var reader = BytesReader(span)
             let addresses = try! reader.read(InlineArray<6, UInt8>.self, count: span.byteCount / 6)
             var sum: UInt64 = 0
-            for address in addresses { sum &+= MACAddress(rawBytes: address).memoryOrderValue }
+            for address in addresses {
+                sum &+= MACAddress(rawBytes: address).memoryOrderValue
+            }
             return sum
         },
         Workload(name: "Zero-copy: for-in Span<InlineArray<16, UInt8>> (IPv6 bytes)", unit: 16, allCores: false) { span in
             var reader = BytesReader(span)
             let addresses = try! reader.read(InlineArray<16, UInt8>.self, count: span.byteCount / 16)
             var sum: UInt64 = 0
-            for address in addresses { sum &+= fold(bitCast(address, to: UInt128.self)) }
+            for address in addresses {
+                sum &+= fold(bitCast(address, to: UInt128.self))
+            }
             return sum
         },
         Workload(name: "load(Float.self) per value", unit: 4, allCores: false) { span in
             var reader = BytesReader(span)
             var sum: UInt32 = 0
-            while reader.remainingByteCount >= 4 { sum &+= try! reader.load(Float.self).bitPattern }
+            while reader.remainingByteCount >= 4 {
+                sum &+= try! reader.load(Float.self).bitPattern
+            }
             return UInt64(sum)
         },
     ]

@@ -96,13 +96,13 @@ extension ZipArchive {
         let largeFiles = files.count { $0.entry.uncompressedSize >= Self.largeEntrySize }
         let width = min(options.maxConcurrency, max(Self.fileCreationWidth, largeFiles))
         try await forEachConcurrently(files, maxConcurrency: width, backend: options.backend, weight: \.entry.uncompressedSize) {
-            [self] job, decoder in try await self.write(job, using: &decoder)
+            [self] job, decoder in try await write(job, using: &decoder)
         }
 
         for (entry, relative, link) in symlinks {
             try directories.create(link.removingLastComponent())
             guard try Self.clearExisting(entry, relative: relative, at: link, options: options) else { continue }
-            let destination = String(decoding: try contents(of: entry, backend: options.backend), as: UTF8.self)
+            let destination = try String(decoding: contents(of: entry, backend: options.backend), as: UTF8.self)
             options.onEvent?(.linking(entry, path: relative, destination: destination))
             // System has no symlink(2) wrapper, and Foundation's would normalize the name, so use Darwin.
             // Unsafe: C strings. Safe: both are NUL-terminated and valid for the call only.

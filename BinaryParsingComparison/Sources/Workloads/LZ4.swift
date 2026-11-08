@@ -27,7 +27,7 @@ public enum LZ4 {
         else { throw LZ4Error() }
         let blockMaximum = 1 << (8 &+ 2 &* sizeCode)
         let hasBlockChecksums = flags[bit: 4]
-        let contentSize = flags[bit: 3] ? Int(try reader.read(Byte8.self, .littleEndian)) : 0
+        let contentSize = try flags[bit: 3] ? Int(reader.read(Byte8.self, .littleEndian)) : 0
         if flags[bit: 0] { try reader.skip(byteCount: 4) } // dictionary ID
         try reader.skip(byteCount: 1) // header checksum
 
@@ -61,9 +61,9 @@ public enum LZ4 {
         while true {
             let token = try reader.read(Byte.self)
             let literalCount = try length(Int(token.highHalf), &reader)
-            try writer.write(try reader.read(byteCount: literalCount))
+            try writer.write(reader.read(byteCount: literalCount))
             if reader.isAtEnd { return }
-            let distance = Int(try reader.read(Byte2.self, .littleEndian))
+            let distance = try Int(reader.read(Byte2.self, .littleEndian))
             guard distance != 0 else { throw .invalidValue }
             let count = try length(Int(token.lowHalf), &reader) &+ 4
             try writer.copy(fromDistance: distance, count: count, allowingOverrun: true)
@@ -110,8 +110,8 @@ public enum LZ4 {
                     try span.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in try writer.write(block) }
                 }
             } else {
-                try output.append(addingCapacity: blockMaximum) { (span: inout OutputSpan<UInt8>) throws(any Error) in
-                    try span.withBytesWriter { (writer: inout BytesWriter) throws(any Error) in
+                try output.append(addingCapacity: blockMaximum) { (span: inout OutputSpan<UInt8>) throws in
+                    try span.withBytesWriter { (writer: inout BytesWriter) throws in
                         try decodeBlockParserSpan(block, into: &writer)
                     }
                 }
@@ -126,7 +126,7 @@ public enum LZ4 {
         while true {
             let token = try UInt8(parsing: &input)
             let literalCount = try lengthParserSpan(Int(token >> 4), &input)
-            try writer.write(try input.sliceSpan(byteCount: literalCount).bytes)
+            try writer.write(input.sliceSpan(byteCount: literalCount).bytes)
             if input.isEmpty { return }
             let distance = try Int(parsing: &input, storedAsLittleEndian: UInt16.self)
             guard distance != 0 else { throw LZ4Error() }

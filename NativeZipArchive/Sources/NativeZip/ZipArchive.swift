@@ -74,9 +74,9 @@ extension ZipArchive {
         do throws(BytesError) {
             var reader = BytesReader(archive)
             try reader.seek(toByteOffset: Int(clamping: location.offset))
-            var directory = BytesReader(try reader.read(byteCount: Int(clamping: location.size)))
+            var directory = try BytesReader(reader.read(byteCount: Int(clamping: location.size)))
             for _ in 0..<location.entryCount {
-                entries.append(try readCentralDirectoryEntry(&directory))
+                try entries.append(readCentralDirectoryEntry(&directory))
             }
         } catch {
             throw error.zipError("central directory entry \(entries.count)")
@@ -91,15 +91,15 @@ extension ZipArchive {
         do throws(BytesError) {
             var eocd = BytesReader(archive)
             try eocd.seek(toByteOffset: eocdOffset)
-            var record = BytesReader(try eocd.read(byteCount: 22))
+            var record = try BytesReader(eocd.read(byteCount: 22))
             try record.expect(Signature.endOfCentralDirectory)
             let diskNumber = try record.read(Byte2.self, .littleEndian)
             let directoryDisk = try record.read(Byte2.self, .littleEndian)
             try record.skip(byteCount: 2) // entries on this disk
-            location = CentralDirectoryLocation(
-                entryCount: UInt64(try record.read(Byte2.self, .littleEndian)),
-                size: UInt64(try record.read(Byte4.self, .littleEndian)),
-                offset: UInt64(try record.read(Byte4.self, .littleEndian))
+            location = try CentralDirectoryLocation(
+                entryCount: UInt64(record.read(Byte2.self, .littleEndian)),
+                size: UInt64(record.read(Byte4.self, .littleEndian)),
+                offset: UInt64(record.read(Byte4.self, .littleEndian))
             )
 
             // ZIP64: saturated fields mean the real values live in the ZIP64 EOCD record, which a
@@ -110,7 +110,7 @@ extension ZipArchive {
                 if try locator.read(Byte4.self) == Signature.zip64Locator {
                     try locator.skip(byteCount: 4) // disk containing the ZIP64 EOCD
                     var zip64 = BytesReader(archive)
-                    try zip64.seek(toByteOffset: Int(clamping: try locator.read(Byte8.self, .littleEndian)))
+                    try zip64.seek(toByteOffset: Int(clamping: locator.read(Byte8.self, .littleEndian)))
                     try zip64.expect(Signature.zip64EndOfCentralDirectory)
                     try zip64.skip(byteCount: 8 + 2 + 2 + 4 + 4 + 8) // record size, versions, disks, entries on disk
                     location.entryCount = try zip64.read(Byte8.self, .littleEndian)
@@ -142,7 +142,7 @@ extension ZipArchive {
     @_lifetime(directory: copy directory)
     private static func readCentralDirectoryEntry(_ directory: inout BytesReader) throws(BytesError) -> ZipEntry {
         // The fixed part as its own cursor: its length is a constant, so every field read is proven in bounds.
-        var header = BytesReader(try directory.read(byteCount: 46))
+        var header = try BytesReader(directory.read(byteCount: 46))
         try header.expect(Signature.centralDirectory)
         let versionMadeBy = try header.read(Byte2.self, .littleEndian)
         try header.skip(byteCount: 2) // version needed to extract
@@ -151,25 +151,25 @@ extension ZipArchive {
         let dosTime = try header.read(Byte2.self, .littleEndian)
         let dosDate = try header.read(Byte2.self, .littleEndian)
         let crc = try header.read(Byte4.self, .littleEndian)
-        var compressedSize = UInt64(try header.read(Byte4.self, .littleEndian))
-        var uncompressedSize = UInt64(try header.read(Byte4.self, .littleEndian))
-        let nameLength = Int(try header.read(Byte2.self, .littleEndian))
-        let extraLength = Int(try header.read(Byte2.self, .littleEndian))
-        let commentLength = Int(try header.read(Byte2.self, .littleEndian))
+        var compressedSize = try UInt64(header.read(Byte4.self, .littleEndian))
+        var uncompressedSize = try UInt64(header.read(Byte4.self, .littleEndian))
+        let nameLength = try Int(header.read(Byte2.self, .littleEndian))
+        let extraLength = try Int(header.read(Byte2.self, .littleEndian))
+        let commentLength = try Int(header.read(Byte2.self, .littleEndian))
         try header.skip(byteCount: 2 + 2) // disk number start, internal attributes
         let externalAttributes = try header.read(Byte4.self, .littleEndian)
-        var localHeaderOffset = UInt64(try header.read(Byte4.self, .littleEndian))
+        var localHeaderOffset = try UInt64(header.read(Byte4.self, .littleEndian))
 
-        let name = decodeName(Span(viewing: try directory.read(byteCount: nameLength)))
-        var extra = BytesReader(try directory.read(byteCount: extraLength))
+        let name = try decodeName(Span(viewing: directory.read(byteCount: nameLength)))
+        var extra = try BytesReader(directory.read(byteCount: extraLength))
         try directory.skip(byteCount: commentLength)
 
         var unixModificationTime: Date?
         while extra.remainingByteCount >= 4 {
             let id = try extra.read(Byte2.self, .littleEndian)
-            let size = Int(try extra.read(Byte2.self, .littleEndian))
+            let size = try Int(extra.read(Byte2.self, .littleEndian))
             guard size <= extra.remainingByteCount else { break } // Tolerate malformed trailing padding.
-            var field = BytesReader(try extra.read(byteCount: size))
+            var field = try BytesReader(extra.read(byteCount: size))
             switch id {
             case 0x0001: // ZIP64 extended information: only the saturated fields are present, in this order.
                 if uncompressedSize == UInt32.max { uncompressedSize = try field.read(Byte8.self, .littleEndian) }
@@ -177,7 +177,7 @@ extension ZipArchive {
                 if localHeaderOffset == UInt32.max { localHeaderOffset = try field.read(Byte8.self, .littleEndian) }
             case 0x5455: // Extended timestamp: a flags byte, then a UTC mtime if bit 0 is set.
                 if size >= 5, try field.read(Byte.self)[bit: 0] {
-                    let seconds = Int32(bitPattern: try field.read(Byte4.self, .littleEndian))
+                    let seconds = try Int32(bitPattern: field.read(Byte4.self, .littleEndian))
                     unixModificationTime = Date(timeIntervalSince1970: TimeInterval(seconds))
                 }
             default:
@@ -276,13 +276,13 @@ extension ZipArchive {
 
 // MARK: - Entry contents
 
-extension ZipArchive {
+public extension ZipArchive {
     /// Calls `body` with successive chunks of the entry's decompressed contents, verifying size and CRC-32.
     ///
     /// The spans borrow `decoder`'s buffer (or, for stored entries, the mapped archive), so nothing is
     /// copied or allocated. Reuse one decoder across calls on the same thread.
     @inlinable
-    public func contents(of entry: ZipEntry, using decoder: inout ZipDecoder, _ body: (RawSpan) throws -> Void) throws {
+    func contents(of entry: ZipEntry, using decoder: inout ZipDecoder, _ body: (RawSpan) throws -> Void) throws {
         guard !entry.isEncrypted else { throw ZipError.encryptedEntry(entry.path) }
         let archive = file.bytes
         let payload = try Self.payload(of: entry, in: archive)
@@ -320,14 +320,14 @@ extension ZipArchive {
 
     /// Convenience that uses a temporary decoder. Prefer ``contents(of:using:_:)`` in loops.
     @inlinable
-    public func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, _ body: (RawSpan) throws -> Void) throws {
+    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, _ body: (RawSpan) throws -> Void) throws {
         var decoder = ZipDecoder(backend: backend)
         try contents(of: entry, using: &decoder, body)
     }
 
     /// Like ``contents(of:using:_:)``, but `consume` runs in a child task, concurrently with decoding the
     /// next chunk. Chunks are consumed one at a time, in order. Only worth it for large deflated entries.
-    func contentsPipelined(
+    internal func contentsPipelined(
         of entry: ZipEntry,
         using decoder: inout ZipDecoder,
         consume: @escaping @Sendable (ZipDecoder.Chunk) throws -> Void
@@ -335,7 +335,7 @@ extension ZipArchive {
         guard !entry.isEncrypted else { throw ZipError.encryptedEntry(entry.path) }
         guard entry.method == Method.deflated else { throw ZipError.unsupportedMethod(entry.method, entry.path) }
         let archive = file.bytes
-        guard let range = archive.byteOffsets(of: try Self.payload(of: entry, in: archive)) else {
+        guard let range = try archive.byteOffsets(of: Self.payload(of: entry, in: archive)) else {
             throw ZipError.truncated("payload for '\(entry.path)'")
         }
 
@@ -355,7 +355,7 @@ extension ZipArchive {
     }
 
     /// The entry's full decompressed contents.
-    public func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes) throws -> Data {
+    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes) throws -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
         try contents(of: entry, backend: backend) { chunk in
             // Unsafe: `Data` has no `RawSpan` append. Safe: the buffer is only read, within the closure.
@@ -367,16 +367,16 @@ extension ZipArchive {
     /// Walks the entry's local file header to its payload and returns the payload's span.
     @usableFromInline
     @_lifetime(copy archive)
-    static func payload(of entry: ZipEntry, in archive: RawSpan) throws(ZipError) -> RawSpan {
+    internal static func payload(of entry: ZipEntry, in archive: RawSpan) throws(ZipError) -> RawSpan {
         do throws(BytesError) {
             var reader = BytesReader(archive)
             try reader.seek(toByteOffset: Int(clamping: entry.localHeaderOffset))
-            var header = BytesReader(try reader.read(byteCount: 30))
+            var header = try BytesReader(reader.read(byteCount: 30))
             try header.expect(Signature.localFile)
             try header.skip(byteCount: 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4) // version, flags, method, time, date, CRC, sizes
             // The local name/extra lengths can differ from the central directory's, so use these.
-            let nameLength = Int(try header.read(Byte2.self, .littleEndian))
-            let extraLength = Int(try header.read(Byte2.self, .littleEndian))
+            let nameLength = try Int(header.read(Byte2.self, .littleEndian))
+            let extraLength = try Int(header.read(Byte2.self, .littleEndian))
             try reader.skip(byteCount: nameLength + extraLength)
             return try reader.read(byteCount: Int(clamping: entry.compressedSize))
         } catch {

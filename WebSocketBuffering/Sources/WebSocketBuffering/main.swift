@@ -1,6 +1,7 @@
 import Foundation
 
 // MARK: - Experiment
+
 //
 // Question: Does URLSessionWebSocketTask buffer messages that arrive before receive() is called,
 // or are they silently dropped?
@@ -36,14 +37,14 @@ try await Task.sleep(for: delayBeforeReceiving)
 print("[\(timestamp())] Delay complete — calling receive() up to \(count) times.\n")
 
 var received = 0
-for i in 1 ... count {
+for i in 1...count {
     do {
         let message = try await task.receive()
         received += 1
         switch message {
-        case .string(let text):
+        case let .string(text):
             print("  [\(i)] string  \(text.count) chars")
-        case .data(let data):
+        case let .data(data):
             print("  [\(i)] data    \(data.count) bytes")
         @unknown default:
             print("  [\(i)] unknown message type")

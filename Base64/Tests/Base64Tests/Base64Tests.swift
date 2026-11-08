@@ -56,7 +56,9 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         for index in 0..<(64 * 4 * 3) {
             bits = bits << 6 | UInt32(index % 64)
             bitCount += 6
-            while bitCount >= 8 { bitCount -= 8; bytes.append(UInt8(truncatingIfNeeded: bits >> UInt32(bitCount))) }
+            while bitCount >= 8 {
+                bitCount -= 8; bytes.append(UInt8(truncatingIfNeeded: bits >> UInt32(bitCount)))
+            }
         }
         let alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
         #expect(try encoded(bytes) == String(repeating: alphabet, count: 12))
@@ -95,7 +97,6 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         #expect((0...7).map { Base64.encodedByteCount(of: $0, padding: false) } == [0, 2, 3, 4, 6, 7, 8, 10])
     }
 }
-
 
 /// The 3-byte-group kernel, which encodes on CPUs without vectorized table lookups. On ARM64 the block
 /// kernel handles every length, so this one is tested directly.

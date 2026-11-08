@@ -4,12 +4,12 @@ import CBytesNEON
 
 // MARK: - Looking up 16 bytes at once
 
-extension ByteLanes {
+public extension ByteLanes {
     /// Whether ``lookup(in:)-(SIMD16<UInt8>,SIMD16<UInt8>,SIMD16<UInt8>)`` is a single instruction: on ARM64
     /// with the `NEONShuffle` trait. Otherwise lookups go a lane at a time, and code that has another way
     /// (arithmetic, say) should use it. A constant, so a branch on it folds away.
     @inlinable @inline(__always)
-    public static var isLookupVectorized: Bool {
+    static var isLookupVectorized: Bool {
         #if NEONShuffle && arch(arm64)
         true
         #else
@@ -27,7 +27,7 @@ extension ByteLanes {
     /// goes through the CBytesNEON C module (the `NEONShuffle` trait, on by default), which inlines into
     /// the caller. Without the trait, or on other CPUs, the same results come a lane at a time.
     @inlinable @inline(__always)
-    public func lookup(in table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>)) -> SIMD16<UInt8> {
+    func lookup(in table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>)) -> SIMD16<UInt8> {
         #if NEONShuffle
         bytes_table3(table.0, table.1, table.2, vector)
         #else
@@ -45,7 +45,7 @@ extension ByteLanes {
     /// let characters = ByteLanes(values).lookup(in: alphabet)
     /// ```
     @inlinable @inline(__always)
-    public func lookup(in table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>)) -> SIMD16<UInt8> {
+    func lookup(in table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>)) -> SIMD16<UInt8> {
         #if NEONShuffle
         bytes_table4(table.0, table.1, table.2, table.3, vector)
         #else
@@ -63,7 +63,7 @@ extension ByteLanes {
     /// let (red, green, blue) = ByteLanes.deinterleave(pixels.0, pixels.1, pixels.2) // 16 RGB pixels
     /// ```
     @inlinable @inline(__always)
-    public static func deinterleave(
+    static func deinterleave(
         _ a: SIMD16<UInt8>, _ b: SIMD16<UInt8>, _ c: SIMD16<UInt8>
     ) -> (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>) {
         let first: SIMD16<UInt8> = [0, 3, 6, 9, 12, 15, 18, 21, 24, 27, 30, 33, 36, 39, 42, 45]
@@ -78,7 +78,7 @@ extension ByteLanes {
     /// Written in Swift, the two rounds of zips get merged into four-vector shuffles, which ARM64 builds a
     /// lane at a time, so this goes through the CBytesNEON C module (see `lookup(in:)`).
     @inlinable @inline(__always)
-    public static func interleave(
+    static func interleave(
         _ a: SIMD16<UInt8>, _ b: SIMD16<UInt8>, _ c: SIMD16<UInt8>, _ d: SIMD16<UInt8>
     ) -> (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>) {
         #if NEONShuffle
@@ -102,7 +102,7 @@ extension ByteLanes {
 
     /// The lane-at-a-time fallback.
     @inlinable @inline(__always)
-    static func _lookup(_ indices: SIMD16<UInt8>, count: Int, _ byte: (Int) -> UInt8) -> SIMD16<UInt8> {
+    internal static func _lookup(_ indices: SIMD16<UInt8>, count: Int, _ byte: (Int) -> UInt8) -> SIMD16<UInt8> {
         var result = SIMD16<UInt8>()
         for lane in 0..<16 where Int(indices[lane]) < count {
             result[lane] = byte(Int(indices[lane]))

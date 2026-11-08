@@ -2,6 +2,7 @@ import Benchmark
 import Foundation
 
 // MARK: - Instant representation
+
 //
 // Mirrors Alamofire's Source/Core/Instant.swift fields. Only the description
 // implementations differ between the variants below.
@@ -66,7 +67,7 @@ extension Instant {
 extension Instant {
     var descriptionStackBuffer: String {
         // Worst-case width: 20 (Int64.min digits + sign) + 1 (dot) + 9 (ns) = 30.
-        return withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 32) { buffer in
+        withUnsafeTemporaryAllocation(of: UInt8.self, capacity: 32) { buffer in
             var i = 0
 
             // --- Write seconds (signed). ---
@@ -119,7 +120,9 @@ extension Instant {
             if tmp == 0 {
                 nDigits = 1
             } else {
-                while tmp > 0 { nDigits += 1; tmp /= 10 }
+                while tmp > 0 {
+                    nDigits += 1; tmp /= 10
+                }
             }
             let totalNanoWidth = 9 - trailing
             let leading = totalNanoWidth - nDigits
@@ -149,6 +152,7 @@ extension Instant {
 }
 
 // MARK: - Test inputs
+
 //
 // Cover the major shape classes of (seconds, nanoseconds):
 //   - zero-zero  (cheap path: shortest output)
@@ -159,16 +163,17 @@ extension Instant {
 //   - generic mixed (no leading, no trailing)
 //   - large seconds with full-width nanoseconds (worst-case digit count)
 private let inputs: [Instant] = [
-    Instant(seconds: 0,           nanoseconds: 0),
-    Instant(seconds: 5,           nanoseconds: 0),
-    Instant(seconds: 0,           nanoseconds: 1),
-    Instant(seconds: 0,           nanoseconds: 999_999_999),
-    Instant(seconds: 1,           nanoseconds: 500_000_000),
-    Instant(seconds: 1,           nanoseconds: 1),
+    Instant(seconds: 0, nanoseconds: 0),
+    Instant(seconds: 5, nanoseconds: 0),
+    Instant(seconds: 0, nanoseconds: 1),
+    Instant(seconds: 0, nanoseconds: 999_999_999),
+    Instant(seconds: 1, nanoseconds: 500_000_000),
+    Instant(seconds: 1, nanoseconds: 1),
     Instant(seconds: 123_456_789, nanoseconds: 123_456_789),
 ]
 
 // MARK: - Correctness check
+
 //
 // Run before any benchmark so a typo in a candidate fails loudly instead of
 // quietly producing the wrong answer at high throughput.
@@ -213,7 +218,7 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
     }
-    
+
     Benchmark("Native (interpolation + count)", configuration: config) { benchmark in
         for _ in benchmark.scaledIterations {
             for input in inputs {

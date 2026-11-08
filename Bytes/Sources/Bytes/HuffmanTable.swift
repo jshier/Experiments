@@ -36,8 +36,8 @@ public struct HuffmanTable: ~Copyable {
     /// decoding codes of up to `rootBits` (by default, up to 10) with one lookup.
     public init(symbolCount: Int, maximumCodeLength: Int = 15, rootBits: Int? = nil) {
         let rootBits = rootBits ?? min(maximumCodeLength, 10)
-        precondition(1 <= rootBits && rootBits <= maximumCodeLength && maximumCodeLength <= 16, "Invalid table shape")
-        precondition(0 < symbolCount && symbolCount <= 1 << 16, "Invalid symbol count")
+        precondition(rootBits >= 1 && rootBits <= maximumCodeLength && maximumCodeLength <= 16, "Invalid table shape")
+        precondition(symbolCount > 0 && symbolCount <= 1 << 16, "Invalid symbol count")
         self.rootBits = rootBits
         self.symbolCount = symbolCount
         self.maximumCodeLength = maximumCodeLength
@@ -134,7 +134,7 @@ extension HuffmanTable {
         symbol makeSymbol: (_ symbol: Int, _ codeLength: Int) -> Entry,
         subtable makeLink: (_ offset: Int, _ indexBits: Int) -> Entry
     ) throws(BytesError) -> Int {
-        precondition(1 <= rootBits && rootBits <= 16 && maximumCodeLength <= 16, "Invalid table shape")
+        precondition(rootBits >= 1 && rootBits <= 16 && maximumCodeLength <= 16, "Invalid table shape")
         precondition(table.count >= 1 << rootBits, "Table smaller than its root")
         guard lengths.count <= 1 << 16 else { throw .invalidValue }
         var counts = InlineArray<17, Int>(repeating: 0)
@@ -156,14 +156,20 @@ extension HuffmanTable {
         if unused > 0 {
             // Incomplete: no codes, or a single 1-bit code. Everything else decodes as invalid.
             guard allowingIncomplete, longest <= 1 else { throw .invalidValue }
-            for index in 0..<rootSize { table[index] = invalid }
+            for index in 0..<rootSize {
+                table[index] = invalid
+            }
             for symbol in lengths.indices where lengths[symbol] == 1 {
                 let entry = makeSymbol(symbol, 1)
                 switch bitOrder {
                 case .leastSignificantFirst:
-                    for index in stride(from: 0, to: rootSize, by: 2) { table[index] = entry }
+                    for index in stride(from: 0, to: rootSize, by: 2) {
+                        table[index] = entry
+                    }
                 case .mostSignificantFirst:
-                    for index in 0..<(rootSize &>> 1) { table[index] = entry }
+                    for index in 0..<(rootSize &>> 1) {
+                        table[index] = entry
+                    }
                 }
             }
             return rootSize
@@ -177,7 +183,7 @@ extension HuffmanTable {
             var sorted = storage.mutableSpan
             return try _sortAndBuild(lengths, &sorted, counts, bitOrder, rootBits, &table, makeSymbol, makeLink)
         }
-        return try withUnsafeTemporaryAllocation(of: UInt16.self, capacity: lengths.count) { (buffer) throws(BytesError) -> Int in
+        return try withUnsafeTemporaryAllocation(of: UInt16.self, capacity: lengths.count) { buffer throws(BytesError) -> Int in
             // Unsafe: a span over stack memory. Safe: initialized here, and it lives only for this call. No
             // safe stack storage has a size known only at run time.
             _ = unsafe buffer.initialize(repeating: 0)
@@ -196,7 +202,9 @@ extension HuffmanTable {
         _ makeSymbol: (Int, Int) -> Entry, _ makeLink: (Int, Int) -> Entry
     ) throws(BytesError) -> Int {
         var offsets = InlineArray<17, Int>(repeating: 0)
-        for length in 1..<16 { offsets[length &+ 1] = offsets[length] &+ counts[length] }
+        for length in 1..<16 {
+            offsets[length &+ 1] = offsets[length] &+ counts[length]
+        }
         for symbol in lengths.indices where lengths[symbol] != 0 {
             let length = Int(lengths[symbol])
             sorted[offsets[length]] = UInt16(truncatingIfNeeded: symbol)
@@ -244,11 +252,15 @@ extension HuffmanTable {
         /// `memcpy` here: the tables are small.)
         @inline(__always)
         func double(_ end: Int) {
-            for index in 0..<end { table[end &+ index] = table[index] }
+            for index in 0..<end {
+                table[end &+ index] = table[index]
+            }
         }
         var index = 0
         var length = 1
-        while counts[length] == 0 { length &+= 1 }
+        while counts[length] == 0 {
+            length &+= 1
+        }
         var count = counts[length]
         var code = 0
         // Entries filled so far, for codes up to `length` bits. If even the shortest codes are longer than
@@ -300,7 +312,9 @@ extension HuffmanTable {
                 table[slot] = entry
                 slot &+= 1 &<< (length &- rootBits)
             } while slot < end
-            if code == (1 &<< length) &- 1 { return end } // The last code.
+            if code == (1 &<< length) &- 1 {
+                return end
+            } // The last code.
             code = next(after: code, length: length)
             count &-= 1
             while count == 0 {
@@ -346,7 +360,9 @@ extension HuffmanTable {
                     run = 1 &<< (width &- tail)
                     first = start &+ (code & ((1 &<< tail) &- 1)) &* run
                 }
-                for slot in first..<(first &+ run) { table[slot] = entry }
+                for slot in first..<(first &+ run) {
+                    table[slot] = entry
+                }
                 index &+= 1
                 code &+= 1
                 count &-= 1

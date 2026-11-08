@@ -139,7 +139,9 @@ extension CRC32 {
         var tables = [[UInt32]](repeating: [UInt32](repeating: 0, count: 256), count: 8)
         for byte in 0..<256 {
             var crc = UInt32(byte)
-            for _ in 0..<8 { crc = crc[bit: 0] ? crc >> 1 ^ 0xEDB8_8320 : crc >> 1 }
+            for _ in 0..<8 {
+                crc = crc[bit: 0] ? crc >> 1 ^ 0xEDB8_8320 : crc >> 1
+            }
             tables[0][byte] = crc
         }
         for k in 1..<8 {
@@ -161,7 +163,9 @@ extension CRC32 {
             // still after it (7 for the first), and the results combine.
             let bytes = group ^ Byte8(UInt64(state), .littleEndian)
             state = 0
-            for index in 0..<8 { state ^= tables[7 &- index][Int(bytes[index])] }
+            for index in 0..<8 {
+                state ^= tables[7 &- index][Int(bytes[index])]
+            }
         }
         reader.forEach(Byte.self) { byte in
             state = state >> 8 ^ tables[0][Int(state[Byte.self, at: 0] ^ byte)]

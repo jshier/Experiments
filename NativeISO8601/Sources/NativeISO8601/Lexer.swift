@@ -168,22 +168,22 @@ struct Lexer: ~Copyable, ~Escapable {
             position &+= run &+ 1
             if peek() == UInt8(ascii: "W") {
                 position &+= 1
-                raw.month = UInt8(truncatingIfNeeded: try digits(2))
+                raw.month = try UInt8(truncatingIfNeeded: digits(2))
                 if peek() == UInt8(ascii: "-") {
                     position &+= 1
-                    raw.day = UInt16(truncatingIfNeeded: try digits(1))
+                    raw.day = try UInt16(truncatingIfNeeded: digits(1))
                     raw.dateForm = .weekDate
                 } else {
                     raw.dateForm = .week
                 }
             } else if isDigit(at: 2) {
-                raw.day = UInt16(truncatingIfNeeded: try digits(3))
+                raw.day = try UInt16(truncatingIfNeeded: digits(3))
                 raw.dateForm = .ordinalDate
             } else {
-                raw.month = UInt8(truncatingIfNeeded: try digits(2))
+                raw.month = try UInt8(truncatingIfNeeded: digits(2))
                 if peek() == UInt8(ascii: "-") {
                     position &+= 1
-                    raw.day = UInt16(truncatingIfNeeded: try digits(2))
+                    raw.day = try UInt16(truncatingIfNeeded: digits(2))
                     raw.dateForm = .calendarDate
                 } else {
                     raw.dateForm = .month
@@ -201,9 +201,9 @@ struct Lexer: ~Copyable, ~Escapable {
             }
             raw.year = year(digits: run, negative: isNegative)
             position &+= run &+ 1
-            raw.month = UInt8(truncatingIfNeeded: try digits(2))
+            raw.month = try UInt8(truncatingIfNeeded: digits(2))
             if isDigit(at: 0) {
-                raw.day = UInt16(truncatingIfNeeded: try digits(1))
+                raw.day = try UInt16(truncatingIfNeeded: digits(1))
                 raw.dateForm = .weekDate
             } else {
                 raw.dateForm = .week
@@ -241,22 +241,22 @@ struct Lexer: ~Copyable, ~Escapable {
     @_lifetime(self: copy self)
     @inline(__always) // Into `lexGeneral`, which is itself out of line.
     private mutating func lexTime(into raw: inout RawComponents) throws(ISO8601ParseError) {
-        raw.hour = UInt8(truncatingIfNeeded: try digits(2))
+        raw.hour = try UInt8(truncatingIfNeeded: digits(2))
         raw.timePrecision = .hour
         if peek() == UInt8(ascii: ":") {
             position &+= 1
-            raw.minute = UInt8(truncatingIfNeeded: try digits(2))
+            raw.minute = try UInt8(truncatingIfNeeded: digits(2))
             raw.timePrecision = .minute
             if peek() == UInt8(ascii: ":") {
                 position &+= 1
-                raw.second = UInt8(truncatingIfNeeded: try digits(2))
+                raw.second = try UInt8(truncatingIfNeeded: digits(2))
                 raw.timePrecision = .second
             }
         } else if isDigit(at: 0) {
-            raw.minute = UInt8(truncatingIfNeeded: try digits(2))
+            raw.minute = try UInt8(truncatingIfNeeded: digits(2))
             raw.timePrecision = .minute
             if isDigit(at: 0) {
-                raw.second = UInt8(truncatingIfNeeded: try digits(2))
+                raw.second = try UInt8(truncatingIfNeeded: digits(2))
                 raw.timePrecision = .second
             }
         }
@@ -278,14 +278,14 @@ struct Lexer: ~Copyable, ~Escapable {
         case UInt8(ascii: "+"), UInt8(ascii: "-"):
             raw.offsetIsNegative = peek() == UInt8(ascii: "-")
             position &+= 1
-            raw.offsetHour = UInt8(truncatingIfNeeded: try digits(2))
+            raw.offsetHour = try UInt8(truncatingIfNeeded: digits(2))
             raw.offsetForm = .hours
             if peek() == UInt8(ascii: ":") {
                 position &+= 1
-                raw.offsetMinute = UInt8(truncatingIfNeeded: try digits(2))
+                raw.offsetMinute = try UInt8(truncatingIfNeeded: digits(2))
                 raw.offsetForm = .hoursMinutes
             } else if isDigit(at: 0) {
-                raw.offsetMinute = UInt8(truncatingIfNeeded: try digits(2))
+                raw.offsetMinute = try UInt8(truncatingIfNeeded: digits(2))
                 raw.offsetForm = .hoursMinutes
             }
         default:
@@ -317,7 +317,9 @@ struct Lexer: ~Copyable, ~Escapable {
     /// The number of consecutive ASCII digits at the cursor (at most 18), without consuming them.
     private func digitRun() -> Int {
         var count = 0
-        while count < 18, isDigit(at: count) { count &+= 1 }
+        while count < 18, isDigit(at: count) {
+            count &+= 1
+        }
         return count
     }
 

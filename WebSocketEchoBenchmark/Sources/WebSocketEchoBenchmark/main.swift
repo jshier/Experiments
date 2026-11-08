@@ -2,6 +2,7 @@ import Alamofire
 import Foundation
 
 // MARK: - Experiment
+
 //
 // Question: How many WebSocket echo round-trips per second can URLSessionWebSocketTask
 // and Alamofire sustain against Firewalk's /websocket/echo endpoint?
@@ -24,78 +25,78 @@ Duration: \(Int(testDuration)) seconds per run
 
 try await Task.detached(priority: .userInitiated) {
 
-// MARK: - URLSession
+    // MARK: - URLSession
 
-print("── URLSession ──────────────────────────────────────")
+    print("── URLSession ──────────────────────────────────────")
 
-let urlTask = URLSession.shared.webSocketTask(with: url)
-urlTask.resume()
+    let urlTask = URLSession.shared.webSocketTask(with: url)
+    urlTask.resume()
 
-let urlMessage = URLSessionWebSocketTask.Message.data(binaryPayload)
-try await urlTask.send(urlMessage)
-
-var urlCount = 0
-let urlStart = Date.now
-
-repeat {
-    _ = try await urlTask.receive()
-    urlCount += 1
-
-    let elapsed = Date.now.timeIntervalSince(urlStart)
-    if elapsed >= testDuration { break }
-
+    let urlMessage = URLSessionWebSocketTask.Message.data(binaryPayload)
     try await urlTask.send(urlMessage)
-} while true
 
-let urlElapsed = Date.now.timeIntervalSince(urlStart)
-urlTask.cancel(with: .normalClosure, reason: nil)
-let urlRate = Double(urlCount) / urlElapsed
+    var urlCount = 0
+    let urlStart = Date.now
 
-print("""
-Round-trips:  \(urlCount)
-Elapsed:      \(String(format: "%.3f", urlElapsed)) s
-Rate:         \(String(format: "%.1f", urlRate)) msg/s
+    repeat {
+        _ = try await urlTask.receive()
+        urlCount += 1
 
-""")
+        let elapsed = Date.now.timeIntervalSince(urlStart)
+        if elapsed >= testDuration { break }
 
-// MARK: - Alamofire
+        try await urlTask.send(urlMessage)
+    } while true
 
-print("── Alamofire ───────────────────────────────────────")
+    let urlElapsed = Date.now.timeIntervalSince(urlStart)
+    urlTask.cancel(with: .normalClosure, reason: nil)
+    let urlRate = Double(urlCount) / urlElapsed
 
-let socket = AF.webSocketRequest(to: url)
-let messages = socket.streamingMessages()
+    print("""
+    Round-trips:  \(urlCount)
+    Elapsed:      \(String(format: "%.3f", urlElapsed)) s
+    Rate:         \(String(format: "%.1f", urlRate)) msg/s
 
-// Kick off the ping-pong. send() awaits until the message is handed off to the socket.
-_ = await socket.send(binaryPayload)
+    """)
 
-var afCount = 0
-let afStart = Date.now
+    // MARK: - Alamofire
 
-for await _ in messages {
-    afCount += 1
+    print("── Alamofire ───────────────────────────────────────")
 
-    let elapsed = Date.now.timeIntervalSince(afStart)
-    if elapsed >= testDuration { break }
+    let socket = AF.webSocketRequest(to: url)
+    let messages = socket.streamingMessages()
 
+    // Kick off the ping-pong. send() awaits until the message is handed off to the socket.
     _ = await socket.send(binaryPayload)
-}
 
-let afElapsed = Date.now.timeIntervalSince(afStart)
-let afRate = Double(afCount) / afElapsed
+    var afCount = 0
+    let afStart = Date.now
 
-print("""
-Round-trips:  \(afCount)
-Elapsed:      \(String(format: "%.3f", afElapsed)) s
-Rate:         \(String(format: "%.1f", afRate)) msg/s
+    for await _ in messages {
+        afCount += 1
 
-""")
+        let elapsed = Date.now.timeIntervalSince(afStart)
+        if elapsed >= testDuration { break }
 
-// MARK: - Summary
+        _ = await socket.send(binaryPayload)
+    }
 
-print("""
-── Summary ─────────────────────────────────────────
-URLSession:  \(String(format: "%.1f", urlRate)) msg/s
-Alamofire:   \(String(format: "%.1f", afRate)) msg/s
-""")
+    let afElapsed = Date.now.timeIntervalSince(afStart)
+    let afRate = Double(afCount) / afElapsed
+
+    print("""
+    Round-trips:  \(afCount)
+    Elapsed:      \(String(format: "%.3f", afElapsed)) s
+    Rate:         \(String(format: "%.1f", afRate)) msg/s
+
+    """)
+
+    // MARK: - Summary
+
+    print("""
+    ── Summary ─────────────────────────────────────────
+    URLSession:  \(String(format: "%.1f", urlRate)) msg/s
+    Alamofire:   \(String(format: "%.1f", afRate)) msg/s
+    """)
 
 }.value

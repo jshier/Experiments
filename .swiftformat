@@ -1,18 +1,19 @@
 # file options
 
 --symlinks ignore
---swiftversion 6.2
---language-mode 5
+--swiftversion 6.4
+--language-mode 6
 
 # format options
 
---commas inline
+--binary-grouping ignore
+--commas collections-only
 --comments indent
---decimalgrouping 3,5
+--decimal-grouping ignore
 --exponentcase lowercase
 --exponentgrouping disabled
---extensionacl on-declarations
 --fractiongrouping disabled
+--hex-grouping ignore
 --ifdef preserve
 --importgrouping testable-top
 --operatorfunc no-space

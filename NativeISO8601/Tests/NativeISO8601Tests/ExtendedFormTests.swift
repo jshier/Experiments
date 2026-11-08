@@ -102,7 +102,7 @@ struct TimestampTests {
         #expect(stamp.time == .init(hour: 23, minute: 20, second: 50, fraction: .init(value: 52, digits: 2)))
         #expect(stamp.utcOffset == .init(isNegative: false, hours: 4, minutes: 0))
         #expect(stamp.utcOffset?.seconds == 14_400)
-        #expect(stamp.date == (try ISO8601.date(from: "1985-04-12T23:20:50.52+04:00")))
+        #expect(try stamp.date == (ISO8601.date(from: "1985-04-12T23:20:50.52+04:00")))
     }
 
     @Test(arguments: [
