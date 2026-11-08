@@ -38,7 +38,7 @@ public enum MQTTProperty: ~Escapable {
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    static func read(from reader: inout Bytes, checked: Bool) throws(BytesError) -> MQTTProperty {
+    static func read(from reader: inout BytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
         let identifier = checked ? try reader.readMQTTVariableByteInteger() : try reader.read(LEB128.self, maxByteCount: 4)
         return try read(identifier, from: &reader, checked: checked)
     }
@@ -47,7 +47,7 @@ public enum MQTTProperty: ~Escapable {
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    static func read(_ identifier: UInt64, from reader: inout Bytes, checked: Bool) throws(BytesError) -> MQTTProperty {
+    static func read(_ identifier: UInt64, from reader: inout BytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
         switch identifier {
         case 0x01: .payloadFormatIndicator(try reader.read(Byte.self).rawValue)
         case 0x02: .messageExpiryInterval(try reader.read(Byte4.self, .bigEndian))
@@ -264,7 +264,7 @@ public struct MQTTProperties: ~Escapable {
     @inlinable
     @_lifetime(copy bytes)
     init(validating bytes: RawSpan, allowing allowed: PropertySet, repeatable: PropertySet) throws(MQTTError) {
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         var seen = PropertySet.none
         while !reader.isAtEnd {
             let identifier: UInt64
@@ -292,7 +292,7 @@ public struct MQTTProperties: ~Escapable {
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    init(reading reader: inout Bytes, allowing allowed: PropertySet, repeatable: PropertySet = .repeatable) throws(MQTTError) {
+    init(reading reader: inout BytesReader, allowing allowed: PropertySet, repeatable: PropertySet = .repeatable) throws(MQTTError) {
         let bytes: RawSpan
         do throws(BytesError) {
             let length = try reader.readMQTTVariableByteInteger()
@@ -310,7 +310,7 @@ public struct MQTTProperties: ~Escapable {
     /// Calls `body` with each property, in order.
     @inlinable
     public func forEach<E: Error>(_ body: (borrowing MQTTProperty) throws(E) -> Void) throws(E) {
-        var reader = Bytes(bytes)
+        var reader = BytesReader(bytes)
         while !reader.isAtEnd {
             // Checked when the list was created, so reading can't fail, and needn't check again.
             try body(try! MQTTProperty.read(from: &reader, checked: false))

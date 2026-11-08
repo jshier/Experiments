@@ -49,14 +49,17 @@ Encode, conventional                    ███                               
 
 Checked in the release assembly of the benchmark binary.
 
-- **Byte scans**:
-  - U+0000 in every string, and wildcards in topic names. These are SWAR, 8 bytes per step with an
-    overlapping last word, so a 32-byte topic takes 4 steps; LLVM turns the loop into NEON for long
-    strings (53 vector instructions in the specialized scan).
+- **Byte scans** (since `scan16`, below): a string's UTF-8 and its forbidden bytes (U+0000, and wildcards
+  in topic names) are checked in one pass of NEON, 16 bytes per step with an overlapping last block, so a
+  32-byte topic takes 2 steps of 9 vector instructions, inlined into `MQTTPublish(reading:)`. ASCII
+  strings need nothing else; others are validated in full afterwards.
+  - Before: SWAR, 8 bytes per step, after the standard library's UTF-8 validation (an out-of-line call),
+    and a second scan for wildcards in topic names.
   - Plain byte loops vectorize 64 bytes at a time, which sends 16–48-byte strings through their scalar
     remainder.
-  - Swift's `SIMDMask` reductions (`any`, `pointwiseMin`) compiled to out-of-line calls, and a `SIMD16`
-    compare bit-cast to integers compiled to a lane-by-lane loop. Each was slower than the scalar code.
+  - With Swift 6.4, the standard library's lane comparisons (`.==`, `.>=`) compile a lane at a time and
+    `SIMDMask` reductions (`any`, `pointwiseMin`) to out-of-line calls. Bytes' `ByteLanes` tests use only
+    lanewise wrapping arithmetic and bitwise operations, which vectorize (Swift 6.5 vectorizes both).
 - **UTF-8 validation**: the standard library's `UTF8Span(validating:)` (3.2 ns for 32 ASCII bytes).
 - **Copies**:
   - When encoding, payloads, strings, and binary fields up to 32 bytes are copied inline with two
@@ -93,6 +96,69 @@ The cost, per PUBLISH:
     checked once), which pays for the new checks when properties are read.
 - **Encoding** pays mostly for scanning the topic, about 8 ns. The rest is checking each field against
   the packet type's rules.
+
+## `MQTTPacket` out of the hot paths (baseline `scan16` → `dispatch1`)
+
+`MQTTPacket` is 153 bytes (CONNECT, with its optional will, is the largest case), so it's built and returned
+in memory, and each test of its case is a call to an outlined "get tag" function. Writing a packet tested
+its case five times: `validateFields()`, `remainingLength`, `flags`, `type`, then the body. Parsing built it
+inside `parse(type:flags:body:)` and wrapped it in an `Optional`.
+
+- **Each packet type parses and writes itself.** `MQTTPublish(parsing: frame)`, `publish.write(to:)`, and
+  the same for every type (the shared PUBACK–PUBCOMP and SUBACK/UNSUBACK shapes take the type:
+  `write(to:as:)`). `MQTTPacket.write(to:)` tests its case once and calls them; `MQTTPacket(parsing:)`
+  dispatches to them.
+- **Framing is separate**: `MQTTFrame.read(from:)` reads and checks the fixed header and bounds the body.
+  Dispatching on its `type` parses the packet types you expect without building the enum.
+  `MQTTPacket.read(from:)` is now a frame and `MQTTPacket(parsing:)`.
+- **Behavior change**: a reserved packet type or reserved flags now throw as soon as the fixed header
+  arrives, as a packet over the maximum size already did, instead of once the whole packet has. In the
+  fuzz test, 3,304 mutations that were incomplete now fail; the accepted ones are unchanged.
+
+One core, p50:
+
+| Workload | `scan16` | `dispatch1` | |
+|---|---|---|---|
+| Encode PUBLISH: `MQTTPacket.write(to:)` | 20.9 M packets/s, 9.5 M instructions | **35.2 M**, 6.7 M | +68% |
+| Encode PUBLISH: `MQTTPublish.write(to:)` (new) | | 35.9 M, 6.7 M | |
+| Parse PUBLISH: `MQTTPacket.read(from:)`, every field and property | 19.0 M, 11 M | 23.7 M, 11 M | +25% |
+| Parse PUBLISH: frames, `MQTTPublish(parsing:)` (new) | | **30.0 M**, 9.9 M | +58% |
+| Parse PUBLISH: `MQTTPacket.read`, properties not iterated | 24.4 M, 9.3 M | 28.7 M, 9.0 M | +18% |
+| Parse mixed stream | 30.7 M, 6.3 M | 37.7 M, 5.9 M | +23% |
+
+- **Writing through the enum now costs nothing**: one case test, then the same code as writing the packet
+  type directly.
+- **Parsing through the enum still costs 26%** against frames, about 9 ns per packet: building the enum in
+  memory, returning it, and testing its case.
+- **What didn't help**:
+  - Inlining `MQTTPacket(parsing:)` into the caller, so the caller's case test meets the enum where it's
+    built: 4–9% slower.
+  - Wrapping each case of the switch in an immediately called closure: it doesn't compile, because a
+    closure's result can't depend on a lifetime, so it can't return these `~Escapable` packets. The packet
+    types' own functions are the per-case functions instead.
+  - Declaring the packet types `BitwiseCopyable` (or `@frozen`): identical code. From another module, a
+    `~Escapable` struct is still destroyed through its type metadata (an indirect call to a no-op), once
+    per parsed PUBLISH; inside the MQTT module, the same destroy is a `ret`.
+
+## 16-byte scans (baseline `safe-final2` → `scan16`)
+
+Strings' checks moved to Bytes' `ByteLanes` scans. Parsing checks a string's UTF-8 and forbidden bytes in
+one inline pass (`read(utf8PrefixedBy:_:excluding:)`), instead of the standard library's validation (an
+out-of-line call) followed by an 8-byte SWAR scan, or two for topic names. Encoding's checks scan 16 bytes
+per step. One core, p50:
+
+| Workload | `safe-final2` | `scan16` | |
+|---|---|---|---|
+| Parse PUBLISH: views, every field and property | 15.1 M packets/s, 14 M instructions | **19.0 M**, 11 M | +26% |
+| Parse PUBLISH: views, properties not iterated | 17.4 M, 12.3 M | **24.4 M**, 9.3 M | +40% |
+| Parse PUBLISH: views, copying topic, payload, and strings | 6.1 M, 38 M | 6.8 M, 35 M | +12% |
+| Parse mixed stream: views | 26.8 M, 7.3 M | 30.7 M, 6.3 M | +14% |
+| Encode PUBLISH: `BytesWriter` | 18.8 M, 9.8 M | 20.9 M, 9.5 M | +11% |
+| Parse PUBLISH: conventional (control: unchanged code) | 2.85 M | 2.96 M | +4% |
+
+Each PUBLISH has three strings checked when parsed (the topic and the user property's name and value),
+all ASCII: per packet, about 13 ns less to parse. The fuzz test's counts (accepted, rejected,
+incomplete) are unchanged, and nothing allocates.
 
 ## Safe constructs and Bytes types (baseline `validated` → `safe-final2`)
 

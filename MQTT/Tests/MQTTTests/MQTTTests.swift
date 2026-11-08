@@ -47,14 +47,14 @@ struct NoPacket: Error {}
 
 /// Parses exactly one packet from `bytes`, checking it consumes them all, and passes it to `body`.
 func parseOne(_ bytes: [UInt8], _ body: (borrowing MQTTPacket) throws -> Void) throws {
-    var reader = Bytes(bytes.span)
+    var reader = BytesReader(bytes.span)
     guard let packet = try MQTTPacket.read(from: &reader) else { throw NoPacket() }
     #expect(reader.byteOffset == bytes.count)
     try body(packet)
 }
 
 func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: SourceLocation = #_sourceLocation) {
-    var reader = Bytes(bytes.span)
+    var reader = BytesReader(bytes.span)
     do {
         _ = try MQTTPacket.read(from: &reader)
         Issue.record("Expected \(kind), parsed a packet", sourceLocation: sourceLocation)
@@ -305,7 +305,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         var consumed = 0
         for available in 1...stream.count {
             let received = Array(stream[consumed..<available])
-            var reader = Bytes(received.span)
+            var reader = BytesReader(received.span)
             while let packet = try MQTTPacket.read(from: &reader) { types.append(packet.type) }
             consumed += reader.byteOffset
         }
@@ -374,7 +374,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         let v311: [UInt8] = [0x10, 0x0D, 0x00, 0x04, 0x4D, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3C, 0x00, 0x00, 0x00]
         expectError(.unsupportedProtocolVersion, v311)
         let tooLarge: [UInt8] = [0x30, 0x7F]
-        var reader = Bytes(tooLarge.span)
+        var reader = BytesReader(tooLarge.span)
         #expect(throws: MQTTError(.packetTooLarge, "packet larger than the maximum packet size")) {
             _ = try MQTTPacket.read(from: &reader, maximumPacketSize: 100)
         }
@@ -442,7 +442,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
 
         var received = bytes + [0x30] // and the first byte of the next packet
         var delivered: [(String, [UInt8])] = []
-        var reader = Bytes(received.span)
+        var reader = BytesReader(received.span)
         while let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: 1 << 20) {
             switch packet {
             case .publish(let publish):

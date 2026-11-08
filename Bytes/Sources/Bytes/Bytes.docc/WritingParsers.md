@@ -55,7 +55,7 @@ struct Reading {
 
 ### Parse
 
-Create a ``Bytes/Bytes`` cursor over the input and read the fields in order. A function that reads part of
+Create a ``BytesReader`` cursor over the input and read the fields in order. A function that reads part of
 a message takes the cursor `inout`; since it's `~Escapable`, say how the result's lifetime relates with
 `@_lifetime` (this needs the `Lifetimes` experimental feature in your target).
 
@@ -64,11 +64,11 @@ enum ReadingError: Error { case truncated, malformed }
 
 func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
     do throws(BytesError) {
-        var reader = Bytes(data)
+        var reader = BytesReader(data)
 
         // A fixed-size header read as its own cursor: its length is a constant the optimizer can see,
         // so every field read inside it needs no bounds check of its own.
-        var header = Bytes(try reader.read(byteCount: 5))
+        var header = BytesReader(try reader.read(byteCount: 5))
         try header.expect(0x53_52 as Byte2)
         let version = try header.read(Nibble.self)
         guard version == 1 else { throw .invalidValue }
@@ -82,7 +82,7 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
         // A run of values: one bounds check, then a vectorized loop.
         var samples: [Int32] = []
         samples.reserveCapacity(count)
-        var run = Bytes(try reader.read(byteCount: count * 3))
+        var run = BytesReader(try reader.read(byteCount: count * 3))
         run.forEach(Byte3.self) { sample in
             samples.append(sample.signedInteger(.bigEndian, as: Int32.self)) // 24-bit, sign-extended
         }
@@ -157,7 +157,7 @@ The MQTT package next to this one (`../MQTT`) parses and encodes every MQTT 5.0 
 - **Keep cursors local, or pass them `inout` to inlinable code.** A cursor passed `inout` to a closure
   or function the compiler doesn't inline lives in memory: every read then loads and stores its offset,
   and loops stop vectorizing. Most parsers are a few local functions in one module, which is fine.
-- **Read fixed-size records as sub-cursors** (`Bytes(try reader.read(byteCount: n))`). Their bounds checks
+- **Read fixed-size records as sub-cursors** (`BytesReader(try reader.read(byteCount: n))`). Their bounds checks
   fold to one per record.
 - **Loop over runs with `forEach`, generating writes, or bulk reads/writes**, not field by field with
   calls the compiler can't see through. Plain loops of single reads and writes also vectorize when the
@@ -165,7 +165,7 @@ The MQTT package next to this one (`../MQTT`) parses and encodes every MQTT 5.0 
 - **Bits one at a time are inherently sequential.** For runs of bit fields, use `forEach(Nibble.self)` or
   `write(Nibble.self, count:)`, which work a byte or block at a time.
 - **Little-endian is free** on Apple platforms; big-endian adds a byte swap, which vectorizes.
-- **`for`-`in` works** (``Bytes/Bytes`` and its `values(of:)` views are `Iterable`), but typed views decode
+- **`for`-`in` works** (``BytesReader`` and its `values(of:)` views are `Iterable`), but typed views decode
   into a buffer first. For hot loops over decoded values, prefer `forEach`. For bytes, or 4-byte custom
   types, iterate zero-copy spans: `for byte in reader`, or `reader.read(InlineArray<4, UInt8>.self, count:)`.
 - **Measure.** `Benchmarks/BytesBenchmarks` shows how to benchmark against hand-written code and record

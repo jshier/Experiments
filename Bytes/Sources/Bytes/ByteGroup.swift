@@ -2,7 +2,7 @@
 ///
 /// ``Byte2`` through ``Byte16`` conform. Read one with `read(_:)`, then interpret it
 /// with ``littleEndian`` or ``bigEndian``, or read the integer directly with
-/// ``Bytes/read(_:_:)``. Odd widths, such as the 24-bit lengths common in media and network formats,
+/// ``BytesReader/read(_:_:)``. Odd widths, such as the 24-bit lengths common in media and network formats,
 /// work the same as the standard ones:
 ///
 /// ```swift

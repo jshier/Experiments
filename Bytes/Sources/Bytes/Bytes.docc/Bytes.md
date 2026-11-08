@@ -10,8 +10,8 @@ allocating. Fields are typed by their shape in the data, not by an integer type 
 byte-swap yourself:
 
 ```swift
-var reader = Bytes(packet.span)
-try reader.expect(0x50_4B_03_04 as Byte4)          // a signature
+var reader = BytesReader(packet.span)
+try reader.expect(0x50_4B_03_04 as Byte4)                     // a signature
 let version = try reader.read(Byte2.self, .littleEndian)      // UInt16
 let length = try reader.read(Byte3.self, .bigEndian)          // UInt32, from 3 bytes
 let type = try reader.read(Nibble.self)                       // 4 bits
@@ -47,7 +47,7 @@ core's memory bandwidth; with all cores, nearly every width reaches the CPU's me
 ### Essentials
 
 - <doc:WritingParsers>
-- ``Bytes/Bytes``
+- ``BytesReader``
 - ``BytesWriter``
 - ``BytesError``
 
@@ -79,6 +79,11 @@ core's memory bandwidth; with all cores, nearly every width reaches the CPU's me
 ### Variable-size data
 
 - ``LEB128``
+
+### Scanning
+
+- ``ByteLanes``
+- ``ByteMatches``
 
 ### Decoders
 

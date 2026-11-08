@@ -130,7 +130,7 @@ enum CentralDirectory {
     static let signature: Byte4 = 0x50_4B_01_02
 
     static func parseWithBytes(_ span: RawSpan) throws(BytesError) -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
             try reader.expect(signature)
@@ -150,12 +150,12 @@ enum CentralDirectory {
             fields.add(try reader.read(Byte4.self, .littleEndian)) // external attributes
             fields.add(try reader.read(Byte4.self, .littleEndian)) // local header offset
             fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = Bytes(try reader.read(byteCount: extraLength))
+            var extra = BytesReader(try reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
                 let id = try extra.read(Byte2.self, .littleEndian)
                 let size = Int(try extra.read(Byte2.self, .littleEndian))
-                var field = Bytes(try extra.read(byteCount: size))
+                var field = BytesReader(try extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self).rawValue & 1 != 0 {
                     fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
                 }
@@ -167,10 +167,10 @@ enum CentralDirectory {
     /// Like `parseWithBytes`, but reads each fixed 46-byte header as a sub-cursor first. Its length is then
     /// a constant the optimizer can see, so it proves every field read in bounds: one check per record.
     static func parseWithBytesRecords(_ span: RawSpan) throws(BytesError) -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
-            var header = Bytes(try reader.read(byteCount: 46))
+            var header = BytesReader(try reader.read(byteCount: 46))
             try header.expect(signature)
             fields.add(try header.read(Byte2.self, .littleEndian)) // made by
             try header.skip(byteCount: 2)
@@ -188,13 +188,13 @@ enum CentralDirectory {
             fields.add(try header.read(Byte4.self, .littleEndian)) // external attributes
             fields.add(try header.read(Byte4.self, .littleEndian)) // local header offset
             fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = Bytes(try reader.read(byteCount: extraLength))
+            var extra = BytesReader(try reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
-                var fieldHeader = Bytes(try extra.read(byteCount: 4))
+                var fieldHeader = BytesReader(try extra.read(byteCount: 4))
                 let id = try fieldHeader.read(Byte2.self, .littleEndian)
                 let size = Int(try fieldHeader.read(Byte2.self, .littleEndian))
-                var field = Bytes(try extra.read(byteCount: size))
+                var field = BytesReader(try extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self).rawValue & 1 != 0 {
                     fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
                 }
@@ -288,7 +288,7 @@ enum CentralDirectory {
 /// 1 + 3 + 4 + 2 + 6 + 13 + 3 + 32 = 64 bits.
 enum BitFields {
     static func parseWithBytes(_ span: Span<UInt8>) throws(BytesError) -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var fields = Fields()
         while reader.remainingBitCount >= 64 {
             fields.add(try reader.read(Bit.self).rawValue)

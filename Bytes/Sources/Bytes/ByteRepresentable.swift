@@ -1,4 +1,4 @@
-/// A type stored as a fixed run of raw bytes, such as an address or a digest, which ``Bytes`` reads with a
+/// A type stored as a fixed run of raw bytes, such as an address or a digest, which ``BytesReader`` reads with a
 /// single load.
 ///
 /// Conform by exposing the bytes, typically as an `InlineArray<N, UInt8>` that's the type's only stored
@@ -76,7 +76,7 @@ extension Load {
     }
 }
 
-extension Bytes {
+extension BytesReader {
     /// Returns the next `T`, from its `MemoryLayout<T.RawBytes>.size` bytes, without consuming them.
     @inlinable @inline(__always)
     public func peek<T: ByteRepresentable>(_: T.Type = T.self) throws(BytesError) -> T {

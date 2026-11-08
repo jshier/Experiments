@@ -139,7 +139,7 @@ func range(ofCopy index: Int, byteCount: Int) -> Range<Int> { index * byteCount.
 /// Parses copy `index` of `publishStream` with views: every field, and every property when
 /// `iteratingProperties`.
 func parsePublishes(copy index: Int, iteratingProperties: Bool) {
-    var reader = Bytes(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
+    var reader = BytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
         guard case .publish(let publish) = packet else { fatalError() }
@@ -157,9 +157,29 @@ func parsePublishes(copy index: Int, iteratingProperties: Bool) {
     blackHole(checksum)
 }
 
+/// Parses copy `index` of `publishStream` as `parsePublishes` does, without `MQTTPacket`: reads frames and
+/// parses each as the PUBLISH its type says.
+func parsePublishFrames(copy index: Int) {
+    var reader = BytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
+    var checksum = 0
+    while let frame = try! MQTTFrame.read(from: &reader) {
+        guard frame.type == .publish else { fatalError() }
+        let publish = try! MQTTPublish(parsing: frame)
+        checksum &+= publish.topic.count &+ publish.payload.byteCount &+ Int(publish.packetIdentifier ?? 0)
+        publish.properties.forEach { property in
+            switch property {
+            case .messageExpiryInterval(let seconds): checksum &+= Int(seconds)
+            case .userProperty(let name, let value): checksum &+= name.count &+ value.count
+            default: break
+            }
+        }
+    }
+    blackHole(checksum)
+}
+
 /// Parses copy `index` of `mixedStream` with views.
 func parseMixedStream(copy index: Int) {
-    var reader = Bytes(mixedStreams.span.bytes.extracting(range(ofCopy: index, byteCount: mixedStream.count)))
+    var reader = BytesReader(mixedStreams.span.bytes.extracting(range(ofCopy: index, byteCount: mixedStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
         checksum &+= Int(packet.type.rawValue)
@@ -184,10 +204,25 @@ func encodePublishes(copy index: Int) {
     precondition(writer.byteCount == publishStream.count)
 }
 
+/// Encodes the same packets as `encodePublishes`, each `MQTTPublish` writing itself, without `MQTTPacket`.
+func encodePublishesDirectly(copy index: Int) {
+    let buffer = UnsafeMutableRawBufferPointer(rebasing: encodeBuffers[range(ofCopy: index, byteCount: publishStream.count)])
+    var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
+    let inputs = encodeInputs[index]
+    let properties = try! MQTTProperties(validating: inputs.propertyBytes.span.bytes)
+    for packet in 0..<packetCount {
+        try! MQTTPublish(
+            qos: .atLeastOnce, topic: inputs.topics[packet % inputs.topics.count].utf8Span,
+            packetIdentifier: UInt16(packet % 65_535 + 1), properties: properties, payload: inputs.payload.span.bytes
+        ).write(to: &writer)
+    }
+    precondition(writer.byteCount == publishStream.count)
+}
+
 /// Parses copy `index` of `publishStream` with views, copying out what a caller would keep: the topic as a
 /// `String`, the payload as an `Array`, and the user property's strings.
 func parsePublishesCopying(copy index: Int) {
-    var reader = Bytes(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
+    var reader = BytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
         guard case .publish(let publish) = packet else { fatalError() }
@@ -270,6 +305,8 @@ struct Workload {
 let workloads: [Workload] = [
     Workload(name: "Parse PUBLISH: Bytes views", byteCount: publishStream.count, packetCount: packetCount,
              isAllocationFree: true) { parsePublishes(copy: $0, iteratingProperties: true) },
+    Workload(name: "Parse PUBLISH: frames, MQTTPublish(parsing:)", byteCount: publishStream.count,
+             packetCount: packetCount, isAllocationFree: true, run: parsePublishFrames),
     Workload(name: "Parse PUBLISH: Bytes views, properties not iterated", byteCount: publishStream.count,
              packetCount: packetCount, isAllocationFree: true) { parsePublishes(copy: $0, iteratingProperties: false) },
     Workload(name: "Parse PUBLISH: Bytes views, copying topic, payload, and strings", byteCount: publishStream.count,
@@ -280,6 +317,8 @@ let workloads: [Workload] = [
              isAllocationFree: true, run: parseMixedStream),
     Workload(name: "Encode PUBLISH: Bytes writer", byteCount: publishStream.count, packetCount: packetCount,
              isAllocationFree: true, run: encodePublishes),
+    Workload(name: "Encode PUBLISH: MQTTPublish.write(to:)", byteCount: publishStream.count, packetCount: packetCount,
+             isAllocationFree: true, run: encodePublishesDirectly),
     Workload(name: "Encode PUBLISH: conventional ([UInt8] appends)", byteCount: publishStream.count,
              packetCount: packetCount, isAllocationFree: false) { blackHole(encodePublishesConventionally(conventionalPublishCopies[$0])) },
 ]

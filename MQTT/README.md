@@ -2,15 +2,15 @@
 
 An MQTT 5.0 packet parser and encoder built on [`Bytes`](../Bytes). Packets are views of the bytes they came
 from: parsing copies and allocates nothing, and encoding writes straight into memory you provide. On an M3
-Ultra a core parses 15 M PUBLISH packets a second (1.9 GB/s) and all cores 344 M (43 GB/s), 5.5–11x the
-conventional `[UInt8]`-and-`String` approach; see `Benchmarks/RESULTS.md`.
+Ultra one core parses 24 M PUBLISH packets a second through `MQTTPacket`, 30 M through frames, and encodes
+35 M, 8–10x the conventional `[UInt8]`-and-`String` approach; see `Benchmarks/RESULTS.md`.
 
 ```swift
 import Bytes
 import MQTT
 
 // Parse packets as bytes arrive; a partial packet is left for later.
-var reader = Bytes(received.span)
+var reader = BytesReader(received.span)
 while let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: 1 << 20) {
     switch packet {
     case .publish(let publish):
@@ -25,6 +25,14 @@ while let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: 1 << 20
     }
 }
 received.removeFirst(reader.byteOffset)
+
+// Or, in a hot loop, read frames and parse the types you expect yourself, without the `MQTTPacket` enum.
+while let frame = try MQTTFrame.read(from: &reader, maximumPacketSize: 1 << 20) {
+    switch frame.type {
+    case .publish: deliver(try MQTTPublish(parsing: frame))
+    default: handle(try MQTTPacket(parsing: frame))
+    }
+}
 
 // Encode into a buffer sized exactly.
 let packet = MQTTPacket.publish(MQTTPublish(
@@ -42,7 +50,9 @@ let bytes = try [UInt8](capacity: packet.encodedByteCount) { output in
   Subscription Identifier) and their values, UTF-8 without U+0000, topic names and filters, packet
   identifiers, and each packet type's reason codes. The error's `kind` is malformed packet, protocol
   error, packet too large, or unsupported protocol version, and `reasonCode` is the code to disconnect
-  with. A throw consumes nothing.
+  with. A throw consumes nothing. A reserved type or flags, or a packet over `maximumPacketSize`, throws
+  as soon as its fixed header arrives; the rest, once the whole packet has. (Parsing a frame consumes it,
+  so a frame's packet that throws leaves the cursor past it.)
 - **Encoding** checks the same rules first (`MQTTPacket.validate()` gives the reason) and writes nothing
   for a packet the parser would reject.
 - **Not checked**: wildcard placement in topic filters (a server answers 0x8F in its SUBACK) and session
@@ -57,6 +67,11 @@ let bytes = try [UInt8](capacity: packet.encodedByteCount) { output in
 - `MQTTUnsubscribe`;
 - `MQTTDisconnect` and `MQTTAuthenticate`;
 - PINGREQ and PINGRESP.
+
+Each packet type also parses and writes itself: `MQTTPublish(parsing: frame)` from an `MQTTFrame` (a
+checked fixed header and its bounded body) and `publish.write(to:)`. That's what `MQTTPacket` dispatches
+to. The enum is 153 bytes, built in memory, and a call per case test, so skipping it is 26% faster parsing
+PUBLISH packets. Writing through it costs nothing extra: it tests its case once.
 
 Every type is `~Escapable`. `UTF8Span` strings and `RawSpan` payloads borrow the input or, when encoding,
 your values. Lists (`MQTTProperties`, `MQTTSubscriptions`, `MQTTTopicFilters`) are checked once and decoded

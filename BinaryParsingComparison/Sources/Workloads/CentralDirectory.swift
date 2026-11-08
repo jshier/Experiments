@@ -54,7 +54,7 @@ public enum CentralDirectory {
     // MARK: Bytes
 
     public static func parseWithBytes(_ span: RawSpan) throws -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
             try reader.expect(signature)
@@ -74,12 +74,12 @@ public enum CentralDirectory {
             fields.add(try reader.read(Byte4.self, .littleEndian)) // external attributes
             fields.add(try reader.read(Byte4.self, .littleEndian)) // local header offset
             fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = Bytes(try reader.read(byteCount: extraLength))
+            var extra = BytesReader(try reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
                 let id = try extra.read(Byte2.self, .littleEndian)
                 let size = Int(try extra.read(Byte2.self, .littleEndian))
-                var field = Bytes(try extra.read(byteCount: size))
+                var field = BytesReader(try extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self)[bit: 0] {
                     fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
                 }
@@ -89,10 +89,10 @@ public enum CentralDirectory {
     }
 
     public static func parseWithBytesRecords(_ span: RawSpan) throws -> UInt64 {
-        var reader = Bytes(span)
+        var reader = BytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
-            var header = Bytes(try reader.read(byteCount: 46))
+            var header = BytesReader(try reader.read(byteCount: 46))
             try header.expect(signature)
             fields.add(try header.read(Byte2.self, .littleEndian)) // made by
             try header.skip(byteCount: 2)
@@ -110,13 +110,13 @@ public enum CentralDirectory {
             fields.add(try header.read(Byte4.self, .littleEndian)) // external attributes
             fields.add(try header.read(Byte4.self, .littleEndian)) // local header offset
             fields.add(try reader.read(byteCount: nameLength).byteCount)
-            var extra = Bytes(try reader.read(byteCount: extraLength))
+            var extra = BytesReader(try reader.read(byteCount: extraLength))
             try reader.skip(byteCount: commentLength)
             while extra.remainingByteCount >= 4 {
-                var fieldHeader = Bytes(try extra.read(byteCount: 4))
+                var fieldHeader = BytesReader(try extra.read(byteCount: 4))
                 let id = try fieldHeader.read(Byte2.self, .littleEndian)
                 let size = Int(try fieldHeader.read(Byte2.self, .littleEndian))
-                var field = Bytes(try extra.read(byteCount: size))
+                var field = BytesReader(try extra.read(byteCount: size))
                 if id == 0x5455, size >= 5, try field.read(Byte.self)[bit: 0] {
                     fields.add(Int32(bitPattern: try field.read(Byte4.self, .littleEndian)))
                 }

@@ -12,7 +12,7 @@ extension RawRepresentable where RawValue: BinaryInteger {
     /// guard let qos = QualityOfService(rawBits: flags[Crumb.self, at: 1]) else { … }
     /// ```
     ///
-    /// To read a field as an `R` directly, use `read(_:as:)` on ``Bytes``.
+    /// To read a field as an `R` directly, use `read(_:as:)` on ``BytesReader``.
     @inlinable
     public init?<let width: Int>(rawBits bits: Bits<width>) {
         guard let raw = RawValue(exactly: bits.rawValue) else { return nil }
@@ -20,7 +20,7 @@ extension RawRepresentable where RawValue: BinaryInteger {
     }
 }
 
-extension Bytes {
+extension BytesReader {
     /// Reads a `width`-bit field as an `R`, through its raw value.
     ///
     /// ```swift
@@ -107,7 +107,7 @@ extension BytesWriter {
 // these types, so they can be loaded from arbitrary bytes, or viewed in place, safely. Each takes
 // `MemoryLayout<T>.size` bytes, which for 3-lane vectors includes a padding lane: `SIMD3<Float>` is 16.
 
-extension Bytes {
+extension BytesReader {
     /// Returns the next `T`, from its `MemoryLayout<T>.size` bytes in native byte order (little-endian on
     /// Apple platforms), without consuming them.
     ///

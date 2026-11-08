@@ -1,4 +1,4 @@
-/// The order in which ``Bytes`` reads the bits within each byte.
+/// The order in which ``BytesReader`` reads the bits within each byte.
 public enum BitOrder: Hashable, Sendable {
     /// The most significant bit (bit 7) first, as in most network protocols and media formats.
     case mostSignificantFirst
@@ -6,20 +6,20 @@ public enum BitOrder: Hashable, Sendable {
     case leastSignificantFirst
 }
 
-/// An error reading ``Bytes``. A read that throws doesn't consume anything.
+/// An error reading ``BytesReader``. A read that throws doesn't consume anything.
 public enum BytesError: Error, Hashable, Sendable {
     /// Fewer bits remain than the read needs.
     case insufficientData
     /// An `expect` found a different value.
     case mismatch
-    /// ``Bytes/read(_:count:)`` was asked to view memory that isn't aligned for its element type.
+    /// ``BytesReader/read(_:count:)`` was asked to view memory that isn't aligned for its element type.
     case misaligned
     /// A ``BytesWriter`` has less room left than the write needs.
     case insufficientCapacity
     /// A field's value isn't valid for the type it's read as: an undefined enum case, malformed UTF-8, a
     /// LEB128 integer longer than allowed, or a length too large for its prefix when writing.
     case invalidValue
-    /// ``Bytes/expectEnd()`` found unread bytes in a section that should have been fully consumed.
+    /// ``BytesReader/expectEnd()`` found unread bytes in a section that should have been fully consumed.
     case trailingData
 }
 
@@ -29,7 +29,7 @@ public enum BytesError: Error, Hashable, Sendable {
 /// a `ByteOrder`, and sub-byte fields as ``Bits`` (``Bit``, ``Crumb``, ``Nibble``, ``Byte``), in any mix:
 ///
 /// ```swift
-/// var reader = Bytes(span)
+/// var reader = BytesReader(span)
 /// try reader.expect(0x50_4B_03_04 as Byte4)
 /// let version = try reader.read(Byte2.self, .littleEndian) // UInt16
 /// let length = try reader.read(Byte3.self, .bigEndian)     // UInt32
@@ -41,11 +41,11 @@ public enum BytesError: Error, Hashable, Sendable {
 /// each byte made of the next 8 bits in ``bitOrder``. Call ``alignToByte()`` to skip to the next byte.
 /// Byte-aligned reads take a fast path: one bounds check and one or two unaligned loads.
 ///
-/// `Bytes` is `~Escapable`, so it can't outlive the memory it reads, and every span it returns borrows that
+/// `BytesReader` is `~Escapable`, so it can't outlive the memory it reads, and every span it returns borrows that
 /// same memory without copying. It's `~Copyable`, so a cursor position can't be duplicated by accident:
 /// pass it `inout` to helper functions.
 @safe
-public struct Bytes: ~Copyable, ~Escapable {
+public struct BytesReader: ~Copyable, ~Escapable {
     /// All the bytes being read, including those already consumed.
     public let span: RawSpan
     /// The order of bits within each byte: for ``Bits``, ``read(bitCount:)``, and multi-byte reads that start
@@ -75,7 +75,7 @@ public struct Bytes: ~Copyable, ~Escapable {
 
 // MARK: - Position
 
-extension Bytes {
+extension BytesReader {
     /// The offset in ``span`` of the byte the next read starts in.
     @inlinable
     public var byteOffset: Int { _byteOffset }
@@ -164,8 +164,8 @@ extension Bytes {
     /// nothing), so it is also the error's location; inside `atomically`, check the copy's.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func atomically<R: ~Copyable, E: Error>(_ body: (inout Bytes) throws(E) -> R) throws(E) -> R {
-        var copy = Bytes(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
+    public mutating func atomically<R: ~Copyable, E: Error>(_ body: (inout BytesReader) throws(E) -> R) throws(E) -> R {
+        var copy = BytesReader(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
         let result = try body(&copy)
         _byteOffset = copy._byteOffset
         _bitOffset = copy._bitOffset
@@ -217,7 +217,7 @@ extension Bytes {
 
 // MARK: - Byte groups
 
-extension Bytes {
+extension BytesReader {
     /// Returns the next `T.byteCount` bytes without consuming them.
     @inlinable @inline(__always)
     public func peek<T: ByteGroup>(_: T.Type = T.self) throws(BytesError) -> T {
@@ -282,7 +282,7 @@ extension Bytes {
 
 // MARK: - Bits
 
-extension Bytes {
+extension BytesReader {
     /// Returns the next `width` bits without consuming them.
     @inlinable @inline(__always)
     public func peek<let width: Int>(_: Bits<width>.Type = Bits<width>.self) throws(BytesError) -> Bits<width> {
@@ -422,7 +422,7 @@ extension Bytes {
 
 // MARK: - Spans
 
-extension Bytes {
+extension BytesReader {
     /// Reads the next `byteCount` bytes as a span borrowing the same memory. Requires byte alignment.
     @inlinable @inline(__always)
     @_lifetime(copy self)
@@ -440,7 +440,7 @@ extension Bytes {
 
 // MARK: - Bulk operations
 
-extension Bytes {
+extension BytesReader {
     /// Reads consecutive `T` groups as integers in `byteOrder` until `output` is full.
     ///
     /// For example, to decode a table of big-endian 32-bit offsets:
@@ -890,7 +890,7 @@ enum Load {
 
 extension Array where Element == UInt8 {
     /// Creates an array with a copy of `bytes`: the byte counterpart of `String(copying:)`, for keeping
-    /// what a span read from ``Bytes`` borrows.
+    /// what a span read from ``BytesReader`` borrows.
     @inlinable
     public init(copying bytes: RawSpan) {
         // Unsafe: `memcpy` into the new array's uninitialized storage. Safe: the capacity is exactly

@@ -6,7 +6,7 @@ import Testing
 @Suite struct AdoptedAPITests {
     @Test func atomicallyCommitsOnlyOnSuccess() throws {
         let data: [UInt8] = [0x01, 0x00, 0x03, 0xAA, 0xBB] // type, then 3 bytes promised but only 2 present
-        var reader = Bytes(data.span)
+        var reader = BytesReader(data.span)
         do {
             _ = try reader.atomically { (reader) throws(BytesError) in
                 _ = try reader.read(Byte.self)
@@ -29,7 +29,7 @@ import Testing
 
     @Test func checkedIntegerReads() throws {
         let data: [UInt8] = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x80, 0x01, 0x02]
-        var reader = Bytes(data.span)
+        var reader = BytesReader(data.span)
         // 2^63 doesn't fit in an Int: throws, consuming nothing.
         do { _ = try reader.read(Int.self, as: Byte8.self, .littleEndian); Issue.record("expected a throw") } catch {
             #expect(error == .invalidValue)
@@ -38,7 +38,7 @@ import Testing
         #expect(offset == 0)
         #expect(try reader.read(UInt64.self, as: Byte8.self, .littleEndian) == 1 << 63)
         #expect(try reader.read(Int.self, as: Byte2.self, .bigEndian) == 0x0102)
-        var narrow = Bytes([0x01, 0x00].span)
+        var narrow = BytesReader([0x01, 0x00].span)
         do { _ = try narrow.read(UInt8.self, as: Byte2.self, .bigEndian); Issue.record("expected a throw") } catch {
             #expect(error == .invalidValue)
         }

@@ -47,7 +47,7 @@ The names have no spaces or slashes: `thresholds update` writes them as `_` in t
 `thresholds check` (benchmark 1.38.1) looks the file up by the unaltered name, so a name with a space
 always fails, or, if other files are found, is silently not checked (ordo-one/benchmark#373).
 
-**One allocation found:** `let reader = Bytes(span); for byte in reader { … }` allocates once per loop, not
+**One allocation found:** `let reader = BytesReader(span); for byte in reader { … }` allocates once per loop, not
 per byte. The cause is in the compiler (Swift 6.4.2, and `main` by inspection):
 
 1. SILGen puts a `~Copyable` `let` in a box: `alloc_box ${ let Bytes }`, then a `begin_borrow [var_decl]`.
@@ -659,7 +659,7 @@ while `ByteReader` advances a pointer field by field (`csel`, then post-incremen
 - Byte-aligned `read(Byte4.self, .littleEndian)`: two `ldp`s of the cursor, a branch on the bit offset, the
   bounds compare, one `ldr`, and the offset store.
 - `Nibble` read: fully inlined and branch-free; both bit orders computed and selected with `csel`.
-- Fixed-size record (`Bytes(try reader.read(byteCount: 46))`, then fields): no per-field checks at all,
+- Fixed-size record (`BytesReader(try reader.read(byteCount: 46))`, then fields): no per-field checks at all,
   including paired loads (`ldp w7, w19, [x17, #16]`) for adjacent 4-byte fields.
 - Bulk decode, `read(_:_:into:)`: autovectorized for every width tried. `Byte2` big-endian uses `rev16.16b`,
   `Byte4` `rev32.16b` (64 bytes per iteration with `ldp q0, q1`), and the odd-width `Byte3` still vectorizes

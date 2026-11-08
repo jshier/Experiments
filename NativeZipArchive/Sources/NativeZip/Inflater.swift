@@ -186,7 +186,7 @@ struct Inflater: ~Copyable {
                 }
             case .stored(let remaining):
                 let count = min(remaining, output.byteCount &- position)
-                var reader = Bytes(input)
+                var reader = BytesReader(input)
                 try reader.seek(toBitPosition: bitPosition)
                 var writer = BytesWriter(output._mutatingExtracting(...))
                 try writer.skip(byteCount: position)
@@ -219,7 +219,7 @@ struct Inflater: ~Copyable {
     /// Reads a block header at ``bitPosition``: the final flag, the type, and a stored block's length or a
     /// dynamic block's tables.
     private mutating func readBlockHeader(_ input: RawSpan) throws(BytesError) {
-        var reader = Bytes(input, bitOrder: .leastSignificantFirst)
+        var reader = BytesReader(input, bitOrder: .leastSignificantFirst)
         try reader.seek(toBitPosition: bitPosition)
         var bits = BitBuffer(reader)
         isFinalBlock = bits.read(Bit.self).isSet
@@ -255,7 +255,7 @@ struct Inflater: ~Copyable {
         into output: inout MutableRawSpan, at end: Int
     ) throws(BytesError) -> (bitPosition: Int, end: Int, endOfBlock: Bool) {
         precondition(literals.count == tableSize && distances.count == distanceTableSize)
-        var reader = Bytes(input, bitOrder: .leastSignificantFirst)
+        var reader = BytesReader(input, bitOrder: .leastSignificantFirst)
         try reader.seek(toBitPosition: bitPosition)
         var bits = BitBuffer(reader)
         var writer = BytesWriter(output._mutatingExtracting(...))
