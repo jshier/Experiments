@@ -1,0 +1,13 @@
+{
+  "comment": "Swift toolchains the experiments need beyond Xcode's. Packages name one in a .swift-toolchain file; Tools/toolchain resolves, lists, installs, and records them (install/register fill in directory and bundle_id). Install sources: {\"swiftly\": SPEC} for releases and snapshots, {\"url\": TARBALL} for builds swiftly can't install (unmerged PRs: download.swift.org/tmp/pull-request/<PR>/<build>/xcode/swift-PR-<PR>-<build>-osx.tar.gz, which expire).",
+  "toolchains": {
+    "pr-91981": {
+      "description": "swiftlang/swift#91981 (split continuation), for swift-platform-executors' ExperimentalIO trait",
+      "install": {
+        "url": "https://download.swift.org/tmp/pull-request/91981/2511/xcode/swift-PR-91981-2511-osx.tar.gz"
+      },
+      "directory": "swift-PR-91981-2511.xctoolchain",
+      "bundle_id": "org.swift.pr.91981.2511"
+    }
+  }
+}

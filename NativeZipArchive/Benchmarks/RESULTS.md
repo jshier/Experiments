@@ -2,7 +2,7 @@
 
 Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra (32 cores), macOS 27.2, APFS.
 Each step is saved as a named baseline in `.benchmarkBaselines/` and can be re-compared with
-`swift package --disable-sandbox benchmark baseline compare <a> <b> | python3 -I Benchmarks/summarize.py`.
+`../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
 ## baseline — the code before any performance work
 

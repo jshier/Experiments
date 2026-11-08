@@ -1,0 +1,58 @@
+#!/bin/bash
+# calls — what compiled functions call, and how often: runtime entry points (swift_retain, swift_task_switch,
+# swift_allocObject), outlined value operations ("outlined destroy of …"), generic or unspecialized paths.
+#
+# usage: Tools/calls FILE PATTERN [--callee REGEX] [--sum]
+#        Tools/calls --target PACKAGE_DIR TARGET PATTERN [options]
+#
+#   FILE      a Mach-O object (.o) or linked binary
+#   --target  a SwiftPM target instead, built (release) and merged into one object
+#   PATTERN   Perl regex matched against the calling functions' demangled (or mangled) names
+#   --callee  only callees whose demangled name matches this Perl regex
+#   --sum     one line per callee, summed over all matching functions
+#
+# Output, tab-separated: caller, kind (call = bl/blr; tail = b to a symbol), count, callee (demangled).
+# Static counts: call sites, not executions (for those, Tools/runtime-count).
+#
+# Objects: callees come from relocations (`objdump -dr`). Binaries: from `otool -tV`, which also names
+# stubs ("symbol stub for: _swift_retain"); plain objdump mislabels stub calls as the nearest symbol.
+#
+# examples:
+#   Tools/calls --target MQTTSocketStream MQTTSocketStream 'Transfer\.' --callee 'swift_task_switch'
+#   Tools/calls .build/release/MQTTBenchmarks 'parsePublish' --callee 'outlined|swift_(retain|release)'
+source "$(dirname "$0")/lib/common.sh"
+
+[[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]] && usage
+[[ $# -ge 2 ]] || usage 2
+read_input "$@"; shift "$INPUT_ARGS"
+[[ $# -ge 1 ]] || usage 2
+file="$INPUT" pattern="$1"; shift
+target='.' sum=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --callee) target="$2"; shift ;;
+        --sum) sum=1 ;;
+        -h|--help) usage ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+kind="$(file_kind "$file")"
+symbols="$(find_symbols "$file" "$pattern")"
+[[ -n "$symbols" ]] || fail "no function matching /$pattern/ in $file"
+
+while IFS=$'\t' read -r mangled demangled; do
+    if [[ "$kind" == object ]]; then
+        "$OBJDUMP" -dr --no-show-raw-insn --disassemble-symbols="$mangled" "$file" |
+            perl -ne 'if (/^\s*[0-9a-f]+:\s+(bl|blr|b)\s/) { $last = $1 } elsif (/ARM64_RELOC_BRANCH26\s+(\S+)/) { print(($last eq "b" ? "tail" : "call"), "\t$1\n") }'
+    else
+        "$OTOOL" -tV -p "$mangled" "$file" |
+            perl -ne 'next if $. <= 3; last if /^_\S+:$/; if (/\t(bl|b)\t(?:0x[0-9a-f]+\s*;\s*symbol stub for:\s*)?(_\S+)/) { print(($1 eq "b" ? "tail" : "call"), "\t$2\n") } elsif (/\tblr\t/) { print "call\t(indirect)\n" }'
+    fi | demangle | CALLER="$demangled" perl -ne 'chomp; print "$ENV{CALLER}\t$_\n"'
+done <<<"$symbols" |
+    TARGET="$target" SUM="$sum" perl -F'\t' -ane '
+        chomp $F[2]; next unless $F[2] =~ /$ENV{TARGET}/;
+        my $key = $ENV{SUM} ? "(all)\t$F[1]\t$F[2]" : "$F[0]\t$F[1]\t$F[2]";
+        $count{$key}++;
+        END { for (sort { $count{$b} <=> $count{$a} || $a cmp $b } keys %count) { my ($c, $k, $t) = split /\t/; print "$c\t$k\t$count{$_}\t$t\n" }
+              print STDERR "no calls", ($ENV{TARGET} ne "." ? " matching /$ENV{TARGET}/" : ""), " in the matching functions\n" unless %count }'

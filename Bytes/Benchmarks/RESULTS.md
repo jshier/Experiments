@@ -2,7 +2,7 @@
 
 Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
 Baselines are in `.benchmarkBaselines/` (the latest full run is `reviewed`); compare any two with
-`swift package --disable-sandbox benchmark baseline compare <a> <b> | python3 -I ../NativeZipArchive/Benchmarks/summarize.py`.
+`../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
 ## Current: Bytes against the alternatives (same harness, same run; baseline `reviewed`)
 

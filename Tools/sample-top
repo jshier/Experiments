@@ -1,0 +1,81 @@
+#!/bin/bash
+# sample-top — where a running program spends its time, per thread: the functions at the top of the stack
+# (self samples), from macOS's `sample` profiler. Quick, needs no Instruments, works on any process you own.
+#
+# usage: Tools/sample-top [--seconds N] [--delay N] [--top N] [--keep FILE] -- PROGRAM [ARGS...]
+#        Tools/sample-top [--seconds N] [--top N] --pid PID
+#        Tools/sample-top [--top N] --file SAMPLE.txt
+#
+#   --seconds N   how long to sample (default 3)
+#   --delay N     seconds to wait after launching before sampling, past startup (default 1)
+#   --top N       functions per thread (default 12)
+#   --keep FILE   keep sample's report
+#
+# Output, per thread with samples, busiest first, tab-separated: thread, samples, share of the thread's
+# samples, function (in module). Waiting in the kernel (workq, mach_msg, kevent, condition variables) is one
+# "(waiting)" line per thread, so busy threads stand out. A launched program must run past
+# --delay + --seconds; make the workload long enough (or loop it).
+#
+# For counter-level detail (cycles, front-end vs back-end stalls) use Tools/counters; for instruction-level
+# hot spots, Instruments' Time Profiler (xctrace record --template 'Time Profiler').
+source "$(dirname "$0")/lib/common.sh"
+
+seconds=3 delay=1 top=12 keep= pid= file=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --seconds) seconds="$2"; shift ;;
+        --delay) delay="$2"; shift ;;
+        --top) top="$2"; shift ;;
+        --keep) keep="$2"; shift ;;
+        --pid) pid="$2"; shift ;;
+        --file) file="$2"; shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+scratch_dir
+if [[ -z "$file" ]]; then
+    file="${keep:-$SCRATCH/sample.txt}"
+    if [[ -z "$pid" ]]; then
+        [[ $# -ge 1 ]] || usage 2
+        program="$(debuggable "$1")"; shift
+        "$program" "$@" > "$SCRATCH/program.log" 2>&1 &
+        pid=$!
+        sleep "$delay"
+    fi
+    kill -0 "$pid" 2>/dev/null || die "process $pid isn't running (did it finish before sampling started?)"
+    sample "$pid" "$seconds" -mayDie -file "$file" > /dev/null 2>&1 || true
+    [[ -n "${!:-}" ]] && wait "$pid" 2>/dev/null || true
+fi
+[[ -s "$file" ]] || die "no sample report"
+
+# The call graph: each line is "<tree marks><count> <frame>  (in <module>) …", nested by indentation. A frame's
+# self samples are its count minus its children's.
+TOP="$top" perl -ne '
+    BEGIN { $idle = qr/^(__workq_kernreturn|mach_msg2_trap|mach_msg_trap|__psynch_cvwait|__semwait_signal|kevent|kevent_id|kevent64|__ulock_wait2?|__select|__psynch_mutexwait|semaphore_wait_trap|__wait4|__sigsuspend|__accept|__read_nocancel)$/ }
+    if (/^Call graph:/) { $in = 1; next }
+    next unless $in;
+    last if /^Total number in stack|^Sort by top of stack|^Binary Images/;
+    next unless /^(\s*[ +!:|]*)(\d+)\s+(.*)$/;
+    my ($indent, $count, $text) = (length $1, $2, $3);
+    if ($indent <= 4) { $thread = $text; $thread =~ s/\s+\(serial\)$//; $thread =~ s/\s{2,}/ /g; @stack = (); next }
+    while (@stack && $stack[-1][0] >= $indent) { finish(pop @stack) }
+    $stack[-1][2] += $count if @stack;
+    $text =~ s/\)\s+\+\s+[\d,.]+.*$/)/; $text =~ s/\s+\+\s+[\d,]+\s+\[.*$//; $text =~ s/\s+\[0x.*$//; $text =~ s/\s{2,}/ /g;
+    push @stack, [$indent, $text, 0, $count, $thread];
+    sub finish { my ($f) = @_; my $self = $f->[3] - $f->[2]; return if $self <= 0;
+        my $name = $f->[1]; my ($function) = $name =~ /^(\S+)/;
+        $name = "(waiting)" if $function =~ $idle;
+        $self{$f->[4]}{$name} += $self; $total{$f->[4]} += $self }
+    END {
+        finish(pop @stack) while @stack;
+        for my $t (sort { ($total{$b} - ($self{$b}{"(waiting)"} // 0)) <=> ($total{$a} - ($self{$a}{"(waiting)"} // 0)) } keys %total) {
+            my $busy = $total{$t} - ($self{$t}{"(waiting)"} // 0);
+            next if $busy <= 0 && !$ENV{ALL};
+            my @frames = sort { $self{$t}{$b} <=> $self{$t}{$a} } keys %{ $self{$t} };
+            splice @frames, $ENV{TOP} if @frames > $ENV{TOP};
+            printf "%s\t%d\t%.1f%%\t%s\n", $t, $self{$t}{$_}, 100 * $self{$t}{$_} / $total{$t}, $_ for @frames;
+        }
+    }' "$file" | demangle

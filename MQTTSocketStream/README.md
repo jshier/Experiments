@@ -12,33 +12,32 @@ for byte, and its payload is the size sent. The sockets and executors are
 swift-platform-executors' I/O is behind its `ExperimentalIO` trait and needs a toolchain with
 [swiftlang/swift#91981](https://github.com/swiftlang/swift/pull/91981) (the split continuation), which isn't
 merged, so no release or `main` snapshot has it (swiftly can't install it). This was built and measured with
-the PR's macOS toolchain build 2511 (Swift 6.5-dev, October 25), installed at
-`~/Library/Developer/Toolchains/swift-PR-91981-2511.xctoolchain`:
+the PR's macOS toolchain build 2511 (Swift 6.5-dev, October 25). `.swift-toolchain` names it (`pr-91981`),
+and `../Tools/toolchains.json` records where it comes from; to install it (a 3 GB download):
 
 ```sh
-curl -LO https://download.swift.org/tmp/pull-request/91981/2511/xcode/swift-PR-91981-2511-osx.tar.gz
-tar -xzf swift-PR-91981-2511-osx.tar.gz -C ~   # its paths start with Library/Developer/Toolchains
+../Tools/toolchain install pr-91981
 ```
 
 Processes must run against that toolchain's Concurrency runtime, not the OS's: with the OS's, the first
 socket operation crashes. The executables embed the runtime's path at link time (`ld -dyld_env`, see
-Package.swift; override with `MQTT_SOCKET_STREAM_RUNTIME` when building), because `swift test` and the
-benchmark plugin replace `DYLD_LIBRARY_PATH` for the processes they start. The scripts select the toolchain
-(override with `TOOLCHAIN=…`):
+Package.swift: the runtime of the toolchain the build uses), because `swift test` and the benchmark plugin
+replace `DYLD_LIBRARY_PATH` for the processes they start. `../Tools/toolchain` selects the toolchain this
+package names:
 
 ```sh
-Scripts/run.sh --payload 1024 --connections 4     # one transfer, printed: GB/s and packets/s
-Scripts/test.sh                                   # the tests, run against the toolchain's runtime
-Scripts/benchmark.sh                              # the benchmarks
-Scripts/benchmark.sh thresholds check --filter 'Allocations:.*'   # fails if packets allocate
+../Tools/toolchain . -- swift run -c release mqtt-socket-stream --payload 1024 --connections 4   # one transfer: GB/s and packets/s
+../Tools/toolchain . test                                                 # the tests, against the toolchain's runtime
+../Tools/toolchain . -- swift package --disable-sandbox benchmark        # the benchmarks
+../Tools/toolchain . -- swift package --disable-sandbox benchmark thresholds check --filter 'Allocations:.*'   # fails if packets allocate
 ```
 
 `mqtt-socket-stream` options: `--mode mqtt|raw`, `--payload BYTES`, `--packets PER-CONNECTION`,
 `--connections N`, `--batch BYTES` (encode and write size), `--buffer BYTES` (receive buffer),
 `--placement threadPerTask|sharedPool`, `--pool THREADS` (shared pool), `--runs N`.
 
-`Scripts/loopback-probe.c` measures the kernel's ceiling with blocking C sockets: loopback TCP, or a
-Unix-domain socketpair.
+`../Tools/socket-ceiling` measures the kernel's ceiling with blocking C sockets: loopback TCP, or a
+Unix-domain socketpair (`--unix`).
 
 ## How it works
 

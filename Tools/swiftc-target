@@ -1,0 +1,79 @@
+#!/bin/bash
+# swiftc-target — run a SwiftPM target's exact compile command with your own flags: its SIL, IR, assembly, or
+# optimization remarks, with the target's settings and dependencies.
+#
+# usage: Tools/swiftc-target [--debug] [--refresh] [--print] PACKAGE_DIR TARGET -- SWIFTC_ARGS...
+#
+#   Captures the `swiftc` command SwiftPM runs for TARGET (release unless --debug) from `swift build -v`,
+#   removes its outputs (object, module, dependency and diagnostics files), adds `-num-threads 0` (one output
+#   file for the whole module), and runs it with SWIFTC_ARGS, which must say what to produce:
+#     -emit-sil -o out.sil       optimized SIL
+#     -emit-ir -o out.ll         optimized LLVM IR (add `-Xfrontend -disable-llvm-optzns` for unoptimized)
+#     -S -o out.s                assembly
+#     -c -o out.o -save-optimization-record=yaml -save-optimization-record-path r.yaml
+#                                -save-optimization-record-passes 'loop-vectorize|sil-inliner'
+#                                remarks (see Tools/remarks)
+#   Dependencies must already be built: the command reads their modules from .build.
+#
+#   --debug     the debug configuration's command
+#   --refresh   capture the command again (it's cached in .build/agent-tools/; capture touches one of the
+#               target's sources, mtime only, to make SwiftPM recompile it)
+#   --print     print the rewritten command instead of running it
+#
+# The toolchain is whatever `swift build` used: set TOOLCHAINS for another.
+#
+# example:
+#   Tools/swiftc-target Base64 Base64 -- -emit-ir -o /tmp/Base64.ll
+source "$(dirname "$0")/lib/common.sh"
+
+configuration=release refresh= print=
+while [[ $# -gt 0 && "$1" == --* ]]; do
+    case "$1" in
+        --debug) configuration=debug ;;
+        --refresh) refresh=1 ;;
+        --print) print=1 ;;
+        --help) usage ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+[[ $# -ge 2 ]] || usage 2
+package="$(cd "$1" && pwd)" target="$2"; shift 2
+[[ "${1:-}" == "--" ]] && shift
+cache="$package/.build/agent-tools/$target.$configuration.command"
+
+capture() {
+    local source
+    source="$(cd "$package" && swift package describe --type json 2>/dev/null |
+        jq -r --arg t "$target" '.targets[] | select(.name == $t) | .path + "/" + (.sources[0] // "")')"
+    [[ -n "$source" && -f "$package/$source" ]] || die "no target $target with Swift sources in $package"
+    touch "$package/$source"
+    note "building $target ($configuration) to capture its compile command…"
+    mkdir -p "$(dirname "$cache")"
+    (cd "$package" && swift build -c "$configuration" --target "$target" -v 2>&1) |
+        perl -ne 'if (/builtin-Swift-Compilation -- (.*\bswiftc .*-module-name '"$target"' .*)$/ || /^\s*(\S*swiftc .*-module-name '"$target"' .*)$/) { print "$1\n"; exit }' > "$cache"
+    [[ -s "$cache" ]] || { rm -f "$cache"; die "didn't find $target's swiftc command in the build log"; }
+}
+[[ -n "$refresh" || ! -s "$cache" ]] && capture
+
+# The command is printed shell-escaped; let bash split it.
+eval "original=( $(cat "$cache") )"
+command=()
+skip=0
+for argument in "${original[@]}"; do
+    if (( skip )); then skip=0; continue; fi
+    case "$argument" in
+        -output-file-map|-emit-module-path|-emit-objc-header-path|-const-gather-protocols-list|\
+        -dependency-scan-serialize-diagnostics-path|-num-threads|-emit-module-interface-path|-emit-module-source-info-path|\
+        -emit-abi-descriptor-path|-index-store-path)
+            skip=1 ;;
+        -emit-module|-emit-objc-header|-emit-dependencies|-emit-const-values|-serialize-diagnostics|-save-temps|-c|\
+        -color-diagnostics|-emit-module-interface|-index-ignore-system-modules|-incremental|-enable-batch-mode)
+            ;;
+        *) command+=("$argument") ;;
+    esac
+done
+command+=(-num-threads 0 "$@")
+
+if [[ -n "$print" ]]; then printf '%q ' "${command[@]}"; echo; exit 0; fi
+"${command[@]}"

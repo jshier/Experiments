@@ -1,0 +1,43 @@
+# file options
+
+--symlinks ignore
+--swiftversion 6.2
+--language-mode 5
+
+# format options
+
+--commas inline
+--comments indent
+--decimalgrouping 3,5
+--exponentcase lowercase
+--exponentgrouping disabled
+--extensionacl on-declarations
+--fractiongrouping disabled
+--ifdef preserve
+--importgrouping testable-top
+--operatorfunc no-space
+--nospaceoperators ..<, ...
+--selfrequired validate
+--someAny false
+--stripunusedargs closure-only
+--suite-name-format preserve
+--test-case-name-format preserve
+--wraparguments preserve
+--wrapcollections preserve
+--wrapparameters preserve
+
+# rules
+
+--enable isEmpty
+--disable andOperator
+--disable docComments
+--disable noForceTryInTests
+--disable noForceUnwrapInTests
+--disable opaqueGenericParameters
+--disable redundantSwiftTestingSuite
+--disable simplifyGenericConstraints
+--disable wrapFunctionBodies
+--disable wrapIfExpressionBodies
+--disable wrapIfStatementBodies
+--disable wrapMultilineStatementBraces
+--disable wrapPropertyBodies

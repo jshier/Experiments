@@ -1,0 +1,74 @@
+#!/bin/bash
+# runtime-count — how many times functions run in a real process, with LLDB breakpoints that count and continue.
+# For runtime events static counts can't show: actual executor hops, allocations, retains, page faults in a
+# loop. DTrace would be faster but is blocked by SIP on system libraries.
+#
+# usage: Tools/runtime-count [--break SYMBOL[@MODULE]]... [--who SYMBOL=REGISTER] -- PROGRAM [ARGS...]
+#
+#   --break   a function to count: a C/runtime name (swift_task_switch, swift_retain, malloc,
+#             swift_allocObject), or a mangled Swift name (quote the $). @MODULE limits it to one image
+#             (swift_task_switch@libswift_Concurrency.dylib), which also avoids counting stubs.
+#   --who     at each hit of SYMBOL, tally what REGISTER points at, symbolized: for swift_task_switch, x0 is
+#             the resume function (which async function is switching); lr is the caller (tail calls hide it).
+#             Implies --break SYMBOL.
+#
+# Output, tab-separated: "hits", symbol, count; then for --who: "who", symbol, count, symbolized value.
+#
+# Each hit stops the process briefly (tens of microseconds): use small workloads, and compare two sizes to
+# separate per-iteration counts from fixed ones (e.g. 20,000 and 80,000 packets).
+#
+# examples:
+#   Tools/runtime-count --break swift_task_switch@libswift_Concurrency.dylib --break swift_job_run \
+#       -- .build/release/mqtt-socket-stream --packets 20000 --runs 1
+#   Tools/runtime-count --who swift_task_switch=x0 -- ./server --requests 100
+source "$(dirname "$0")/lib/common.sh"
+
+breaks=() whos=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --break) breaks+=("$2"); shift ;;
+        --who) whos+=("$2"); breaks+=("${2%%=*}"); shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+[[ $# -ge 1 && ${#breaks[@]} -ge 1 ]] || usage 2
+# One breakpoint per symbol, even if it's given with both --break and --who.
+breaks=($(printf '%s\n' "${breaks[@]}" | perl -ne 'print unless $seen{$_}++'))
+scratch_dir
+
+{
+    index=0
+    for spec in "${breaks[@]}"; do
+        index=$((index + 1))
+        name="${spec%%@*}" module=
+        [[ "$spec" == *@* ]] && module="${spec#*@}"
+        who=
+        for w in "${whos[@]+"${whos[@]}"}"; do [[ "${w%%=*}" == "$spec" ]] && who="${w#*=}"; done
+        line="breakpoint set -n '$name' -G true"
+        [[ -n "$module" ]] && line+=" -s '$module'"
+        [[ -n "$who" ]] && line+=" -C 'register read $who'"
+        echo "$line"
+    done
+    echo "run"
+    echo "breakpoint list"
+    echo "quit"
+} > "$SCRATCH/commands"
+
+program="$(debuggable "$1")"; shift
+xcrun lldb --batch -s "$SCRATCH/commands" -- "$program" "$@" > "$SCRATCH/log" 2>&1 || true
+grep -qE "^[0-9]+: name" "$SCRATCH/log" || { tail -20 "$SCRATCH/log" >&2; die "lldb didn't run the program ($AUTH_HINT)"; }
+
+# "1: name = 'swift_task_switch', module = libswift_Concurrency.dylib, locations = 2, resolved = 1, hit count = 85"
+perl -ne 'print "hits\t$1\t$2\n" if /^\d+: name = \x27([^\x27]+)\x27.*hit count = (\d+)/' "$SCRATCH/log" | demangle
+for w in "${whos[@]+"${whos[@]}"}"; do
+    register="${w#*=}"
+    # "     x0 = 0x0000000100f67ac0  mqtt-socket-stream`(2) suspend resume partial function for …"
+    REGISTER="$register" SYMBOL="${w%%=*}" perl -ne '
+        next unless /^\s*\Q$ENV{REGISTER}\E = 0x[0-9a-f]+\s*(.*)$/;
+        my $s = $1; $s =~ s/^[^`]*`//; $s =~ s/\s+at\s+.*$//; $s =~ s/ \+ \d+$//; $s = "(no symbol)" unless length $s;
+        $count{$s}++;
+        END { print "who\t$ENV{SYMBOL}\t$count{$_}\t$_\n" for sort { $count{$b} <=> $count{$a} } keys %count }' "$SCRATCH/log" | demangle
+done

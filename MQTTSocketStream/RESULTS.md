@@ -2,7 +2,7 @@
 
 M3 Ultra (24 performance + 8 efficiency cores), macOS 27.2. The swiftlang/swift#91981 toolchain, build 2511
 (Swift 6.5-dev), swift-platform-executors `bd74d56`, kqueue backend. Benchmarks: medians from
-`Scripts/benchmark.sh`, about 512 MB per connection per iteration (256 MB for the multi-connection runs).
+`../Tools/toolchain . -- swift package --disable-sandbox benchmark`, about 512 MB per connection per iteration (256 MB for the multi-connection runs).
 Bandwidth counts every byte on the wire, MQTT headers included; the timing runs from the first listener to
 the last receiver's end of stream. Every packet is checked on arrival.
 
@@ -71,7 +71,8 @@ writes itself. Its Benchmarks/RESULTS.md has the details.
   released around the call. Neither end now touches a reference count per packet.
 - **Checked**: `Allocations:Check_64_B_payload_packets` and `Allocations:Encode_64_B_payload_packets` count
   allocations over 10,000 packets against static thresholds of zero (`Thresholds/`):
-  `Scripts/benchmark.sh thresholds check --filter 'Allocations:.*'` fails if either end allocates.
+  `../Tools/toolchain . -- swift package --disable-sandbox benchmark thresholds check --filter
+  'Allocations:.*'` fails if either end allocates.
 - **A transfer** makes 120–122 allocations (executors, sockets, buffers, tasks), the same for 100,000
   packets as for 1,000,000 (`Transfer allocations` benchmarks): none per packet, read, or write.
 - The transfers themselves aren't measured with the malloc interposer that counts allocations: it cost
@@ -136,7 +137,8 @@ A sample of the 64 B run, since skipping the enum:
 
 ## The ceiling: loopback TCP, not the executors or the parsing
 
-`Scripts/loopback-probe.c` measures the kernel with blocking C sockets on plain threads:
+`../Tools/socket-ceiling` (then `Scripts/loopback-probe.c`) measures the kernel with blocking C sockets on
+plain threads:
 
 | Blocking C sockets, 1 MB writes | 1 pair | 2 | 4 | 8 | 16 |
 |---|---|---|---|---|---|
@@ -172,7 +174,7 @@ difference is within run-to-run noise.
 - **The runtime:** processes must load the toolchain's Concurrency runtime. With the OS's, the first socket
   operation crashes (a null access in `withContinuation`), or the process exits silently. `swift test` and
   the ordo-one benchmark plugin both replace `DYLD_LIBRARY_PATH` for the processes they launch. So the
-  executables embed it (`ld -dyld_env`), and `Scripts/test.sh` runs the test bundle through
+  executables embed it (`ld -dyld_env`), and `../Tools/toolchain . test` runs the test bundle through
   `swiftpm-testing-helper` itself.
 - **Leased buffers:** `PThreadTaskExecutor` doesn't implement them yet (`fatalError("Leasing buffers is not
   implemented yet")`). So `TCPConnection`'s closure-based `read { }` and `write { }`, which would let

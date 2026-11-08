@@ -1,10 +1,11 @@
 // The kernel's ceiling for local sockets, without Swift or any executor: N sender/receiver thread pairs over
 // blocking sockets, each pair its own connection.
 //
-//     xcrun clang -O2 -o /tmp/loopback-probe Scripts/loopback-probe.c
-//     /tmp/loopback-probe PAIRS BYTES-PER-PAIR WRITE-SIZE [SOCKET-BUFFER-SIZE [u]]
+// Built and run by Tools/socket-ceiling; directly:
+//     xcrun clang -O2 -o socket-ceiling Tools/lib/socket-ceiling.c
+//     ./socket-ceiling PAIRS BYTES-PER-PAIR WRITE-SIZE [SOCKET-BUFFER-SIZE [u]]
 //
-// The fifth argument `u` uses a Unix-domain socketpair instead of loopback TCP.
+// The fifth argument `u` uses a Unix-domain socketpair instead of loopback TCP. At most 256 pairs.
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -34,7 +35,9 @@ static void *receiver(void *arg) {
     j->bytes = total; close(j->fd); free(buf); return NULL;
 }
 int main(int argc, char **argv) {
-    int pairs = atoi(argv[1]); perConnection = atol(argv[2]); chunk = atoi(argv[3]); sockbuf = argc > 4 ? atoi(argv[4]) : 0; useUnix = argc > 5 && argv[5][0] == 'u';
+    if (argc < 4) { fprintf(stderr, "usage: %s PAIRS BYTES-PER-PAIR WRITE-SIZE [SOCKET-BUFFER-SIZE [u]]\n", argv[0]); return 2; }
+    int pairs = atoi(argv[1]); perConnection = atol(argv[2]);
+    if (pairs < 1 || pairs > 256) { fprintf(stderr, "PAIRS must be 1-256\n"); return 2; } chunk = atoi(argv[3]); sockbuf = argc > 4 ? atoi(argv[4]) : 0; useUnix = argc > 5 && argv[5][0] == 'u';
     pthread_t threads[512]; job jobs[512];
     struct timespec t0, t1; clock_gettime(CLOCK_MONOTONIC, &t0);
     for (int i = 0; i < pairs; i++) {
