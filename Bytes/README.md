@@ -123,6 +123,28 @@ let same = topic.span.bytes.bytesEqual(expected)                           // XO
   Swift 6.5 vectorizes those too, but 6.4 compiles them a lane at a time and reduces with an out-of-line
   call.
 
+### Typed blocks in, typed blocks out, and shuffles
+
+```swift
+let blocks = try reader.read(InlineArray<48, UInt8>.self, count: n)       // a view: no copy
+try writer.write(InlineArray<64, UInt8>.self, count: n, filling: { out in  // fill the next n in place
+    for i in blocks.indices { out[i] = encode(blocks[i]) }
+})
+let (r, g, b) = ByteLanes.deinterleave(v0, v1, v2)                         // as `ld3` loads: every 3rd byte
+let (o0, o1, o2, o3) = ByteLanes.interleave(a, b, c, d)                    // as `st4` stores (`zip`s)
+let characters = ByteLanes(indices).lookup(in: (t0, t1, t2, t3))           // 64-byte table: one `tbl`
+```
+
+- A loop from one typed span to another (`read(_:count:)` to `write(_:count:filling:)`) has one bounds
+  check per span, before the loop, and is the shape LLVM vectorizes best. A loop over 3-byte groups in and
+  4-byte groups out compiles to `ld3` and `st4`.
+- **Table lookups and shuffles** are NEON's `tbl` and `zip`, through the CBytesNEON C module (the
+  `NEONShuffle` trait, on by default). Swift can't express them: `SIMD16`'s dynamic subscript goes a lane
+  at a time, and its zip patterns get merged into four-vector shuffles, which ARM64 builds a lane at a
+  time. `ByteLanes.isLookupVectorized` says whether lookups are single instructions (ARM64 with the trait),
+  so code can choose another way where they aren't.
+- [Base64](../Base64) is built from these: 21 GB/s per core, 93% of a C kernel with `ld3` and `st4`.
+
 ## Decoders
 
 For entropy coders and LZ77 (DEFLATE, PNG, JPEG, Brotli), Bytes has a bit buffer, Huffman tables, and

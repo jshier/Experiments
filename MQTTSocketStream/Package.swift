@@ -9,14 +9,31 @@ import PackageDescription
 // The I/O interfaces need the `ExperimentalIO` trait and a toolchain with swiftlang/swift#91981 (the
 // split continuation), and processes must run against that toolchain's Concurrency runtime. See README.md.
 
-/// The toolchain's Concurrency runtime, which the executables must load instead of the OS's. Embedded in each
-/// executable as `LC_DYLD_ENVIRONMENT` (`ld -dyld_env`), so it applies however they're launched: the
+/// The selected toolchain's Concurrency runtime, which the executables must load instead of the OS's. Embedded
+/// in each executable as `LC_DYLD_ENVIRONMENT` (`ld -dyld_env`), so it applies however they're launched: the
 /// benchmark plugin, like `swift test`, doesn't pass `DYLD_LIBRARY_PATH` through to the processes it starts.
-let runtime = ProcessInfo.processInfo.environment["MQTT_SOCKET_STREAM_RUNTIME"]
-    ?? "\(NSHomeDirectory())/Library/Developer/Toolchains/swift-PR-91981-2511.xctoolchain/usr/lib/swift/macosx"
-let useToolchainRuntime: [LinkerSetting] = [
-    .unsafeFlags(["-Xlinker", "-dyld_env", "-Xlinker", "DYLD_LIBRARY_PATH=\(runtime)"]),
-]
+///
+/// No toolchain is named here (builds come and go): the one this package needs is in `.swift-toolchain`
+/// (see `../Tools/toolchains.json`), and the runtime is that of whichever toolchain the build uses:
+/// `TOOLCHAIN_RUNTIME` (set by `../Tools/toolchain`), else the installed toolchain whose bundle id is
+/// `TOOLCHAINS`. With neither, nothing is embedded, and the I/O fails at run time on the OS runtime.
+let runtime: String? = {
+    let environment = ProcessInfo.processInfo.environment
+    if let runtime = environment["TOOLCHAIN_RUNTIME"] { return runtime }
+    guard let id = environment["TOOLCHAINS"] else { return nil }
+    for directory in ["\(NSHomeDirectory())/Library/Developer/Toolchains", "/Library/Developer/Toolchains"] {
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: directory)) ?? [] {
+            let toolchain = "\(directory)/\(name)"
+            guard let info = NSDictionary(contentsOfFile: "\(toolchain)/Info.plist"),
+                  info["CFBundleIdentifier"] as? String == id else { continue }
+            return "\(toolchain)/usr/lib/swift/macosx"
+        }
+    }
+    return nil
+}()
+let useToolchainRuntime: [LinkerSetting] = runtime.map {
+    [.unsafeFlags(["-Xlinker", "-dyld_env", "-Xlinker", "DYLD_LIBRARY_PATH=\($0)"])]
+} ?? []
 
 let settings: [SwiftSetting] = [
     .swiftLanguageMode(.v6),

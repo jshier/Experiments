@@ -1,0 +1,74 @@
+#!/bin/bash
+# sil-trace — follow SIL instructions through the optimizer: which pass adds, changes, or removes them, for one
+# function. Finds why a retain, release, destroy, allocation, or copy survives (or appears).
+#
+# usage: Tools/sil-trace FILE.swift FUNCTION MATCH [-- SWIFTC_ARGS...]
+#        Tools/sil-trace --target PACKAGE_DIR TARGET FUNCTION MATCH [--debug]
+#
+#   FUNCTION  Perl regex for the function's demangled (or mangled) name; the first match is traced
+#   MATCH     Perl regex for the SIL instructions to follow, e.g.
+#               'destroy_value|destroy_addr|release_value|strong_release'      lifetimes ending
+#               'copy_value|retain_value|strong_retain'                         copies
+#               'alloc_box|alloc_ref|alloc_stack'                                allocations
+#               'apply|try_apply'                                                calls left
+#
+# Output: each pass after which the matching instructions changed, with them (value numbers normalized to
+# %_, comments dropped). The last line is what reaches IRGen.
+#
+# Uses -Xllvm -sil-print-function / -sil-print-all, which release compilers support. For a target, the
+# function's module is recompiled with its exact command (Tools/swiftc-target).
+#
+# example (the trivially destroyable ~Escapable struct whose release survives LowerAggregateInstrs):
+#   Tools/sil-trace Client.swift 'spans4' 'release_value|destroy' -- -I . -enable-experimental-feature Lifetimes
+source "$(dirname "$0")/lib/common.sh"
+
+target_package= target_name= debug= positional=() swiftc_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target) target_package="$2"; target_name="$3"; shift 2 ;;
+        --debug) debug=--debug ;;
+        -h|--help) usage ;;
+        --) shift; swiftc_args=("$@"); break ;;
+        *) positional+=("$1") ;;
+    esac
+    shift
+done
+scratch_dir
+
+compile() { # compile ARGS...: SIL, with extra args
+    if [[ -n "$target_package" ]]; then
+        "$TOOLS_DIR/swiftc-target" $debug "$target_package" "$target_name" -- "$@"
+    else
+        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos27" -module-name "$module" "${swiftc_args[@]}" "$file" "$@"
+    fi
+}
+if [[ -n "$target_package" ]]; then
+    [[ ${#positional[@]} -eq 2 ]] || usage 2
+    function_pattern="${positional[0]}" match="${positional[1]}"
+else
+    [[ ${#positional[@]} -eq 3 ]] || usage 2
+    file="${positional[0]}" function_pattern="${positional[1]}" match="${positional[2]}"
+    # A fixed module name: without one, swiftc names the module after the output file, and mangled names differ.
+    module="$(basename "$file" .swift | perl -pe 'chomp; s/\W/_/g; s/^(\d)/_$1/')"
+fi
+
+# The function's mangled name, from the optimized SIL's function list.
+compile -emit-sil -o "$SCRATCH/out.sil" 2> "$SCRATCH/log" || { grep error "$SCRATCH/log" >&2; die "compile failed"; }
+perl -ne 'print "$1\n" if /^sil .*@(\$\S+)\s*:/' "$SCRATCH/out.sil" | sort -u > "$SCRATCH/names"
+mangled="$(paste "$SCRATCH/names" <(demangle < "$SCRATCH/names") |
+    PATTERN="$function_pattern" perl -F'\t' -ane 'chomp $F[1]; if ($F[1] =~ /$ENV{PATTERN}/ || $F[0] =~ /$ENV{PATTERN}/) { print $F[0]; exit }')"
+[[ -n "$mangled" ]] || fail "no SIL function matching /$function_pattern/"
+note "tracing $(echo "$mangled" | demangle) ($mangled)"
+
+compile -emit-sil -o /dev/null -Xllvm "-sil-print-function=$mangled" -Xllvm -sil-print-all > "$SCRATCH/trace" 2>&1 || true
+MATCH="$match" perl -ne '
+    # "*** SIL function after #4346, stage LowLevel,Function, pass 6: LowerAggregateInstrs (lower-aggregate-instrs)"
+    # or "*** SIL module before EarlyModulePasses ***".
+    if (/\*\*\* SIL (?:module|function) (?:after|before)/) {
+        $pass = /pass \d+: (.+?)\s*$/ ? $1 : /\*\*\* SIL \w+ ((?:after|before)\s+.+?)\s*(?:\*\*\*)?\s*$/ ? $1 : "?"; next }
+    if (/^sil /) { $in = 1; @found = (); next }
+    if ($in && /^\} \/\/ end sil function/) {
+        $in = 0; my $state = join "; ", @found;
+        if (!defined $last || $state ne $last) { printf "%-70s %d  %s\n", $pass, scalar @found, $state; $last = $state }
+        next }
+    if ($in && /$ENV{MATCH}/) { my $i = $_; $i =~ s{\s*//.*}{}; $i =~ s/%\d+/%_/g; $i =~ s/^\s+|\s+$//g; $i =~ s/\s+/ /g; push @found, $i }' "$SCRATCH/trace"

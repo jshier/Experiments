@@ -1,0 +1,60 @@
+#!/bin/bash
+# loops — find the loops in compiled functions and say whether they're vectorized.
+#
+# usage: Tools/loops FILE PATTERN [--tsv] [--body] [--require OPS] [--forbid OPS]
+#        Tools/loops --target PACKAGE_DIR TARGET PATTERN [options]
+#
+#   FILE      a Mach-O object (.o) or binary (executable, dylib)
+#   --target  a SwiftPM target instead: built (release) and its objects merged into one (lib/common.sh
+#             target_object). The way to check a package; set TOOLCHAINS for another toolchain.
+#   PATTERN   Perl regex matched against demangled names ("static Base64.encodeBlocks") and mangled ones.
+#
+# For each matching function, each loop (a branch back to an earlier label): its address range, instruction
+# count, nesting, a verdict, and its instruction mix. Verdicts:
+#   vector128   128-bit NEON (`.16b`, `.8h`, `.4s`, `.2d`, q-register loads/stores)
+#   vector64    only 64-bit NEON (often a vectorizer epilogue)
+#   scalar      no NEON
+#   +lane-moves single lanes moved to/from general registers (`mov.b v3[2], w12`, `ins`, `umov`): a shuffle
+#               LLVM couldn't express, built a lane at a time
+#   +calls      calls in the loop (`bl`/`blr`)
+#
+#   --tsv         one line per loop: function, loop, start, end, instructions, depth, innermost|outer,
+#                 verdict, mix
+#   --body        print each loop's instructions
+#   --require OPS comma-separated mnemonic substrings that must all appear in an innermost loop (`ld3.16b,st4.16b`)
+#   --forbid OPS  mnemonic substrings that must not (`mov.b,ins,umov,bl`)
+#   With --require/--forbid, exits 1 unless every matching function has an innermost loop that passes.
+#
+# examples (Base64's two kernels: the NEON table kernel, without lane-at-a-time inserts, and the
+# auto-vectorized 3-byte-group kernel):
+#   Tools/loops --target Base64 Base64 encodeBlocks --require tbl,zip --forbid mov.b,ins
+#   Tools/loops --target Base64 Base64 'encode\(_:into:alphabet' --require ld3.16b,st4.16b
+#   Tools/loops .build/release/mqtt-benchmarks 'MQTTPublish.init' --body
+source "$(dirname "$0")/lib/common.sh"
+
+[[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]] && usage
+[[ $# -ge 2 ]] || usage 2
+read_input "$@"; shift "$INPUT_ARGS"
+[[ $# -ge 1 ]] || usage 2
+file="$INPUT" pattern="$1"; shift
+[[ -f "$file" ]] || die "no file $file"
+export FORMAT=text BODY= REQUIRE= FORBID=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --tsv) FORMAT=tsv ;;
+        --body) BODY=1 ;;
+        --require) REQUIRE="$2"; shift ;;
+        --forbid) FORBID="$2"; shift ;;
+        -h|--help) usage ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+
+symbols="$(find_symbols "$file" "$pattern")"
+[[ -n "$symbols" ]] || fail "no function matching /$pattern/ in $file"
+status=0
+while IFS=$'\t' read -r mangled demangled; do
+    FUNCTION="$demangled" disassemble_symbol "$file" "$mangled" | FUNCTION="$demangled" perl "$TOOLS_DIR/lib/loops.pl" || status=1
+done <<<"$symbols"
+exit $status

@@ -1,0 +1,99 @@
+#!/bin/bash
+# counters — what each thread's CPU actually did, from the performance counters (Instruments' CPU Counters
+# instrument, recorded with xctrace). No sudo. The runtime check for vectorization: SIMD instruction counts.
+#
+# usage: Tools/counters [--mode MODE] [--keep FILE.trace] -- PROGRAM [ARGS...]
+#        Tools/counters [--mode MODE] --trace FILE.trace
+#        Tools/counters --list-modes
+#
+# Modes (Instruments' names; --list-modes prints all, with their metrics, from Xcode's own definitions):
+#   bottlenecks (default)   share of cycles: useful (retiring), discarded (mispredicted work), delivery
+#                           (front end: fetch, decode, i-cache), processing (back end: execution units, memory)
+#   processing              back-end breakdown: executing, execution latency, memory misses
+#   delivery                front-end breakdown: latency (i-cache, i-TLB), bandwidth (taken branches)
+#   simd_fp_unit_instructions        counts of SIMD/FP arithmetic, loads, and stores — 0 means scalar code
+#   branch_simd_vector_instructions  branches, taken branches, SIMD vector arithmetic
+#   call_branch_instructions, l1d_metrics, l1d_miss_sampling, data_address_translation_metrics, …
+#
+# Output, tab-separated, per thread with cycles, busiest first:
+#   bottleneck modes:  thread, cycles (G), then each metric's share of the mode's total
+#   count modes:       thread, cycles (G), then each metric's count (G) and per cycle, "count (per cycle)"
+# Counts are summed over all cores (P and E). Per cycle and per unit of work (divide by your iterations) is
+# the useful form: e.g. SIMD arithmetic per 48-byte block equals the vector instructions in the loop.
+#
+#   --keep FILE.trace   keep the recording (open it in Instruments for timelines and per-function detail)
+#   --time-limit T      stop recording after T (e.g. 5s); default: when PROGRAM exits
+source "$(dirname "$0")/lib/common.sh"
+have yq || die "needs yq: brew install yq"
+have jq || die "needs jq: brew install jq"
+definitions="$(xcode-select -p)/../SharedFrameworks/RecountDT.framework/Versions/A/Resources/Analysis"
+
+mode=bottlenecks trace= keep= limit=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --mode) mode="$2"; shift ;;
+        --trace) trace="$2"; shift ;;
+        --keep) keep="$2"; shift ;;
+        --time-limit) limit="$2"; shift ;;
+        --list-modes)
+            jq -r '.name as $analysis | .modes[] | [$analysis, .name, .display_name, ([.metrics[]?.name] | join(","))] | @tsv' "$definitions"/*.json
+            exit 0 ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+analysis="$(jq -r --arg m "$mode" 'select(any(.modes[]; .name == $m)) | .name' "$definitions"/*.json 2>/dev/null | head -1)"
+[[ -n "$analysis" ]] || die "unknown mode $mode (Tools/counters --list-modes)"
+scratch_dir
+
+if [[ -z "$trace" ]]; then
+    [[ $# -ge 1 ]] || usage 2
+    trace="${keep:-$SCRATCH/run.trace}"
+    rm -rf "$trace"
+    xctrace record --template 'CPU Counters' --show-recording-options 2>/dev/null |
+        jq --arg a "$analysis" --arg c "$mode" '.["CPU Counters"].selectedCountingMode = {analysisMode: $a, countingMode: $c}' > "$SCRATCH/options.json"
+    program="$(debuggable "$1")"; shift
+    note "recording $(basename "$program") with CPU Counters ($mode)…"
+    xctrace record --template 'CPU Counters' --recording-options "$SCRATCH/options.json" --output "$trace" \
+        ${limit:+--time-limit "$limit"} --launch -- "$program" "$@" > "$SCRATCH/record.log" 2>&1 ||
+        { tail -5 "$SCRATCH/record.log" >&2; die "xctrace record failed ($AUTH_HINT)"; }
+fi
+[[ -d "$trace" ]] || die "no trace $trace"
+
+# xctrace writes each repeated value once, with an "id", and later as {"ref": id}. `resolve` maps them back.
+resolve='([.. | objects | select(has("+@id"))] | map({key: .["+@id"], value: .}) | from_entries) as $ids
+    | def r: if type == "object" and has("+@ref") then $ids[.["+@ref"]] else . end;
+    def rows: .["trace-query-result"].node.row // [] | if type == "array" then .[] else . end;'
+export_table() { xctrace export --input "$trace" --xpath "/trace-toc/run[@number=\"1\"]/data/table[@schema=\"$1\"]" 2>/dev/null | yq -p xml -o json '.'; }
+
+if [[ "$analysis" == bottleneck ]]; then
+    # Relative weights per time slice in MetricAggregationForThread; cycles as integers.
+    export_table MetricAggregationForThread | jq -r "$resolve"'
+        [rows | {thread: (.thread | r | .["+@fmt"]), name: (.string | r | .["+content"]),
+                 int: ((.uint64 | r | .["+content"]) // "0" | tonumber),
+                 double: ((.["fixed-decimal"] | r | .["+content"]) // "0" | tonumber)}]
+        | group_by(.thread)
+        | map({thread: .[0].thread, cycles: (map(select(.name == "cycle") | .int) | add // 0),
+               metrics: (map(select(.name != "cycle")) | group_by(.name) | map({key: .[0].name, value: (map(.double) | add)}) | from_entries)})
+        | map(select(.cycles > 0)) | sort_by(-.cycles)
+        | .[] | (.metrics | add) as $total
+        | [.thread, (.cycles / 1e9 * 100 | round / 100 | tostring) + " G"]
+          + (.metrics | to_entries | map("\(.key) " + (if $total > 0 then (.value / $total * 1000 | round / 10 | tostring) + "%" else "-" end)))
+        | @tsv'
+else
+    # Event counts per thread in MetricTableForThread.
+    export_table MetricTableForThread | jq -r "$resolve"'
+        [rows | {thread: (.thread | r | .["+@fmt"]),
+                 name: (.string | if type == "array" then .[0] else . end | r | .["+content"]),
+                 value: ((.["non-zero-uint64"] // .uint64 // {"+content": "0"}) | r | .["+content"] // "0" | tonumber)}]
+        | group_by(.thread)
+        | map({thread: .[0].thread, cycles: (map(select(.name == "cycle") | .value) | add // 0),
+               metrics: (map(select(.name != "cycle")) | group_by(.name) | map({key: .[0].name, value: (map(.value) | add)}) | from_entries)})
+        | map(select(.cycles > 0)) | sort_by(-.cycles)
+        | .[] | .cycles as $cycles
+        | [.thread, (.cycles / 1e9 * 100 | round / 100 | tostring) + " G"]
+          + (.metrics | to_entries | map("\(.key) \(.value / 1e9 * 1000 | round / 1000) G (\(.value / $cycles * 1000 | round / 1000))"))
+        | @tsv'
+fi

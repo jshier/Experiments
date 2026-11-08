@@ -1,0 +1,93 @@
+#!/bin/bash
+# bn — Binary Ninja's MCP server from the command line: for scripts, and for sessions where the MCP tools
+# didn't load (the server wasn't running when the session started).
+#
+# usage: Tools/bn status                         is the server up; Binary Ninja's version
+#        Tools/bn tools                          the server's tools, one line each
+#        Tools/bn call TOOL ['JSON-ARGUMENTS']   call a tool, print its text result
+#        Tools/bn loop-il FILE PATTERN [--level llil|mlil|lifted]
+#                                                open FILE, find the first function matching PATTERN (a
+#                                                substring of its name), print its loops' blocks (back edges)
+#                                                as IL, where NEON appears as intrinsics (vqtbl4q_s8, vzip1q_s8,
+#                                                vld3q…); then close FILE if this opened it
+#
+# The server runs inside the Binary Ninja app (GUI MCP server, HTTP; enable and start it in Settings → MCP,
+# or the command palette). The headless `binaryninja_mcp` (stdio) needs a Commercial or Ultimate license.
+# URL: BN_MCP_URL (default http://127.0.0.1:24642/mcp). Opening a file adds a tab in the app; `loop-il`
+# closes what it opened. Constant pools in relocatable objects (.o) read as empty: open linked binaries for
+# memory reads.
+#
+# Binary Ninja vs Tools/loops: loops is faster, needs nothing running, works on any toolchain's output, and
+# can assert; Binary Ninja adds demangled names everywhere, CFGs with back-edge flags, cross-references,
+# IL with NEON as intrinsics, and interactive navigation in the app.
+source "$(dirname "$0")/lib/common.sh"
+have jq || die "needs jq"
+URL="${BN_MCP_URL:-http://127.0.0.1:24642/mcp}"
+
+session() {
+    local headers
+    headers="$(mktemp)"
+    curl -sf -D "$headers" -o /dev/null -X POST "$URL" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+        -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"experiments-tools","version":"1"}}}' ||
+        { rm -f "$headers"; fail "no Binary Ninja MCP server at $URL (is Binary Ninja open with the MCP server started?)"; }
+    SESSION="$(perl -ne 'print $1 if /^mcp-session-id:\s*(\S+)/i' "$headers")"
+    rm -f "$headers"
+    post '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null
+}
+post() {
+    curl -s -X POST "$URL" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+        ${SESSION:+-H "Mcp-Session-Id: $SESSION"} -d "$1" | sed 's/^data: //'
+}
+call() { # call TOOL JSON: the tool's text result; exit 1 on a tool error
+    local response
+    response="$(post "$(jq -cn --arg name "$1" --argjson args "${2:-{\}}" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$name,arguments:$args}}')")"
+    if [[ "$(jq -r '.result.isError // false' <<<"$response")" == true || -n "$(jq -r '.error.message // empty' <<<"$response")" ]]; then
+        jq -r '.error.message // .result.content[0].text' <<<"$response" >&2; return 1
+    fi
+    jq -r '.result.content[0].text' <<<"$response"
+}
+
+command="${1:-}"; shift || true
+case "$command" in
+    status)
+        session
+        post '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '"up: \(.result.tools | length) tools"'
+        defaults read "/Applications/Binary Ninja.app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null | sed 's/^/Binary Ninja /' ;;
+    tools)
+        session
+        post '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '.result.tools[] | "\(.name)\t\(.description | split("\n")[0])"' ;;
+    call)
+        [[ $# -ge 1 ]] || usage 2
+        session; call "$1" "${2:-{\}}" ;;
+    loop-il)
+        [[ $# -ge 2 ]] || usage 2
+        file="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" pattern="$2" level=llil
+        [[ "${3:-}" == --level ]] && level="$4"
+        session
+        opened="$(call bn_open_item_open "$(jq -cn --arg p "$file" '{path:$p, setActive:true}')" | perl -ne 'print $1 if /\b(item_\d+)\b/')"
+        trap '[[ -n "$opened" ]] && call bn_open_item_close "{\"openItem\":\"$opened\"}" > /dev/null' EXIT
+        call bn_analysis_update_and_wait '{}' > /dev/null
+        address="$(call bn_function_search "$(jq -cn --arg q "$pattern" '{query:$q, limit:1}')" | perl -ne 'print $1 if /^\|\s*(0x[0-9a-f]+)\s*\|/')"
+        [[ -n "$address" ]] || fail "no function matching '$pattern'"
+        call bn_function_search "$(jq -cn --arg q "$pattern" '{query:$q, limit:1}')" | perl -ne 'print "function $1 ", substr($2, 0, 150), "\n" if /^\|\s*(0x[0-9a-f]+)\s*\|[^|]*\|\s*([^|]+)/'
+        # Loop blocks: those with a back-edge among their incoming edges.
+        call bn_function_basic_blocks "{\"function\":\"$address\",\"limit\":500}" |
+            perl -ne 'print "$1 $2\n" if /^\|\s*\d+\s*\|\s*(0x[0-9a-f]+)-(0x[0-9a-f]+).*back-edge/' > "${TMPDIR:-/tmp}/bn-loops.$$"
+        [[ -s "${TMPDIR:-/tmp}/bn-loops.$$" ]] || { rm -f "${TMPDIR:-/tmp}/bn-loops.$$"; fail "no loops in $address"; }
+        while read -r start end; do echo "loop block ${start}–${end}:"; done < "${TMPDIR:-/tmp}/bn-loops.$$"
+        call bn_function_il "{\"function\":\"$address\",\"level\":\"$level\",\"limit\":2000}" |
+            RANGES="$(tr '\n' ' ' < "${TMPDIR:-/tmp}/bn-loops.$$")" perl -ne '
+                BEGIN { my @r = split " ", $ENV{RANGES}; while (@r) { push @ranges, [hex shift @r, hex shift @r] } }
+                next unless /^(0x[0-9a-f]+)\s+(.*)$/; my ($address, $text) = ($1, $2); my $a = hex $address;
+                next unless grep { $a >= $_->[0] && $a < $_->[1] } @ranges;
+                # Lanewise operations lift as one statement per lane (v17.b[0] = …, v17.b[1] = …): collapse
+                # a run of them at one address into the first, with the lane count.
+                (my $shape = $text) =~ s/\[\d+\]/[i]/g;
+                if (defined $last && $address eq $last_address && $shape eq $last_shape) { $lanes++; next }
+                flush(); ($last, $last_address, $last_shape, $lanes) = ("  $address  $text", $address, $shape, 1);
+                sub flush { print $last, ($lanes > 1 ? "   (×$lanes lanes)" : ""), "\n" if defined $last }
+                END { flush() }'
+        rm -f "${TMPDIR:-/tmp}/bn-loops.$$" ;;
+    -h|--help|"") usage ;;
+    *) die "unknown command $command" ;;
+esac

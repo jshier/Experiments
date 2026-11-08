@@ -1,0 +1,83 @@
+#!/bin/bash
+# mca — static throughput estimate for a compiled loop with llvm-mca: cycles per iteration, IPC, and which
+# execution units bind it.
+#
+# usage: Tools/mca FILE PATTERN [--loop N] [--cpu CPU] [--full]
+#        Tools/mca --target PACKAGE_DIR TARGET PATTERN [options]
+#
+#   FILE, --target, PATTERN  as for Tools/loops (one function should match; the first is used)
+#   --loop N       the loop number Tools/loops prints (default: the largest innermost loop)
+#   --cpu          LLVM CPU model (default apple-m3; `llvm-mca -mcpu=help` lists them)
+#   --full         llvm-mca's whole report (per-instruction latency and micro-ops, timeline)
+#
+# Prints the loop's instruction count, llvm-mca's "Block RThroughput" (cycles per iteration if nothing but
+# throughput limits it) and IPC, and the resource pressure per unit, busiest first.
+#
+# Caveat, measured: LLVM's Apple CPU models are derived from the old Cyclone model (3 vector units; every
+# `tbl` is one micro-op whatever its table size; `ld3`/`st4` costed simply). It predicted 7.7 cycles per 48
+# bytes for both a 7-`tbl` Base64 kernel (measured 9.1) and a C `ld3`/`st4` kernel (measured 8.4). Use it for
+# a lower bound and to see which unit saturates, not to rank NEON shuffle strategies: measure those.
+#
+# Needs Homebrew's LLVM (brew install llvm; keg-only, found automatically).
+source "$(dirname "$0")/lib/common.sh"
+
+[[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]] && usage
+[[ $# -ge 2 ]] || usage 2
+read_input "$@"; shift "$INPUT_ARGS"
+[[ $# -ge 1 ]] || usage 2
+file="$INPUT" pattern="$1"; shift
+loop= cpu=apple-m3 full=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --loop) loop="$2"; shift ;;
+        --cpu) cpu="$2"; shift ;;
+        --full) full=1 ;;
+        -h|--help) usage ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+need_llvm
+scratch_dir
+
+symbol="$(find_symbols "$file" "$pattern" | head -1)"
+[[ -n "$symbol" ]] || fail "no function matching /$pattern/ in $file"
+mangled="${symbol%%$'\t'*}" demangled="${symbol#*$'\t'}"
+"$TOOLS_DIR/loops" "$file" "^$(perl -e 'print quotemeta shift' "$mangled")\$" --tsv > "$SCRATCH/loops" 2>/dev/null || true
+[[ -s "$SCRATCH/loops" ]] || fail "no loops in $demangled"
+# Columns: function, loop, start, end, instructions, depth, innermost|outer, verdict, mix.
+if [[ -n "$loop" ]]; then
+    range="$(perl -F'\t' -ane 'print "$F[2] $F[3] $F[4]\n" if $F[1] eq "loop'"$loop"'"' "$SCRATCH/loops")"
+else
+    range="$(perl -F'\t' -ane 'print "$F[4] $F[2] $F[3] $F[4]\n" if $F[6] eq "innermost"' "$SCRATCH/loops" | sort -rn | head -1 | cut -d' ' -f2-)"
+fi
+[[ -n "$range" ]] || fail "no such loop"
+read -r start end count <<<"$range"
+
+# The loop's instructions as assembly llvm-mca can read: no addresses, comments, or branches (their targets
+# are labels it can't resolve; the loop branch is one cheap instruction).
+"$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols="$mangled" "$file" |
+    START="$start" END="$end" perl -ne '
+        next unless /^\s*([0-9a-f]+):\s+(\S+)\s*(.*)$/;
+        my ($a, $m, $o) = (hex $1, $2, $3);
+        next if $a < hex($ENV{START}) || $a > hex($ENV{END});
+        next if $m =~ /^(b|b\..+|cbz|cbnz|tbz|tbnz)$/;
+        $o =~ s/\s*[;<].*$//;
+        print "$m $o\n"' > "$SCRATCH/loop.s"
+
+echo "$demangled: loop at 0x${start}–0x${end}, ${count} instructions, model ${cpu}"
+if [[ -n "$full" ]]; then
+    "$LLVM_BIN/llvm-mca" -mtriple=arm64-apple-macos -mcpu="$cpu" -iterations=500 "$SCRATCH/loop.s"
+    exit 0
+fi
+"$LLVM_BIN/llvm-mca" -mtriple=arm64-apple-macos -mcpu="$cpu" -iterations=500 "$SCRATCH/loop.s" > "$SCRATCH/report" 2>&1 ||
+    { cat "$SCRATCH/report" >&2; die "llvm-mca failed"; }
+grep -E "^(Block RThroughput|IPC|uOps Per Cycle):" "$SCRATCH/report" | sed 's/^/  /'
+echo "  resource pressure per iteration, busiest units:"
+perl -ne '
+    if (/^\[([\d.]+)\]\s+-\s+(\S+)/) { $name{$1} = $2 }
+    if (/^Resource pressure per iteration:/) { $header = <>; $values = <>; @h = $header =~ /\[([\d.]+)\]/g; @v = split " ", $values;
+        for my $i (0 .. $#h) { $p{$h[$i]} = $v[$i] } }
+    END { my %unit; for (keys %p) { next if $p{$_} eq "-"; $unit{$name{$_} // $_} += $p{$_} }
+          for (sort { $unit{$b} <=> $unit{$a} } keys %unit) { printf "    %-12s %6.2f\n", $_, $unit{$_} } }' "$SCRATCH/report" | head -6
+echo "  (Apple models are Cyclone-derived: a bound, not a prediction for NEON shuffles. See --help.)"

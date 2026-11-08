@@ -1,7 +1,8 @@
 import Benchmark
 import MQTTSocketStream
 
-// Run with the toolchain's Concurrency runtime: Scripts/benchmark.sh (see README.md).
+// Run with the toolchain's Concurrency runtime: `../Tools/toolchain . -- swift package --disable-sandbox
+// benchmark` (see README.md).
 
 extension BenchmarkMetric {
     static let bandwidth = BenchmarkMetric.custom("Bandwidth (MB/s)", polarity: .prefersLarger, useScalingFactor: false)
@@ -128,8 +129,8 @@ let benchmarks: @Sendable () -> Void = {
     }
 
     // Allocation checks: each end's per-packet work must not allocate. Static thresholds of zero (in
-    // `Thresholds/`), so `Scripts/benchmark.sh thresholds check --filter 'Allocations:.*'` fails if either
-    // does. Warmup runs the fixtures' lazy initializers.
+    // `Thresholds/`), so `benchmark thresholds check --filter 'Allocations:.*'` (through `../Tools/toolchain .`)
+    // fails if either does. Warmup runs the fixtures' lazy initializers.
     let zeroAllocations = Benchmark.Configuration(
         metrics: [.mallocCountTotal],
         warmupIterations: 1,

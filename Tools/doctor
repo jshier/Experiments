@@ -1,0 +1,83 @@
+#!/bin/bash
+# doctor — what this machine has for performance work, and what's missing. Run it first in a new session.
+#
+# usage: Tools/doctor
+#
+# Output, tab-separated: area, item, status (ok | missing | off | note), detail (version, path, or how to
+# install). Notes on which LLVM is which: Swift compilers embed their own LLVM (Apple's fork in Xcode;
+# swiftlang/llvm-project in swift.org and PR toolchains); Homebrew's `llvm` is upstream and newer. Use
+# Swift's own for what the compiler did (Tools/remarks), Homebrew's only for what Swift toolchains don't
+# ship (llvm-mca, opt).
+source "$(dirname "$0")/lib/common.sh"
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
+
+row() { printf '%s\t%s\t%s\t%s\n' "$@"; }
+
+# CPU
+row machine cpu note "$(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo ?)P + $(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null || echo 0)E cores, macOS $(sw_vers -productVersion)"
+row machine sip note "$(csrutil status 2>/dev/null | sed 's/.*: //') (enabled: DTrace can't trace system libraries; use Tools/runtime-count)"
+if DevToolsSecurity -status 2>/dev/null | grep -q enabled; then
+    row machine developer-mode ok "attaching (Instruments, lldb) doesn't prompt"
+else
+    row machine developer-mode note "off: the first attach (Allocations, lldb) shows an authentication prompt, approved for 10 h; tell the user if a tool hangs. The user can run: sudo DevToolsSecurity -enable"
+fi
+
+# Swift and its LLVM
+row swift xcode ok "$(xcode-select -p)"
+row swift swiftc ok "$(xcrun swiftc --version 2>&1 | head -1)"
+row swift "Swift's LLVM (Xcode)" note "$(xcrun clang --version | head -1) — Apple's fork, what swiftc optimizes with"
+[[ -n "${TOOLCHAINS:-}" ]] && row swift TOOLCHAINS note "$TOOLCHAINS (selects the toolchain for xcrun, swift build, and these tools)"
+for toolchain in ~/Library/Developer/Toolchains/*.xctoolchain /Library/Developer/Toolchains/*.xctoolchain; do
+    [[ -d "$toolchain" && -f "$toolchain/Info.plist" ]] || continue
+    id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$toolchain/Info.plist" 2>/dev/null)"
+    version="$("$toolchain/usr/bin/swiftc" --version 2>&1 | head -1)"
+    row swift "toolchain $(basename "$toolchain")" ok "TOOLCHAINS=$id — $version"
+done
+# Registry problems (Tools/toolchains.json): needed but missing, broken links, installed but unregistered.
+"$TOOLS_DIR/toolchain" list 2>/dev/null | while IFS=$'\t' read -r name status id users source; do
+    case "$status" in
+        missing) row swift "toolchain $name" missing "needed by ${users:-nothing}: Tools/toolchain install $name ($source)" ;;
+        broken) row swift "toolchain $name" note "broken: $source" ;;
+        unregistered) row swift "toolchain $name" note "not in Tools/toolchains.json; if a package needs it: $source" ;;
+    esac
+done
+have swiftly && row swift swiftly ok "$(swiftly --version 2>/dev/null | head -1); installs release/snapshot toolchains (not PR builds)"
+
+# Xcode tools
+for tool in objdump otool nm swift-demangle dsymutil lldb xctrace; do
+    path="$(xcrun --find "$tool" 2>/dev/null || command -v "$tool" || true)"
+    [[ -n "$path" ]] && row xcode "$tool" ok "$path" || row xcode "$tool" missing "install Xcode"
+done
+row xcode xctrace-templates note "$(xctrace list templates 2>/dev/null | grep -cE '^[A-Z]') templates; CPU Counters, Time Profiler, Processor Trace, Allocations, Swift Tasks…"
+
+# Homebrew
+if have brew; then
+    llvm="$(llvm_bin || true)"
+    if [[ -n "$llvm" ]]; then
+        row brew llvm ok "$("$llvm/clang" --version | head -1) at $llvm (keg-only, upstream): llvm-mca, opt, llc, llvm-mc"
+    else
+        row brew llvm missing "brew install llvm — for Tools/mca (llvm-mca) and running opt on emitted IR"
+    fi
+    for entry in "yq:XML/YAML/TOML queries (Tools/remarks, counters, profile)" "jq:JSON queries" \
+                 "hyperfine:command-line benchmarking with statistics" "gawk:GNU awk (strtonum, gensub); not needed by Tools" \
+                 "gsed:GNU sed (sed -i without '', \\b); not needed by Tools" "coreutils:gdate (ns), gtimeout, gnumfmt" \
+                 "rg:ripgrep" "cloc:counting code"; do
+        tool="${entry%%:*}" purpose="${entry#*:}"
+        command="$tool"; [[ "$tool" == coreutils ]] && command=gdate
+        if have "$command"; then row brew "$tool" ok "$(command -v "$command") — $purpose"
+        else formula="${tool/gsed/gnu-sed}"; formula="${formula/#rg/ripgrep}"; row brew "$tool" missing "brew install $formula — $purpose"; fi
+    done
+    awk_version="$(awk --version 2>&1 | head -1)"
+    row brew awk note "awk on PATH: $(command -v awk) ($awk_version): one-true-awk, not gawk"
+else
+    row brew brew missing "https://brew.sh — for llvm (llvm-mca), yq, hyperfine"
+fi
+
+# Binary Ninja
+if [[ -d "/Applications/Binary Ninja.app" ]]; then
+    row binaryninja app ok "$(defaults read "/Applications/Binary Ninja.app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null)"
+    if lsof -nP -iTCP:24642 -sTCP:LISTEN > /dev/null 2>&1; then row binaryninja mcp ok "listening on 127.0.0.1:24642 (Tools/bn)"
+    else row binaryninja mcp off "open Binary Ninja and start its MCP server (Settings → MCP) for Tools/bn and MCP tools"; fi
+else
+    row binaryninja app missing "optional: https://binary.ninja (IL views, CFGs; MCP server)"
+fi

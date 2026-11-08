@@ -1,0 +1,55 @@
+#!/bin/bash
+# socket-ceiling — the kernel's throughput ceiling for local sockets, with no Swift, executor, or framing:
+# N sender/receiver thread pairs over blocking sockets, one connection each (Tools/lib/socket-ceiling.c).
+# The baseline for networking benchmarks: how close an implementation gets to what the kernel allows.
+#
+# usage: Tools/socket-ceiling [--pairs N] [--bytes SIZE] [--write SIZE] [--buffer SIZE] [--unix] [--runs N]
+#
+#   --pairs N      connections, each with a sending and a receiving thread (default 1; at most 256)
+#   --bytes SIZE   bytes sent per connection (default 1G)
+#   --write SIZE   bytes per write(2) call (default 256K)
+#   --buffer SIZE  SO_SNDBUF/SO_RCVBUF on both ends (default: the system's)
+#   --unix         a Unix-domain socketpair instead of loopback TCP
+#   --runs N       repeat, one line each (default 1)
+#   SIZE takes K, M, G suffixes (powers of 1024).
+#
+# Output, one line per run: pairs, GB transferred, milliseconds, GB/s.
+#
+# Compiled with xcrun clang -O2 on first use (and when the source changes) into
+# ~/Library/Caches/experiments-tools/.
+#
+# examples (MQTTSocketStream/RESULTS.md compares its transfers with these):
+#   Tools/socket-ceiling --pairs 1 --bytes 512M --write 256K
+#   Tools/socket-ceiling --pairs 4 --bytes 256M --unix --runs 3
+source "$(dirname "$0")/lib/common.sh"
+
+size() { perl -e 'my $s = shift; $s =~ /^(\d+)([KMG]?)B?$/i or exit 1; print $1 * {"" => 1, K => 1024, M => 1024**2, G => 1024**3}->{uc $2}' "$1" ||
+    die "bad size $1 (e.g. 4096, 256K, 1G)"; }
+pairs=1 bytes=1G write=256K buffer=0 unix= runs=1
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --pairs) pairs="$2"; shift ;;
+        --bytes) bytes="$2"; shift ;;
+        --write) write="$2"; shift ;;
+        --buffer) buffer="$2"; shift ;;
+        --unix) unix=u ;;
+        --runs) runs="$2"; shift ;;
+        -h|--help) usage ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+# One per line: in `a="$(…)" b="$(…)"` only the last substitution's failure counts.
+bytes="$(size "$bytes")"
+write="$(size "$write")"
+buffer="$(size "$buffer")"
+
+source_file="$TOOLS_DIR/lib/socket-ceiling.c"
+binary="$HOME/Library/Caches/experiments-tools/socket-ceiling"
+if [[ ! -x "$binary" || "$source_file" -nt "$binary" ]]; then
+    mkdir -p "$(dirname "$binary")"
+    xcrun clang -O2 -o "$binary" "$source_file" || die "couldn't compile $source_file"
+fi
+for ((run = 0; run < runs; run++)); do
+    "$binary" "$pairs" "$bytes" "$write" "$buffer" $unix
+done

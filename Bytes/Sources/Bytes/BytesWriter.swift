@@ -665,6 +665,46 @@ extension BytesWriter {
     public mutating func write<T: ByteRepresentable>(_ values: Span<T>) throws(BytesError) where T.RawBytes: ConvertibleToBytes {
         try write(T.self, count: values.count) { unsafe values[unchecked: $0] }
     }
+
+    /// Writes `count` values of `T` in place: `body` fills a typed view of the next `count` values' bytes,
+    /// then the writer moves past them. The counterpart of ``BytesReader/read(_:count:)``: together they
+    /// let a loop go from one typed span to another, which is the shape the compiler vectorizes best.
+    ///
+    /// ```swift
+    /// // Base64: 3 bytes in, 4 characters out, per element. Compiles to NEON `ld3`/`st4`.
+    /// let groups = try reader.read(InlineArray<3, UInt8>.self, count: count / 3)
+    /// try writer.write(InlineArray<4, UInt8>.self, count: groups.count, filling: { output in
+    ///     for index in groups.indices { output[index] = encode(groups[index]) }
+    /// })
+    /// ```
+    ///
+    /// The view starts with whatever bytes were there; `body` should set every element. `T` must accept any
+    /// bytes (`ConvertibleFromBytes`) and be storable as bytes (`ConvertibleToBytes`): integers, `SIMD`
+    /// vectors, and `InlineArray`s of them. Requires byte alignment.
+    ///
+    /// Throws ``BytesError/insufficientCapacity`` if there isn't room, and ``BytesError/misaligned`` if the
+    /// bytes aren't aligned for `T` (never for types with an alignment of 1, such as `InlineArray<N, UInt8>`).
+    /// Either way, `body` isn't called and nothing is written.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    public mutating func write<T: ConvertibleFromBytes & ConvertibleToBytes, R: ~Copyable>(
+        _: T.Type, count: Int, filling body: (inout MutableSpan<T>) -> R
+    ) throws(BytesError) -> R {
+        precondition(count >= 0, "Negative count")
+        precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
+        _assumeInvariant()
+        let (byteCount, overflow) = count.multipliedReportingOverflow(by: MemoryLayout<T>.stride)
+        guard !overflow, likely(_bytes.byteCount &- _byteOffset >= byteCount) else { throw .insufficientCapacity }
+        var bytes = _bytes._mutatingExtracting(_byteOffset..<(_byteOffset &+ byteCount))
+        if MemoryLayout<T>.alignment > 1, byteCount > 0 {
+            let address = bytes.withUnsafeBytes { UInt(bitPattern: $0.baseAddress) }
+            guard address & UInt(MemoryLayout<T>.alignment &- 1) == 0 else { throw .misaligned }
+        }
+        var values = MutableSpan<T>(mutating: &bytes)
+        let result = body(&values)
+        _byteOffset &+= byteCount
+        return result
+    }
 }
 
 // MARK: - Writing into uninitialized memory

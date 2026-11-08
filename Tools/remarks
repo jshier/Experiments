@@ -1,0 +1,73 @@
+#!/bin/bash
+# remarks — the compiler's own reasons, per function: which loops LLVM vectorized (and how wide), which it
+# didn't and why, and optionally other passes' decisions (inlining, specialization).
+#
+# usage: Tools/remarks FILE.swift [--passes REGEX] [--function PATTERN] [--all] [-- SWIFTC_ARGS...]
+#        Tools/remarks --target PACKAGE_DIR TARGET [--debug] [--passes REGEX] [--function PATTERN] [--all]
+#
+#   FILE.swift  compiled alone at -O for the host (add imports' flags after --, e.g. -I, -enable-experimental-feature)
+#   --target    a SwiftPM target, compiled with its exact command (Tools/swiftc-target; dependencies must be built)
+#   --passes    passes to report, a regex (default `loop-vectorize`). Others: `sil-inliner`,
+#               `sil-generic-specializer`, `inline` (LLVM), `slp-vectorizer`, `licm`, `gvn`.
+#   --function  only functions whose demangled name matches (Perl regex)
+#   --all       include the generic "loop not vectorized" lines that repeat a specific reason
+#
+# Output, one line per remark, tab-separated: kind (Passed|Missed|Analysis), pass, function (demangled),
+# location, reason name, message. Common loop-vectorize reasons:
+#   Vectorized "vectorization width: 16"     done; width 16 bytes lanes = one 128-bit vector per step
+#   "Cannot vectorize early exit loop"       a trap or break inside the loop: usually a bounds check
+#   "cannot identify array bounds"           can't prove accesses don't overlap or stay in bounds
+#   "could not determine number of loop iterations"   not a counted loop
+#   "loop control flow is not understood"    branches inside the body (e.g. correlated `if`s threaded)
+#   "the cost-model indicates ... not beneficial"     vectorized, but no extra interleaving
+#
+# These come from Swift's own LLVM (`-save-optimization-record-passes`), so they describe what the shipped
+# compiler did. Plain `-Xllvm -pass-remarks*` doesn't work with swiftc (unknown or silent).
+#
+# examples:
+#   Tools/remarks Probe.swift -- -enable-experimental-feature Lifetimes
+#   Tools/remarks --target Base64 Base64 --function encode
+source "$(dirname "$0")/lib/common.sh"
+have yq || die "needs yq: brew install yq"
+
+passes='loop-vectorize' function_pattern='' all= target_package= target_name= file= debug=
+swiftc_args=()
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --target) target_package="$2"; target_name="$3"; shift 2 ;;
+        --debug) debug=--debug ;;
+        --passes) passes="$2"; shift ;;
+        --function) function_pattern="$2"; shift ;;
+        --all) all=1 ;;
+        -h|--help) usage ;;
+        --) shift; swiftc_args=("$@"); break ;;
+        -*) die "unknown option $1" ;;
+        *) file="$1" ;;
+    esac
+    shift
+done
+[[ -n "$file" || -n "$target_package" ]] || usage 2
+scratch_dir
+record="$SCRATCH/record.opt.yaml"
+flags=(-c -o "$SCRATCH/out.o" -save-optimization-record=yaml -save-optimization-record-path "$record"
+       -save-optimization-record-passes "$passes")
+
+if [[ -n "$target_package" ]]; then
+    "$TOOLS_DIR/swiftc-target" $debug "$target_package" "$target_name" -- "${flags[@]}" 2> "$SCRATCH/log" ||
+        { grep -E "error" "$SCRATCH/log" >&2; die "compiling $target_name failed"; }
+else
+    [[ -f "$file" ]] || die "no file $file"
+    xcrun swiftc -O -g -parse-as-library -target "$(uname -m)-apple-macos27" "${swiftc_args[@]}" "$file" "${flags[@]}" 2> "$SCRATCH/log" ||
+        { grep -E "error" "$SCRATCH/log" >&2; die "compiling $file failed"; }
+fi
+[[ -s "$record" ]] || fail "no remarks for /$passes/"
+
+PASSES="$passes" yq -o tsv 'select(.Pass | test("^(" + strenv(PASSES) + ")$")) |
+    [tag, .Pass, .Function, (.DebugLoc.File // "?") + ":" + ((.DebugLoc.Line // 0) | tostring), .Name,
+     ([.Args[] | to_entries | .[0].value | tostring] | join(""))]' "$record" |
+    demangle | sed 's/^!//' |
+    FUNCTION="$function_pattern" ALL="$all" perl -F'\t' -ane '
+        next if length $ENV{FUNCTION} && $F[2] !~ /$ENV{FUNCTION}/;
+        next if !$ENV{ALL} && $F[4] eq "MissedDetails";
+        chomp $F[5]; $F[3] =~ s{.*/}{}; $F[5] =~ s/"+//g;
+        print join("\t", @F), "\n"' | sort -u

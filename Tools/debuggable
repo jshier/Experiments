@@ -1,0 +1,19 @@
+#!/bin/bash
+# debuggable — print the path of a copy of PROGRAM signed with the `get-task-allow` entitlement, so
+# Instruments (Allocations, Leaks, any attaching template), lldb, and `sample` can attach to it. SwiftPM
+# release builds lack it, and attaching fails with "Failed to attach to target process".
+#
+# usage: Tools/debuggable PROGRAM
+#
+# The copy is PROGRAM-debuggable next to PROGRAM (so rpaths and resource bundles resolve), re-made only when
+# PROGRAM is newer; a program that already has the entitlement prints as is. The Tools that launch programs
+# (allocations, counters, profile, sample-top, runtime-count) do this themselves; use this for everything
+# else, e.g.:
+#   xctrace record --template Leaks --launch -- "$(Tools/debuggable .build/release/tool)" ARGS
+source "$(dirname "$0")/lib/common.sh"
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
+[[ $# -eq 1 ]] || usage 2
+scratch_dir
+copy="$(debuggable "$1")"
+[[ "$copy" != "$SCRATCH"/* ]] || die "$(dirname "$1") isn't writable; copy PROGRAM somewhere writable first"
+echo "$copy"

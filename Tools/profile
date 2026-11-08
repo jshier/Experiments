@@ -1,0 +1,70 @@
+#!/bin/bash
+# profile — where time goes, per thread, with inlined functions broken out: Instruments' Time Profiler,
+# recorded with xctrace and symbolicated from dSYMs, so code inlined into a hot loop is attributed to the
+# function it came from (e.g. a C helper or `@inline(__always)` Swift function), not just its caller.
+#
+# usage: Tools/profile [--top N] [--high-frequency] [--keep FILE.trace] -- PROGRAM [ARGS...]
+#        Tools/profile [--top N] --trace FILE.trace --dsym BINARY_OR_DSYM
+#
+#   --top N            functions per thread (default 12)
+#   --high-frequency   sample at a higher rate (Time Profiler's high-frequency option)
+#   --keep FILE.trace  keep the symbolicated recording (open in Instruments for call trees and source)
+#   --dsym             for --trace: the binary (a dSYM is made with dsymutil) or an existing .dSYM
+#
+# Output, per thread, busiest first, tab-separated: thread, samples, share of the thread, function. Samples
+# are the leaf (self) frame of each 1 ms sample. Needs debug info (SwiftPM release builds have it: -g); the
+# dSYM is made from PROGRAM with dsymutil, because xctrace won't symbolicate a SwiftPM binary without one.
+#
+# Compared with Tools/sample-top: lower overhead, kernel-integrated, and inlined frames; sample-top needs no
+# Instruments and attaches to a running process.
+source "$(dirname "$0")/lib/common.sh"
+have yq || die "needs yq: brew install yq"
+have jq || die "needs jq: brew install jq"
+
+top=12 high= keep= trace= dsym=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --top) top="$2"; shift ;;
+        --high-frequency) high=1 ;;
+        --keep) keep="$2"; shift ;;
+        --trace) trace="$2"; shift ;;
+        --dsym) dsym="$2"; shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+scratch_dir
+if [[ -z "$trace" ]]; then
+    [[ $# -ge 1 ]] || usage 2
+    trace="$SCRATCH/run.trace"
+    program="$(debuggable "$1")"; shift
+    dsym="$program"
+    xctrace record --template 'Time Profiler' --show-recording-options 2>/dev/null |
+        jq --argjson h "${high:+true}${high:-false}" '.["Time Profiler"].highFrequencySampling = $h' > "$SCRATCH/options.json"
+    note "recording $(basename "$program") with Time Profiler…"
+    xctrace record --template 'Time Profiler' --recording-options "$SCRATCH/options.json" --output "$trace" --launch -- "$program" "$@" \
+        > "$SCRATCH/record.log" 2>&1 || { tail -5 "$SCRATCH/record.log" >&2; die "xctrace record failed ($AUTH_HINT)"; }
+fi
+[[ -d "$trace" && -n "$dsym" ]] || usage 2
+if [[ "$dsym" != *.dSYM ]]; then
+    xcrun dsymutil "$dsym" -o "$SCRATCH/program.dSYM" > /dev/null 2>&1 || die "dsymutil failed for $dsym"
+    dsym="$SCRATCH/program.dSYM"
+fi
+symbolicated="${keep:-$SCRATCH/symbolicated.trace}"
+rm -rf "$symbolicated"
+xctrace symbolicate --input "$trace" --dsym "$dsym" --output "$symbolicated" > "$SCRATCH/symbolicate.log" 2>&1 ||
+    { tail -3 "$SCRATCH/symbolicate.log" >&2; die "xctrace symbolicate failed"; }
+
+xctrace export --input "$symbolicated" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' 2>/dev/null |
+    yq -p xml -o json '.' | jq -r --argjson top "$top" '
+    ([.. | objects | select(has("+@id"))] | map({key: .["+@id"], value: .}) | from_entries) as $ids
+    | def r: if type == "object" and has("+@ref") then $ids[.["+@ref"]] else . end;
+    [.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
+     | {thread: (.thread | r | .["+@fmt"]),
+        frame: (.["tagged-backtrace"] | r | .frame | if type == "array" then .[0] else . end | r | .["+@name"] // "?")}]
+    | group_by(.thread) | map({thread: .[0].thread, total: length, frames: (group_by(.frame) | map({frame: .[0].frame, n: length}) | sort_by(-.n))})
+    | sort_by(-.total) | .[]
+    | .thread as $t | .total as $total | .frames[0:$top][]
+    | [$t, .n, ((.n / $total * 1000 | round / 10 | tostring) + "%"), .frame] | @tsv' | demangle

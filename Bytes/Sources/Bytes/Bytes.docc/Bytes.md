@@ -80,7 +80,7 @@ core's memory bandwidth; with all cores, nearly every width reaches the CPU's me
 
 - ``LEB128``
 
-### Scanning
+### Scanning and shuffling 16 bytes at once
 
 - ``ByteLanes``
 - ``ByteMatches``

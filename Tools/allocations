@@ -1,0 +1,59 @@
+#!/bin/bash
+# allocations — where a program's heap allocations come from: Instruments' Allocations template, recorded with
+# xctrace, summarized by size class and by responsible call site. For when an allocation-count benchmark or
+# threshold (mallocCountTotal) says something allocates and you need to know what.
+#
+# usage: Tools/allocations [--top N] [--timeout SECONDS] [--keep FILE.trace] -- PROGRAM [ARGS...]
+#
+# Output: the busiest size classes/types (count, bytes), then the top responsible callers (count, caller,
+# library), tab-separated, under "== categories" and "== callers" headers. Compare two workload sizes to
+# separate per-iteration allocations from fixed ones.
+#
+# Two hurdles, handled:
+# - Allocations attaches to the process, which needs the `get-task-allow` entitlement; SwiftPM release builds
+#   don't have it ("Failed to attach to target process"). Like every launching tool, this runs PROGRAM-
+#   debuggable, a copy signed with it (lib/common.sh `debuggable`; PROGRAM itself is untouched).
+# - macOS may ask the user to authorize attaching (a system prompt). Until they do, the recording waits:
+#   this gives up after --timeout seconds (default 120) and says so. Tell the user to look for the prompt.
+source "$(dirname "$0")/lib/common.sh"
+have yq || die "needs yq: brew install yq"
+have jq || die "needs jq: brew install jq"
+
+top=15 timeout=120 keep=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --top) top="$2"; shift ;;
+        --timeout) timeout="$2"; shift ;;
+        --keep) keep="$2"; shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+[[ $# -ge 1 ]] || usage 2
+scratch_dir
+program="$(debuggable "$1")"; shift
+
+trace="${keep:-$SCRATCH/run.trace}"
+rm -rf "$trace"
+note "recording $(basename "$program") with Allocations…"
+status=0
+with_timeout "$timeout" xctrace record --template Allocations --output "$trace" --launch -- "$program" "$@" > "$SCRATCH/record.log" 2>&1 || status=$?
+if [[ $status == 124 ]]; then
+    pkill -f "$program" 2>/dev/null || true
+    fail "recording didn't finish in ${timeout}s: the program runs longer (--timeout), or xctrace is waiting on a prompt: $AUTH_HINT"
+fi
+grep -q "Failed to attach" "$SCRATCH/record.log" && fail "xctrace couldn't attach: $(grep -m1 Error "$SCRATCH/record.log"); $AUTH_HINT"
+[[ -d "$trace" ]] || { tail -5 "$SCRATCH/record.log" >&2; die "no trace recorded"; }
+
+detail() { xctrace export --input "$trace" --xpath "/trace-toc/run[@number=\"1\"]/tracks/track[@name=\"Allocations\"]/details/detail[@name=\"$1\"]" 2>/dev/null | yq -p xml -o json '.'; }
+echo "== categories (count events, total bytes)"
+detail Statistics | jq -r --argjson top "$top" '[.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
+    | {category: .["+@category"], count: (.["+@count-events"] | tonumber), bytes: (.["+@total-bytes"] | tonumber)}]
+    | sort_by(-.count) | .[0:$top][] | [.count, .bytes, .category] | @tsv'
+echo "== callers (count, responsible caller, library)"
+detail "Allocations List" | jq -r --argjson top "$top" '[.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
+    | {caller: .["+@responsible-caller"], library: .["+@responsible-library"]}]
+    | group_by(.caller) | map({caller: .[0].caller, library: .[0].library, count: length}) | sort_by(-.count) | .[0:$top][]
+    | [.count, .caller, .library] | @tsv' | demangle
