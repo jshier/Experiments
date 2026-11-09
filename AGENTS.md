@@ -166,6 +166,12 @@ can't trace system libraries with SIP on.)
 by size class, then by responsible caller. Use when a malloc threshold fails. Needs the attach prompt
 approved (above).
 
+**`Tools/tasks [--top N] [--keep F] [--time-limit T] -- PROGRAM ARGS`** (or `--trace F`) — Instruments' Swift
+Concurrency template: per task, its runs, the threads it ran on, thread and actor switches (real hops),
+continuation waits, and the wait from runnable to running; per-thread running time; totals. It records
+moves, not executor checks (`swift_task_switch` fast paths change no state): pair it with
+`Tools/runtime-count` for those.
+
 **`Tools/bench-table PKG [--metric R] [--filter R] [--percentile p50] BASELINE...`** — baselines side by side
 with change, units normalized (counts unscaled, times in µs).
 
@@ -254,12 +260,17 @@ Vectorization on ARM64 with Swift 6.4 (details and numbers: `Base64/Benchmarks/R
 - A table lookup in a loop is a gather: it blocks the vectorizer. Compute instead, with arithmetic masks
   (`(v &+ 128 &- k) &>> 7`), not `if`/ternary chains: LLVM threads correlated conditions into branches,
   then reports "loop control flow is not understood".
-- `SIMD16<UInt8>` on 6.4: `.==`/`.>=` compile lane by lane, `any()` is an out-of-line call, the dynamic
-  subscript is per lane. NEON `tbl` isn't reachable from Swift: use a small C target (`CBytesNEON`) with
-  `static inline` intrinsics.
-- LLVM merges consecutive shuffles: two rounds of `zip`s became four-source shuffles lowered to 16 lane
-  inserts. An empty `asm volatile("" : "+w"(v))` between rounds (in C) stops it. Shuffles chosen by a
-  `Bool` parameter, and vectors built from an array literal then mutated per lane, also become inserts.
+- `SIMD16<UInt8>` on 6.4: comparisons of two vectors (`a .== b`, `a .>= b`) are one instruction (`cmeq`,
+  `cmhs`), but the overloads taking a scalar (`v .== 0`, `v .>= 0x80`) compile lane by lane; `any()`/`all()`
+  are inlined (`umaxv`) in some loops and out-of-line calls elsewhere. Splat scalars
+  (`SIMD16(repeating:)`), or use `ByteLanes`. All fixed in 6.5-dev. The dynamic subscript is per lane on
+  both. NEON `tbl` isn't reachable from Swift: use a small C target (`CBytesNEON`) with `static inline`
+  intrinsics.
+- LLVM merges consecutive shuffles: two rounds of `zip`s written with Swift lane initializers became
+  four-source shuffles lowered to 1 `zip` and 14 lane inserts per vector. `bytes_interleave4` in C keeps
+  the rounds apart with an empty `asm("" : "+w"(v))` (a standalone C version without it didn't merge, in a
+  later check). Shuffles chosen by a `Bool` parameter, and vectors built from an array literal then mutated
+  per lane, also become inserts (16 for the literal).
 - The Base64 `tbl` kernel ends up bound by `tbl` throughput (vector unit pressure), not instruction count:
   fewer instructions didn't mean faster. Measure variants.
 
@@ -268,11 +279,13 @@ spaces: thresholds for names with spaces break, ordo-one/package-benchmark#373).
 `Tools/calls … --callee 'swift_allocObject|swift_slowAlloc|malloc'` statically, `Tools/runtime-count
 --break swift_allocObject` dynamically, `Tools/allocations` for responsible callers.
 
-Concurrency: count hops with `Tools/runtime-count --break swift_task_switch@libswift_Concurrency.dylib`
-(and `--who …=x0`), check suspension points statically with `Tools/calls --target PKG TARGET PATTERN --callee swift_task_switch`.
-`nonisolated(nonsending)` keeps async functions on the caller's executor. The Instruments Swift Tasks
-template shows task states over time (`xctrace export` table `SwiftTaskStateTable`: Running, Suspended,
-Enqueued…); System Call Trace (`syscall` table) counts syscalls without the breakpoint perturbation.
+Concurrency: find actual hops with `Tools/tasks` (Instruments' `SwiftTaskStateTable`: thread and actor per
+Running interval); count executor checks with `Tools/runtime-count --break
+swift_task_switch@libswift_Concurrency.dylib` (and `--who …=x0`); check suspension points statically with
+`Tools/calls --target PKG TARGET PATTERN --callee swift_task_switch`. In MQTTSocketStream, 55–113
+`swift_task_switch` calls per transfer turned out to be zero hops for the socket tasks.
+`nonisolated(nonsending)` keeps async functions on the caller's executor. System Call Trace (`syscall`
+table) counts syscalls without the breakpoint perturbation.
 
 Enums: big `switch`es over payload enums in hot code can get poorly optimized; the MQTT fix was per-type
 `init(parsing:)`/`write(to:)` with a single dispatch (`MQTT/Sources/MQTT/Framing.swift`).
@@ -286,6 +299,36 @@ Enums: big `switch`es over payload enums in hot code can get poorly optimized; t
 - A custom metric named `.throughput` collides with the built-in: name it otherwise (`.inputThroughput`).
 - The malloc interposer costs ~10% on large transfers: keep allocation and timing benchmarks separate.
 - Closure type ambiguity in `Benchmark(...) { benchmark in }`: annotate `(benchmark: Benchmark) in`.
+- `--filter` must match the whole benchmark name (`'.*Bytes.*'`, not `'Bytes'`); a filter that matches
+  nothing still prints "Updated baseline" and saves nothing.
+- The benchmark plugin rebuilds swift-syntax (2.5–3 minutes) after any change; run `benchmark list` first so
+  a timed or locked run doesn't include the build.
+- **Compare times only within one interleaved run.** Even with nothing else benchmarking, this machine's
+  single-core times drift 5–10% between runs minutes apart, and up to 10% between days (unchanged
+  controls like Foundation's encoder move too); transfers vary ±20%. To verify a timing change, extract
+  the old code (`git archive <commit> Pkg Bytes … | tar -x -C "$SCRATCH/old"`), build both, and alternate
+  old and new runs (`baseline update ab-old-1`, `ab-new-1`, `ab-old-2`, …), then compare round by round.
+  Instruction counts don't drift.
+- Benchmark sizes that are all multiples of a kernel's block size hide its remainder path: include odd
+  sizes (Base64's 16-byte-remainder sizes hid a 42% short-input improvement).
+
+### Parallel agents
+
+Several agents can update packages at once (builds and static analysis run in parallel fine), but timings
+can't be trusted then, even serialized: other agents' builds load the machine (unchanged code measured
+5–15% slower). So:
+
+- Judge changes by instruction counts, allocation counts, and codegen (`Tools/loops`, `Tools/calls`); re-run
+  timed benchmarks one package at a time afterwards on an idle machine.
+- Serialize anything timing-sensitive with a shared lock:
+  `lockf -k "$SCRATCH_ROOT/bench.lock" swift package --disable-sandbox benchmark …`.
+- Give each agent its own packages to edit; a shared dependency (Bytes) stays read-only while others
+  compile against it, and new API for it is proposed (prototyped in the consumer), not added mid-run.
+- Give each agent its own scratch subdirectory; agents overwrote each other's helper scripts in a shared one.
+- Don't wait for another job with `until ! pgrep -f 'PATTERN'; do sleep 5; done`: the waiting shell's own
+  command line contains PATTERN, so `pgrep -f` always finds it and the loop never ends (ten such loops
+  outlived their agents). Wait on the job's PID (`while kill -0 $pid …`), on its output file, or let the
+  harness notify you when a background job exits.
 
 ## macOS tools: what's useful for this
 

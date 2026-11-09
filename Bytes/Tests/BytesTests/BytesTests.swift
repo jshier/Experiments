@@ -392,7 +392,9 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
 enum Unit: UInt8 { case celsius, fahrenheit, kelvin }
 
 struct SensorID: ByteRepresentable, Equatable {
-    var rawBytes: InlineArray<6, UInt8> static func ==(lhs: Self, rhs: Self) -> Bool { (0..<6).allSatisfy { lhs.rawBytes[$0] == rhs.rawBytes[$0] } }
+    var rawBytes: InlineArray<6, UInt8>
+    init(rawBytes: InlineArray<6, UInt8>) { self.rawBytes = rawBytes }
+    static func ==(lhs: Self, rhs: Self) -> Bool { (0..<6).allSatisfy { lhs.rawBytes[$0] == rhs.rawBytes[$0] } }
 }
 
 struct Reading {
@@ -669,7 +671,9 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
 
 /// A custom type backed by `n` raw bytes, like an IPv4 (4), MAC (6), or IPv6 (16) address.
 struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
-    var rawBytes: InlineArray<n, UInt8> var array: [UInt8] { (0..<n).map { rawBytes[$0] } }
+    var rawBytes: InlineArray<n, UInt8>
+    init(rawBytes: InlineArray<n, UInt8>) { self.rawBytes = rawBytes }
+    var array: [UInt8] { (0..<n).map { rawBytes[$0] } }
     static func ==(lhs: Self, rhs: Self) -> Bool { lhs.array == rhs.array }
 }
 

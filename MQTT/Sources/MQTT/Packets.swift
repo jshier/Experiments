@@ -133,22 +133,20 @@ public struct MQTTConnect: ~Escapable {
         guard try body.readMQTTByte("protocol version") == Self.protocolVersion else {
             throw MQTTError(.unsupportedProtocolVersion, "protocol version")
         }
-        // The connect flags, field by field, then the keep-alive.
-        let flags: (userName: Bool, password: Bool, willRetain: Bool, willQoS: Crumb, will: Bool, reserved: Bit)
+        // The connect flags, then the keep-alive. The flags, from the most significant bit: user name,
+        // password, will retain, will QoS (2 bits), will, clean start, and a reserved bit.
+        let connectFlags: Byte
         do throws(BytesError) {
-            flags.userName = try body.read(Bit.self).isSet
-            flags.password = try body.read(Bit.self).isSet
-            flags.willRetain = try body.read(Bit.self).isSet
-            flags.willQoS = try body.read(Crumb.self)
-            flags.will = try body.read(Bit.self).isSet
-            cleanStart = try body.read(Bit.self).isSet
-            flags.reserved = try body.read(Bit.self)
+            connectFlags = try body.read(Byte.self)
             keepAlive = try body.read(Byte2.self, .bigEndian)
         } catch {
             throw .malformed("connect header")
         }
-        guard flags.reserved == 0 else { throw .malformed("reserved connect flag") }
-        guard let willQoS = MQTTQoS(rawBits: flags.willQoS) else { throw .malformed("will QoS 3") }
+        guard !connectFlags[bit: 0] else { throw .malformed("reserved connect flag") }
+        cleanStart = connectFlags[bit: 1]
+        let flags = (userName: connectFlags[bit: 7], password: connectFlags[bit: 6], willRetain: connectFlags[bit: 5],
+                     will: connectFlags[bit: 2])
+        guard let willQoS = MQTTQoS(rawBits: connectFlags[Crumb.self, at: 3]) else { throw .malformed("will QoS 3") }
         guard flags.will || (willQoS == .atMostOnce && !flags.willRetain) else {
             throw .malformed("will QoS or retain without a will")
         }
@@ -199,13 +197,15 @@ public struct MQTTConnect: ~Escapable {
     func writeBody(to writer: inout BytesWriter) throws(BytesError) {
         try writer.write(Self.protocolName)
         try writer.write(Self.protocolVersion)
-        try writer.write(Bit(userName != nil))
-        try writer.write(Bit(password != nil))
-        try writer.write(Bit(will?.retain ?? false))
-        try writer.write(will?.qos ?? .atMostOnce, as: Crumb.self)
-        try writer.write(Bit(will != nil))
-        try writer.write(Bit(cleanStart))
-        try writer.write(Bit(0))
+        // The connect flags, packed first: one store.
+        var flags = Byte.zero
+        flags[bit: 7] = userName != nil
+        flags[bit: 6] = password != nil
+        flags[bit: 5] = will?.retain ?? false
+        flags[Crumb.self, at: 3] = Crumb(truncatingIfNeeded: (will?.qos ?? .atMostOnce).rawValue)
+        flags[bit: 2] = will != nil
+        flags[bit: 1] = cleanStart
+        try writer.write(flags)
         try writer.write(keepAlive, as: Byte2.self, .bigEndian)
         try writer.write(properties)
         try writer.writeMQTTString(clientIdentifier)
@@ -240,15 +240,16 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
     @_lifetime(copy body)
     @_lifetime(body: copy body)
     init(reading body: inout BytesReader) throws(MQTTError) {
-        let reserved: Bits<7>
+        // The flags: 7 reserved bits, then Session Present.
+        let flags: Byte
         do throws(BytesError) {
-            reserved = try body.read(Bits<7>.self)
-            sessionPresent = try body.read(Bit.self).isSet
+            flags = try body.read(Byte.self)
             reasonCode = try body.read(MQTTReasonCode.self, as: Byte.self)
         } catch {
             throw .malformed("connect acknowledge flags")
         }
-        guard reserved == 0 else { throw .malformed("reserved connect acknowledge flags") }
+        guard flags[Bits<7>.self, at: 1] == 0 else { throw .malformed("reserved connect acknowledge flags") }
+        sessionPresent = flags[bit: 0]
         try Self.check(reasonCode, sessionPresent: sessionPresent)
         properties = try MQTTProperties(reading: &body, allowing: .connectAcknowledgement)
         try body.expectMQTTEnd("connect acknowledgement")
@@ -272,8 +273,7 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
 
     @inlinable
     func writeBody(to writer: inout BytesWriter) throws(BytesError) {
-        try writer.write(Bits<7>(0))
-        try writer.write(Bit(sessionPresent))
+        try writer.write(Byte(Bit(sessionPresent))) // 7 reserved bits, then Session Present
         try writer.write(reasonCode, as: Byte.self)
         try writer.write(properties)
     }

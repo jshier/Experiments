@@ -1,4 +1,4 @@
-@testable import Base64
+import Base64
 import Bytes
 import Foundation
 import Testing
@@ -90,6 +90,23 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         let atEnd = reader.isAtEnd
         #expect(atEnd)
         #expect(String(decoding: output, as: UTF8.self) == ">>Zm9vYmFy")
+    }
+
+    /// The same past a block, where the last block overlaps the one before (1 to 47 bytes after 48), and
+    /// past the bytes before the reader's position.
+    @Test(arguments: [49, 64, 95, 96, 143])
+    func encodesFromAPositionPastABlock(count: Int) throws {
+        var generator = SystemRandomNumberGenerator()
+        let bytes = (0..<(count + 5)).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
+        var output = [UInt8](repeating: 0, count: Base64.encodedByteCount(of: count))
+        var span = output.mutableSpan
+        var writer = BytesWriter(&span)
+        var reader = BytesReader(bytes.span)
+        try reader.skip(byteCount: 5)
+        try Base64.encode(&reader, into: &writer)
+        let atEnd = reader.isAtEnd
+        #expect(atEnd)
+        #expect(String(decoding: output, as: UTF8.self) == reference(Array(bytes[5...])))
     }
 
     @Test func encodedByteCounts() {

@@ -43,12 +43,16 @@ public enum Base64 {
         /// The 64 characters as four vectors, for `ByteLanes.lookup(in:)`.
         @inlinable
         var table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>) {
-            // One initializer per vector: a constant, plus two inserts for the last. (An array literal changed
-            // lane by lane compiled to 16 inserts.)
-            ([65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80], // "A"–"P"
-             [81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 97, 98, 99, 100, 101, 102], // "Q"–"Z", "a"–"f"
-             [103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118], // "g"–"v"
-             SIMD16(119, 120, 121, 122, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, character62, character63)) // "w"–"z", "0"–"9"
+            // The last vector is a `Byte16` constant with its last two bytes set: integer operations, then one
+            // move to a vector. (As `SIMD16(119, …, character62, character63)` it compiled to 16 lane inserts
+            // with Swift 6.4.2, as did an array literal changed lane by lane.)
+            var last: Byte16 = 0x77_78_79_7A_30_31_32_33_34_35_36_37_38_39_00_00 // "w"–"z", "0"–"9"
+            last[14] = character62
+            last[15] = character63
+            return ([65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80], // "A"–"P"
+                    [81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 97, 98, 99, 100, 101, 102], // "Q"–"Z", "a"–"f"
+                    [103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118], // "g"–"v"
+                    bitCast(last.littleEndian, to: SIMD16<UInt8>.self))
         }
 
         /// What to add from 62 on top of the digits' offset to get `character62`, then from 63 on top of that to
@@ -93,16 +97,26 @@ public enum Base64 {
             })
             let rest = reader.remainingByteCount
             guard rest > 0 else { return }
-            var block = InlineArray<48, UInt8>(repeating: 0)
-            var blockBytes = block.mutableSpan
-            var blockWriter = BytesWriter(&blockBytes)
-            try blockWriter.write(reader.read(byteCount: rest))
+            let block: InlineArray<48, UInt8>
+            if blocks.isEmpty {
+                var bytes = InlineArray<48, UInt8>(repeating: 0)
+                var blockBytes = bytes.mutableSpan
+                var blockWriter = BytesWriter(&blockBytes)
+                try writeShort(reader.read(byteCount: rest), to: &blockWriter)
+                block = bytes
+            } else {
+                // After a block, the last 48 bytes overlap it: load them, and move the last `rest` to the
+                // front with zeros after, in registers, with no copy through memory (1,000 bytes: 6% faster).
+                try reader.seek(toByteOffset: reader.byteOffset &- (48 &- rest))
+                let last = try reader.load(InlineArray<3, SIMD16<UInt8>>.self)
+                block = bitCast(shiftedDown(last, by: 48 &- rest), to: InlineArray<48, UInt8>.self)
+            }
             let characters = encodeBlock(block, table: table)
-            try writer.write(characters.span.bytes.extracting(0..<encodedByteCount(of: rest, padding: false)))
-            if padding {
-                for _ in 0..<((3 &- rest % 3) % 3) {
-                    try writer.write(0x3D as Byte)
-                } // "="
+            try writeShort(characters.span.bytes.extracting(first: encodedByteCount(of: rest, padding: false)), to: &writer)
+            switch padding ? rest % 3 : 0 {
+            case 1: try writer.write(0x3D_3D as Byte2) // "=="
+            case 2: try writer.write(0x3D as Byte) // "="
+            default: break
             }
             return
         }
@@ -193,10 +207,34 @@ public enum Base64 {
         return bitCast([c0, c1, c2, c3] as InlineArray<4, SIMD16<UInt8>>, to: InlineArray<64, UInt8>.self)
     }
 
+    /// Writes `bytes`, at most 64, as at most two writes of 32 bytes or fewer, which Bytes copies inline
+    /// (it calls `memmove` for more: 95-byte inputs, whose last block is 63 characters, took 24% longer).
+    /// Not atomic, but `encode` has checked the room already.
+    @inlinable @inline(__always)
+    @_lifetime(writer: copy writer)
+    static func writeShort(_ bytes: RawSpan, to writer: inout BytesWriter) throws(BytesError) {
+        guard bytes.byteCount > 32 else { return try writer.write(bytes) }
+        try writer.write(bytes.extracting(first: 32))
+        try writer.write(bytes.extracting(droppingFirst: 32))
+    }
+
+    /// 48 bytes moved down by `count` (1 through 47), with zeros after: three 48-byte table lookups whose
+    /// indices past the end give zero.
+    @inlinable @inline(__always)
+    static func shiftedDown(_ bytes: InlineArray<3, SIMD16<UInt8>>, by count: Int) -> InlineArray<3, SIMD16<UInt8>> {
+        let table = (bytes[0], bytes[1], bytes[2])
+        let indices = SIMD16<UInt8>(repeating: UInt8(truncatingIfNeeded: count))
+            &+ [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        return [ByteLanes(indices).lookup(in: table), ByteLanes(indices &+ 16).lookup(in: table),
+                ByteLanes(indices &+ 32).lookup(in: table)]
+    }
+
     /// Encodes each 3-byte group into 4 characters. Compiled once, here, and checked to vectorize: a
-    /// typed-span-to-typed-span loop with no table lookups (see the type's documentation).
+    /// typed-span-to-typed-span loop with no table lookups (see the type's documentation). `package`, so
+    /// the tests can call it on ARM64 (where `encode` doesn't) without `@testable`, which release builds
+    /// don't support.
     @usableFromInline @inline(never)
-    static func encode(
+    package static func encode(
         _ groups: Span<InlineArray<3, UInt8>>, into characters: inout MutableSpan<InlineArray<4, UInt8>>,
         alphabet: Alphabet
     ) {

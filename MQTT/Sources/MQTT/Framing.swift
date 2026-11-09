@@ -54,13 +54,11 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
     @_lifetime(reader: copy reader)
     public static func read(from reader: inout BytesReader, maximumPacketSize: Int = .max) throws(MQTTError) -> MQTTFrame? {
         let start = reader.byteOffset
-        // Type and flags (a nibble each), then the remaining length.
-        let typeBits: Nibble
-        let flags: Nibble
+        // Type and flags (the high and low nibbles of a byte), then the remaining length.
+        let header: Byte
         let remainingLength: Int
         do throws(BytesError) {
-            typeBits = try reader.read(Nibble.self)
-            flags = try reader.read(Nibble.self)
+            header = try reader.read(Byte.self)
             remainingLength = try Int(reader.readMQTTVariableByteInteger())
         } catch {
             try! reader.seek(toByteOffset: start)
@@ -68,7 +66,8 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
             throw .malformed("remaining length")
         }
         do throws(MQTTError) {
-            guard let type = MQTTPacketType(rawBits: typeBits) else { throw .malformed("reserved packet type") }
+            let flags = header.lowHalf
+            guard let type = MQTTPacketType(rawBits: header.highHalf) else { throw .malformed("reserved packet type") }
             // PUBLISH uses its flags; PUBREL, SUBSCRIBE, and UNSUBSCRIBE require 0b0010; the rest, 0.
             guard type == .publish || flags == type.requiredFlags else { throw .malformed("reserved flags") }
             guard reader.byteOffset &- start &+ remainingLength <= maximumPacketSize else {
@@ -120,8 +119,7 @@ extension BytesWriter {
         do throws(MQTTError) { try validate() } catch { throw .invalidValue }
         guard bodyByteCount <= MQTTPacket.maximumRemainingLength else { throw .invalidValue }
         guard remainingByteCount >= 1 &+ Size.lengthPrefixed(bodyByteCount) else { throw .insufficientCapacity }
-        try write(type, as: Nibble.self)
-        try write(flags)
+        try write(Byte(highHalf: Nibble(truncatingIfNeeded: type.rawValue), lowHalf: flags))
         try write(UInt64(bodyByteCount), as: LEB128.self)
         try body(&self)
     }

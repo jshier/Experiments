@@ -74,7 +74,7 @@ extension ZipArchive {
         do throws(BytesError) {
             var reader = BytesReader(archive)
             try reader.seek(toByteOffset: Int(clamping: location.offset))
-            var directory = try BytesReader(reader.read(byteCount: Int(clamping: location.size)))
+            var directory = try reader.readSection(byteCount: Int(clamping: location.size))
             for _ in 0..<location.entryCount {
                 try entries.append(readCentralDirectoryEntry(&directory))
             }
@@ -91,7 +91,7 @@ extension ZipArchive {
         do throws(BytesError) {
             var eocd = BytesReader(archive)
             try eocd.seek(toByteOffset: eocdOffset)
-            var record = try BytesReader(eocd.read(byteCount: 22))
+            var record = try eocd.readSection(byteCount: 22)
             try record.expect(Signature.endOfCentralDirectory)
             let diskNumber = try record.read(Byte2.self, .littleEndian)
             let directoryDisk = try record.read(Byte2.self, .littleEndian)
@@ -142,7 +142,7 @@ extension ZipArchive {
     @_lifetime(directory: copy directory)
     private static func readCentralDirectoryEntry(_ directory: inout BytesReader) throws(BytesError) -> ZipEntry {
         // The fixed part as its own cursor: its length is a constant, so every field read is proven in bounds.
-        var header = try BytesReader(directory.read(byteCount: 46))
+        var header = try directory.readSection(byteCount: 46)
         try header.expect(Signature.centralDirectory)
         let versionMadeBy = try header.read(Byte2.self, .littleEndian)
         try header.skip(byteCount: 2) // version needed to extract
@@ -161,15 +161,17 @@ extension ZipArchive {
         var localHeaderOffset = try UInt64(header.read(Byte4.self, .littleEndian))
 
         let name = try decodeName(Span(viewing: directory.read(byteCount: nameLength)))
-        var extra = try BytesReader(directory.read(byteCount: extraLength))
+        var extra = try directory.readSection(byteCount: extraLength)
         try directory.skip(byteCount: commentLength)
 
         var unixModificationTime: Date?
         while extra.remainingByteCount >= 4 {
             let id = try extra.read(Byte2.self, .littleEndian)
             let size = try Int(extra.read(Byte2.self, .littleEndian))
-            guard size <= extra.remainingByteCount else { break } // Tolerate malformed trailing padding.
-            var field = try BytesReader(extra.read(byteCount: size))
+            // Tolerate malformed trailing padding. (Not `read(sectionPrefixedBy:)`, which would throw here:
+            // with `try?` it measured 0.7% more instructions for the whole parse.)
+            guard size <= extra.remainingByteCount else { break }
+            var field = try extra.readSection(byteCount: size)
             switch id {
             case 0x0001: // ZIP64 extended information: only the saturated fields are present, in this order.
                 if uncompressedSize == UInt32.max { uncompressedSize = try field.read(Byte8.self, .littleEndian) }
@@ -371,7 +373,7 @@ public extension ZipArchive {
         do throws(BytesError) {
             var reader = BytesReader(archive)
             try reader.seek(toByteOffset: Int(clamping: entry.localHeaderOffset))
-            var header = try BytesReader(reader.read(byteCount: 30))
+            var header = try reader.readSection(byteCount: 30)
             try header.expect(Signature.localFile)
             try header.skip(byteCount: 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4) // version, flags, method, time, date, CRC, sizes
             // The local name/extra lengths can differ from the central directory's, so use these.

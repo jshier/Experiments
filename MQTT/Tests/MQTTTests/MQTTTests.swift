@@ -134,7 +134,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         }
         let properties = try MQTTProperties(validating: bytes.span.bytes)
         var seen: [String] = []
-        for property in properties {
+        properties.forEach { property in
             switch property {
             case let .payloadFormatIndicator(value): seen.append("format \(value)")
             case let .messageExpiryInterval(value): seen.append("expiry \(value)")
@@ -255,7 +255,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
             guard case let .subscribe(parsed) = packet else { Issue.record("not a subscribe"); return }
             var filters: [String] = []
             var options: [MQTTSubscriptionOptions] = []
-            for subscription in parsed.subscriptions {
+            parsed.subscriptions.forEach { subscription in
                 filters.append(string(subscription.topicFilter))
                 options.append(subscription.options)
             }
@@ -456,7 +456,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
             switch packet {
             case let .publish(publish):
                 delivered.append((String(copying: publish.topic), [UInt8](copying: publish.payload)))
-                for property in publish.properties {
+                publish.properties.forEach { property in
                     if case .messageExpiryInterval = property { Issue.record("no properties") }
                 }
             default:

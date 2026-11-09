@@ -119,9 +119,9 @@ let same = topic.span.bytes.bytesEqual(expected)                           // XO
   built from `matching(_:)` and `nonASCII`, combined with `|` and `&`. Shorter spans fill one block with
   overlapping loads, so a 32-byte string is two tests and no branches.
 - The tests are lanewise wrapping arithmetic and bitwise operations, which compile to a few NEON (or SSE)
-  instructions with Swift 6.4 and 6.5. Not the standard library's lane comparisons (`.==`) and `any()`:
-  Swift 6.5 vectorizes those too, but 6.4 compiles them a lane at a time and reduces with an out-of-line
-  call.
+  instructions with Swift 6.4 and 6.5. With 6.4, the standard library's comparisons of two vectors
+  (`a .== b`) are one instruction too, but those against a scalar (`v .== 0`) compile a lane at a time,
+  and `any()` is sometimes an out-of-line call; 6.5 vectorizes all of them.
 
 ### Typed blocks in, typed blocks out, and shuffles
 

@@ -237,3 +237,82 @@ comparisons are `CRC-32 <size>: Bytes / zlib` and `Stored + CRC 32 MB random: By
 
 CRC is about 4% of inflating time, so the decode benchmarks move by less than their noise (instructions
 −1%). How `CRC32` works is in Bytes' RESULTS.md.
+
+## step9 (2026-11-09): current Bytes API, verified free (baselines `pre-modern` → `modern`)
+
+Wall-clock times in `pre-modern` and the reruns below were taken while five agents shared the machine.
+`modern` was re-run alone afterwards: against `native-crc`, instruction and allocation counts identical,
+wall times a median change of 0.0% (at most +7%). Instruction counts, allocation counts, and codegen are
+the evidence here. `pre-modern` is the step8 code rebuilt against today's Bytes (compute benchmarks only);
+`modern` is the full suite.
+
+**Changes kept**, each checked by disassembling the whole NativeZip object (release, `Tools/loops
+--target`) before and after, with addresses and label numbers normalized. With all of them the object is
+identical to step8's except for two `try!` line numbers in `Inflater.init`:
+
+- Fixed-size records and the extra-field area are `readSection(byteCount:)` instead of
+  `BytesReader(try reader.read(byteCount:))` (EOCD, central directory, directory entry, extra fields,
+  local header).
+- A stored block's NLEN is checked with `ByteGroup`'s `~`: `try stored.expect(~length)` on the `Byte2`.
+- `HuffmanEntry`'s fields are Bytes bit-field subscripts (`raw[bits: 0..<6]`, `raw[Nibble.self, at: 8]`,
+  `raw[bits: 16..<32]`), and its kind is the `Kind` enum through `init?(rawBits:)`
+  (`Kind(rawBits: raw[Bits<3>.self, at: 12]) ?? .invalid`), so the decode loop switches on `.literal`,
+  `.lengthOrDistance`, `.endOfBlock` instead of comparing raw values. Same code: the conversion folds.
+- Two strict-memory-safety warnings in release builds fixed (`unsafe` on `UnsafeRawBufferPointer.isEmpty`
+  in `ZipDecoder`).
+
+**Tried and reverted:**
+
+- Extra fields with `read(sectionPrefixedBy: Byte2.self, .littleEndian)` under `try?` (a field longer than
+  what's left ends the list): central-directory parsing +0.7% instructions (4,891 K → 4,927 K); the
+  explicit length check plus `readSection` measured 4,895 K. (Cause not isolated: `read(bytesPrefixedBy:)`
+  checks the length twice, and `try?` builds an `Optional<BytesReader>`.)
+- `HuffmanEntry.extra` as `bits[bits: codeLength..<totalBits]`: the range's checks can't fold with runtime
+  bounds, so `decodeSymbols` grew from 995 to 1,026 lines with two more traps and more spills. Kept the mask
+  and shift (an unchecked extract is proposed to Bytes).
+
+| Benchmark (p50) | native-crc | pre-modern | modern |
+|---|---|---|---|
+| Inflate + CRC 32 MB text: Bytes / zlib, instructions | 247 M / 218 M | 247 M / 218 M | 247 M / 218 M |
+| Inflate + CRC 2,000 small files: Bytes / zlib, instructions | 238 M / 214 M | 238 M / 214 M | 238 M / 214 M |
+| Inflate + CRC, mallocs: Bytes / zlib | 0 / 1 | 0 / 1 | 0 / 1 |
+| Verify 2,000 small files (parallel): Bytes / zlib, instructions | 315 M / 292 M | 315 M / 292 M | 315 M / 292 M |
+| Stored + CRC 32 MB random: Bytes / zlib, instructions | 29 M / 31 M | 29 M / 31 M | 29 M / 31 M |
+| CRC-32 64 B (×512 K): Bytes / zlib, instructions | — | 51 M / 61 M | 51 M / 61 M |
+| CRC-32 32 MB: Bytes / zlib, instructions | — | 10 M / 13 M | 10 M / 13 M |
+| Parse central directory (2,000 entries), instructions | 4,907 K (`safe-parse`) | 4,891 K | 4,911 K |
+| Locate 2,000 payloads, instructions | 3,394 K (`safe-parse`) | 3,373 K | 3,373 K |
+| Extract 32 MB text: Bytes / zlib, instructions | 271 M / 241 M | — | 271 M / 241 M |
+
+The parse rows differ by 0.4% between runs of byte-identical code: they include `String`, `Date`, and
+2,289 allocations per iteration, whose instruction counts vary. Times under load (for the record only):
+inflating 32 MB of text 15 ms for both backends, CRC-32 Bytes 1.6–2.3x faster than zlib as in step8.
+
+**Static checks of the decoder.** `decodeSymbols` keeps the bit buffer and writer in registers: its only
+stack accesses are the prologue and spills around the cold calls. Those calls are: `BitBuffer._refillSlowly` (within 8 bytes
+of the input's end), `memset` (distance-1 matches), and 13 throw sites, each calling
+`_stdlib_isOSVersionAtLeastOrVariantVersionAtLeast` before `swift_willThrowTypedImpl` (typed throws'
+back-deployment check, even with a macOS 27 deployment target; code size only). No retain, release,
+allocation, or outlined copy in any Inflater function (`Tools/calls --callee
+'swift_retain|swift_release|swift_allocObject|outlined'`).
+
+**Where decode time goes** (`Tools/profile`, `nunzip -t` of a 2 GB text file, Bytes backend, leaf frames
+with inlining): the match copy (`BytesWriter.copy`) 21%, literal stores (`BytesWriter.write`) 21%, the
+entry-kind dispatch 18% (attributed to `Kind.init(rawValue:)`, now the source line of the compare), the
+rest of `decodeSymbols` 16%, the refill (its load 8.5%, the rest 4.6%), masks 5.8%, CRC-32 2.1%, subtable
+lookups 1.7%, table building < 1%. zlib's `inflate_fast` isn't symbolicated (system library).
+
+**What bounds it** (`Tools/counters`, `nunzip -t` of 512 MB of text, worker thread):
+
+| | cycles | useful | discarded | processing (back end) | delivery (front end) |
+|---|---|---|---|---|---|
+| Bytes | 1.70 G | 49% | 20% | 28% (92% of it executing, 1.4% memory misses) | 2.5% |
+| zlib | 1.74 G | 41% | 31% | 21% | 7.3% (56% of it fetch bandwidth) |
+
+The Bytes decoder runs 13% more instructions than zlib in 2.5% fewer cycles: it loses less to
+mispredicted branches and front-end stalls. What remains is execution-bound (dependent shifts, loads, and
+stores of the decode chain), not memory-bound, and the 20% discarded is the data-dependent branch on each
+entry's kind, which Huffman decoding can't avoid.
+
+Extraction of 2,000 small files varied ±15% in instructions and ±25% in time across three runs (kernel
+contention; the decoder is under 10% of it), so its Bytes-vs-zlib differences in this run are noise.

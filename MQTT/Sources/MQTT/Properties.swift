@@ -115,7 +115,7 @@ struct PropertySet {
     init(bits: UInt64) { self.bits = bits }
 
     @inlinable @inline(__always)
-    func contains(_ identifier: UInt64) -> Bool { identifier < 64 && bits &>> identifier & 1 != 0 }
+    func contains(_ identifier: UInt64) -> Bool { identifier < 64 && bits[bit: Int(identifier)] }
 
     @inlinable @inline(__always)
     func isSubset(of other: Self) -> Bool { bits & ~other.bits == 0 }
@@ -272,7 +272,7 @@ public struct MQTTProperties: ~Escapable {
             // An unknown identifier is in no packet's set, so it's malformed too.
             guard allowed.contains(identifier) else { throw .malformed("property not allowed in this packet") }
             guard !seen.contains(identifier) || repeatable.contains(identifier) else { throw .protocolError("duplicate property") }
-            seen.bits |= 1 &<< identifier
+            seen.bits[bit: Int(identifier)] = true
             let property: MQTTProperty
             do throws(BytesError) {
                 property = try MQTTProperty.read(identifier, from: &reader, checked: true)

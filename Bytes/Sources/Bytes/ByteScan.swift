@@ -9,9 +9,10 @@
 /// ```
 ///
 /// Each test is two or three vector instructions on all 16 lanes (NEON, or SSE on x86), with no branches,
-/// using only lanewise wrapping arithmetic and bitwise operations. Not the standard library's lane
-/// comparisons (`.==`, `.>=`) and `SIMDMask` reductions (`any`): those vectorize with a Swift 6.5 compiler,
-/// but Swift 6.4's compiles them a lane at a time and reduces through an out-of-line call.
+/// using only lanewise wrapping arithmetic and bitwise operations. With Swift 6.4, the standard library's
+/// comparisons of two vectors (`a .== b`) are one instruction too, but those against a scalar
+/// (`v .== 0`) compile a lane at a time, and `SIMDMask.any()` is inlined in some loops and an
+/// out-of-line call in others. Swift 6.5 compiles all of them to vector instructions.
 @frozen
 public struct ByteLanes: Sendable {
     public var vector: SIMD16<UInt8>

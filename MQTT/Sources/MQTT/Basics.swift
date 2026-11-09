@@ -169,10 +169,10 @@ struct ReasonCodeSet {
 
     @inlinable @inline(__always)
     func contains(_ code: MQTTReasonCode) -> Bool {
-        let raw = UInt64(code.rawValue)
+        let raw = Int(code.rawValue)
         return switch raw {
-        case 0..<0x40: low &>> raw & 1 != 0
-        case 0x80..<0xC0: high &>> (raw & 0x3F) & 1 != 0
+        case 0..<0x40: low[bit: raw]
+        case 0x80..<0xC0: high[bit: raw & 0x3F]
         default: false
         }
     }
@@ -226,38 +226,34 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
         self.retainHandling = retainHandling
     }
 
-    /// Reads the options byte, field by field, most significant bit first: 2 reserved bits (nonzero is
+    /// Reads the options byte. Its fields, from the most significant bit: 2 reserved bits (nonzero is
     /// malformed), retain handling (3 is a protocol error), retain as published, no local, and maximum QoS
     /// (3 is a protocol error).
     @inlinable
     @_lifetime(reader: copy reader)
     init(reading reader: inout BytesReader) throws(MQTTError) {
-        let reserved: Crumb
-        let retainHandling: Crumb
-        let maximumQoS: Crumb
-        do throws(BytesError) {
-            reserved = try reader.read(Crumb.self)
-            retainHandling = try reader.read(Crumb.self)
-            retainAsPublished = try reader.read(Bit.self).isSet
-            noLocal = try reader.read(Bit.self).isSet
-            maximumQoS = try reader.read(Crumb.self)
-        } catch {
-            throw .malformed("subscription options")
+        let options: Byte
+        do throws(BytesError) { options = try reader.read(Byte.self) } catch { throw .malformed("subscription options") }
+        guard options[Crumb.self, at: 6] == 0 else { throw .malformed("reserved subscription option bits") }
+        guard let handling = MQTTRetainHandling(rawBits: options[Crumb.self, at: 4]) else {
+            throw .protocolError("retain handling 3")
         }
-        guard reserved == 0 else { throw .malformed("reserved subscription option bits") }
-        guard let handling = MQTTRetainHandling(rawBits: retainHandling) else { throw .protocolError("retain handling 3") }
-        guard let qos = MQTTQoS(rawBits: maximumQoS) else { throw .protocolError("maximum QoS 3") }
-        self.retainHandling = handling
-        self.maximumQoS = qos
+        guard let qos = MQTTQoS(rawBits: options[Crumb.self, at: 0]) else { throw .protocolError("maximum QoS 3") }
+        retainHandling = handling
+        retainAsPublished = options[bit: 3]
+        noLocal = options[bit: 2]
+        maximumQoS = qos
     }
 
+    /// The options byte, packed before it's written: one store.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
-        try writer.write(Crumb(0))
-        try writer.write(retainHandling, as: Crumb.self)
-        try writer.write(Bit(retainAsPublished))
-        try writer.write(Bit(noLocal))
-        try writer.write(maximumQoS, as: Crumb.self)
+        var options = Byte.zero
+        options[Crumb.self, at: 4] = Crumb(truncatingIfNeeded: retainHandling.rawValue)
+        options[bit: 3] = retainAsPublished
+        options[bit: 2] = noLocal
+        options[Crumb.self, at: 0] = Crumb(truncatingIfNeeded: maximumQoS.rawValue)
+        try writer.write(options)
     }
 }
 
@@ -332,14 +328,13 @@ extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func readMQTTVariableByteInteger() throws(BytesError) -> UInt64 {
-        let start = byteOffset
-        let value = try read(LEB128.self, maxByteCount: 4)
-        let byteCount = byteOffset &- start
-        guard byteCount == 1 || byteCount == LEB128.byteCount(of: value) else {
-            try! seek(toByteOffset: start)
-            throw .invalidValue
+        try atomically { reader throws(BytesError) in
+            let start = reader.byteOffset
+            let value = try reader.read(LEB128.self, maxByteCount: 4)
+            let byteCount = reader.byteOffset &- start
+            guard byteCount == 1 || byteCount == LEB128.byteCount(of: value) else { throw .invalidValue }
+            return value
         }
-        return value
     }
 
     /// Throws a malformed-packet error if bytes are left over.

@@ -10,6 +10,56 @@ cores), macOS 27.2, Swift 6.4.2. Single-core times vary about ±10% from run to 
 One core parses the same 1.25 MB again and again, from cache. All 32 cores each parse their own copies
 (4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput.
 
+## 2026-11-09: flag bytes read and written whole (baselines `before-modern` → `modern`)
+
+Sub-byte fields that fill one byte are now read as one `Byte` and taken apart with Bytes' field
+subscripts, and written by packing a `Byte` first, instead of a `read`/`write` per field:
+
+- the fixed header (`header.highHalf`/`lowHalf`; written with `Byte(highHalf:lowHalf:)`);
+- CONNECT's flags, CONNACK's flags, and the subscription options byte (`flags[bit: 7]`,
+  `flags[Crumb.self, at: 3]`, settable for writing);
+- `readMQTTVariableByteInteger` uses `atomically` instead of saving the offset and `try! seek`ing back;
+- `ReasonCodeSet`/`PropertySet` test bits with `[bit:]` (identical code).
+
+A byte-aligned `read(Nibble.self)`/`read(Bit.self)` takes Bytes' general bit path (offset, bit order,
+two-byte window); a `Byte` read is one load. Instructions per function, release (`MQTT.o`):
+
+| Function | Before | After |
+|---|---|---|
+| `MQTTFrame.read(from:maximumPacketSize:)` | 457 | 390 |
+| `MQTTPublish.write(to:)` | 414 | 364 |
+| `MQTTPacket.write(to:)` | 318 | 273 |
+| `MQTTConnect.init(reading:)` / `writeBody(to:)` | 930 / 567 | 774 / 339 |
+| `MQTTConnectAcknowledgement.init(reading:)` / `writeBody(to:)` | 231 / 183 | 208 / 150 |
+| `MQTTSubscriptionOptions.init(reading:)` / `write(to:)` | 278 / 273 | 176 / 83 |
+| `MQTTProperties.init(validating:allowing:repeatable:)` | 323 | 288 |
+
+Benchmark instructions, one core (`before-modern` is the same code as `dispatch1`, rebuilt against the
+current Bytes, which alone added 0.4–1.5%):
+
+| Workload | `dispatch1` | `before-modern` | `modern` | |
+|---|---|---|---|---|
+| Encode PUBLISH (both encoders) | 6.70 M | 6.80 M | **6.26 M** | −7.9% |
+| Parse PUBLISH: frames | 9.94 M | 10.0 M | **9.54 M** | −4.7% |
+| Parse PUBLISH: views, properties not iterated | 8.98 M | 9.11 M | **8.58 M** | −5.9% |
+| Parse PUBLISH: views, every property | 11 M | 11 M | 11 M | (reported in millions) |
+| Parse mixed stream | 5.93 M | 5.96 M | **5.03 M** | −15.6% |
+
+- **Times, re-verified by interleaving** (the old code, commit `eec4a92`, and the new, run alternately
+  twice, one core): encoding and the PUBLISH parsers within ±4% of the old code, round by round; the mixed
+  stream 4–5% faster. So the fewer instructions buy little time here: these loops are bound by load
+  latency and branches, not instruction count. Absolute times on this day ran 8–10% above `dispatch1`'s
+  for the old code too (machine state), so compare times only within one interleaved run.
+- **Checked unchanged**: the vectorized loops (`Tools/loops`: the same 11 `vector128` loops, same
+  sizes, in `MQTTPublish.init(reading:flags:)`, `MQTTSubscriptions.init(validating:)`, and
+  `MQTTPacket.init(parsing:)`); runtime calls (`Tools/calls --callee
+  'swift_retain|swift_release|swift_allocObject|outlined|swift_task_switch'`: identical); allocation
+  thresholds pass; the fuzz test's counts are identical (accepted 18,636, failed 61,288, incomplete
+  20,076).
+- **Tried and reverted**: classifying a rejected topic name on a separate cursor over
+  `remainingBytes`, instead of re-reading and seeking back: +42 instructions in
+  `MQTTPublish.init(reading:flags:)` for a cold path.
+
 ## Current (baseline `validated`): every MQTT 5.0 receiver rule checked
 
 ### Throughput

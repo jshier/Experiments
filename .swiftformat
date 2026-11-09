@@ -35,6 +35,10 @@
 --disable noForceTryInTests
 --disable noForceUnwrapInTests
 --disable opaqueGenericParameters
+# Rewrites `.forEach { }` as `for`-`in` even on types that aren't Sequences (MQTTProperties).
+--disable preferForLoop
+# 0.64.6 removed a required `init(rawBytes:)` and joined the next declaration onto the property's line.
+--disable redundantMemberwiseInit
 --disable redundantSwiftTestingSuite
 --disable simplifyGenericConstraints
 --disable wrapFunctionBodies

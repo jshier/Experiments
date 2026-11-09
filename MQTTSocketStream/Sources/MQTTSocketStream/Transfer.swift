@@ -171,7 +171,11 @@ public enum Transfer {
     public static func encode(into batch: inout [UInt8], from next: inout Int, until end: Int, payload: [UInt8]) -> Int {
         var span = batch.mutableSpan
         var writer = BytesWriter(&span)
-        let properties = try! MQTTProperties(validating: Fixtures.propertyBytes.span.bytes)
+        // Bound to a local first: a span of another file's global is rejected ("lifetime-dependent value
+        // escapes its scope") when files compile separately (debug builds), though not with whole-module
+        // optimization (release builds). Once per batch, not per packet.
+        let propertyBytes = Fixtures.propertyBytes
+        let properties = try! MQTTProperties(validating: propertyBytes.span.bytes)
         let (topicBytes, topicEnds) = Fixtures.topicTable
         while next < end {
             let index = next % topicEnds.count

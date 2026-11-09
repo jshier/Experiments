@@ -111,3 +111,71 @@ byte-only cursor.
   lengths fold.
 - Odd widths from two overlapping loads instead of a byte loop.
 - A shared throw path per function, if error locations can be recovered another way.
+
+## 2026-11-09: current Bytes API, re-check
+
+Baselines `original` (the code before this pass) and `modern` (after), `Tools/bench-table
+BinaryParsingComparison original modern`. Same Bytes API as above, swift-binary-parsing still 0.0.4 (the
+latest tag), Swift 6.4 (Xcode 27.3). `original`'s times were taken while other agents loaded the machine;
+`modern` was re-run alone afterwards, so its times run a median 8.6% faster than `original`'s with
+identical instruction counts: that's the machine, not the code. The comparison below is by instruction
+and allocation counts, which are stable.
+
+**Bytes side updated** (the `ParserSpan` side and every algorithm unchanged):
+- Untrusted sizes read straight into `Int` with `read(Int.self, as: Byte2.self, .littleEndian)` (zip name,
+  extra, comment, and extra-field lengths; LZ4 match distance; QOI width and height as `Byte4`
+  big-endian), the counterpart of `Int(parsing:storedAsLittleEndian:)` on the `ParserSpan` side. For LZ4's
+  8-byte content size this is also a fix: `Int(read(Byte8…))` trapped on a size above `Int.max`; it now
+  throws `.invalidValue`.
+- Sub-cursors with `readSection(byteCount:)` instead of `BytesReader(read(byteCount:))` (zip header,
+  extra field block, each extra field).
+- Already current and left as they were: byte-group literals (`0x71_6F_69_66 as Byte4`), bit-field
+  subscripts (`first[Crumb.self, at: 6]`, `size[bits: 0..<31]`, `flags[bit: 5]`), `highHalf`/`lowHalf`,
+  `forEach(_:_:)` with a byte order, `copy(fromDistance:count:allowingOverrun:)` for LZ4 matches.
+
+**Cost: none.** Every Bytes and `ParserSpan` row has the same instruction and malloc counts in `original`
+and `modern` (and as in the table above). `Tools/loops` verdicts are unchanged for every function; the one
+structural change is in `LZ4.decodeWithBytes`'s frame-level loop (one more nesting level, 256 → 271
+instructions: the content size's new `.invalidValue` throw path), which runs once per block and doesn't
+show in the counts. `Tools/calls`: no new runtime calls in the Bytes functions.
+
+**Bytes vs `ParserSpan` now** (instructions; the ratio is `ParserSpan`'s count over Bytes'):
+
+| Workload | Bytes | `ParserSpan` | Ratio |
+|---|---|---|---|
+| Zip directory, field by field | 301 K | 461 K | 1.53 |
+| …fixed-size records | 199 K | 325 K | 1.63 |
+| `UInt32` big-endian | 197 K | 197 K | 1.00 |
+| 24-bit big-endian, per value | 1,426 K (`forEach`: 771 K) | 4,461 K | 3.13 |
+| QOI `antelope.qoi` | 131 M | 138 M | 1.05 |
+| QOI `tricolor.qoi` | 6.57 M | 4.59 M | 0.70 |
+| LZ4 `swift-help.lz4` | 65 M, 2 mallocs | 66 M, 2 | 1.02 |
+| LZ4 `tricolor.qoi.lz4` | 216 K | 219 K | 1.01 |
+
+**The explanations above still hold** (checked in the release object of `Workloads`):
+- Trapping adds: `parseWithParserSpan` has 20 `adds` + `b.vs` pairs, `parseWithParserSpanRecords` 2;
+  the Bytes functions none.
+- Per-site throw paths: `parseWithParserSpan` is 563 instructions against `parseWithBytes`' 219
+  (568/220 before), with 8 `stur`/`ldur` stack accesses against none; `Tools/calls` shows 12
+  `swift_allocError` and 20 `ParsingError` witness-table accessor call sites in it, against 1 and 3.
+- Out-of-line slicing: `specialized ParserSpan.sliceSpan<A>(byteCount:)` is still a call, at 2 call
+  sites in each `ParserSpan` zip function.
+- 24-bit values: the `ParserSpan` loop is 17 scalar instructions per value; Bytes' per-value loop and
+  `forEach` are `vector128`.
+- QOI `tricolor.qoi`: the Bytes build's run-pixel loop is 17 instructions (`uzp1.8b` + `fmov` narrowing
+  the pixel on every store, and the input's `remainingByteCount >= 8` recomputed each pixel), the
+  `ParserSpan` build's 11. Neither the bit-field subscripts nor the `Byte3` read cause it: variants with
+  shifts and masks, or three single-byte reads, have the same loop and counts (6.57 M).
+
+**Prototyped Bytes APIs** (measured, then removed; details in this run's API proposals):
+- Copying LZ4 literals with a fixed-size move and overrun (`writer.write(from: &reader, byteCount:,
+  allowingOverrun: true)`): 65 → 51 M instructions on `swift-help.lz4` (−22%), 216 → 172 K on
+  `tricolor.qoi.lz4`.
+- Writing a QOI run at once (`writer.write(repeating:byteCount:count:)`): 6.57 → 2.27 M on
+  `tricolor.qoi` (−65%), 131 → 106 M on `antelope.qoi` (−19%).
+- Both change the decoding algorithm, so they'd have to go into both ports to keep the comparison fair;
+  not adopted here.
+- An error-location wrapper taking a closure cost 15% (301 → 345 K) because the closure wasn't inlined;
+  `catch { throw reader.located(error) }` cost 1.3% (305 K). Wrapping each zip entry in `atomically { }`
+  cost 50% (453 K) for the same reason: the closure body isn't inlined, so the cursor lives in memory and
+  14 calls to the unaligned slow path appear (see the README's caveat about closures).

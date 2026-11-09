@@ -41,12 +41,16 @@ struct HuffmanEntry {
     /// Bits to consume: the code, plus a length's or distance's extra bits.
     /// Masked to 6 bits, the width a variable shift uses: so `BitBuffer.consume` can shift by the raw entry
     /// (ARM's `lsr` ignores the rest), keeping the mask off the decode loop's critical path.
-    @inline(__always) var totalBits: Int { Int(raw & 0x3F) }
-    @inline(__always) var codeLength: Int { Int(raw >> 8 & 0xF) }
-    @inline(__always) var kind: UInt32 { raw >> 12 & 0x7 }
-    @inline(__always) var value: Int { Int(raw >> 16) }
+    @inline(__always) var totalBits: Int { Int(raw[bits: 0..<6]) }
+    @inline(__always) var codeLength: Int { Int(raw[Nibble.self, at: 8]) }
+    /// Compiles to the same code as comparing the raw field: the optimizer folds the conversion away.
+    @inline(__always) var kind: Kind { Kind(rawBits: raw[Bits<3>.self, at: 12]) ?? .invalid }
+    @inline(__always) var value: Int { Int(raw[bits: 16..<32]) }
 
     /// The extra bits' value, from bits whose first is this entry's code's first.
+    ///
+    /// A mask and a shift rather than `bits[bits: codeLength..<totalBits]`: with a range not known to be
+    /// valid, the subscript's checks stay in the decode loop (measured: 31 more instructions, two traps).
     @inline(__always)
     func extra(_ bits: UInt64) -> Int {
         Int(truncatingIfNeeded: (bits & ((1 &<< UInt64(totalBits)) &- 1)) &>> UInt64(codeLength))
@@ -235,10 +239,10 @@ struct Inflater: ~Copyable {
         case .stored:
             bits.alignToByte()
             var stored = try bits.finish()
-            let length = try stored.read(Byte2.self, .littleEndian)
-            try stored.expect(Byte2(~length, .littleEndian)) // NLEN, the one's complement
+            let length = try stored.read(Byte2.self)
+            try stored.expect(~length) // NLEN, the one's complement
             bitPosition = stored.bitPosition
-            state = .stored(remaining: Int(length))
+            state = .stored(remaining: Int(length.littleEndian))
             return
         case .fixedHuffman:
             state = .huffman(fixed: true)
@@ -277,7 +281,7 @@ struct Inflater: ~Copyable {
         var entry = lookup(literals, bits.bits, rootBits: literalRootBits)
         // Room for three literals, a match, and its copy's overrun.
         symbols: while writer.remainingByteCount >= 3 &+ maximumMatch &+ BytesWriter.copyOverrun {
-            if entry.kind == HuffmanEntry.Kind.literal.rawValue {
+            if entry.kind == .literal {
                 // Literals come in runs: up to three per refill (15 bits each of the 56 or more buffered).
                 // Each lookup after a literal reads valid bits (41, then 26 or more left), and a refill only
                 // adds bits above them, so an entry that isn't a literal stays valid across the refill.
@@ -288,11 +292,11 @@ struct Inflater: ~Copyable {
                 // Root entries first: a literal there can't be a subtable link, so the common case skips
                 // that check. Anything else is resolved below.
                 entry = rootEntry(literals, bits.bits, rootBits: literalRootBits)
-                if entry.kind == HuffmanEntry.Kind.literal.rawValue {
+                if entry.kind == .literal {
                     bits.consume(bitCount: entry.totalBits)
                     try writer.write(Byte(truncatingIfNeeded: entry.value))
                     entry = rootEntry(literals, bits.bits, rootBits: literalRootBits)
-                    if entry.kind == HuffmanEntry.Kind.literal.rawValue {
+                    if entry.kind == .literal {
                         bits.consume(bitCount: entry.totalBits)
                         try writer.write(Byte(truncatingIfNeeded: entry.value))
                         // 11 or more bits are left: enough for the root lookup, which then doesn't wait for the
@@ -309,12 +313,12 @@ struct Inflater: ~Copyable {
                 bits.refill()
             }
             switch entry.kind {
-            case HuffmanEntry.Kind.literal.rawValue:
+            case .literal:
                 // A long literal code, from a subtable: rare. 56 or more bits buffered.
                 bits.consume(bitCount: entry.totalBits)
                 try writer.write(Byte(truncatingIfNeeded: entry.value))
                 entry = lookup(literals, bits.bits, rootBits: literalRootBits)
-            case HuffmanEntry.Kind.lengthOrDistance.rawValue:
+            case .lengthOrDistance:
                 // 48 or more bits buffered. After the length, 28 or more: enough for the distance, decoded
                 // from a copy of them, so the refill started here overlaps it instead of delaying it. After
                 // the distance, 28 or more remain: enough for the next root lookup, made before a second
@@ -324,7 +328,7 @@ struct Inflater: ~Copyable {
                 let window = bits.bits
                 bits.refill()
                 let distanceEntry = lookup(distances, window, rootBits: distanceRootBits)
-                guard distanceEntry.kind == HuffmanEntry.Kind.lengthOrDistance.rawValue else { throw .invalidValue }
+                guard distanceEntry.kind == .lengthOrDistance else { throw .invalidValue }
                 let distance = distanceEntry.value &+ distanceEntry.extra(window)
                 bits.consume(bitCount: distanceEntry.totalBits)
                 let root = rootEntry(literals, bits.bits, rootBits: literalRootBits)
@@ -332,7 +336,7 @@ struct Inflater: ~Copyable {
                 entry = resolve(root, literals, bits.bits, rootBits: literalRootBits)
                 // Throws `invalidValue` for a distance reaching before the output's start.
                 try writer.copy(fromDistance: distance, count: length, allowingOverrun: true)
-            case HuffmanEntry.Kind.endOfBlock.rawValue:
+            case .endOfBlock:
                 bits.consume(bitCount: entry.totalBits)
                 endOfBlock = true
                 break symbols
@@ -362,7 +366,7 @@ struct Inflater: ~Copyable {
     private static func resolve(
         _ entry: HuffmanEntry, _ table: Span<UInt32>, _ bits: UInt64, rootBits: Int
     ) -> HuffmanEntry {
-        guard entry.kind == HuffmanEntry.Kind.subtable.rawValue else { return entry }
+        guard entry.kind == .subtable else { return entry }
         let index = Int(truncatingIfNeeded: bits &>> UInt64(rootBits)) & ((1 &<< entry.codeLength) &- 1)
         return HuffmanEntry(raw: table[entry.value &+ index])
     }

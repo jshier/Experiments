@@ -79,7 +79,7 @@ import Testing
         let bytes: [UInt8] = [0x00, 0x03, 0x61, 0x23, 0x62, 0x00, 0x01, 0x61]
         var reader = BytesReader(bytes.span)
         #expect(throws: BytesError.invalidValue) {
-            try reader.read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: { $0.matching(UInt8(ascii: "#")) })
+            _ = try reader.read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: { $0.matching(UInt8(ascii: "#")) })
         }
         #expect(reader.byteOffset == 0)
         let text = try reader.read(utf8PrefixedBy: Byte2.self, .bigEndian)

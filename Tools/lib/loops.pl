@@ -3,7 +3,8 @@
 # loops: a branch to a label at or before the branch is a loop from the label to the branch.
 #
 # Environment: FUNCTION (name to print), FORMAT (text|tsv), BODY (1: print loop instructions),
-# REQUIRE / FORBID (comma-separated mnemonic substrings, checked against the innermost loops).
+# REQUIRE / FORBID (comma-separated mnemonics, with or without their numeric/lane suffix: `zip` matches
+# `zip1.16b`, `bl` doesn't match `tbl` or `blr`; checked against the innermost loops).
 # Exit status 1 if REQUIRE/FORBID are given and no innermost loop satisfies them.
 use strict;
 use warnings;
@@ -71,9 +72,12 @@ for my $loop (@loops) {
     $number++;
 
     if ($innermost && $checking) {
-        my $text = join ' ', map { $_->{mnemonic} } @insns[$start .. $end];
-        my $ok = !grep { index($text, $_) < 0 } keys %require;
-        $ok &&= !grep { index($text, $_) >= 0 } keys %forbid;
+        # An op names a mnemonic, optionally without its numeric or lane suffix: `zip` matches `zip1.16b`,
+        # `tbl` matches `tbl.16b`, `ld3.16b` only itself, and `bl` matches `bl` but not `tbl` or `blr`.
+        my @mnemonics = map { $_->{mnemonic} } @insns[$start .. $end];
+        my $present = sub { my $op = shift; scalar grep { /^\Q$op\E(?:$|[.\d])/ } @mnemonics };
+        my $ok = !grep { !$present->($_) } keys %require;
+        $ok &&= !grep { $present->($_) } keys %forbid;
         $satisfied ||= $ok;
     }
 

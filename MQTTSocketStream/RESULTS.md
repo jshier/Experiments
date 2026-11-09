@@ -6,6 +6,41 @@ M3 Ultra (24 performance + 8 efficiency cores), macOS 27.2. The swiftlang/swift#
 Bandwidth counts every byte on the wire, MQTT headers included; the timing runs from the first listener to
 the last receiver's end of stream. Every packet is checked on arrival.
 
+## 2026-11-09: MQTT's flag bytes read whole (baseline `frames` → `modern`)
+
+Nothing changed here but the MQTT package under it, which now reads and writes its fixed header and flag
+bytes as whole `Byte`s instead of field by field (its Benchmarks/RESULTS.md), and a debug-build fix (below).
+
+| Per 10,000 packets, in memory | `frames` | `modern` | |
+|---|---|---|---|
+| Check 64 B payload packets: instructions | 8.60 M | **7.47 M** | −13% |
+| Encode 64 B payload packets: instructions | 6.09 M | **5.68 M** | −7% |
+| Allocations (`Allocations:` thresholds) | 0 | 0 | pass |
+| Allocations per transfer (100 K and 1 M packets) | 120 | 120 | |
+
+- **Transfer times, re-verified by interleaving** the old binary (commit `eec4a92`) and the new, five runs
+  each, alternating (median, GB/s): 64 B on 1 connection 2.77 against 2.65, on 4 connections 4.55
+  against 4.44, raw 16 KB on 4 connections 3.89 against 4.08. The ranges overlap in every case: equal
+  within noise. Single runs vary ±20% (one raw 4-connection run measured +77% slower), so compare
+  transfers only interleaved.
+- **Executor hops** (`Tools/runtime-count`, one 64 B connection): `swift_task_switch` 55 for 20,000
+  packets and 113 for 80,000, `swift_job_run` 16–17: as before.
+- **SIMD** (`Tools/counters --mode simd_fp_unit_instructions`, 8.4 M packets of 64 B): receiver 0.58 G
+  SIMD arithmetic and 0.11 G SIMD loads (69 and 13 per packet: the string scans and the topic compare);
+  sender 0.47 G and 0.11 G (56 and 13), plus 0.06 G SIMD stores.
+- **Profile** (`Tools/profile`, 64 B): sender `__sendto` 51%, `BytesWriter.write(_:)` 9%, `memmove` 6%,
+  the topic scan 4%; receiver `__recvfrom` 26%, `read(utf8PrefixedBy:_:excluding:)` 14%,
+  `MQTTPublish.init(reading:flags:)` 10%. Leaf names include inlined frames: `RawSpan._checkRange`
+  (6% of the receiver) and a `ClosedRange` `contains` witness (3% of the sender) are inlined bounds checks
+  and `switch` range cases, not calls (the binary has no stub calls to them). `outlined destroy of
+  MQTTPublish` is about 2% per side, as below.
+- **Debug builds** failed at `Transfer.encode`: `MQTTProperties(validating:
+  Fixtures.propertyBytes.span.bytes)`, "lifetime-dependent value escapes its scope". A span of a global
+  declared in another file is rejected when files compile separately (debug builds), and accepted with
+  whole-module optimization (release builds), with Swift 6.4.2 and the PR toolchain alike: the global's
+  addressor is only a declaration in the other file's compilation, so the lifetime checker can't see
+  that it's a `let`. The fix binds the global to a local first (once per batch).
+
 ## Results
 
 Baseline `frames`, against `nonsending-scan16` (allocations, scans, and concurrency, below) and
@@ -126,6 +161,36 @@ builds with `NonisolatedNonsendingByDefault`). Counted with LLDB breakpoints ove
   `nonisolated(nonsending)` together (not measured apart: the checks are a few per 256 KB read, so most
   of it is the scans); the sender's topic table then took it to 16.1 M.
 
+#### Measured with Instruments (2026-11-09)
+
+The breakpoint counts above can't tell a check from a move. Instruments' Swift Concurrency template
+records every task state change (Running, Suspended, waiting on a continuation) with the thread and actor
+it ran on, which shows actual hops. `Tools/tasks -- .build/…/mqtt-socket-stream ARGS` records and
+summarizes it (64 B payloads, `mqtt` mode, one run each):
+
+| Transfer | Tasks | Runs | Thread switches | Actor switches | Continuation waits | Wait before running (median, p90) |
+|---|---|---|---|---|---|---|
+| 1 connection, 20,000 packets | 5 | 62 | 6 | 6 | 50 | 7.9, 12.2 µs |
+| 1 connection, 80,000 packets | 5 | 179 | 6 | 6 | 167 | 5.8, 12.7 µs |
+| 4 connections, thread per task | 17 | 277 | 18 | 18 | 239 | 5.8, 12.0 µs |
+| 4 connections, shared pool of 2 threads | 10 | 201 | 4 | 4 | 183 | 4.4, 10.6 µs |
+| 4 connections, shared pool of 8 threads | 10 | 250 | 4 | 4 | 232 | 5.7, 11.2 µs |
+| 1 connection, `raw` mode | 5 | 83 | 6 | 6 | 71 | 5.6, 13.5 µs |
+
+- **The sender and receiver tasks never hop.** In every run, each runs on exactly one thread with no
+  thread or actor switch, including 8 tasks sharing a 2-thread pool: a suspended read or write resumes on
+  the thread it suspended on (`resumeSynchronously` on the event loop), so the pool's round-robin never
+  comes into play once a task is running.
+- **Every switch is `main` setting up**: `main` moves between the main thread and the global concurrent
+  executor while it creates the executors and starts the tasks: 6 times for one connection, 18 for four
+  connections with an executor each, 4 with one shared pool. The same for 20,000 and 80,000 packets: a
+  fixed cost per transfer.
+- **Suspensions follow socket waits, not packets**: continuation waits grow with the bytes moved (50 →
+  167 for 4x the packets), each a socket that wasn't ready. From being made runnable to running takes a
+  median of 4–8 µs.
+- Together with the breakpoint counts: the 55–113 `swift_task_switch` calls per transfer are fast-path
+  checks that leave the task where it is. Instruments records no state change for them, and none is a hop.
+
 ### What's left per packet
 
 A sample of the 64 B run, since skipping the enum:
@@ -161,7 +226,10 @@ ms of transfer, and the in-memory MQTT benchmarks parse and encode large-payload
 ## Placement
 
 A shared `PThreadTaskExecutor` pool hands each job to its next thread in turn; one single-thread executor per
-sender and receiver keeps each task, its socket's kqueue registration, and its buffers on one thread. With
+sender and receiver keeps each task, its socket's kqueue registration, and its buffers on one thread. In
+practice the pool barely matters once tasks are running: Instruments shows each task staying on one pool
+thread for the whole transfer, because suspended socket operations resume on the thread that suspended
+(see "Measured with Instruments" above). With
 4 connections of 1 KB packets, the first measurements had thread per task 6% ahead (4.45 against 4.20
 GB/s). Repeated runs now overlap (4.3–4.7 and 4.2–4.8 GB/s): at the 4-connection TCP ceiling, the
 difference is within run-to-run noise.
