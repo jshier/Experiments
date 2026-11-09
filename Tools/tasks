@@ -1,0 +1,109 @@
+#!/bin/bash
+# tasks — what each Swift task actually did, from Instruments' Swift Concurrency template (recorded with
+# xctrace): where it ran, whether it hopped between threads or actors, how long it waited for its executor,
+# and how often it suspended on a continuation (I/O, `withCheckedContinuation`, …).
+#
+# usage: Tools/tasks [--top N] [--keep FILE.trace] [--time-limit T] [--timeout S] -- PROGRAM [ARGS...]
+#        Tools/tasks [--top N] --trace FILE.trace
+#
+# Output, tab-separated, three tables under "==" headers:
+#   == tasks (busiest first, --top N, default 20): task, runs (Running intervals), running time,
+#      threads (distinct threads it ran on), thread switches (consecutive runs on different threads: real
+#      hops), actor switches (consecutive runs on different actors/executors), continuations (count, total
+#      time), scheduling waits before a run (count, median, p90, max: Suspended/Enqueued time right before
+#      Running, i.e. from being made runnable to running), lifetime
+#   == threads: thread, runs, running time (task code only)
+#   == totals: tasks, runs, thread switches, actor switches, continuations, scheduling waits (median, p90)
+#   Times in µs.
+#
+# What it can't show: executor *checks* that don't change state. A plain `nonisolated` async function calls
+# `swift_task_switch` on entry and after each await to confirm its executor; when it's already right, the
+# task never leaves Running, so nothing is recorded. Count those with Tools/runtime-count
+# (`--break swift_task_switch@libswift_Concurrency.dylib`). This tool counts actual moves.
+#
+# PROGRAM is launched as PROGRAM-debuggable (get-task-allow; lib/common.sh). Keep runs short: every task
+# state change is recorded. --timeout (default 300 s) ends a recording that hangs (e.g. waiting on an
+# authorization prompt).
+source "$(dirname "$0")/lib/common.sh"
+have yq || die "needs yq: brew install yq"
+have jq || die "needs jq: brew install jq"
+
+top=20 keep= trace= limit= timeout=300
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --top) top="$2"; shift ;;
+        --keep) keep="$2"; shift ;;
+        --trace) trace="$2"; shift ;;
+        --time-limit) limit="$2"; shift ;;
+        --timeout) timeout="$2"; shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        *) die "unknown option $1" ;;
+    esac
+    shift
+done
+scratch_dir
+if [[ -z "$trace" ]]; then
+    [[ $# -ge 1 ]] || usage 2
+    program="$(debuggable "$1")"; shift
+    trace="${keep:-$SCRATCH/run.trace}"
+    rm -rf "$trace"
+    note "recording $(basename "$program") with Swift Concurrency…"
+    status=0
+    with_timeout "$timeout" xctrace record --template 'Swift Concurrency' --output "$trace" ${limit:+--time-limit "$limit"} \
+        --launch -- "$program" "$@" > "$SCRATCH/record.log" 2>&1 || status=$?
+    [[ $status != 124 ]] || fail "recording didn't finish in ${timeout}s ($AUTH_HINT)"
+    [[ -d "$trace" ]] || { tail -5 "$SCRATCH/record.log" >&2; die "xctrace record failed ($AUTH_HINT)"; }
+fi
+[[ -d "$trace" ]] || die "no trace $trace"
+
+xctrace export --input "$trace" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="SwiftTaskStateTable"]' 2>/dev/null |
+    yq -p xml -o json '.' > "$SCRATCH/states.json"
+[[ -s "$SCRATCH/states.json" ]] || die "no SwiftTaskStateTable in $trace (was it recorded with the Swift Concurrency template?)"
+
+jq -r --argjson top "$top" '
+    ([.. | objects | select(has("+@id"))] | map({key: .["+@id"], value: .}) | from_entries) as $ids
+    | def r: if type == "object" and has("+@ref") then $ids[.["+@ref"]] else . end;
+      def one: if type == "array" then .[0] else . end;
+      def us: . / 1000 | . * 10 | round / 10;
+      def pct(p): if length == 0 then null else .[((length - 1) * p) | floor] end;
+    [.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
+     | {t: (.["start-time"] | r | .["+content"] | tonumber),
+        d: (.duration | r | .["+content"] // "0" | tonumber),
+        task: (.["analysis-core-swift-task"] | one | r | .["+@fmt"]),
+        state: (.["swift-task-state"] | r | .["+@fmt"]),
+        thread: (.thread | r | .["+@fmt"] // "" | sub(" \\(.*$"; "")),
+        actor: (.["swift-actor"] | if type == "array" then (.[1] // .[0]) else . end | r | .["+@fmt"] // "")}]
+    | sort_by(.t) as $rows
+    | ($rows | group_by(.task) | map(
+        . as $s
+        | ($s | map(select(.state == "Running"))) as $run
+        | ([range(1; $s | length) as $i
+            | select($s[$i].state == "Running" and ($s[$i - 1].state | test("Suspended|Enqueued")))
+            | $s[$i - 1].d] | sort) as $waits
+        | ($s | map(select(.state == "Continuation"))) as $cont
+        | {task: $s[0].task, runs: ($run | length), running: ($run | map(.d) | add // 0),
+           threads: ($run | map(.thread) | unique | length),
+           switches: ([range(1; $run | length) as $i | select($run[$i].thread != $run[$i - 1].thread)] | length),
+           actorSwitches: ([range(1; $run | length) as $i | select($run[$i].actor != $run[$i - 1].actor)] | length),
+           continuations: ($cont | length), continuationTime: ($cont | map(.d) | add // 0),
+           waits: $waits, lifetime: (($s[-1].t + $s[-1].d) - $s[0].t)})) as $tasks
+    | ($rows | map(select(.state == "Running")) | group_by(.thread)
+       | map({thread: .[0].thread, runs: length, running: (map(.d) | add)}) | sort_by(-.running)) as $threads
+    | ($tasks | map(.waits) | add // [] | sort) as $allWaits
+    | "== tasks",
+      (["task", "runs", "running µs", "threads", "thread switches", "actor switches", "continuations",
+        "continuation µs", "waits", "wait median µs", "wait p90 µs", "wait max µs", "lifetime µs"] | @tsv),
+      ($tasks | sort_by(-.running) | .[0:$top][]
+       | [.task, .runs, (.running | us), .threads, .switches, .actorSwitches, .continuations,
+          (.continuationTime | us), (.waits | length), (.waits | pct(0.5) // 0 | us),
+          (.waits | pct(0.9) // 0 | us), (.waits | last // 0 | us), (.lifetime | us)] | @tsv),
+      "== threads",
+      (["thread", "runs", "running µs"] | @tsv),
+      ($threads[] | [.thread, .runs, (.running | us)] | @tsv),
+      "== totals",
+      (["tasks", "runs", "thread switches", "actor switches", "continuations", "waits", "wait median µs", "wait p90 µs"] | @tsv),
+      ([($tasks | length), ($tasks | map(.runs) | add), ($tasks | map(.switches) | add),
+        ($tasks | map(.actorSwitches) | add), ($tasks | map(.continuations) | add), ($allWaits | length),
+        ($allWaits | pct(0.5) // 0 | us), ($allWaits | pct(0.9) // 0 | us)] | @tsv)
+' "$SCRATCH/states.json" | demangle

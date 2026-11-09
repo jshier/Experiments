@@ -86,9 +86,15 @@ target_object() {
     (cd "$package" && swift build -c release --target "$target") > "$log" 2>&1 ||
         { grep -E 'error:' "$log" | head -20 >&2; rm -f "$log"; die "swift build --target $target failed"; }
     rm -f "$log"
-    # Xcode-style build system (.build/out/Intermediates.noindex/…/Release/T-t.build) or native (.build/…/release/T.build).
+    # Xcode-style build system: .build/out/Intermediates.noindex/…/Release/T-t.build (libraries) or T-p.build
+    # (executables); native: .build/…/release/T.build. Failing those, the prelinked .build/out/Products/Release/T.o
+    # that some builds leave for a dependency's module.
     while IFS= read -r object; do objects+=("$object"); done < <(find "$package/.build" \
-        \( -path "*/Release/$target-t.build/Objects-normal/*" -o -path "*/release/$target.build/*" \) -name '*.o' 2>/dev/null | sort)
+        \( -path "*/Release/$target-t.build/Objects-normal/*" -o -path "*/Release/$target-p.build/Objects-normal/*" \
+           -o -path "*/release/$target.build/*" \) -name '*.o' 2>/dev/null | sort)
+    if [[ ${#objects[@]} -eq 0 && -f "$package/.build/out/Products/Release/$target.o" ]]; then
+        objects=("$package/.build/out/Products/Release/$target.o")
+    fi
     [[ ${#objects[@]} -gt 0 ]] || die "no objects for $target under $package/.build"
     if [[ ${#objects[@]} -eq 1 ]]; then echo "${objects[0]}"; return 0; fi
     merged="$package/.build/agent-tools/$target.o"

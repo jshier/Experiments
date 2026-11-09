@@ -21,8 +21,9 @@
 #   --tsv         one line per loop: function, loop, start, end, instructions, depth, innermost|outer,
 #                 verdict, mix
 #   --body        print each loop's instructions
-#   --require OPS comma-separated mnemonic substrings that must all appear in an innermost loop (`ld3.16b,st4.16b`)
-#   --forbid OPS  mnemonic substrings that must not (`mov.b,ins,umov,bl`)
+#   --require OPS comma-separated mnemonics that must all appear in an innermost loop (`ld3.16b,st4.16b`);
+#                 a mnemonic without its suffix matches every form (`zip` matches `zip1.16b`, `tbl` `tbl.16b`)
+#   --forbid OPS  mnemonics that must not (`mov.b,ins,umov,bl`: `bl` doesn't match `tbl` or `blr`)
 #   With --require/--forbid, exits 1 unless every matching function has an innermost loop that passes.
 #
 # examples (Base64's two kernels: the NEON table kernel, without lane-at-a-time inserts, and the

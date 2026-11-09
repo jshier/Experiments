@@ -1,4 +1,10 @@
+// `@testable` (for the folding constants) only where Bytes is built for testing: `swift build -c release
+// --build-tests` builds it without `-enable-testing`, and the import would fail.
+#if DEBUG
 @_spi(Benchmarking) @testable import Bytes
+#else
+@_spi(Benchmarking) import Bytes
+#endif
 import Testing
 
 @Suite struct CRC32Tests {
@@ -58,7 +64,7 @@ import Testing
         #expect(whole == Self.reference(data))
     }
 
-    #if arch(arm64)
+    #if arch(arm64) && DEBUG
     /// The folding constants: x^(n ± 32) mod P, bit-reflected, shifted left one.
     @Test func foldingConstants() {
         func constant(_ exponent: Int) -> UInt64 {

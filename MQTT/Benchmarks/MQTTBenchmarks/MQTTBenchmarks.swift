@@ -147,7 +147,7 @@ func parsePublishes(copy index: Int, iteratingProperties: Bool) {
         guard case let .publish(publish) = packet else { fatalError() }
         checksum &+= publish.topic.count &+ publish.payload.byteCount &+ Int(publish.packetIdentifier ?? 0)
         if iteratingProperties {
-            for property in publish.properties {
+            publish.properties.forEach { property in
                 switch property {
                 case let .messageExpiryInterval(seconds): checksum &+= Int(seconds)
                 case let .userProperty(name, value): checksum &+= name.count &+ value.count
@@ -168,7 +168,7 @@ func parsePublishFrames(copy index: Int) {
         guard frame.type == .publish else { fatalError() }
         let publish = try! MQTTPublish(parsing: frame)
         checksum &+= publish.topic.count &+ publish.payload.byteCount &+ Int(publish.packetIdentifier ?? 0)
-        for property in publish.properties {
+        publish.properties.forEach { property in
             switch property {
             case let .messageExpiryInterval(seconds): checksum &+= Int(seconds)
             case let .userProperty(name, value): checksum &+= name.count &+ value.count
@@ -231,7 +231,7 @@ func parsePublishesCopying(copy index: Int) {
         let topic = String(copying: publish.topic)
         let body = publish.payload.withUnsafeBytes { Array($0) }
         checksum &+= topic.utf8.count &+ body.count
-        for property in publish.properties {
+        publish.properties.forEach { property in
             if case let .userProperty(name, value) = property {
                 checksum &+= String(copying: name).utf8.count &+ String(copying: value).utf8.count
             }

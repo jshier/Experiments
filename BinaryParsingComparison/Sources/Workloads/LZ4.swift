@@ -27,7 +27,7 @@ public enum LZ4 {
         else { throw LZ4Error() }
         let blockMaximum = 1 << (8 &+ 2 &* sizeCode)
         let hasBlockChecksums = flags[bit: 4]
-        let contentSize = try flags[bit: 3] ? Int(reader.read(Byte8.self, .littleEndian)) : 0
+        let contentSize = try flags[bit: 3] ? reader.read(Int.self, as: Byte8.self, .littleEndian) : 0
         if flags[bit: 0] { try reader.skip(byteCount: 4) } // dictionary ID
         try reader.skip(byteCount: 1) // header checksum
 
@@ -63,7 +63,7 @@ public enum LZ4 {
             let literalCount = try length(Int(token.highHalf), &reader)
             try writer.write(reader.read(byteCount: literalCount))
             if reader.isAtEnd { return }
-            let distance = try Int(reader.read(Byte2.self, .littleEndian))
+            let distance = try reader.read(Int.self, as: Byte2.self, .littleEndian)
             guard distance != 0 else { throw .invalidValue }
             let count = try length(Int(token.lowHalf), &reader) &+ 4
             try writer.copy(fromDistance: distance, count: count, allowingOverrun: true)

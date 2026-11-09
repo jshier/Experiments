@@ -42,7 +42,7 @@ if [[ -z "$trace" ]]; then
     program="$(debuggable "$1")"; shift
     dsym="$program"
     xctrace record --template 'Time Profiler' --show-recording-options 2>/dev/null |
-        jq --argjson h "${high:+true}${high:-false}" '.["Time Profiler"].highFrequencySampling = $h' > "$SCRATCH/options.json"
+        jq --argjson h "$([[ -n "$high" ]] && echo true || echo false)" '.["Time Profiler"].highFrequencySampling = $h' > "$SCRATCH/options.json"
     note "recording $(basename "$program") with Time Profiler…"
     xctrace record --template 'Time Profiler' --recording-options "$SCRATCH/options.json" --output "$trace" --launch -- "$program" "$@" \
         > "$SCRATCH/record.log" 2>&1 || { tail -5 "$SCRATCH/record.log" >&2; die "xctrace record failed ($AUTH_HINT)"; }

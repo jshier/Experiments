@@ -37,8 +37,8 @@ public enum QOI {
     public static func decodeWithBytes(_ data: RawSpan) throws -> DecodedImage {
         var reader = BytesReader(data)
         try reader.expect(0x71_6F_69_66 as Byte4) // "qoif"
-        let width = try Int(reader.read(Byte4.self, .bigEndian))
-        let height = try Int(reader.read(Byte4.self, .bigEndian))
+        let width = try reader.read(Int.self, as: Byte4.self, .bigEndian)
+        let height = try reader.read(Int.self, as: Byte4.self, .bigEndian)
         let channels = try Int(reader.read(Byte.self))
         let colorSpace = try reader.read(Byte.self)
         guard channels == 3 || channels == 4, colorSpace <= 1, width > 0, height > 0 else { throw QOIError() }

@@ -1,25 +1,82 @@
 # Bytes performance log
 
 Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
-Baselines are in `.benchmarkBaselines/` (the latest full run is `reviewed`); compare any two with
+Baselines are in `.benchmarkBaselines/` (the latest full run is `modern`, re-run on 2026-11-09 with no
+other benchmarks running); compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
-## Current: Bytes against the alternatives (same harness, same run; baseline `reviewed`)
+## Current: Bytes against the alternatives (same harness, same run; baseline `modern`)
+
+The times below were first taken on a loaded machine (see the 2026-11-09 section). Re-run alone, `modern`
+against `safe-final`: instruction counts identical (268 rows, none beyond −0.8%), wall times a median
+change of 0.0% (single rows ±18%, run-to-run noise), allocation thresholds pass.
 
 | Workload | Bytes | Comparator | |
 |---|---|---|---|
-| Zip central directory, 2,000 entries (~170 KB) | **9.3 µs**, 291 K instr | original `ByteReader`: 19 µs, 259 K instr | 2x faster |
-| | fixed-size-record style: 11 µs, 253 K instr | hand-written `RawSpan.load` offsets: 16 µs, 317 K instr | 1.5x faster |
-| Bit fields, 8 fields of 1–32 bits per record, 128 KB | **37 µs**, 706 K instr | 64-bit refill-buffer reader: 300 µs, 8,180 K instr | 8x faster |
-| Find a 4-byte signature 64 KB back (zip EOCD worst case) | **2.3 µs**, 50 K instr | `RawSpan.load` per offset: 33 µs, 787 K instr | 15x faster |
-| 256 K big-endian `UInt32`s | 18 µs | `RawSpan.load` per value: 18 µs | equal (all vectorize) |
-| 349 K big-endian 24-bit values (`Byte3`) | 54 µs | — | vectorized (`ld3`) |
+| Zip central directory, 2,000 entries (~170 KB) | **11 µs**, 301 K instr | original `ByteReader`: 17 µs, 259 K instr | 1.5x faster |
+| | fixed-size-record style: **7.8 µs**, 199 K instr | hand-written `RawSpan.load` offsets: 16 µs, 317 K instr | 2x faster |
+| Bit fields, 8 fields of 1–32 bits per record, 128 KB | **40 µs**, 706 K instr | 64-bit refill-buffer reader: 332 µs, 8,180 K instr | 8x faster |
+| Find a 4-byte signature 64 KB back (zip EOCD worst case) | **2.0 µs**, 50 K instr | `RawSpan.load` per offset: 33 µs, 787 K instr | 16x faster |
+| 256 K big-endian `UInt32`s | 21 µs, 200 K instr | `RawSpan.load` per value: 21 µs, 201 K instr | equal (all vectorize) |
+| 349 K big-endian 24-bit values (`Byte3`), `read(_:_:into:)` | 22 µs, 267 K instr | — | NEON `tbl` unpacking |
 
-Field-by-field parsing uses more instructions than at v3 (291 against 263 K) because one `assume` was
-dropped so that loops of reads vectorize (see "Making loops of single reads vectorize"); wall time is
-unchanged.
+Field-by-field parsing uses more instructions than at v3 (301 against 263 K) because one `assume` was
+dropped so that loops of reads vectorize (see "Making loops of single reads vectorize"), and the checked
+`extracting` added 3% (see "Safe constructs"); wall time is unchanged.
 
 No benchmark allocates, apart from the output array in the bulk ones and one `for`-`in` shape (below).
+
+## Verification, 2026-11-09 (baseline `modern`)
+
+A full run after the renames, the formatting pass, and the `ByteLanes` additions. Other agents were
+building and benchmarking on the machine at the time (load average ~10), so times are not comparable.
+Instruction counts are, and they're what this check uses.
+
+- **Instructions are unchanged from `safe-final` in every benchmark.** Of 280 rows, none differs by 1% or
+  more, except two 32-core rows at +1.3% and +1.5%, which are scheduling noise. Wall times are 5–15%
+  slower across the board, including the references (raw SIMD read and store, `RawSpan.load`), and with
+  equal instruction counts. That's the load, not the code.
+- **The `literals3` numbers don't reproduce at HEAD, but the parser didn't change.** That baseline
+  recorded 292 K for "Fields: Bytes", 197 K for the fixed-size records, and 48 K for the search, against
+  301, 199, and 50 K now. The comparators that don't use Bytes moved by the same 1–2 K (315 → 317,
+  257 → 259).
+  - Commit `fa86687`, the literal fix, built from a clean export and run back to back with HEAD, gives
+    292 / 197 / 315 / 257 / 48 K again, so both measurements are deterministic.
+  - Yet `parseWithBytes` is byte-for-byte the same machine code in both binaries (`objdump`, addresses
+    normalized). The signature is still the folded `mov`/`movk` constant with no `swift_once`, so the
+    literal fix holds.
+  - The difference is outside the measured function: the benchmark binary around it, or the process-wide
+    instruction counter. It isn't a library regression.
+  - The "−3% against `safe-final`" in "Integer literals" is therefore a property of that build of the
+    benchmark binary, not something the literal change does to the parser.
+- **Allocations:** `thresholds check --filter 'Allocations:.*'` passes (EQUAL) with the `NEONShuffle`
+  trait on, and with it off (`--disable-default-traits`, checked by the absence of `tbl` in the rebuilt
+  bulk-read loops).
+- **Vectorization**, checked with `Tools/loops` on the benchmark binary and on probes:
+  - `forEach` over every byte group:
+    - `Byte2`, `Byte4`, `Byte8`: `rev*.16b` + `add` with `ldp q`.
+    - `Byte3`: `ld3.16b`.
+    - `Byte5`–`Byte7`: NEON `tbl` unpacking.
+    - `Byte9`–`Byte15`: `rev64.16b`/`usra.2d`.
+  - `forEach` over every bit width: `Bits<3>` with `ld3.16b`, `Bits<5>`–`Bits<7>` from 64-bit blocks.
+  - Bulk `read(_:_:into:)` of `Byte3` and `Byte5`–`Byte7`: an innermost loop of 4 `tbl.16b` with `ldp`/`stp`,
+    with no lane moves.
+  - `lastByteOffset(of:)`: 12 instructions with 2 `cmeq.16b`, `and.16b`, and `umaxv.16b`.
+  - `ByteLanes.lookup(in:)` and `deinterleave`: `tbl.16b`. `interleave`: `zip1`/`zip2` plus an `st2.4h`
+    store, with no lane moves.
+  - `CRC32._fold`: 8 `pmull`, 8 `pmull2`, and 8 `eor3` per 128 bytes. The tail is `crc32x`.
+  - Generating writes vectorize for `Byte2`, `Byte4`, `Byte`, `Nibble`, `Crumb`, and `Bit`.
+    - `Byte3` and `Byte5`–`Byte7` use `tbl` packing, with a few lane inserts building the 32/64-bit lanes.
+    - `Byte8`–`Byte16` writes are scalar, as recorded below.
+- **`Byte16` `forEach` is reported `vector128` by `Tools/loops`, but its decode is scalar.**
+  - The loop is `ldp x`, `rev` ×2, `fmov`/`mov.d` into vectors, then `add.2d`. Only the benchmark's sum
+    is vectorized, fed one lane at a time.
+  - `Tools/counters --mode simd_fp_unit_instructions` on a probe confirms it: 0 SIMD loads for `Byte16`,
+    against 66 M `ldp q` for `Byte4` and 219 M (`ld3`) for `Byte3`, over the same 2 GB.
+  - Its instruction count is the same as in `bandwidth2`, so this isn't new. The note under "Making loops
+    of single reads vectorize" now says so.
+- **A tooling note:** `Tools/loops --forbid` matches substrings, so `--forbid bl` also rejects `tbl`. Use
+  `blr`, or check the `+calls` verdict.
 
 ## Allocation checks
 
@@ -119,8 +176,9 @@ then cost **41% more instructions** parsing fixed-size zip records (281 vs 199 K
   LLVM intrinsic). Swapping back to an interpolated precondition message didn't matter.
 - **The fix:** the literal initializer reverses the bytes with shifts. Constant again, no `swift_once`.
 
-Against `safe-final`: field parsing −3% instructions, fixed-size records −1%, signature search −4%.
-NativeZip's parsing (computed-property signatures) was unaffected either way.
+Against `safe-final`: field parsing −3% instructions, fixed-size records −1%, signature search −4%
+(baseline `literals3`). These didn't hold at HEAD, where the parser's machine code is unchanged: see
+the 2026-11-09 section. NativeZip's parsing (computed-property signatures) was unaffected either way.
 
 A `static let` built with a byte order still has the lazy-initialization cost. Checked:
 `static let signature = Byte4(0x504B_0102, .bigEndian)` compiles to the `swift_once` check again. Write
@@ -471,10 +529,11 @@ Also from the assembly review:
   closure-specialized function, which keeps the closure's captured variables in memory (a store every
   iteration) and blocks vectorization. Force-inlining keeps them in registers.
 - `Byte16` keeps a single 128-bit load. Building it from 64-bit halves, as for 9–15, made big-endian
-  `Byte16` loops fully scalar (32 against 56 GB/s). Its loop stays scalar either way, because LLVM's cost
-  model declines two-lane 64-bit vectors when the scalar loop (`ldp`, two `rev`, two `add`) is that
-  short, and Swift has no loop pragmas to override it. It reaches 56 GB/s on one core and the memory
-  ceiling with all cores.
+  `Byte16` loops fully scalar (32 against 56 GB/s). Its loads and byte swaps stay scalar either way
+  (`ldp`, two `rev` on general registers), because LLVM's cost model declines two-lane 64-bit vectors for
+  them, and Swift has no loop pragmas to override it. Only the benchmark's sum is vectorized, fed through
+  `fmov`/`mov.d`, which is why `Tools/loops` calls the loop `vector128` (2026-11-09: no SIMD loads at run
+  time). It reaches 56 GB/s on one core and the memory ceiling with all cores.
 
 ## The standard library's `ConvertibleFromBytes`
 

@@ -15,6 +15,7 @@ struct ByteReader: ~Escapable {
     }
 
     var count: Int { remaining.byteCount }
+    var isEmpty: Bool { remaining.byteCount == 0 }
 
     @_lifetime(self: copy self)
     mutating func read<T: FixedWidthInteger & ConvertibleFromBytes>(_: T.Type = T.self) throws(ComparatorError) -> T {

@@ -810,7 +810,8 @@ enum Load {
 
     /// Like ``group(_:from:at:)``, tuned for loops over consecutive groups. Three-byte groups load each
     /// byte separately, which the vectorizer turns into NEON `ld3` (de-interleaving 48 bytes into three
-    /// vectors): 40% faster in a loop than two overlapping 16-bit loads, but one load more for a single read.
+    /// vectors): 46% more throughput in a loop than two overlapping 16-bit loads (13 → 19 GB/s), but one
+    /// load more for a single read.
     /// Five- to seven-byte groups have no such instruction and stay faster with overlapping loads.
     @inlinable @inline(__always)
     static func streamingGroup<T: ByteGroup>(_: T.Type, from span: RawSpan, at offset: Int) -> T {
