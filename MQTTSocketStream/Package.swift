@@ -58,6 +58,7 @@ let package = Package(
             traits: ["ExperimentalIO"]
         ),
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
+        .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
     ],
     targets: [
         .target(
@@ -71,7 +72,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "mqtt-socket-stream",
-            dependencies: ["MQTTSocketStream"],
+            dependencies: ["MQTTSocketStream", .product(name: "ArgumentParser", package: "swift-argument-parser")],
             swiftSettings: settings,
             linkerSettings: useToolchainRuntime
         ),
