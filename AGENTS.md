@@ -33,6 +33,12 @@ reproducers live outside the repo, in `~/Downloads/swift-bugs/` (numbered `NN-sw
 - Don't touch project READMEs beyond what the user asks: they're for humans. Don't commit unless asked.
 - Swift style here: public API `@inlinable` (but measure: it can change codegen), `sending` over
   `@Sendable` where it fits, every `unsafe` expression with a comment saying why it's safe.
+- Executables that take options use [swift-argument-parser](https://github.com/apple/swift-argument-parser)
+  (`@main struct …: ParsableCommand`/`AsyncParsableCommand`, so not in a `main.swift`), never hand-parsed
+  `CommandLine.arguments`: `--help`, typed values, and validation for free. Make option enums
+  `ExpressibleByArgument` (`String`-backed and `CaseIterable` need no more than the conformance). Examples:
+  `NativeZipArchive/Sources/nunzip`, `MQTTSocketStream/Sources/mqtt-socket-stream`. Benchmark executables
+  (package-benchmark parses their arguments) are the exception.
 - Use Edit/Write for file changes rather than `sed -i`/scripts; jq for JSON, yq for XML/YAML/TOML (no inline
   Python); never `rm -rf "$VAR"` without checking the variable is set and points where you expect.
 - Temporary files go in the session scratchpad (or `mktemp -d`), never the workspace root. SwiftPM runs
