@@ -86,7 +86,7 @@ extension Bits {
 
 // MARK: P6 – appending to an array through a writer
 
-extension Array where Element == UInt8 {
+extension [UInt8] {
     /// Appends up to `byteCapacity` bytes written by `body`: `append(addingCapacity:)` and
     /// `withBytesWriter` in one call, committing exactly what's written.
     @inline(always)
@@ -306,9 +306,9 @@ public extension LZ4 {
             let block = try reader.read(byteCount: Int(size[bits: 0..<31]))
             if hasBlockChecksums { try reader.skip(byteCount: 4) }
             if size[bit: 31] {
-                try output.append(byteCapacity: block.byteCount) { (writer) throws(BytesError) in try writer.write(block) }
+                try output.append(byteCapacity: block.byteCount) { writer throws(BytesError) in try writer.write(block) }
             } else {
-                try output.append(byteCapacity: blockMaximum) { (writer) throws(BytesError) in
+                try output.append(byteCapacity: blockMaximum) { writer throws(BytesError) in
                     try decodeBlock(block, into: &writer)
                 }
             }
@@ -321,7 +321,7 @@ public extension CentralDirectory {
     /// P3: `parseWithBytes` inside `locatingErrors`.
     static func parseWithBytesProtoLocated(_ span: RawSpan) throws(LocatedBytesError) -> UInt64 {
         var reader = BytesReader(span)
-        return try reader.locatingErrors { (reader) throws(BytesError) in
+        return try reader.locatingErrors { reader throws(BytesError) in
             var fields = Fields()
             while !reader.isAtEnd {
                 try reader.expect(signature)
@@ -412,7 +412,7 @@ public extension CentralDirectory {
         var reader = BytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
-            try reader.atomically { (reader) throws(BytesError) in
+            try reader.atomically { reader throws(BytesError) in
                 try reader.expect(signature)
                 try fields.add(reader.read(Byte2.self, .littleEndian)) // made by
                 try reader.skip(byteCount: 2)

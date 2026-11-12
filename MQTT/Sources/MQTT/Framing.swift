@@ -30,6 +30,7 @@ public import Bytes
 /// received.removeFirst(reader.byteOffset) // Keep the partial packet, if any.
 /// ```
 public struct MQTTFrame: ~Copyable, ~Escapable {
+    /// The packet's type.
     public let type: MQTTPacketType
     /// The fixed header's flags: checked for every type but PUBLISH, which parses its own.
     public let flags: Nibble
@@ -47,13 +48,21 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
     /// Reads the next packet's fixed header and takes its body, or returns `nil` without consuming
     /// anything if the packet isn't all there yet.
     ///
-    /// Throws ``MQTTError`` for a reserved packet type, reserved flags, a malformed remaining length, or a
-    /// packet larger than `maximumPacketSize`, leaving the cursor where it was.
+    /// The header is checked as soon as it's complete, before the body arrives. Either way the reader is
+    /// left where it was unless a frame is returned.
+    ///
+    /// - Parameters:
+    ///   - reader: The stream to read from. The frame's body borrows its bytes.
+    ///   - maximumPacketSize: The largest packet to accept, in bytes, fixed header included.
+    /// - Returns: The frame, or `nil` if the packet isn't all there yet.
+    /// - Throws: `MQTTError.malformed(_:)` for a reserved packet type, reserved flags, or a malformed
+    ///   remaining length; ``MQTTError/Kind/packetTooLarge`` if the packet is larger than
+    ///   `maximumPacketSize`.
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
     public static func read(from reader: inout BytesReader, maximumPacketSize: Int = .max) throws(MQTTError) -> MQTTFrame? {
-        let start = reader.byteOffset
+        let start = reader.position
         // Type and flags (the high and low nibbles of a byte), then the remaining length.
         let header: Byte
         let remainingLength: Int
@@ -61,7 +70,7 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
             header = try reader.read(Byte.self)
             remainingLength = try Int(reader.readMQTTVariableByteInteger())
         } catch {
-            try! reader.seek(toByteOffset: start)
+            reader.rewind(to: start)
             if error == .insufficientData { return nil }
             throw .malformed("remaining length")
         }
@@ -70,21 +79,24 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
             guard let type = MQTTPacketType(rawBits: header.highHalf) else { throw .malformed("reserved packet type") }
             // PUBLISH uses its flags; PUBREL, SUBSCRIBE, and UNSUBSCRIBE require 0b0010; the rest, 0.
             guard type == .publish || flags == type.requiredFlags else { throw .malformed("reserved flags") }
-            guard reader.byteOffset &- start &+ remainingLength <= maximumPacketSize else {
+            guard reader.byteOffset &- start.byteOffset &+ remainingLength <= maximumPacketSize else {
                 throw MQTTError(.packetTooLarge, "packet larger than the maximum packet size")
             }
             guard let body = try? reader.readSection(byteCount: remainingLength) else {
-                try! reader.seek(toByteOffset: start)
+                reader.rewind(to: start)
                 return nil
             }
             return MQTTFrame(type: type, flags: flags, body: body)
         } catch {
-            try! reader.seek(toByteOffset: start)
+            reader.rewind(to: start)
             throw error
         }
     }
 
-    /// Precondition: the frame is a `type`, as a packet type's `init(parsing:)` requires.
+    /// Checks the frame's type, as a packet type's `init(parsing:)` requires.
+    ///
+    /// - Parameter type: The type the frame must have.
+    /// - Precondition: The frame is a `type`.
     @inlinable @inline(__always)
     func expect(_ type: MQTTPacketType) {
         precondition(self.type == type, "Parsing a frame as a different packet type: dispatch on `type` first")
@@ -92,7 +104,8 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
 }
 
 extension MQTTPacketType {
-    /// The fixed header's flags for every type but PUBLISH.
+    /// The fixed header's flags for every type but PUBLISH: 0b0010 for PUBREL, SUBSCRIBE, and UNSUBSCRIBE,
+    /// 0 for the rest.
     @inlinable @inline(__always)
     var requiredFlags: Nibble {
         switch self {
@@ -105,11 +118,17 @@ extension MQTTPacketType {
 // MARK: - Writing packets
 
 extension BytesWriter {
-    /// Writes a packet: checks it (`validate`) and its size first, so nothing is written if it throws, then
-    /// writes the fixed header and the body.
+    /// Writes a packet: checks it and its size first, so nothing is written if it throws, then writes the
+    /// fixed header and the body.
     ///
-    /// Throws ``BytesError/invalidValue`` if `validate` throws or the body is too long for MQTT, and
-    /// ``BytesError/insufficientCapacity`` if the packet doesn't fit.
+    /// - Parameters:
+    ///   - type: The packet type, for the fixed header.
+    ///   - flags: The fixed header's flags.
+    ///   - bodyByteCount: The body's size, which `body` must write exactly.
+    ///   - validate: Checks the packet's fields.
+    ///   - body: Writes the body.
+    /// - Throws: `BytesError.invalidValue` if `validate` throws or the body is longer than
+    ///   ``MQTTPacket/maximumRemainingLength``; `BytesError.insufficientCapacity` if the packet doesn't fit.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func writeMQTTPacket(
@@ -119,7 +138,7 @@ extension BytesWriter {
         do throws(MQTTError) { try validate() } catch { throw .invalidValue }
         guard bodyByteCount <= MQTTPacket.maximumRemainingLength else { throw .invalidValue }
         guard remainingByteCount >= 1 &+ Size.lengthPrefixed(bodyByteCount) else { throw .insufficientCapacity }
-        try write(Byte(highHalf: Nibble(truncatingIfNeeded: type.rawValue), lowHalf: flags))
+        try write(Byte(highHalf: Nibble(rawBitsOf: type), lowHalf: flags))
         try write(UInt64(bodyByteCount), as: LEB128.self)
         try body(&self)
     }
@@ -128,12 +147,21 @@ extension BytesWriter {
 // MARK: - Each packet type: parsing a frame, and writing
 
 // Every `write(to:)` checks the packet first (the rules `MQTTPacket.validate()` names), so nothing is
-// written if it throws: ``BytesError/invalidValue`` if it breaks one, ``BytesError/insufficientCapacity``
+// written if it throws: `BytesError.invalidValue` if it breaks one, `BytesError.insufficientCapacity`
 // if it doesn't fit. Every `init(parsing:)` requires a frame of its type: dispatch on `frame.type` first.
 // A frame is consumed when it's parsed, so if parsing throws, the stream's cursor is past the packet; MQTT
 // ends the connection then anyway.
 
 public extension MQTTConnect {
+    /// Parses a CONNECT frame, consuming it.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/connect``.
+    /// - Precondition: `frame.type` is ``MQTTPacketType/connect``.
+    /// - Throws: ``MQTTError/Kind/unsupportedProtocolVersion`` if the protocol name or version isn't
+    ///   MQTT 5.0; `MQTTError.malformed(_:)` if the body is truncated, has bytes left over, sets a reserved
+    ///   connect flag, a will QoS of 3, or will QoS or retain without a will, or has an invalid string,
+    ///   will topic, or property; `MQTTError.protocolError(_:)` for an empty will topic or a property
+    ///   rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -142,6 +170,11 @@ public extension MQTTConnect {
         try self.init(reading: &body)
     }
 
+    /// Writes the packet, checked first so nothing is written if it throws.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
+    ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.connect, flags: 0, bodyByteCount: bodyByteCount,
@@ -151,6 +184,13 @@ public extension MQTTConnect {
 }
 
 public extension MQTTConnectAcknowledgement {
+    /// Parses a CONNACK frame, consuming it.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/connectAcknowledgement``.
+    /// - Precondition: `frame.type` is ``MQTTPacketType/connectAcknowledgement``.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated, has bytes left over, sets a reserved
+    ///   flag, or has an invalid property; `MQTTError.protocolError(_:)` for a reason code CONNACK doesn't
+    ///   allow, Session Present with a failure code, or a property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -159,6 +199,11 @@ public extension MQTTConnectAcknowledgement {
         try self.init(reading: &body)
     }
 
+    /// Writes the packet, checked first so nothing is written if it throws.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
+    ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.connectAcknowledgement, flags: 0, bodyByteCount: bodyByteCount,
@@ -168,6 +213,14 @@ public extension MQTTConnectAcknowledgement {
 }
 
 public extension MQTTPublish {
+    /// Parses a PUBLISH frame, consuming it. The payload is the rest of the body.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/publish``.
+    /// - Precondition: `frame.type` is ``MQTTPacketType/publish``.
+    /// - Throws: `MQTTError.malformed(_:)` if the flags have QoS 3 or DUP with QoS 0, or the topic or a
+    ///   property is invalid (a wildcard or U+0000 in the topic, bad UTF-8, truncation);
+    ///   `MQTTError.protocolError(_:)` for a zero packet identifier, an empty topic without a Topic Alias,
+    ///   or a property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -177,6 +230,11 @@ public extension MQTTPublish {
         try self.init(reading: &body, flags: flags)
     }
 
+    /// Writes the packet, checked first so nothing is written if it throws.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
+    ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.publish, flags: flags, bodyByteCount: bodyByteCount,
@@ -186,7 +244,15 @@ public extension MQTTPublish {
 }
 
 public extension MQTTPublishResponse {
-    /// PUBACK, PUBREC, PUBREL, or PUBCOMP, as the frame's type says.
+    /// Parses a PUBACK, PUBREC, PUBREL, or PUBCOMP frame, as its type says, consuming it.
+    ///
+    /// The reason code and properties may be omitted: success, and none.
+    ///
+    /// - Parameter frame: A frame of one of those four types.
+    /// - Precondition: `frame.type` is one of those four types.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated, has bytes left over, or has an
+    ///   invalid property; `MQTTError.protocolError(_:)` for a reason code the type doesn't allow or a
+    ///   property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -195,7 +261,15 @@ public extension MQTTPublishResponse {
         try self.init(reading: &body, reasonCodes: reasonCodes)
     }
 
-    /// Writes it as `type`: PUBACK, PUBREC, PUBREL, or PUBCOMP.
+    /// Writes it as `type`: PUBACK, PUBREC, PUBREL, or PUBCOMP, checked first so nothing is written if it
+    /// throws. The reason code and properties are omitted when they're success and empty.
+    ///
+    /// - Parameters:
+    ///   - writer: The writer to append to.
+    ///   - type: One of those four types.
+    /// - Precondition: `type` is one of those four types.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` (including a
+    ///   reason code `type` doesn't allow); `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
         let reasonCodes = Self.reasonCodes(for: type)
@@ -215,6 +289,14 @@ public extension MQTTPublishResponse {
 }
 
 public extension MQTTSubscribe {
+    /// Parses a SUBSCRIBE frame, consuming it.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/subscribe``.
+    /// - Precondition: `frame.type` is ``MQTTPacketType/subscribe``.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated or has an invalid property, filter,
+    ///   or options byte; `MQTTError.protocolError(_:)` for a zero packet identifier, no subscriptions,
+    ///   an empty filter, No Local on a shared subscription, a retain handling or maximum QoS of 3, or a
+    ///   property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -223,6 +305,11 @@ public extension MQTTSubscribe {
         try self.init(reading: &body)
     }
 
+    /// Writes the packet, checked first so nothing is written if it throws.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
+    ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.subscribe, flags: 0b0010, bodyByteCount: bodyByteCount,
@@ -232,6 +319,13 @@ public extension MQTTSubscribe {
 }
 
 public extension MQTTUnsubscribe {
+    /// Parses an UNSUBSCRIBE frame, consuming it.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/unsubscribe``.
+    /// - Precondition: `frame.type` is ``MQTTPacketType/unsubscribe``.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated or has an invalid property or filter;
+    ///   `MQTTError.protocolError(_:)` for a zero packet identifier, no topic filters, an empty filter, or
+    ///   a property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -240,6 +334,11 @@ public extension MQTTUnsubscribe {
         try self.init(reading: &body)
     }
 
+    /// Writes the packet, checked first so nothing is written if it throws.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
+    ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.unsubscribe, flags: 0b0010, bodyByteCount: bodyByteCount,
@@ -249,7 +348,15 @@ public extension MQTTUnsubscribe {
 }
 
 public extension MQTTSubscribeAcknowledgement {
-    /// SUBACK or UNSUBACK, as the frame's type says.
+    /// Parses a SUBACK or UNSUBACK frame, as its type says, consuming it. The reason codes are the rest of
+    /// the body.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/subscribeAcknowledgement`` or
+    ///   ``MQTTPacketType/unsubscribeAcknowledgement``.
+    /// - Precondition: `frame.type` is one of those two types.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated or has an invalid property;
+    ///   `MQTTError.protocolError(_:)` for no reason codes, a reason code the type doesn't allow, or a
+    ///   property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -258,7 +365,15 @@ public extension MQTTSubscribeAcknowledgement {
         try self.init(reading: &body, reasonCodes: reasonCodes)
     }
 
-    /// Writes it as `type`: SUBACK or UNSUBACK.
+    /// Writes it as `type`: SUBACK or UNSUBACK, checked first so nothing is written if it throws.
+    ///
+    /// - Parameters:
+    ///   - writer: The writer to append to.
+    ///   - type: ``MQTTPacketType/subscribeAcknowledgement`` or ``MQTTPacketType/unsubscribeAcknowledgement``.
+    /// - Precondition: `type` is one of those two types.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` (including a
+    ///   reason code `type` doesn't allow) or its body is too long for MQTT;
+    ///   `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
         let allowed = Self.reasonCodes(for: type)
@@ -278,6 +393,13 @@ public extension MQTTSubscribeAcknowledgement {
 }
 
 public extension MQTTDisconnect {
+    /// Parses a DISCONNECT frame, consuming it. An empty body is a normal disconnection.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/disconnect``.
+    /// - Precondition: `frame.type` is ``MQTTPacketType/disconnect``.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated, has bytes left over, or has an
+    ///   invalid property; `MQTTError.protocolError(_:)` for a reason code DISCONNECT doesn't allow or a
+    ///   property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -286,6 +408,12 @@ public extension MQTTDisconnect {
         try self.init(reading: &body)
     }
 
+    /// Writes the packet, checked first so nothing is written if it throws. The reason code and properties
+    /// are omitted for a normal disconnection without properties.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
+    ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.disconnect, flags: 0, bodyByteCount: bodyByteCount,
@@ -295,6 +423,13 @@ public extension MQTTDisconnect {
 }
 
 public extension MQTTAuthenticate {
+    /// Parses an AUTH frame, consuming it. An empty body is success without properties.
+    ///
+    /// - Parameter frame: A frame of type ``MQTTPacketType/authenticate``.
+    /// - Precondition: `frame.type` is ``MQTTPacketType/authenticate``.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated, has bytes left over, or has an
+    ///   invalid property; `MQTTError.protocolError(_:)` for a reason code AUTH doesn't allow or a
+    ///   property rule broken.
     @inlinable
     @_lifetime(copy frame)
     init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -303,6 +438,12 @@ public extension MQTTAuthenticate {
         try self.init(reading: &body)
     }
 
+    /// Writes the packet, checked first so nothing is written if it throws. The reason code and properties
+    /// are omitted for success without properties.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
+    ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.authenticate, flags: 0, bodyByteCount: bodyByteCount,

@@ -20,13 +20,21 @@ Medians from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, 
 | …each 46-byte header as a sub-cursor/slice | **7 µs**, 199 K | 13 µs, 325 K | — |
 | 192 K big-endian `UInt32`s (768 KB) | 10 µs, 197 K | 10 µs, 197 K | — |
 | 256 K big-endian 24-bit values | **55 µs**, 1,426 K (`forEach`: 48 µs, 771 K) | 158 µs, 4,461 K | — |
-| QOI `antelope.qoi` (1833×1222, 5 MB) | **7.8 ms**, 130 M | 7.9 ms, 138 M | 34.8 ms, 764 M |
-| QOI `tricolor.qoi` (600×600, 98.5% runs) | 233 µs, 6.6 M | **182 µs**, 4.6 M | 4.4 ms, 104 M |
-| LZ4 `swift-help` (10.6 MB from 3.8 MB) | **4.2 ms**, 65 M, 2 mallocs | 4.4 ms, 66 M, 2 | 172 ms, 3,107 M, 706 K mallocs |
-| LZ4 `tricolor.qoi` (22 KB) | **8 µs** | 9 µs | 376 µs, 2,397 mallocs |
+| QOI `antelope.qoi` (1833×1222, 5 MB), same algorithm | 7.9 ms, 129 M | 8.0 ms, 138 M | 35 ms, 764 M |
+| …Bytes with run fills (`write(repeating:)`) | **7.6 ms**, 111 M | | |
+| QOI `tricolor.qoi` (600×600, 98.5% runs), same algorithm | 215 µs, 5.9 M | **176 µs**, 4.6 M | 4.4 ms, 104 M |
+| …Bytes with run fills | **67 µs**, 1.5 M | | |
+| LZ4 `swift-help` (10.6 MB from 3.8 MB), same algorithm | 4.2 ms, 63 M, 2 mallocs | 4.5 ms, 66 M, 2 | 189 ms, 3,113 M, 706 K mallocs |
+| …Bytes with overrun literal copies | **2.5 ms**, 48 M, 2 | | |
+| LZ4 `tricolor.qoi` (22 KB), same algorithm | 8.3 µs, 208 K | 9.3 µs, 218 K | 375 µs, 2,397 mallocs |
+| …Bytes with overrun literal copies | **7.2 µs**, 160 K | | |
 
-The QOI and LZ4 ports run the same algorithm with either library reading the input; both write output
-with `BytesWriter`. (`BinaryParsing` only parses.)
+(QOI and LZ4 rows: 2026-11-09, round 2 of the interleaved runs below.)
+
+"Same algorithm" rows run the example's algorithm with either library reading the input; both write output
+with `BytesWriter`. (`BinaryParsing` only parses.) The `…` rows are the Bytes ports as they are now, with
+Bytes APIs `ParserSpan` has no counterpart for on the output side; the `ParserSpan` ports are kept as they
+were, against the shipping library.
 
 ## Why
 
@@ -179,3 +187,93 @@ show in the counts. `Tools/calls`: no new runtime calls in the Bytes functions.
   `catch { throw reader.located(error) }` cost 1.3% (305 K). Wrapping each zip entry in `atomically { }`
   cost 50% (453 K) for the same reason: the closure body isn't inlined, so the cursor lives in memory and
   14 calls to the unaligned slow path appear (see the README's caveat about closures).
+
+## 2026-11-09: run fills and overrun literal copies, Bytes side only (baselines `ab-old-*` → `ab-new-*`)
+
+Bytes now has the two APIs prototyped above, and the Bytes ports use them:
+
+- QOI: a QOI_OP_RUN is one `writer.write(repeating: pixel, byteCount: channels, count: run)`, cut off at the
+  end of the image as the pixel loop was. The run counter and its per-pixel `guard` are gone.
+- LZ4: literals are `writer.write(from: &reader, byteCount: literalCount, allowingOverrun: true)`: 16-byte
+  steps while both cursors have room (most literal runs are under 16 bytes, so one load and one store).
+
+The `ParserSpan` ports are unchanged, against the shipping swift-binary-parsing. To keep a like-for-like
+comparison, the previous Bytes algorithm stays as `decodeWithBytesPixelRuns` and
+`decodeWithBytesExactLiterals`, benchmarked as "Bytes, pixel-at-a-time runs" and "Bytes, exact literal
+copies", which is what the "ParserSpan, same algorithm" rows now compare with. Each pair shares one
+`@inline(always)` body with a constant flag. For LZ4, LLVM merged the two wrappers into one function and
+specialized the block decoder's closure once with the flag as a run-time argument (both variants then tested
+it per sequence), so the flag is passed as a literal at each inlined call inside the closure; it's now
+tested once per block. QOI's two variants compiled separately.
+
+Interleaved runs of the previous commit's tree (`ab-old-*`) and this one (`ab-new-*`), two rounds; times
+are round 2, instructions exact minimums from the baselines:
+
+| Workload | Bytes before | Bytes now | Change | Bytes, same algorithm as before | `ParserSpan` |
+|---|---|---|---|---|---|
+| QOI `tricolor.qoi` | 6.57 M, 227 µs | 1.52 M, 67 µs | −77% instr, −70% time | 5.87 M, 215 µs | 4.58 M, 176 µs |
+| QOI `antelope.qoi` | 130.4 M, 7.85 ms | 111.2 M, 7.64 ms | −15%, −3% | 128.6 M, 7.87 ms | 137.7 M, 7.96 ms |
+| LZ4 `swift-help.lz4` | 64.9 M, 4.36 ms | 48.1 M, 2.53 ms | −26%, −42% | 62.7 M, 4.16 ms | 65.8 M, 4.51 ms |
+| LZ4 `tricolor.qoi.lz4` | 216 K, 8.3 µs | 160 K, 7.2 µs | −26%, −13% | 208 K, 8.3 µs | 218 K, 9.3 µs |
+
+Compared with the prototypes: QOI `tricolor.qoi` 2.27 → 1.52 M (the run fill stores 16 bytes at a time
+where the prototype stored 8), LZ4 51 → 48 M (one 16-byte move where the prototype used two 8-byte stores).
+
+The same-algorithm Bytes variants also moved, with no change to their decoding source: the same code now
+compiled in a different place (inlined from the shared body, next to its other variant).
+- LZ4 exact literals, 64.9 → 62.7 M (−3.4%). Not from Bytes' new inline copy of 33–64-byte spans: both
+  LZ4 ports call `write(_: RawSpan)` out of line (`Tools/calls`), and the `ParserSpan` port, whose literals
+  take the same call, moved −0.1%.
+- QOI pixel-at-a-time runs, `tricolor.qoi` 6.57 → 5.87 M (−11%), `antelope.qoi` −1.4%: the run loop the
+  earlier analysis found to be the gap to `ParserSpan` (register allocation) compiled differently. It
+  remains 1.28x `ParserSpan`'s instructions on `tricolor.qoi`.
+
+So the "before → now" columns above include a few percent of layout change; the "same algorithm" column is
+the clean measure of what the new APIs give (QOI `tricolor.qoi` 5.87 → 1.52 M, LZ4 62.7 → 48.1 M).
+
+Later again (baselines `bcd2-old-*` → `bcd2-new-*`): Bytes' `write(_: RawSpan)` is now inlined (it was a
+call per literal run, in both LZ4 ports, since both write output with `BytesWriter`); the Bytes LZ4 port
+builds its output with `append(byteCapacity:) { (writer) throws(BytesError) in … }`; the Bytes zip-directory
+port reads extra fields with `read(sectionPrefixedBy:)`, which now checks the length once. The
+`ParserSpan` source is unchanged, but its output side changed with Bytes:
+
+| Workload | Instructions | Time (rounds 1 / 2) |
+|---|---|---|
+| LZ4 `swift-help.lz4`: Bytes | 48.1 → 46.0 M (−4.4%) | −6% / +6% (noise) |
+| …Bytes, exact literal copies | 62.7 → 49.6 M (−21%) | −10% / −8% |
+| …`ParserSpan` | 65.8 → 55.5 M (−15.6%) | −10% / −11% |
+| LZ4 `tricolor.qoi.lz4`: Bytes / exact / `ParserSpan` | −4.6% / −21% / −16% | 0% / −15% / −7 to −11% |
+| Zip directory: Bytes | 300.6 → 298.6 K (−0.7%) | within noise |
+| Zip directory: `ParserSpan`, fixed-size records (both) | unchanged | unchanged |
+
+So the LZ4 `ParserSpan` rows above now measure `ParserSpan` input with a faster Bytes output side than
+before; the like-for-like comparison is the same-algorithm Bytes row (49.6 M) against `ParserSpan`
+(55.5 M).
+
+Later the same day (baselines `fu3-old-*` → `fu3-new-*`): Bytes builds the run fill's 16-byte pattern with
+two multiplies instead of 128-bit doubling, and copies matches 2–7 bytes back as runs. QOI `tricolor.qoi`
+(Bytes): 1.52 → 1.32 M instructions (−13%; its time moved with the run's drift, −8 to −10% on every row,
+`ParserSpan` included). `antelope.qoi` −0.2%; LZ4 ±0.7% (few of its matches are under 8 bytes back). The
+`ParserSpan` and same-algorithm rows are unchanged.
+
+Untouched rows (the published examples, every `ParserSpan` row) moved under 0.5% in instructions and
+within ±6% in time.
+
+## 2026-11-10: Bytes' conveniences in the Bytes ports (baselines `conv-old-*` → `conv-new-*`)
+
+The `ParserSpan` ports are unchanged. In the Bytes ports: the zip directory's extra fields with
+`forEachRecord(tag:length:_:_:)` and the timestamp with `readSigned(_:_:as:)` (the fixed-size-record
+variant, `readSigned` only), and LZ4's frame-descriptor check as two `matches(_:mask:)` (version 01,
+reserved bits clear, independent blocks) instead of six field tests.
+
+| Workload | Instructions | Time (rounds 1 / 2) |
+|---|---|---|
+| Zip directory: Bytes | 298.6 → 284.6 K (−4.7%) | −2.0% / −4.9% |
+| Zip directory, fixed-size records: Bytes | unchanged (198.6 K) | within noise |
+| LZ4, both inputs, Bytes and exact-literals ports | unchanged (±32 instructions) | within ±3% (one +10.5% round) |
+| Every `ParserSpan` row and the published examples | within 0.1% | within noise |
+
+So the zip-directory comparison is now 284.6 K (Bytes) against 460.6 K (`ParserSpan`). `forEachRecord` is
+the same algorithm as the loop it replaces (tag, length, all of the value or an error), written once: the
+record loop got cheaper because it checks the header once and doesn't go through
+`read(sectionPrefixedBy:)`. The same change could be made to the `ParserSpan` port with its own API.

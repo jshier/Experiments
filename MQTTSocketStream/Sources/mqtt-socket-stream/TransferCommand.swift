@@ -40,6 +40,9 @@ struct TransferCommand: AsyncParsableCommand {
     @Option(help: "Transfers to run.")
     var runs = 3
 
+    /// Checks that `--payload` isn't negative and every other count or size is at least 1.
+    ///
+    /// - Throws: `ValidationError` naming the offending option.
     func validate() throws {
         guard payload >= 0 else { throw ValidationError("--payload must not be negative.") }
         for (name, value) in [("packets", packets), ("connections", connections), ("batch", batch),
@@ -48,6 +51,9 @@ struct TransferCommand: AsyncParsableCommand {
         }
     }
 
+    /// Runs the transfer `--runs` times, printing each result.
+    ///
+    /// - Throws: Any error from `Transfer.run(_:mode:placement:)`.
     func run() async throws {
         let workload = Workload(
             payloadSize: payload,

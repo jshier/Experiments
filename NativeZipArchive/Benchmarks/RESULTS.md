@@ -316,3 +316,78 @@ entry's kind, which Huffman decoding can't avoid.
 
 Extraction of 2,000 small files varied ±15% in instructions and ±25% in time across three runs (kernel
 contention; the decoder is under 10% of it), so its Bytes-vs-zlib differences in this run are noise.
+
+## step10 (2026-11-09): short-distance matches as runs (baselines `fu3-old-*` → `fu3-new-*`)
+
+Bytes' `copy(fromDistance:count:allowingOverrun:)` copied matches fewer than 8 bytes back a byte at a time,
+each byte waiting on the one stored just before it. It now repeats the last `distance` bytes with 16-byte
+stores (one load, a pattern built with two multiplies), out of line so the decode loop doesn't carry it
+(see `../Bytes/Benchmarks/RESULTS.md`). No NativeZip source changed.
+
+The text fixtures barely have such matches, so the benchmarks gained one that does: **32 MB of pixel runs**
+(`Fixtures.raster`: runs of 1–40 identical 2- to 7-byte pixels, the width changing every 4 KB; `zip`
+codes each run as one pixel of literals and a match one pixel back). Fixtures are now version 2 (a new
+cache directory, regenerated on first use). Interleaved runs of the tree before and after, two rounds:
+
+| Benchmark | Instructions | Time (round 1 / round 2) |
+|---|---|---|
+| Inflate + CRC 32 MB raster: Bytes | 227 → 141 M (−38%) | 18 → 10.0 / 18 → 9.2 ms (−49%) |
+| Inflate + CRC 32 MB raster: zlib | unchanged | 9.8 ms |
+| Inflate + CRC 32 MB text: Bytes | +0.0% | 13 ms, unchanged |
+| Inflate + CRC 2,000 small files: Bytes | +0.1% | 14–15 ms, unchanged |
+
+On pixel runs the Bytes decoder was 1.8x zlib's time; now it's level with it. The first version inlined the
+short-distance path into `decodeSymbols`: the loop grew from 743 to 853 instructions, and text and small
+files took 12–14% more instructions. Out of line (with distance 1 back as the inline `memset` it was), the loop is 722 and they're unchanged.
+
+## step11 (2026-11-09): cursors created at their offsets (baselines `pos-old-*` → `pos-new-*`)
+
+`BytesReader(archive, atByteOffset: entry.localHeaderOffset)` instead of a reader and `seek(toByteOffset:
+Int(clamping: …))` (5 sites: central directory, EOCD, ZIP64 locator and record, local header; the
+`UInt64` offsets go in as they are), and in the inflater `BitBuffer(input, atBitPosition:bitOrder:)` and
+`BytesWriter(&output, atByteOffset:)` instead of a reader, `seek(toBitPosition:)`, `BitBuffer(reader)`,
+`BytesWriter(output._mutatingExtracting(...))`, and `skip(byteCount:)`.
+
+Whole functions: `decodeSymbols` 789 → 769 instructions, `readBlockHeader` 296 → 265 (shorter throw paths). The Bytes
+writer initializer had to be `@inline(__always)`: as an out-of-line call it grew `decodeSymbols` to 891.
+
+| Benchmark | Instructions | Time (rounds 1 / 2) |
+|---|---|---|
+| Inflate + CRC 32 MB raster: Bytes | 141.1 → 139.4 M (−1.2%) | −1.2% / −1.3% (9.1 ms; zlib 9.9) |
+| Inflate + CRC 32 MB text, 2,000 small files: Bytes | −0.0% | unchanged |
+| Locate 2,000 payloads | −0.3% | −0.5% / −2.1% |
+| Parse central directory (2,000 entries) | −0.0% | −2.5% / −1.3% |
+
+## step12 (2026-11-09): extra fields with `readSectionIfComplete` (baselines `bcd-old-*` → `bcd-new-*`)
+
+The extra-field loop's `size` read, `guard size <= extra.remainingByteCount`, and `readSection(byteCount:)`
+became `guard var field = extra.readSectionIfComplete(prefixedBy: Byte2.self, .littleEndian) else { break }`.
+It's simpler, but not faster here: parsing the central directory took +0.2% instructions (4.9004 → 4.9096 M,
+about 5 per entry) and +1.7% time in both rounds, though the same call measured 14% cheaper than the
+hand-written form in Bytes' own benchmark. `readCentralDirectoryEntry` shrank from 488 to 466 instructions.
+Bytes' inlined `write(_: RawSpan)` reaches the stored-block copy (`Inflater.decode` 227 → 268
+instructions); the inflate benchmarks are unchanged (±0.5%).
+
+## step13 (2026-11-10): Bytes' conveniences (baselines `conv-old-*` → `conv-new-*`)
+
+- `Inflater`: the extra bits with the unchecked `bits.bits(from: codeLength, upTo: totalBits)`, the root
+  lookup with `bits.bits(from: 0, upTo: rootBits)`, `BFINAL` with `bits.read(Bool.self)`.
+  `decodeSymbols` is the same 769 instructions as before.
+  - Not the subtable index: `bits.bits(from: rootBits, upTo: rootBits &+ codeLength)` masks before
+    shifting, which needs the sum, and grew `decodeSymbols` by 5 instructions. It keeps the shift-then-mask
+    expression, with a comment.
+- `ZipArchive`: the extended timestamp with `readSigned(Byte4.self, .littleEndian, as: Int32.self)`.
+- `ZipDecoder`: `CRC32.checksum(bytes, continuing:)` (`crc32` 21 → 14 instructions), and
+  `output.append(copying: chunk)` for the inflated output.
+- Kept: `readSectionIfComplete` for extra fields (it tolerates a truncated last field, as zip readers must;
+  Bytes' new `forEachRecord` throws on one), and the strings in `ZipError` (no `located(_:)`).
+
+| Benchmark | Instructions | Time (rounds 1 / 2) |
+|---|---|---|
+| Parse central directory (2,000 entries) | 4.8938 → 4.8929 M (−0.02%) | −1.5% / −0.8% |
+| Locate 2,000 payloads | −0.3% | +0.1% / +0.3% |
+| Inflate + CRC (2,000 small files, 32 MB text, 32 MB raster), Bytes | within ±0.03% | −0.7 to −6% |
+| The same with zlib, and the original `ByteReader` rows (controls) | within ±0.3% | −0.6 to −6%, +3.8% |
+
+No change in instructions, as the codegen check predicted; the time differences are the same size in the
+controls.

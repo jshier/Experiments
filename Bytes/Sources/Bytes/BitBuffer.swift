@@ -41,6 +41,9 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     /// Creates a buffer at `reader`'s position, taking it over. Get a cursor back with ``finish()``.
     ///
     /// Always inlined, so a bit order the caller writes as a literal is a constant in the decode loop.
+    ///
+    /// - Parameter reader: The cursor to continue from, including any bits already consumed from its current
+    ///   byte. Its bit order becomes the buffer's.
     @inlinable @inline(always)
     @_lifetime(copy reader)
     public init(_ reader: consuming BytesReader) {
@@ -56,6 +59,27 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         }
     }
 
+    /// Creates a buffer at a bit position in `span`, such as where a resumable decoder stopped.
+    ///
+    /// ```swift
+    /// var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
+    /// ```
+    ///
+    /// Always inlined, like ``init(_:)``, so a literal bit order is a constant in the decode loop.
+    ///
+    /// - Parameters:
+    ///   - span: The data to decode.
+    ///   - position: The bit to start at, counted from the start of `span` (see ``BytesReader/bitPosition``),
+    ///     0 through `span.byteCount * 8`.
+    ///   - bitOrder: The order of bits within each byte.
+    /// - Throws: ``BytesError/invalidValue`` if `position` is negative, ``BytesError/insufficientData`` if it
+    ///   is past the end of `span`.
+    @inlinable @inline(always)
+    @_lifetime(copy span)
+    public init(_ span: RawSpan, atBitPosition position: Int, bitOrder: BitOrder) throws(BytesError) {
+        try self.init(BytesReader(span, atBitPosition: position, bitOrder: bitOrder))
+    }
+
     /// The buffered bits: the next is bit 0 for ``BitOrder/leastSignificantFirst``, bit 63 for
     /// ``BitOrder/mostSignificantFirst``. Only ``bufferedBitCount`` of them are valid.
     @inlinable
@@ -65,7 +89,8 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     @inlinable
     public var bufferedBitCount: Int { _count }
 
-    /// The position of the next bit in ``span``-relative bits. Past the end if zeros have been read.
+    /// The position of the next unread bit, in bits from the start of the data. Past the end if zeros have
+    /// been read.
     @inlinable
     public var bitPosition: Int { _nextByte &<< 3 &- _count }
 
@@ -74,6 +99,8 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     public var isOverrun: Bool { bitPosition > span.byteCount &<< 3 }
 
     /// Fills the buffer to at least ``minimumRefill`` bits, adding zeros past the end of the data.
+    ///
+    /// Never fails: reading the zeros shows up in ``isOverrun`` and ``finish()``.
     @inlinable @inline(always)
     public mutating func refill() {
         let shift = UInt64(truncatingIfNeeded: _count)
@@ -97,6 +124,14 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     }
 
     /// Within 8 bytes of the end: adds bytes one at a time, zeros past the end.
+    ///
+    /// - Parameters:
+    ///   - bits: The buffered bits.
+    ///   - count: The number of valid bits in `bits`.
+    ///   - nextByte: The offset of the next byte to load.
+    ///   - span: The data being read.
+    ///   - bitOrder: The order of bits within each byte.
+    /// - Returns: The new bits, valid bit count, and next byte offset.
     @usableFromInline
     static func _refillSlowly(
         _ bits: UInt64, _ count: Int, _ nextByte: Int, span: RawSpan, bitOrder: BitOrder
@@ -116,7 +151,11 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         return (bits, count, nextByte)
     }
 
-    /// The next `count` bits (0 through 56), right-aligned, without consuming them. They must be buffered.
+    /// The next bits, right-aligned, without consuming them.
+    ///
+    /// - Parameter count: The number of bits, 0 through 56. They must be buffered.
+    /// - Returns: The bits as an integer; the first bit read is the most significant for
+    ///   ``BitOrder/mostSignificantFirst`` and the least significant for ``BitOrder/leastSignificantFirst``.
     @inlinable @inline(always)
     public func peek(bitCount count: Int) -> UInt64 {
         switch bitOrder {
@@ -125,8 +164,10 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         }
     }
 
-    /// Drops the next `count` bits (0 through 63). They must be buffered: consuming more than
-    /// ``bufferedBitCount`` gives meaningless bits (never unsafe memory accesses).
+    /// Drops the next bits. They must be buffered: consuming more than ``bufferedBitCount`` gives
+    /// meaningless bits (never unsafe memory accesses).
+    ///
+    /// - Parameter count: The number of bits, 0 through 63.
     @inlinable @inline(always)
     public mutating func consume(bitCount count: Int) {
         assert(count <= _count, "Consumed \(count) bits with \(_count) buffered")
@@ -137,7 +178,10 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         _count &-= count
     }
 
-    /// Reads the next `count` bits (0 through 56), refilling first if needed.
+    /// Reads and consumes the next bits, refilling first if needed.
+    ///
+    /// - Parameter count: The number of bits, 0 through 56.
+    /// - Returns: The bits, right-aligned, as ``peek(bitCount:)`` returns them. Zeros if the data ran out.
     @inlinable @inline(always)
     public mutating func read(bitCount count: Int) -> UInt64 {
         if _count < count { refill() }
@@ -146,14 +190,48 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         return value
     }
 
-    /// Reads the next `width` bits, refilling first if needed.
+    /// Reads and consumes the next `width` bits, refilling first if needed. Zeros if the data ran out.
+    ///
+    /// - Parameter type: The ``Bits`` type to read, such as `Nibble.self`.
+    /// - Returns: The bits.
     @inlinable @inline(always)
     public mutating func read<let width: Int>(_: Bits<width>.Type = Bits<width>.self) -> Bits<width> {
         Bits(truncatingIfNeeded: read(bitCount: width))
     }
 
-    /// Reads a `width`-bit field as an `R`, through its raw value. Throws ``BytesError/invalidValue``
-    /// for a value that isn't a valid raw value.
+    /// Reads and consumes the next bit as a flag: `true` for 1, `false` for 0 or past the end of the data.
+    ///
+    /// ```swift
+    /// let isFinal = bits.read(Bool.self)   // DEFLATE's BFINAL
+    /// ```
+    ///
+    /// - Parameter type: `Bool.self`.
+    /// - Returns: The flag.
+    @inlinable @inline(always)
+    public mutating func read(_: Bool.Type) -> Bool {
+        read(bitCount: 1) != 0
+    }
+
+    /// Reads the next bits as a two's-complement signed integer, refilling first if needed. See
+    /// ``BytesReader/readSigned(bitCount:)``.
+    ///
+    /// - Parameter count: The number of bits, 1 through 56.
+    /// - Returns: The sign-extended value.
+    @inlinable @inline(always)
+    public mutating func readSigned(bitCount count: Int) -> Int64 {
+        assert(count >= 1 && count <= 56, "Bit count must be 1 through 56")
+        let shift = Int64(64 &- count)
+        return Int64(bitPattern: read(bitCount: count) &<< UInt64(shift)) &>> shift
+    }
+
+    /// Reads a `width`-bit field as an `R`, through its raw value. The bits are consumed even if they don't
+    /// make a valid `R`.
+    ///
+    /// - Parameters:
+    ///   - type: The `RawRepresentable` type to produce, such as an enum.
+    ///   - bitsType: The field's ``Bits`` type, such as `Crumb.self`.
+    /// - Returns: The `R` whose raw value is the field.
+    /// - Throws: ``BytesError/invalidValue`` if no `R` has the field as its raw value.
     @inlinable @inline(always)
     public mutating func read<R: RawRepresentable, let width: Int>(
         _: R.Type, as _: Bits<width>.Type
@@ -163,7 +241,7 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         return value
     }
 
-    /// Consumes bits up to the next byte boundary.
+    /// Consumes the bits up to the next byte boundary; does nothing if already on one.
     @inlinable
     public mutating func alignToByte() {
         let partial = bitPosition & 7
@@ -173,8 +251,10 @@ public struct BitBuffer: ~Copyable, ~Escapable {
         }
     }
 
-    /// A cursor at the next unread bit, ending the buffer. Throws ``BytesError/insufficientData`` if more
-    /// bits were consumed than the data has.
+    /// Ends the buffer, returning a cursor at the next unread bit.
+    ///
+    /// - Returns: A ``BytesReader`` over the same data and bit order.
+    /// - Throws: ``BytesError/insufficientData`` if more bits were consumed than the data has.
     @inlinable
     @_lifetime(copy self)
     public consuming func finish() throws(BytesError) -> BytesReader {
@@ -185,10 +265,13 @@ public struct BitBuffer: ~Copyable, ~Escapable {
 }
 
 public extension BytesReader {
-    /// A ``BitBuffer`` at this cursor's position, for decoding codes from it at full speed. Moves this cursor
-    /// past what the buffer consumed when `body` returns.
+    /// Runs `body` with a ``BitBuffer`` at this cursor's position, for decoding codes at full speed, then
+    /// moves this cursor past what the buffer consumed.
     ///
-    /// Throws ``BytesError/insufficientData`` if `body` consumed more bits than remain, or what `body` throws.
+    /// - Parameter body: Receives the buffer. If it throws, the cursor doesn't move.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws; ``BytesError/insufficientData`` if `body` consumed more bits than
+    ///   remain (the cursor doesn't move).
     @inlinable @inline(always)
     @_lifetime(self: copy self)
     mutating func withBitBuffer<R>(_ body: (inout BitBuffer) throws(BytesError) -> R) throws(BytesError) -> R {

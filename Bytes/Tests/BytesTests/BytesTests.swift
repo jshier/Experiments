@@ -413,12 +413,12 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
 
         // A fixed-size header read as its own cursor: its length is a constant the optimizer can see,
         // so every field read inside it needs no bounds check of its own.
-        var header = try BytesReader(reader.read(byteCount: 5))
+        var header = try reader.readSection(byteCount: 5)
         try header.expect([0x53, 0x52] as Byte2)
         let version = try header.read(Nibble.self)
         guard version == 1 else { throw .invalidValue }
         let unit = try header.read(Unit.self, as: Crumb.self) // throws .invalidValue for 3
-        let hasTimestamp = try header.read(Bit.self).isSet
+        let hasTimestamp = try header.read(Bool.self)
         try header.expect(Bit(0)) // reserved
         let count = try Int(header.read(Byte2.self, .bigEndian))
 
@@ -427,7 +427,7 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
         // A run of values: one bounds check, then a vectorized loop.
         var samples: [Int32] = []
         samples.reserveCapacity(count)
-        var run = try BytesReader(reader.read(byteCount: count * 3))
+        var run = try reader.readSection(byteCount: count * 3)
         run.forEach(Byte3.self) { sample in
             samples.append(sample.signedInteger(.bigEndian, as: Int32.self)) // 24-bit, sign-extended
         }
@@ -446,7 +446,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
             try writer.write([0x53, 0x52] as Byte2)
             try writer.write(reading.version)
             try writer.write(reading.unit, as: Crumb.self)
-            try writer.write(Bit(reading.timestamp != nil))
+            try writer.write(reading.timestamp != nil)
             try writer.write(Bit(0))
             try writer.write(UInt16(reading.samples.count), as: Byte2.self, .bigEndian)
             if let timestamp = reading.timestamp {

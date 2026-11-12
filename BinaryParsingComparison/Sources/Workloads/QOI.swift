@@ -4,19 +4,29 @@ import Bytes
 // QOI decoding (https://qoiformat.org), the same algorithm as swift-binary-parsing's example (including its
 // loop condition, so all three produce the same pixels), written two ways:
 //
-// - `decodeWithBytes`: `Bytes` reading, `BytesWriter` writing into the output array.
-// - `decodeWithParserSpan`: the same, reading with `ParserSpan` instead: the input side alone differs.
+// - `decodeWithBytes`: `Bytes` reading, `BytesWriter` writing into the output array, each QOI_OP_RUN as one
+//   `write(repeating:byteCount:count:)`.
+// - `decodeWithBytesPixelRuns`: the same, but writing runs a pixel per loop iteration, as the example does
+//   (and as `decodeWithBytes` did before Bytes had run fills).
+// - `decodeWithParserSpan`: `decodeWithBytesPixelRuns` reading with `ParserSpan` instead: the input side
+//   alone differs. It's kept as it is, against the shipping swift-binary-parsing.
 //
-// Both keep pixels as `SIMD4<UInt8>` (lane-wise wrapping arithmetic for the deltas, one store per pixel)
+// All of them keep pixels as `SIMD4<UInt8>` (lane-wise wrapping arithmetic for the deltas, one store per pixel)
 // and the 64-entry index in an `InlineArray`, as the example's TODOs suggest.
 
+/// A decoded image, in a shape common to all the decoders.
 public struct DecodedImage: Equatable, Sendable {
+    /// The width in pixels.
     public var width: Int
+    /// The height in pixels.
     public var height: Int
+    /// The bytes per pixel: 3 (RGB) or 4 (RGBA).
     public var channels: Int
+    /// The pixels, row by row from the top left, `channels` bytes each.
     public var pixels: [UInt8]
 }
 
+/// A QOI file the decoders reject: a bad header, or an image of 400 million pixels or more.
 public struct QOIError: Error {}
 
 public enum QOI {
@@ -34,7 +44,40 @@ public enum QOI {
 
     // MARK: Bytes
 
+    /// Decodes a QOI image with `Bytes`, writing each run with one fill.
+    ///
+    /// Decoding stops when the image is full or fewer than 8 bytes remain (the end marker's size, as in the
+    /// example's loop condition), so truncated input gives a shorter ``DecodedImage/pixels`` rather than an
+    /// error.
+    ///
+    /// - Parameter data: The QOI file.
+    /// - Returns: The image.
+    /// - Throws: ``QOIError`` if the channel count or color space is invalid, a dimension is 0, or the pixel
+    ///   count overflows or reaches 400 million; `BytesError.mismatch` if the magic isn't `qoif`;
+    ///   `BytesError.insufficientData` if the header is cut short.
     public static func decodeWithBytes(_ data: RawSpan) throws -> DecodedImage {
+        try decodeWithBytes(data, fillingRuns: true)
+    }
+
+    /// Decodes a QOI image with `Bytes`, writing runs a pixel per loop iteration, as the example does.
+    ///
+    /// - Parameter data: The QOI file.
+    /// - Returns: The image, as ``decodeWithBytes(_:)`` returns it.
+    /// - Throws: As ``decodeWithBytes(_:)``.
+    public static func decodeWithBytesPixelRuns(_ data: RawSpan) throws -> DecodedImage {
+        try decodeWithBytes(data, fillingRuns: false)
+    }
+
+    /// The decoder behind the two above, inlined into each with `fillingRuns` a constant: the other path
+    /// folds away.
+    ///
+    /// - Parameters:
+    ///   - data: The QOI file.
+    ///   - fillingRuns: Whether to write each run at once, or a pixel per iteration.
+    /// - Returns: The image.
+    /// - Throws: As ``decodeWithBytes(_:)``.
+    @inline(always)
+    static func decodeWithBytes(_ data: RawSpan, fillingRuns: Bool) throws -> DecodedImage {
         var reader = BytesReader(data)
         try reader.expect(0x71_6F_69_66 as Byte4) // "qoif"
         let width = try reader.read(Int.self, as: Byte4.self, .bigEndian)
@@ -58,7 +101,7 @@ public enum QOI {
             var position = 0
             while position < total, reader.remainingByteCount >= 8 {
                 defer { position &+= channels }
-                guard run == 0 else {
+                guard fillingRuns || run == 0 else {
                     run &-= 1
                     try store(previous, channels: channels, to: &writer)
                     continue
@@ -89,8 +132,18 @@ public enum QOI {
                             green &- 8 &+ UInt8(second.highHalf), green, green &- 8 &+ UInt8(second.lowHalf), 0
                         )
                     default: // QOI_OP_RUN: this pixel and `value` more
-                        run = Int(value)
-                        pixel = previous
+                        guard fillingRuns else {
+                            run = Int(value)
+                            pixel = previous
+                            break
+                        }
+                        // All at once, cut off at the end of the image as the pixel-at-a-time loop is. (Its
+                        // input check can't end a run early: runs read nothing.)
+                        let count = min(Int(value) &+ 1, (total &- position) / channels)
+                        try writer.write(repeating: UInt64(bitCast(previous, to: UInt32.self)), byteCount: channels, count: count)
+                        position &+= (count &- 1) &* channels // The `defer` adds the first.
+                        cache[hash(previous)] = previous
+                        continue
                     }
                 }
                 try store(pixel, channels: channels, to: &writer)
@@ -107,6 +160,12 @@ public enum QOI {
 
     // MARK: ParserSpan
 
+    /// Decodes a QOI image with `ParserSpan`: the algorithm of ``decodeWithBytesPixelRuns(_:)``.
+    ///
+    /// - Parameter data: The QOI file.
+    /// - Returns: The image, as ``decodeWithBytes(_:)`` returns it.
+    /// - Throws: ``QOIError`` as for ``decodeWithBytes(_:)``, and for a wrong magic; `ParsingError` if the
+    ///   header is cut short or the pixel count overflows.
     public static func decodeWithParserSpan(_ data: RawSpan) throws -> DecodedImage {
         var input = ParserSpan(data)
         guard try UInt32(parsingBigEndian: &input) == 0x716F_6966 else { throw QOIError() }

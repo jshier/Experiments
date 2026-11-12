@@ -9,34 +9,54 @@ public import Bytes
 
 @usableFromInline
 enum Check {
-    /// A string an encoder is about to write: at most 65,535 bytes, no U+0000.
+    /// Checks a string an encoder is about to write: at most 65,535 bytes, no U+0000.
+    ///
+    /// - Parameter text: The string.
+    /// - Throws: `MQTTError.malformed(_:)` if it's too long or contains U+0000.
     @inlinable
     static func string(_ text: UTF8Span) throws(MQTTError) {
         guard !Text.isTooLong(text.count) else { throw .malformed("string longer than 65,535 bytes") }
         guard !Text.containsNull(text) else { throw .malformed("U+0000 in a string") }
     }
 
-    /// Binary data an encoder is about to write: at most 65,535 bytes.
+    /// Checks binary data an encoder is about to write: at most 65,535 bytes.
+    ///
+    /// - Parameter bytes: The data.
+    /// - Throws: `MQTTError.malformed(_:)` if it's too long.
     @inlinable
     static func binary(_ bytes: RawSpan) throws(MQTTError) {
         guard !Text.isTooLong(bytes.byteCount) else { throw .malformed("binary data longer than 65,535 bytes") }
     }
 
-    /// A topic name: no wildcards or U+0000, and at least one character unless a Topic Alias stands in for
-    /// it [MQTT-3.3.2-2, MQTT-4.7.3-1, 3.3.2.1].
+    /// Checks a topic name: no wildcards or U+0000, and at least one character unless a Topic Alias stands in
+    /// for it [MQTT-3.3.2-2, MQTT-4.7.3-1, 3.3.2.1].
+    ///
+    /// - Parameters:
+    ///   - topic: The topic name.
+    ///   - hasTopicAlias: Whether the packet has a Topic Alias property.
+    /// - Throws: `MQTTError.malformed(_:)` for a wildcard or U+0000; `MQTTError.protocolError(_:)` if
+    ///   it's empty without an alias.
     @inlinable
     static func topicName(_ topic: UTF8Span, hasTopicAlias: Bool) throws(MQTTError) {
         guard !Text.containsWildcardOrNull(topic) else { throw .malformed("wildcard or U+0000 in a topic name") }
         guard !topic.isEmpty || hasTopicAlias else { throw .protocolError("empty topic name without a topic alias") }
     }
 
-    /// A reason code allowed in the packet.
+    /// Checks that a reason code is one the packet type allows.
+    ///
+    /// - Parameters:
+    ///   - code: The reason code.
+    ///   - allowed: The packet type's codes.
+    /// - Throws: `MQTTError.protocolError(_:)` if it isn't allowed.
     @inlinable
     static func reasonCode(_ code: MQTTReasonCode, in allowed: ReasonCodeSet) throws(MQTTError) {
         guard allowed.contains(code) else { throw .protocolError("reason code not allowed in this packet") }
     }
 
-    /// A packet identifier for SUBSCRIBE, UNSUBSCRIBE, or PUBLISH with QoS 1 or 2 [MQTT-2.2.1-3].
+    /// Checks the packet identifier of a SUBSCRIBE, UNSUBSCRIBE, or PUBLISH with QoS 1 or 2 [MQTT-2.2.1-3].
+    ///
+    /// - Parameter identifier: The identifier.
+    /// - Throws: `MQTTError.protocolError(_:)` if it's 0.
     @inlinable
     static func packetIdentifier(_ identifier: UInt16) throws(MQTTError) {
         guard identifier != 0 else { throw .protocolError("packet identifier 0") }
@@ -44,8 +64,14 @@ enum Check {
 }
 
 extension BytesReader {
-    /// A topic name, checked as ``Check/topicName(_:hasTopicAlias:)`` does except for the alias, which comes
-    /// later in the packet. One pass for an ASCII topic: its UTF-8, wildcards, and U+0000 together.
+    /// Reads a topic name, checked as ``Check/topicName(_:hasTopicAlias:)`` does except for the empty case,
+    /// which depends on the alias, later in the packet. One pass for an ASCII topic: its UTF-8, wildcards,
+    /// and U+0000 together.
+    ///
+    /// - Parameter detail: The detail for an error other than a wildcard or U+0000.
+    /// - Returns: The topic name, borrowing the reader's bytes.
+    /// - Throws: `MQTTError.malformed(_:)` with "wildcard or U+0000 in a topic name" if the topic has
+    ///   either, or with `detail` if it's truncated or isn't valid UTF-8. Nothing is consumed on failure.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
@@ -55,11 +81,11 @@ extension BytesReader {
         } catch {
             // Which rule it broke, now that it's an error (nothing was consumed): if it's valid UTF-8, a
             // wildcard or U+0000.
-            let start = byteOffset
+            let start = position
             guard error == .invalidValue, (try? read(utf8PrefixedBy: Byte2.self, .bigEndian)) != nil else {
                 throw .malformed(detail)
             }
-            try! seek(toByteOffset: start)
+            rewind(to: start)
             throw .malformed("wildcard or U+0000 in a topic name")
         }
     }
@@ -69,12 +95,25 @@ extension BytesReader {
 
 /// A will: the message the server publishes if the client disconnects abnormally.
 public struct MQTTWill: ~Escapable {
+    /// The QoS to publish the will at.
     public var qos: MQTTQoS
+    /// Whether the server retains the will.
     public var retain: Bool
+    /// The will's properties, such as Will Delay Interval.
     public var properties: MQTTProperties
+    /// The topic to publish to: no wildcards, not empty.
     public var topic: UTF8Span
+    /// The message.
     public var payload: RawSpan
 
+    /// Creates a will.
+    ///
+    /// - Parameters:
+    ///   - qos: The QoS to publish at.
+    ///   - retain: Whether the server retains the message.
+    ///   - properties: The will's properties.
+    ///   - topic: The topic to publish to.
+    ///   - payload: The message.
     @inlinable
     @_lifetime(copy properties, copy topic, copy payload)
     public init(
@@ -91,15 +130,31 @@ public struct MQTTWill: ~Escapable {
 
 /// CONNECT: the first packet a client sends.
 public struct MQTTConnect: ~Escapable {
+    /// Whether to start a new session, discarding any existing one.
     public var cleanStart: Bool
     /// Seconds; 0 turns keep-alive off.
     public var keepAlive: UInt16
+    /// The connection's properties, such as Session Expiry Interval.
     public var properties: MQTTProperties
+    /// The client's identifier; may be empty, for the server to assign one.
     public var clientIdentifier: UTF8Span
+    /// The will, if any.
     public var will: MQTTWill?
+    /// The user name, if any.
     public var userName: UTF8Span?
+    /// The password, if any.
     public var password: RawSpan?
 
+    /// Creates a CONNECT.
+    ///
+    /// - Parameters:
+    ///   - cleanStart: Whether to start a new session.
+    ///   - keepAlive: The keep-alive interval in seconds; 0 turns it off.
+    ///   - properties: The connection's properties.
+    ///   - clientIdentifier: The client's identifier.
+    ///   - will: The will, if any.
+    ///   - userName: The user name, if any.
+    ///   - password: The password, if any.
     @inlinable
     @_lifetime(copy properties, copy clientIdentifier, copy will, copy userName, copy password)
     public init(
@@ -202,7 +257,7 @@ public struct MQTTConnect: ~Escapable {
         flags[bit: 7] = userName != nil
         flags[bit: 6] = password != nil
         flags[bit: 5] = will?.retain ?? false
-        flags[Crumb.self, at: 3] = Crumb(truncatingIfNeeded: (will?.qos ?? .atMostOnce).rawValue)
+        flags[Crumb.self, at: 3] = Crumb(rawBitsOf: will?.qos ?? .atMostOnce)
         flags[bit: 2] = will != nil
         flags[bit: 1] = cleanStart
         try writer.write(flags)
@@ -225,9 +280,17 @@ public struct MQTTConnect: ~Escapable {
 public struct MQTTConnectAcknowledgement: ~Escapable {
     /// Whether the server resumed a session. Only with a successful reason code.
     public var sessionPresent: Bool
+    /// The outcome: success, or why the connection was refused.
     public var reasonCode: MQTTReasonCode
+    /// The server's properties, such as its limits and capabilities.
     public var properties: MQTTProperties
 
+    /// Creates a CONNACK.
+    ///
+    /// - Parameters:
+    ///   - sessionPresent: Whether the server resumed a session; only with a successful reason code.
+    ///   - reasonCode: The outcome.
+    ///   - properties: The server's properties.
     @inlinable
     @_lifetime(copy properties)
     public init(sessionPresent: Bool = false, reasonCode: MQTTReasonCode = .success, properties: consuming MQTTProperties = MQTTProperties()) {
@@ -255,7 +318,13 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
         try body.expectMQTTEnd("connect acknowledgement")
     }
 
-    /// The reason code is one CONNACK allows, and a failure has no session [MQTT-3.2.2-6].
+    /// Checks that the reason code is one CONNACK allows, and that a failure has no session [MQTT-3.2.2-6].
+    ///
+    /// - Parameters:
+    ///   - reasonCode: The reason code.
+    ///   - sessionPresent: The Session Present flag.
+    /// - Throws: `MQTTError.protocolError(_:)` if the code isn't allowed, or Session Present is set with a
+    ///   failure.
     @inlinable
     static func check(_ reasonCode: MQTTReasonCode, sessionPresent: Bool) throws(MQTTError) {
         try Check.reasonCode(reasonCode, in: .connectAcknowledgement)
@@ -285,15 +354,29 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
 public struct MQTTPublish: ~Escapable {
     /// Whether this is a redelivery. Only with QoS 1 or 2.
     public var duplicate: Bool
+    /// The delivery guarantee.
     public var qos: MQTTQoS
+    /// Whether the server retains the message for future subscribers.
     public var retain: Bool
     /// Empty only with a Topic Alias property, which then stands in for it.
     public var topic: UTF8Span
     /// Non-zero, with QoS 1 or 2; `nil` with QoS 0.
     public var packetIdentifier: UInt16?
+    /// The message's properties, such as Message Expiry Interval.
     public var properties: MQTTProperties
+    /// The application message.
     public var payload: RawSpan
 
+    /// Creates a PUBLISH.
+    ///
+    /// - Parameters:
+    ///   - duplicate: Whether this is a redelivery; only with QoS 1 or 2.
+    ///   - qos: The delivery guarantee.
+    ///   - retain: Whether the server retains the message.
+    ///   - topic: The topic name; empty only with a Topic Alias property.
+    ///   - packetIdentifier: Non-zero with QoS 1 or 2; `nil` with QoS 0.
+    ///   - properties: The message's properties.
+    ///   - payload: The application message.
     @inlinable
     @_lifetime(copy topic, copy properties, copy payload)
     public init(
@@ -326,7 +409,7 @@ public struct MQTTPublish: ~Escapable {
             throw .protocolError("empty topic name without a topic alias")
         }
         // The payload is the rest of the packet.
-        do throws(BytesError) { payload = try body.read(byteCount: body.remainingByteCount) } catch { throw .malformed("payload") }
+        payload = body.readRemainingBytes()
     }
 
     @inlinable
@@ -345,6 +428,8 @@ public struct MQTTPublish: ~Escapable {
     var flags: Nibble {
         var flags = Nibble.zero
         flags[bit: 3] = duplicate
+        // The checked `Crumb(_:)`, not `Crumb(rawBitsOf: qos)`: its range check lets the setter drop its
+        // mask, where `rawBitsOf` truncates (an `and`): encoding PUBLISH took 3 instructions more per packet.
         flags[Crumb.self, at: 1] = Crumb(qos.rawValue)
         flags[bit: 0] = retain
         return flags
@@ -368,10 +453,19 @@ public struct MQTTPublish: ~Escapable {
 
 /// PUBACK, PUBREC, PUBREL, and PUBCOMP: the steps of QoS 1 and 2 delivery, which share a shape.
 public struct MQTTPublishResponse: ~Escapable {
+    /// The identifier of the PUBLISH this answers.
     public var packetIdentifier: UInt16
+    /// The outcome; which codes are allowed depends on the packet type.
     public var reasonCode: MQTTReasonCode
+    /// The response's properties: a Reason String and User Properties.
     public var properties: MQTTProperties
 
+    /// Creates a response.
+    ///
+    /// - Parameters:
+    ///   - packetIdentifier: The identifier of the PUBLISH it answers.
+    ///   - reasonCode: The outcome.
+    ///   - properties: The response's properties.
     @inlinable
     @_lifetime(copy properties)
     public init(packetIdentifier: UInt16, reasonCode: MQTTReasonCode = .success, properties: consuming MQTTProperties = MQTTProperties()) {
@@ -380,7 +474,14 @@ public struct MQTTPublishResponse: ~Escapable {
         self.properties = properties
     }
 
-    /// `reasonCodes` is the set the packet type allows.
+    /// Reads a response's body: the identifier, then the reason code and properties unless omitted.
+    ///
+    /// - Parameters:
+    ///   - body: The packet's body.
+    ///   - reasonCodes: The set the packet type allows.
+    /// - Throws: `MQTTError.malformed(_:)` if the body is truncated, has bytes left over, or has an
+    ///   invalid property; `MQTTError.protocolError(_:)` for a reason code not in `reasonCodes` or a
+    ///   property rule broken.
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
@@ -418,9 +519,16 @@ public struct MQTTPublishResponse: ~Escapable {
 
 /// One subscription in a SUBSCRIBE.
 public struct MQTTSubscription: ~Escapable {
+    /// The topic filter, possibly with wildcards.
     public var topicFilter: UTF8Span
+    /// The subscription's options.
     public var options: MQTTSubscriptionOptions
 
+    /// Creates a subscription.
+    ///
+    /// - Parameters:
+    ///   - topicFilter: The topic filter.
+    ///   - options: The subscription's options.
     @inlinable
     @_lifetime(copy topicFilter)
     public init(topicFilter: UTF8Span, options: MQTTSubscriptionOptions) {
@@ -435,8 +543,15 @@ public struct MQTTSubscriptions: ~Escapable {
     public let bytes: RawSpan
 
     /// Views encoded subscriptions, checking that there's at least one, and that each is well-formed, has a
-    /// non-empty topic filter, and doesn't set No Local on a shared subscription [MQTT-3.8.3-4]. Wildcard
-    /// placement isn't checked: a server answers an invalid filter with reason code 0x8F in its SUBACK.
+    /// non-empty topic filter, and doesn't set No Local on a shared subscription [MQTT-3.8.3-4].
+    ///
+    /// Wildcard placement isn't checked: a server answers an invalid filter with reason code 0x8F in its
+    /// SUBACK. Build the bytes by writing each ``MQTTSubscription`` to a `BytesWriter`.
+    ///
+    /// - Parameter bytes: The encoded subscriptions: each a topic filter (a string) and an options byte.
+    /// - Throws: `MQTTError.malformed(_:)` for an invalid topic filter or options byte, or a reserved
+    ///   option bit; `MQTTError.protocolError(_:)` for no subscriptions, an empty filter, No Local on a
+    ///   shared subscription, or a retain handling or maximum QoS of 3.
     @inlinable
     @_lifetime(copy bytes)
     public init(validating bytes: RawSpan) throws(MQTTError) {
@@ -451,7 +566,10 @@ public struct MQTTSubscriptions: ~Escapable {
         self.bytes = bytes
     }
 
-    /// Calls `body` with each subscription, in order.
+    /// Calls `body` with each subscription, in order. The topic filters aren't validated again.
+    ///
+    /// - Parameter body: Called with each subscription; its error is rethrown.
+    /// - Throws: Whatever `body` throws.
     @inlinable
     public func forEach<E: Error>(_ body: (borrowing MQTTSubscription) throws(E) -> Void) throws(E) {
         var reader = BytesReader(bytes)
@@ -465,6 +583,10 @@ public struct MQTTSubscriptions: ~Escapable {
 
 public extension BytesWriter {
     /// Writes a subscription, for building a list to view with ``MQTTSubscriptions/init(validating:)``.
+    ///
+    /// - Parameter subscription: The subscription.
+    /// - Throws: `BytesError.invalidValue` if the topic filter is longer than 65,535 bytes;
+    ///   `BytesError.insufficientCapacity` if there's no room.
     @inlinable
     @_lifetime(self: copy self)
     mutating func write(_ subscription: borrowing MQTTSubscription) throws(BytesError) {
@@ -477,9 +599,17 @@ public extension BytesWriter {
 public struct MQTTSubscribe: ~Escapable {
     /// Non-zero.
     public var packetIdentifier: UInt16
+    /// The request's properties: a Subscription Identifier and User Properties.
     public var properties: MQTTProperties
+    /// The topic filters to subscribe to, with their options.
     public var subscriptions: MQTTSubscriptions
 
+    /// Creates a SUBSCRIBE.
+    ///
+    /// - Parameters:
+    ///   - packetIdentifier: A non-zero identifier.
+    ///   - properties: The request's properties.
+    ///   - subscriptions: The subscriptions.
     @inlinable
     @_lifetime(copy properties, copy subscriptions)
     public init(
@@ -496,9 +626,7 @@ public struct MQTTSubscribe: ~Escapable {
     init(reading body: inout BytesReader) throws(MQTTError) {
         packetIdentifier = try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .subscribe)
-        let list: RawSpan
-        do throws(BytesError) { list = try body.read(byteCount: body.remainingByteCount) } catch { throw .malformed("subscriptions") }
-        subscriptions = try MQTTSubscriptions(validating: list)
+        subscriptions = try MQTTSubscriptions(validating: body.readRemainingBytes())
     }
 
     @inlinable
@@ -526,6 +654,10 @@ public struct MQTTTopicFilters: ~Escapable {
     public let bytes: RawSpan
 
     /// Views encoded topic filters, checking that there's at least one and each is a non-empty string.
+    ///
+    /// - Parameter bytes: The encoded topic filters: each a string.
+    /// - Throws: `MQTTError.malformed(_:)` for an invalid string; `MQTTError.protocolError(_:)` for no
+    ///   topic filters or an empty one.
     @inlinable
     @_lifetime(copy bytes)
     public init(validating bytes: RawSpan) throws(MQTTError) {
@@ -537,7 +669,10 @@ public struct MQTTTopicFilters: ~Escapable {
         self.bytes = bytes
     }
 
-    /// Calls `body` with each topic filter, in order.
+    /// Calls `body` with each topic filter, in order. The strings aren't validated again.
+    ///
+    /// - Parameter body: Called with each topic filter; its error is rethrown.
+    /// - Throws: Whatever `body` throws.
     @inlinable
     public func forEach<E: Error>(_ body: (UTF8Span) throws(E) -> Void) throws(E) {
         var reader = BytesReader(bytes)
@@ -551,9 +686,17 @@ public struct MQTTTopicFilters: ~Escapable {
 public struct MQTTUnsubscribe: ~Escapable {
     /// Non-zero.
     public var packetIdentifier: UInt16
+    /// The request's properties: User Properties.
     public var properties: MQTTProperties
+    /// The topic filters to unsubscribe from.
     public var topicFilters: MQTTTopicFilters
 
+    /// Creates an UNSUBSCRIBE.
+    ///
+    /// - Parameters:
+    ///   - packetIdentifier: A non-zero identifier.
+    ///   - properties: The request's properties.
+    ///   - topicFilters: The topic filters.
     @inlinable
     @_lifetime(copy properties, copy topicFilters)
     public init(
@@ -570,9 +713,7 @@ public struct MQTTUnsubscribe: ~Escapable {
     init(reading body: inout BytesReader) throws(MQTTError) {
         packetIdentifier = try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .unsubscribe)
-        let list: RawSpan
-        do throws(BytesError) { list = try body.read(byteCount: body.remainingByteCount) } catch { throw .malformed("topic filters") }
-        topicFilters = try MQTTTopicFilters(validating: list)
+        topicFilters = try MQTTTopicFilters(validating: body.readRemainingBytes())
     }
 
     @inlinable
@@ -596,11 +737,19 @@ public struct MQTTUnsubscribe: ~Escapable {
 
 /// SUBACK and UNSUBACK: one reason code per subscription or topic filter, in request order.
 public struct MQTTSubscribeAcknowledgement: ~Escapable {
+    /// The identifier of the request this answers.
     public var packetIdentifier: UInt16
+    /// The acknowledgement's properties: a Reason String and User Properties.
     public var properties: MQTTProperties
     /// The reason codes' raw values, viewing the packet. At least one; see ``reasonCode(at:)``.
     public var reasonCodes: Span<UInt8>
 
+    /// Creates a SUBACK or UNSUBACK.
+    ///
+    /// - Parameters:
+    ///   - packetIdentifier: The identifier of the request it answers.
+    ///   - properties: The acknowledgement's properties.
+    ///   - reasonCodes: One raw reason code per subscription or topic filter, in request order.
     @inlinable
     @_lifetime(copy properties, copy reasonCodes)
     public init(packetIdentifier: UInt16, properties: consuming MQTTProperties = MQTTProperties(), reasonCodes: Span<UInt8>) {
@@ -610,23 +759,30 @@ public struct MQTTSubscribeAcknowledgement: ~Escapable {
     }
 
     /// The reason code at `index`.
+    ///
+    /// - Parameter index: A position in ``reasonCodes``.
+    /// - Returns: The code there.
+    /// - Precondition: `index` is in bounds.
     @inlinable
     public func reasonCode(at index: Int) -> MQTTReasonCode {
         MQTTReasonCode(rawValue: reasonCodes[index])
     }
 
-    /// `allowed` is the set the packet type allows.
+    /// Reads a SUBACK's or UNSUBACK's body: the identifier, the properties, and the rest as reason codes.
+    ///
+    /// - Parameters:
+    ///   - body: The packet's body.
+    ///   - allowed: The set the packet type allows.
+    /// - Throws: `MQTTError.malformed(_:)` if the identifier is truncated or a property is invalid;
+    ///   `MQTTError.protocolError(_:)` for no reason codes, a code not in `allowed`, or a property rule
+    ///   broken.
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
     init(reading body: inout BytesReader, reasonCodes allowed: ReasonCodeSet) throws(MQTTError) {
         packetIdentifier = try body.readMQTTUInt16("packet identifier")
         properties = try MQTTProperties(reading: &body, allowing: .acknowledgement)
-        do throws(BytesError) {
-            reasonCodes = try Span(viewing: body.read(byteCount: body.remainingByteCount))
-        } catch {
-            throw .malformed("reason codes")
-        }
+        reasonCodes = Span(viewing: body.readRemainingBytes())
         try Self.check(reasonCodes, allowed)
     }
 
@@ -662,9 +818,16 @@ public typealias MQTTUnsubscribeAcknowledgement = MQTTSubscribeAcknowledgement
 
 /// DISCONNECT: the last packet either side sends, with why.
 public struct MQTTDisconnect: ~Escapable {
+    /// Why the connection is ending.
     public var reasonCode: MQTTReasonCode
+    /// The packet's properties, such as a Reason String or Server Reference.
     public var properties: MQTTProperties
 
+    /// Creates a DISCONNECT.
+    ///
+    /// - Parameters:
+    ///   - reasonCode: Why the connection is ending.
+    ///   - properties: The packet's properties.
     @inlinable
     @_lifetime(copy properties)
     public init(reasonCode: MQTTReasonCode = .normalDisconnection, properties: consuming MQTTProperties = MQTTProperties()) {
@@ -707,9 +870,16 @@ public struct MQTTDisconnect: ~Escapable {
 
 /// AUTH: a step of extended (challenge/response) authentication.
 public struct MQTTAuthenticate: ~Escapable {
+    /// Success, Continue Authentication, or Re-authenticate.
     public var reasonCode: MQTTReasonCode
+    /// The packet's properties: Authentication Method and Data, a Reason String, and User Properties.
     public var properties: MQTTProperties
 
+    /// Creates an AUTH.
+    ///
+    /// - Parameters:
+    ///   - reasonCode: The step's status.
+    ///   - properties: The packet's properties.
     @inlinable
     @_lifetime(copy properties)
     public init(reasonCode: MQTTReasonCode = .success, properties: consuming MQTTProperties = MQTTProperties()) {

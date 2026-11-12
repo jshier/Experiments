@@ -7,6 +7,11 @@ import Bytes
 public enum Integers {
     // MARK: 32-bit
 
+    /// Sums the big-endian `UInt32`s of `span`, one `read` each; a partial last value is ignored.
+    ///
+    /// - Parameter span: The bytes.
+    /// - Returns: The sum, wrapping.
+    /// - Throws: Never in practice: each read is of bytes known to remain.
     public static func sum32Bytes(_ span: RawSpan) throws -> UInt64 {
         var reader = BytesReader(span)
         var sum: UInt64 = 0
@@ -16,6 +21,10 @@ public enum Integers {
         return sum
     }
 
+    /// Sums the big-endian `UInt32`s of `span` with `forEach`; a partial last value is ignored.
+    ///
+    /// - Parameter span: The bytes.
+    /// - Returns: The sum, wrapping.
     public static func sum32BytesForEach(_ span: RawSpan) -> UInt64 {
         var reader = BytesReader(span)
         var sum: UInt64 = 0
@@ -23,6 +32,12 @@ public enum Integers {
         return sum
     }
 
+    /// Sums the big-endian `UInt32`s of `span` with `ParserSpan`, one parse each; a partial last value is
+    /// ignored.
+    ///
+    /// - Parameter span: The bytes.
+    /// - Returns: The sum, wrapping.
+    /// - Throws: Never in practice: each parse is of bytes known to remain.
     public static func sum32ParserSpan(_ span: RawSpan) throws -> UInt64 {
         var input = ParserSpan(span)
         var sum: UInt64 = 0
@@ -34,6 +49,11 @@ public enum Integers {
 
     // MARK: 24-bit
 
+    /// Sums the big-endian 24-bit integers of `span`, one `read` each; a partial last value is ignored.
+    ///
+    /// - Parameter span: The bytes.
+    /// - Returns: The sum.
+    /// - Throws: Never in practice: each read is of bytes known to remain.
     public static func sum24Bytes(_ span: RawSpan) throws -> UInt64 {
         var reader = BytesReader(span)
         var sum: UInt64 = 0
@@ -43,6 +63,10 @@ public enum Integers {
         return sum
     }
 
+    /// Sums the big-endian 24-bit integers of `span` with `forEach`; a partial last value is ignored.
+    ///
+    /// - Parameter span: The bytes.
+    /// - Returns: The sum.
     public static func sum24BytesForEach(_ span: RawSpan) -> UInt64 {
         var reader = BytesReader(span)
         var sum: UInt64 = 0
@@ -50,6 +74,12 @@ public enum Integers {
         return sum
     }
 
+    /// Sums the big-endian 24-bit integers of `span` with `ParserSpan` (`byteCount: 3`), one parse each; a
+    /// partial last value is ignored.
+    ///
+    /// - Parameter span: The bytes.
+    /// - Returns: The sum.
+    /// - Throws: Never in practice: each parse is of bytes known to remain.
     public static func sum24ParserSpan(_ span: RawSpan) throws -> UInt64 {
         var input = ParserSpan(span)
         var sum: UInt64 = 0

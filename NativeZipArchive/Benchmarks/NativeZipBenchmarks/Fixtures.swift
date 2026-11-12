@@ -2,12 +2,13 @@ import Foundation
 
 /// Deterministic benchmark archives, generated once and cached in a fixed temporary directory.
 enum Fixtures {
-    static let version = 1
+    static let version = 2
     static let root = URL(filePath: NSTemporaryDirectory()).appending(path: "NativeZipBenchmarkFixtures-v\(version)")
 
     static var smallFiles: URL { root.appending(path: "small.zip") } // 2,000 text files, ~4–16 KB each
     static var largeText: URL { root.appending(path: "text.zip") } // one 32 MB deflated text file
     static var largeRandom: URL { root.appending(path: "random.zip") } // one 32 MB stored (incompressible) file
+    static var raster: URL { root.appending(path: "raster.zip") } // one 32 MB deflated file of pixel runs
 
     /// A per-iteration scratch directory for extraction output, always inside `root`.
     static func scratchDirectory() -> URL {
@@ -52,9 +53,36 @@ enum Fixtures {
         }
         try random.write(to: largeRandomDirectory.appending(path: "big.bin"))
 
+        let rasterDirectory = source.appending(path: "raster")
+        try fileManager.createDirectory(at: rasterDirectory, withIntermediateDirectories: true)
+        try rasterData(byteCount: 32 << 20, using: &rng).write(to: rasterDirectory.appending(path: "big.raw"))
+
         try zip("small", into: smallFiles, from: source)
         try zip("text", into: largeText, from: source)
+        try zip("raster", into: raster, from: source)
+        // Last: `prepare` checks for it to tell whether the fixtures are complete.
         try zip("random", into: largeRandom, from: source)
+    }
+
+    /// Raster-like data: runs of 1 to 40 identical pixels of 2 to 7 bytes (the width changes every 4 KB),
+    /// each run a random pixel. Deflate codes a run as one pixel of literals, then a match one pixel back:
+    /// the short distances that repeat a pattern, which text rarely has.
+    private static func rasterData(byteCount: Int, using rng: inout SplitMix64) -> Data {
+        var output = [UInt8]()
+        output.reserveCapacity(byteCount + 4096 + 300)
+        while output.count < byteCount {
+            let width = 2 + Int(rng.next() % 6)
+            let segmentEnd = output.count + 4096
+            while output.count < segmentEnd {
+                let pixel = rng.next()
+                for _ in 0...(rng.next() % 40) {
+                    for byte in 0..<width {
+                        output.append(UInt8(truncatingIfNeeded: pixel >> (8 * UInt64(byte))))
+                    }
+                }
+            }
+        }
+        return Data(output.prefix(byteCount))
     }
 
     /// Word-salad text that compresses roughly like source code (~3–4x).

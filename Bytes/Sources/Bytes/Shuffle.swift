@@ -15,6 +15,9 @@ enum Shuffle {
     /// help, and 9 to 15 bytes would need lookups across more than 64 bytes.) Lanes are stored straight
     /// into `T.Integer`s, so a conformance whose `Integer` isn't the lane size is excluded. Both checks fold
     /// to a constant.
+    ///
+    /// - Parameter type: The group type.
+    /// - Returns: `true` if runs of `type` are packed and unpacked with lookups.
     @inlinable @inline(__always)
     static func handles<T: ByteGroup>(_: T.Type) -> Bool {
         switch T.byteCount {
@@ -27,6 +30,9 @@ enum Shuffle {
     /// already vectorizes (NEON `ld3`) together with the caller's body, while unpacking first and then
     /// calling the body once per lane keeps the body scalar (measured 5x slower). For 5 to 7 bytes, whose
     /// plain loop barely vectorizes, unpacking halves the instructions.
+    ///
+    /// - Parameter type: The group type.
+    /// - Returns: `true` if `forEach` over `type` unpacks with lookups.
     @inlinable @inline(__always)
     static func handlesIteration<T: ByteGroup>(_: T.Type) -> Bool {
         switch T.byteCount {
@@ -36,19 +42,35 @@ enum Shuffle {
     }
 
     /// The size of the lane holding one value: 4 bytes for 3-byte groups, 8 otherwise.
+    ///
+    /// - Parameter byteCount: The group's width in bytes.
+    /// - Returns: The lane size in bytes.
     @inlinable @inline(__always)
     static func laneSize(_ byteCount: Int) -> Int { byteCount == 3 ? 4 : 8 }
 
-    /// Values per step: 64 bytes of lanes.
+    /// The values in one step: 64 bytes of lanes.
+    ///
+    /// - Parameter byteCount: The group's width in bytes.
+    /// - Returns: 16 for 3-byte groups, 8 otherwise.
     @inlinable @inline(__always)
     static func valuesPerStep(_ byteCount: Int) -> Int { 64 / laneSize(byteCount) }
 
-    /// Packed bytes per step.
+    /// The packed bytes in one step.
+    ///
+    /// - Parameter byteCount: The group's width in bytes.
+    /// - Returns: The values per step times `byteCount`: 48, 40, 48, or 56.
     @inlinable @inline(__always)
     static func bytesPerStep(_ byteCount: Int) -> Int { valuesPerStep(byteCount) &* byteCount }
 
-    /// Index vector `part` (0 through 3) for packing: output byte `16 * part + i` takes byte
-    /// `index[i]` of the 64 bytes of lanes. Constant-folded when its arguments are constants.
+    /// The index vector for one part of a step's packing: output byte `16 * part + i` takes byte
+    /// `index[i]` of the 64 bytes of lanes. Slots past the step's packed bytes are `0xFF` (out of range, so
+    /// `tbl` gives 0). Constant-folded when its arguments are constants.
+    ///
+    /// - Parameters:
+    ///   - byteCount: The group's width in bytes.
+    ///   - bigEndian: Whether each value's bytes are written most significant first.
+    ///   - part: Which 16 output bytes, 0 through 3.
+    /// - Returns: The indices for `part`.
     @inlinable @inline(__always)
     static func packIndex(byteCount: Int, bigEndian: Bool, part: Int) -> SIMD16<UInt8> {
         let lane = laneSize(byteCount)
@@ -64,8 +86,15 @@ enum Shuffle {
         return index
     }
 
-    /// Index vector `part` (0 through 3) for unpacking: lane byte `16 * part + i` takes byte `index[i]` of
-    /// the step's packed bytes, or zero above the value's width.
+    /// The index vector for one part of a step's unpacking: lane byte `16 * part + i` takes byte `index[i]`
+    /// of the step's packed bytes. Lane bytes above the value's width are `0xFF` (out of range, so `tbl`
+    /// gives 0).
+    ///
+    /// - Parameters:
+    ///   - byteCount: The group's width in bytes.
+    ///   - bigEndian: Whether each value's bytes are stored most significant first.
+    ///   - part: Which 16 lane bytes, 0 through 3.
+    /// - Returns: The indices for `part`.
     @inlinable @inline(__always)
     static func unpackIndex(byteCount: Int, bigEndian: Bool, part: Int) -> SIMD16<UInt8> {
         let lane = laneSize(byteCount)
@@ -87,11 +116,18 @@ enum Shuffle {
 
     // MARK: Packing (writing)
 
-    /// Writes whole steps of `count` values from `value`, packed as `T` in `bigEndian` or little-endian
-    /// order, starting at `start`, and returns how many values it wrote (a multiple of the step). Capacity
-    /// already checked for all `count` values. Unsafe: unchecked vector stores, like ``Store`` and for the
-    /// same reason (checked, they keep the loop from running at NEON speed). Each step writes within the
-    /// `count` values checked.
+    /// Writes whole steps of values, packed as `T`. The caller has already checked capacity for all `count`
+    /// values. Unsafe: unchecked vector stores, like ``Store`` and for the same reason (checked, they keep
+    /// the loop from running at NEON speed). Each step writes within the `count` values checked.
+    ///
+    /// - Parameters:
+    ///   - type: The group type.
+    ///   - bigEndian: Whether to write each value most significant byte first.
+    ///   - count: The number of values the caller will write in all.
+    ///   - bytes: The span to write to.
+    ///   - start: The byte offset of the first value.
+    ///   - value: The value at an index below `count`.
+    /// - Returns: How many values it wrote: `count` rounded down to a multiple of the step.
     @unsafe @inlinable @inline(__always)
     static func pack<T: ByteGroup>(
         _: T.Type, bigEndian: Bool, count: Int, to bytes: inout MutableRawSpan, at start: Int, _ value: (Int) -> T.Integer
@@ -125,7 +161,13 @@ enum Shuffle {
         return steps &* perStep
     }
 
-    /// One step's values from `value`, starting at index `first`, as 64 bytes of lanes.
+    /// Gathers one step's values as 64 bytes of lanes.
+    ///
+    /// - Parameters:
+    ///   - type: The group type.
+    ///   - first: The index of the step's first value.
+    ///   - value: The value at an index.
+    /// - Returns: The step's values in lanes, as four vectors.
     @inlinable @inline(__always)
     static func lanes<T: ByteGroup>(
         _: T.Type, _ first: Int, _ value: (Int) -> T.Integer
@@ -149,8 +191,14 @@ enum Shuffle {
 
     // MARK: Unpacking (reading)
 
-    /// How many whole steps of `T` can be unpacked from `availableBytes` bytes for up to `count` values:
-    /// each step loads 64 bytes from its start (more than it uses), so it needs that many to be readable.
+    /// Counts the whole steps of `T` that can be unpacked: each step loads 64 bytes from its start (more
+    /// than it uses), so it needs that many to be readable.
+    ///
+    /// - Parameters:
+    ///   - type: The group type.
+    ///   - count: The number of values wanted.
+    ///   - availableBytes: The bytes readable from the first step's start.
+    /// - Returns: The steps, at most `count` values' worth.
     @inlinable @inline(__always)
     static func unpackableSteps<T: ByteGroup>(_: T.Type, count: Int, availableBytes: Int) -> Int {
         let stepBytes = bytesPerStep(T.byteCount)
@@ -158,7 +206,12 @@ enum Shuffle {
         return Swift.min(count / valuesPerStep(T.byteCount), (availableBytes &- 64) / stepBytes &+ 1)
     }
 
-    /// The unpacking index vectors for `T` in an order.
+    /// Makes the four unpacking index vectors for `T`.
+    ///
+    /// - Parameters:
+    ///   - type: The group type.
+    ///   - bigEndian: Whether each value's bytes are stored most significant first.
+    /// - Returns: The index vectors for parts 0 through 3.
     @inlinable @inline(__always)
     static func unpackIndices<T: ByteGroup>(
         _: T.Type, bigEndian: Bool
@@ -171,9 +224,17 @@ enum Shuffle {
         )
     }
 
-    /// Step `step`'s values from packed bytes at `start`, as 64 bytes of lanes. The caller ensures the
-    /// step's 64-byte load is in bounds (see ``unpackableSteps(_:count:availableBytes:)``). Unsafe: unchecked
-    /// vector loads, like ``Load`` and for the same reason.
+    /// Unpacks one step's values into 64 bytes of lanes. The caller ensures the step's 64-byte load is in
+    /// bounds (see ``unpackableSteps(_:count:availableBytes:)``). Unsafe: unchecked vector loads, like
+    /// ``Load`` and for the same reason.
+    ///
+    /// - Parameters:
+    ///   - type: The group type.
+    ///   - step: The step's number.
+    ///   - span: The span holding the packed bytes.
+    ///   - start: The byte offset of the first step.
+    ///   - indices: The unpacking indices, from ``unpackIndices(_:bigEndian:)``.
+    /// - Returns: The step's values in lanes, as four vectors.
     @unsafe @inlinable @inline(__always)
     static func unpack<T: ByteGroup>(
         _: T.Type, step: Int, from span: RawSpan, at start: Int,
@@ -189,7 +250,13 @@ enum Shuffle {
         return (table(packed, indices.0), table(packed, indices.1), table(packed, indices.2), table(packed, indices.3))
     }
 
-    /// Value `index` (0 through 15, or 7) of unpacked lanes, as `T.Integer`.
+    /// Reads one value from unpacked lanes.
+    ///
+    /// - Parameters:
+    ///   - type: The group type.
+    ///   - lanes: The step's lanes, from ``unpack(_:step:from:at:_:)``.
+    ///   - index: The value's index in the step: 0 through 15 for 3-byte groups, 0 through 7 otherwise.
+    /// - Returns: The value as `T.Integer`.
     @inlinable @inline(__always)
     static func lane<T: ByteGroup>(
         _: T.Type, _ lanes: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>), _ index: Int

@@ -7,6 +7,9 @@ import Bytes
 
 /// A synthetic central directory: `count` entries, each a 46-byte header, a name, an extended-timestamp
 /// extra field, and no comment. (The same generator as Bytes' `Fields:` benchmarks.)
+///
+/// - Parameter count: The number of entries.
+/// - Returns: The directory's bytes.
 public func makeCentralDirectory(count: Int) -> [UInt8] {
     var bytes: [UInt8] = []
     func append<T: FixedWidthInteger>(_ value: T) {
@@ -46,6 +49,7 @@ struct Fields {
     mutating func add(_ value: some FixedWidthInteger) { checksum &+= UInt64(truncatingIfNeeded: value) }
 }
 
+/// An entry that doesn't start with the central directory signature (`PK\1\2`), in the `ParserSpan` parsers.
 public struct BadSignature: Error {}
 
 public enum CentralDirectory {
@@ -53,6 +57,12 @@ public enum CentralDirectory {
 
     // MARK: Bytes
 
+    /// Parses a central directory with `Bytes`, reading every field from one reader.
+    ///
+    /// - Parameter span: The directory: entries to the end of the span.
+    /// - Returns: The sum of the fields read, so nothing is optimized away.
+    /// - Throws: `BytesError.mismatch` if an entry doesn't start with the signature;
+    ///   `BytesError.insufficientData` if one is cut short.
     public static func parseWithBytes(_ span: RawSpan) throws -> UInt64 {
         var reader = BytesReader(span)
         var fields = Fields()
@@ -76,18 +86,21 @@ public enum CentralDirectory {
             try fields.add(reader.read(byteCount: nameLength).byteCount)
             var extra = try reader.readSection(byteCount: extraLength)
             try reader.skip(byteCount: commentLength)
-            while extra.remainingByteCount >= 4 {
-                let id = try extra.read(Byte2.self, .littleEndian)
-                let size = try extra.read(Int.self, as: Byte2.self, .littleEndian)
-                var field = try extra.readSection(byteCount: size)
-                if id == 0x5455, size >= 5, try field.read(Byte.self)[bit: 0] {
-                    try fields.add(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
+            try extra.forEachRecord(tag: Byte2.self, length: Byte2.self, .littleEndian) { id, field throws(BytesError) in
+                if id == 0x5455, field.remainingByteCount >= 5, try field.read(Byte.self)[bit: 0] {
+                    try fields.add(field.readSigned(Byte4.self, .littleEndian, as: Int32.self))
                 }
             }
         }
         return fields.checksum
     }
 
+    /// Parses a central directory with `Bytes`, reading each fixed 46-byte header, and each extra field's
+    /// header, through a sub-reader.
+    ///
+    /// - Parameter span: The directory.
+    /// - Returns: The sum of the fields read, as ``parseWithBytes(_:)``.
+    /// - Throws: As ``parseWithBytes(_:)``.
     public static func parseWithBytesRecords(_ span: RawSpan) throws -> UInt64 {
         var reader = BytesReader(span)
         var fields = Fields()
@@ -118,7 +131,7 @@ public enum CentralDirectory {
                 let size = try fieldHeader.read(Int.self, as: Byte2.self, .littleEndian)
                 var field = try extra.readSection(byteCount: size)
                 if id == 0x5455, size >= 5, try field.read(Byte.self)[bit: 0] {
-                    try fields.add(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
+                    try fields.add(field.readSigned(Byte4.self, .littleEndian, as: Int32.self))
                 }
             }
         }
@@ -127,6 +140,12 @@ public enum CentralDirectory {
 
     // MARK: BinaryParsing
 
+    /// Parses a central directory with `ParserSpan`, reading every field from one cursor.
+    ///
+    /// - Parameter span: The directory.
+    /// - Returns: The sum of the fields read, as ``parseWithBytes(_:)``.
+    /// - Throws: ``BadSignature`` if an entry doesn't start with the signature; `ParsingError` if one is cut
+    ///   short.
     public static func parseWithParserSpan(_ span: RawSpan) throws -> UInt64 {
         var input = ParserSpan(span)
         var fields = Fields()
@@ -162,6 +181,12 @@ public enum CentralDirectory {
         return fields.checksum
     }
 
+    /// Parses a central directory with `ParserSpan`, reading each fixed 46-byte header, and each extra
+    /// field's header, through a sub-cursor.
+    ///
+    /// - Parameter span: The directory.
+    /// - Returns: The sum of the fields read, as ``parseWithBytes(_:)``.
+    /// - Throws: As ``parseWithParserSpan(_:)``.
     public static func parseWithParserSpanRecords(_ span: RawSpan) throws -> UInt64 {
         var input = ParserSpan(span)
         var fields = Fields()

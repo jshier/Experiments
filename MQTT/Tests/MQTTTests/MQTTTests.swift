@@ -6,20 +6,15 @@ import Testing
 
 /// Encodes `packet` into a new array.
 func encoded(_ packet: borrowing MQTTPacket) throws -> [UInt8] {
-    try [UInt8](capacity: packet.encodedByteCount) { output in
-        try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in try packet.write(to: &writer) }
-    }
+    try [UInt8](byteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
 }
 
 /// Builds encoded fields (a property list, a subscription list) in a new array.
 func fieldBytes(_ body: (inout BytesWriter) throws(BytesError) -> Void) throws -> [UInt8] {
-    try [UInt8](capacity: 512) { output in
-        try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in try body(&writer) }
-    }
+    try [UInt8](byteCapacity: 512, writing: body)
 }
 
 func string(_ text: UTF8Span) -> String { String(copying: text) }
-func array(_ bytes: RawSpan) -> [UInt8] { (0..<bytes.byteCount).map { bytes.load(fromByteOffset: $0, as: UInt8.self) } }
 
 // `Optional.map`, `== nil`, and `#require` need `Escapable` values; views aren't.
 func optionalString(_ text: UTF8Span?) -> String? {
@@ -31,7 +26,7 @@ func optionalString(_ text: UTF8Span?) -> String? {
 
 func optionalArray(_ bytes: RawSpan?) -> [UInt8]? {
     switch bytes {
-    case let .some(bytes): array(bytes)
+    case let .some(bytes): [UInt8](copying: bytes)
     case .none: nil
     }
 }
@@ -74,7 +69,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
             guard case let .publish(publish) = packet else { Issue.record("not a publish"); return }
             #expect(string(publish.topic) == "a/b/c" && publish.qos == .atMostOnce && publish.packetIdentifier == nil)
             #expect(!publish.duplicate && !publish.retain && publish.properties.isEmpty)
-            #expect(array(publish.payload) == Array("hello".utf8))
+            #expect([UInt8](copying: publish.payload) == Array("hello".utf8))
             let reencoded = try encoded(packet)
             #expect(reencoded == bytes)
         }
@@ -140,7 +135,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
             case let .messageExpiryInterval(value): seen.append("expiry \(value)")
             case let .contentType(value): seen.append("type \(string(value))")
             case let .responseTopic(value): seen.append("response \(string(value))")
-            case let .correlationData(value): seen.append("correlation \(array(value))")
+            case let .correlationData(value): seen.append("correlation \([UInt8](copying: value))")
             case let .subscriptionIdentifier(value): seen.append("subscription \(value)")
             case let .sessionExpiryInterval(value): seen.append("session \(value)")
             case let .serverKeepAlive(value): seen.append("keep alive \(value)")
@@ -176,7 +171,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
             #expect(string(publish.topic) == topic && publish.qos == qos && publish.retain)
             #expect(publish.duplicate == (qos != .atMostOnce))
             #expect(publish.packetIdentifier == (qos == .atMostOnce ? nil : 42))
-            #expect(array(publish.payload) == payload && array(publish.properties.bytes) == props)
+            #expect([UInt8](copying: publish.payload) == payload && [UInt8](copying: publish.properties.bytes) == props)
             let reencoded = try encoded(parsed)
             #expect(reencoded == bytes)
         }
@@ -201,7 +196,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
             #expect(!connect.cleanStart && connect.keepAlive == 300 && string(connect.clientIdentifier) == "client-42")
             guard case let .some(will) = connect.will else { Issue.record("no will"); return }
             #expect(will.qos == .exactlyOnce && will.retain && string(will.topic) == "status/c42")
-            #expect(array(will.payload) == willPayload && array(will.properties.bytes) == willProps)
+            #expect([UInt8](copying: will.payload) == willPayload && [UInt8](copying: will.properties.bytes) == willProps)
             #expect(optionalString(connect.userName) == "user" && optionalArray(connect.password) == password)
             let reencoded = try encoded(parsed)
             #expect(reencoded == bytes)
@@ -445,9 +440,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         let packet = MQTTPacket.publish(MQTTPublish(
             qos: .atLeastOnce, topic: "sensors/kitchen".utf8Span, packetIdentifier: 7, payload: reading.span.bytes
         ))
-        let bytes = try [UInt8](capacity: packet.encodedByteCount) { output in
-            try output.withBytesWriter { writer throws(BytesError) in try packet.write(to: &writer) }
-        }
+        let bytes = try [UInt8](byteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
 
         var received = bytes + [0x30] // and the first byte of the next packet
         var delivered: [(String, [UInt8])] = []

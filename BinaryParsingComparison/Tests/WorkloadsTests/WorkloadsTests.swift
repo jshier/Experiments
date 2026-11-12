@@ -35,6 +35,7 @@ func dataFile(_ name: String) throws -> [UInt8] {
         let expected = try ExampleQOI(parsing: data).decodedImage
         #expect(expected.pixels.count == expected.width * expected.height * expected.channels)
         #expect(try QOI.decodeWithBytes(data.span.bytes) == expected)
+        #expect(try QOI.decodeWithBytesPixelRuns(data.span.bytes) == expected)
         #expect(try QOI.decodeWithParserSpan(data.span.bytes) == expected)
     }
 
@@ -43,6 +44,7 @@ func dataFile(_ name: String) throws -> [UInt8] {
         let compressed = try dataFile("tricolor.qoi.lz4")
         #expect(try [UInt8](ExampleLZ4(parsing: compressed).data) == original)
         #expect(try LZ4.decodeWithBytes(compressed.span.bytes) == original)
+        #expect(try LZ4.decodeWithBytesExactLiterals(compressed.span.bytes) == original)
         #expect(try LZ4.decodeWithParserSpan(compressed.span.bytes) == original)
     }
 
@@ -51,6 +53,7 @@ func dataFile(_ name: String) throws -> [UInt8] {
         let expected = try [UInt8](ExampleLZ4(parsing: compressed).data)
         #expect(expected.count == 10_640_904)
         #expect(try LZ4.decodeWithBytes(compressed.span.bytes) == expected)
+        #expect(try LZ4.decodeWithBytesExactLiterals(compressed.span.bytes) == expected)
         #expect(try LZ4.decodeWithParserSpan(compressed.span.bytes) == expected)
     }
 }

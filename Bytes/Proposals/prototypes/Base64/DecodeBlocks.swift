@@ -30,7 +30,7 @@ func decodeBlocks(_ blocks: Span<InlineArray<64, UInt8>>, into output: inout Mut
         let (d, id) = decodeLane(text, every4th &+ 3, low, high)
         invalid = invalid | ia | ib | ic | id
         let bytes = (a &<< 2 | b &>> 4, b &<< 4 | c &>> 2, c &<< 6 | d)
-        let o0 = ByteLanes(st3).lookup(in: bytes)                                         // as st3
+        let o0 = ByteLanes(st3).lookup(in: bytes) // as st3
         let out: InlineArray<3, SIMD16<UInt8>> = [
             o0,
             ByteLanes([21, 37, 6, 22, 38, 7, 23, 39, 8, 24, 40, 9, 25, 41, 10, 26]).lookup(in: bytes),
@@ -67,7 +67,9 @@ func runDecodeBlocks(size: Int, totalMB: Int) {
     let clock = ContinuousClock()
     let start = clock.now
     var ok = true
-    for _ in 0..<calls { ok = decodeBlocksPrototype(text, into: &output, tables: tables) && ok }
+    for _ in 0..<calls {
+        ok = decodeBlocksPrototype(text, into: &output, tables: tables) && ok
+    }
     let seconds: Double = (clock.now - start) / .seconds(1)
     print("decode blocks \(bytes.count) bytes\tGB/s of text \((Double(text.count * calls) / seconds / 1e8).rounded() / 10)\tok \(ok)")
 }

@@ -8,6 +8,7 @@ import MQTT
 /// frames and parsed as PUBLISH (`MQTTPublish(parsing:)`), and the topics expected are held here, end to
 /// end in one array, so a check reads no global and compares 16 bytes at a time.
 public struct PacketChecker {
+    /// The payload size, in bytes, every packet must have.
     public let payloadSize: Int
     /// The packets checked so far.
     public private(set) var packets = 0
@@ -19,6 +20,8 @@ public struct PacketChecker {
     private var identifier: UInt16 = 1
 
     /// A checker expecting packet 0 next. Takes references to the fixtures' topic table: no allocation.
+    ///
+    /// - Parameter payloadSize: The payload size, in bytes, every packet must have.
     public init(payloadSize: Int) {
         self.payloadSize = payloadSize
         (topicBytes, topicEnds) = Fixtures.topicTable
@@ -27,7 +30,9 @@ public struct PacketChecker {
     /// Parses and checks the complete packets at the start of `bytes`, returning the bytes they took. A
     /// packet that hasn't fully arrived is left for the next call, with more bytes.
     ///
-    /// Throws if a packet is malformed or isn't the one expected.
+    /// - Parameter bytes: The received bytes not yet consumed.
+    /// - Returns: The bytes the complete packets took, for the caller to consume.
+    /// - Throws: `TransferError` if a packet is malformed or isn't the one expected.
     public mutating func check(_ bytes: RawSpan) throws(TransferError) -> Int {
         var reader = BytesReader(bytes)
         var isExpected = true
@@ -48,6 +53,10 @@ public struct PacketChecker {
         return reader.byteOffset
     }
 
+    /// Whether `publish` has the expected packet identifier, payload size, and topic.
+    ///
+    /// - Parameter publish: The parsed packet.
+    /// - Returns: `true` if it is the next packet sent.
     private func isNext(_ publish: MQTTPublish) -> Bool {
         let start = topicIndex == 0 ? 0 : topicEnds[topicIndex - 1]
         return publish.packetIdentifier == identifier

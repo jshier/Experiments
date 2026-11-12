@@ -20,30 +20,67 @@ public struct CRC32: Hashable, Sendable {
     /// The checksum of everything added so far.
     public private(set) var value: UInt32
 
-    /// A CRC of no bytes yet, or continuing from the checksum of earlier bytes (`value` of another
-    /// `CRC32`, or a checksum stored with the data).
+    /// Creates a CRC of no bytes yet, or continuing from the checksum of earlier bytes.
+    ///
+    /// - Parameter value: The checksum of the earlier bytes (`value` of another `CRC32`, or a checksum
+    ///   stored with the data); 0 for none.
     public init(continuing value: UInt32 = 0) {
         self.value = value
     }
 
-    /// Adds `bytes`.
+    /// Adds `bytes` to the checksum.
+    ///
+    /// - Parameter bytes: The bytes to add.
     public mutating func update(_ bytes: RawSpan) {
         value = ~Self._update(~value, bytes)
     }
 
-    /// Adds `bytes`.
+    /// Adds `bytes` to the checksum.
+    ///
+    /// - Parameter bytes: The bytes to add.
     public mutating func update(_ bytes: Span<UInt8>) {
         update(bytes.bytes)
     }
 
-    /// The checksum of `bytes`.
+    /// Computes the checksum of `bytes`.
+    ///
+    /// - Parameter bytes: The bytes to checksum.
+    /// - Returns: The CRC-32 of `bytes`.
     public static func checksum(_ bytes: RawSpan) -> UInt32 {
-        var crc = CRC32()
-        crc.update(bytes)
-        return crc.value
+        checksum(bytes, continuing: 0)
     }
 
-    /// `state` (the unconditioned register) updated with `bytes`.
+    /// Continues the checksum of earlier bytes with `bytes`: for a running CRC kept as an integer, as
+    /// zlib's `crc32(crc, buf, len)` does.
+    ///
+    /// ```swift
+    /// crc = CRC32.checksum(chunk, continuing: crc)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - bytes: The bytes that follow the earlier ones.
+    ///   - value: The checksum of the earlier bytes.
+    /// - Returns: The CRC-32 of the earlier bytes followed by `bytes`.
+    public static func checksum(_ bytes: RawSpan, continuing value: UInt32) -> UInt32 {
+        ~_update(~value, bytes)
+    }
+
+    /// Continues the checksum of earlier bytes with `bytes`.
+    ///
+    /// - Parameters:
+    ///   - bytes: The bytes that follow the earlier ones.
+    ///   - value: The checksum of the earlier bytes.
+    /// - Returns: The CRC-32 of the earlier bytes followed by `bytes`.
+    public static func checksum(_ bytes: Span<UInt8>, continuing value: UInt32) -> UInt32 {
+        checksum(bytes.bytes, continuing: value)
+    }
+
+    /// Updates the unconditioned register with `bytes`.
+    ///
+    /// - Parameters:
+    ///   - state: The register, the complement of a checksum.
+    ///   - bytes: The bytes to add.
+    /// - Returns: The updated register.
     static func _update(_ state: UInt32, _ bytes: RawSpan) -> UInt32 {
         #if canImport(CBytesCRC) && arch(arm64)
         _hardwareUpdate(state, bytes)
@@ -85,6 +122,11 @@ extension CRC32 {
     /// accumulators each fold forward 128 bytes per step (two carry-less multiplies and a three-way XOR):
     /// independent chains, so the multiplies' latency overlaps. Each 128-byte step is read as a fixed-size
     /// sub-cursor, so its eight loads need no bounds checks of their own.
+    ///
+    /// - Parameters:
+    ///   - state: The unconditioned register.
+    ///   - reader: The bytes to fold; advanced past the folded blocks.
+    /// - Returns: The register after the folded bytes.
     static func _fold(_ state: UInt32, _ reader: inout BytesReader) -> UInt32 {
         var block = BytesReader(try! reader.read(byteCount: 128))
         // Always inlined: as a call, each load spilled the eight accumulators (3.5x slower).
@@ -153,7 +195,12 @@ extension CRC32 {
         return tables
     }()
 
-    /// `state` updated with `bytes` from tables: 8 bytes per step (8 lookups), then single bytes.
+    /// Updates the unconditioned register from tables: 8 bytes per step (8 lookups), then single bytes.
+    ///
+    /// - Parameters:
+    ///   - state: The register, the complement of a checksum.
+    ///   - bytes: The bytes to add.
+    /// - Returns: The updated register.
     static func _tableUpdate(_ state: UInt32, _ bytes: RawSpan) -> UInt32 {
         let tables = tables
         var state = state
@@ -173,7 +220,10 @@ extension CRC32 {
         return state
     }
 
-    /// The table-driven checksum, which other CPUs use, for benchmarking it on this one.
+    /// Computes the checksum with the tables that other CPUs use, for benchmarking it on this one.
+    ///
+    /// - Parameter bytes: The bytes to checksum.
+    /// - Returns: The CRC-32 of `bytes`.
     @_spi(Benchmarking)
     public static func tableChecksum(_ bytes: RawSpan) -> UInt32 {
         ~_tableUpdate(~0, bytes)

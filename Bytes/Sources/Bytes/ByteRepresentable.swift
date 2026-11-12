@@ -26,6 +26,8 @@ public protocol ByteRepresentable {
     associatedtype RawBytes: ConvertibleFromBytes
 
     /// Creates a value from its bytes. To parse at raw speed, only store them; validate elsewhere.
+    ///
+    /// - Parameter rawBytes: The bytes, in memory order.
     init(rawBytes: RawBytes)
 
     /// The value's bytes, in memory order.
@@ -43,7 +45,12 @@ extension Load {
     /// Sizes 3 and 5–7 load directly: the same trick through a 32- or 64-bit integer measured slower there
     /// (14 against 31 GB/s for 6 bytes), because the reinterpretation goes through a stack slot the
     /// optimizer doesn't remove; the direct load already matches the raw-bytes speed.
-    @inlinable @inline(__always)
+    ///
+    /// - Parameters:
+    ///   - span: The bytes to load from.
+    ///   - offset: The byte offset of the first byte.
+    /// - Returns: The value.
+    @unsafe @inlinable @inline(__always)
     static func rawBytes<R: ConvertibleFromBytes>(_: R.Type, from span: RawSpan, at offset: Int) -> R {
         let size = MemoryLayout<R>.size
         switch size {
@@ -70,7 +77,12 @@ extension Load {
     /// 9–15) and every bit pattern is a valid `R` (`ConvertibleFromBytes`). The safe form, a checked load
     /// from an `InlineArray<1, UInt128>`'s span, measured 46% more instructions reading 12-byte values:
     /// the array goes through a stack slot the optimizer doesn't remove.
-    @inlinable @inline(__always)
+    ///
+    /// - Parameters:
+    ///   - wide: The value whose memory to read.
+    ///   - as: The type to load.
+    /// - Returns: The value.
+    @unsafe @inlinable @inline(__always)
     static func lowBytes<R: ConvertibleFromBytes>(_ wide: UInt128, as _: R.Type) -> R {
         withUnsafeBytes(of: wide) { unsafe $0.loadUnaligned(as: R.self) }
     }
@@ -78,8 +90,13 @@ extension Load {
 
 public extension BytesReader {
     /// Returns the next `T`, from its `MemoryLayout<T.RawBytes>.size` bytes, without consuming them.
+    ///
+    /// - Parameter type: The type to read, such as `IPv4Address.self`. Inferred from context when omitted.
+    /// - Returns: The value.
+    /// - Throws: ``BytesError/insufficientData`` if fewer whole bytes remain than `T.RawBytes` takes.
+    /// - Precondition: `T.RawBytes` isn't empty.
     @inlinable @inline(__always)
-    func peek<T: ByteRepresentable>(_: T.Type = T.self) throws(BytesError) -> T {
+    func peek<T: ByteRepresentable>(_ type: T.Type = T.self) throws(BytesError) -> T {
         _assumeInvariant()
         let size = MemoryLayout<T.RawBytes>.size
         precondition(size > 0, "\(T.self).RawBytes has no bytes") // Constant-folded.
@@ -92,20 +109,34 @@ public extension BytesReader {
     }
 
     /// Reads the next `T`, from its `MemoryLayout<T.RawBytes>.size` bytes.
+    ///
+    /// - Parameter type: The type to read, such as `IPv4Address.self`. Inferred from context when omitted.
+    /// - Returns: The value.
+    /// - Throws: ``BytesError/insufficientData`` if fewer whole bytes remain than `T.RawBytes` takes,
+    ///   consuming nothing.
+    /// - Precondition: `T.RawBytes` isn't empty.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func read<T: ByteRepresentable>(_: T.Type = T.self) throws(BytesError) -> T {
+    mutating func read<T: ByteRepresentable>(_ type: T.Type = T.self) throws(BytesError) -> T {
         let value = try peek(T.self)
         _byteOffset &+= MemoryLayout<T.RawBytes>.size // Whole bytes leave the bit offset unchanged.
         return value
     }
 
     /// Reads every remaining whole `T`, in order, calling `body` with each. Like
-    /// ``forEach(_:_:)-(T.Type,_)`` for byte groups: one bounds check, then a counted loop of unaligned
-    /// loads the compiler vectorizes together with `body`. Consumes what it reads.
+    /// `forEach(_:_:)` for byte groups: one bounds check, then a counted loop of unaligned
+    /// loads the compiler vectorizes together with `body`. Consumes what it reads; trailing bytes too few for
+    /// a whole `T` are left unread, and if `body` throws, the value it threw on and everything before it are
+    /// consumed.
+    ///
+    /// - Parameters:
+    ///   - type: The type to read, such as `IPv4Address.self`.
+    ///   - body: Called with each value, in order.
+    /// - Throws: Whatever `body` throws.
+    /// - Precondition: `T.RawBytes` isn't empty.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func forEach<T: ByteRepresentable, E: Error>(_: T.Type, _ body: (T) throws(E) -> Void) throws(E) {
+    mutating func forEach<T: ByteRepresentable, E: Error>(_ type: T.Type, _ body: (T) throws(E) -> Void) throws(E) {
         _assumeInvariant()
         let size = MemoryLayout<T.RawBytes>.size
         precondition(size > 0, "\(T.self).RawBytes has no bytes") // Constant-folded.
@@ -135,9 +166,16 @@ public extension BytesReader {
 
     /// Reads consecutive `T`s until `output` is full: one bounds check, then a counted loop of loads and
     /// stores that vectorizes.
+    ///
+    /// - Parameters:
+    ///   - type: The type to read, such as `IPv4Address.self`.
+    ///   - output: Receives the values, filling its free capacity.
+    /// - Throws: ``BytesError/insufficientData`` if fewer whole `T`s remain than `output` has room for,
+    ///   consuming nothing and appending nothing.
+    /// - Precondition: `T.RawBytes` isn't empty.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func read<T: ByteRepresentable>(_: T.Type, into output: inout OutputSpan<T>) throws(BytesError) {
+    mutating func read<T: ByteRepresentable>(_ type: T.Type, into output: inout OutputSpan<T>) throws(BytesError) {
         _assumeInvariant()
         let size = MemoryLayout<T.RawBytes>.size
         precondition(size > 0, "\(T.self).RawBytes has no bytes") // Constant-folded.
@@ -169,6 +207,13 @@ public extension BytesReader {
     /// `R`'s bytes when not byte-aligned, each made of the next 8 bits. Bounds already checked.
     /// Never inlined, so its stack buffer (and the stack-protector check that comes with it) stays out of
     /// the callers' fast paths.
+    ///
+    /// - Parameters:
+    ///   - span: The bytes being read.
+    ///   - byteOffset: The byte the first of them starts in.
+    ///   - bit: Bits already consumed from that byte, 1 through 7.
+    ///   - bitOrder: The order of bits within each byte.
+    /// - Returns: The value.
     @inlinable @inline(never)
     internal static func _unalignedRawBytes<R: ConvertibleFromBytes>(
         _: R.Type, in span: RawSpan, atByte byteOffset: Int, bit: Int, bitOrder: BitOrder

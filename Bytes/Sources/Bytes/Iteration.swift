@@ -20,6 +20,8 @@ extension BytesReader: Iterable {
     /// Declare the reader with `var` (or take it `borrowing`): in Swift 6.4, a loop over a `let` reader
     /// heap-allocates the cursor once, because the compiler boxes a `~Copyable` `let` that an iterator
     /// borrows.
+    ///
+    /// - Returns: An iterator over the whole unread bytes (``remainingBytes``).
     @inlinable
     @_lifetime(borrow self)
     public func makeBorrowingIterator() -> Span<UInt8>.BorrowingIterator {
@@ -45,9 +47,14 @@ public extension BytesReader {
     /// library's own (`for x in array.span`).
     ///
     /// The cursor doesn't move. Trailing bytes too few for a whole `T` are skipped.
+    ///
+    /// - Parameters:
+    ///   - type: The byte group to view the fields as, such as `Byte3.self`.
+    ///   - byteOrder: The byte order of the fields.
+    /// - Returns: A view of the values from the cursor's position, borrowing the same memory.
     @inlinable
     @_lifetime(copy self)
-    func values<T: ByteGroup>(of _: T.Type, _ byteOrder: ByteOrder) -> ByteGroupValues<T> {
+    func values<T: ByteGroup>(of type: T.Type, _ byteOrder: ByteOrder) -> ByteGroupValues<T> {
         ByteGroupValues(span: span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder, byteOrder: byteOrder)
     }
 
@@ -60,13 +67,22 @@ public extension BytesReader {
     ///
     /// As with ``values(of:_:)``, bind the view to a constant before looping over it. The cursor doesn't
     /// move. Trailing bits too few for a whole value are skipped.
+    ///
+    /// - Parameter type: The bit field to view the values as, such as `Nibble.self`.
+    /// - Returns: A view of the values from the cursor's position, borrowing the same memory.
     @inlinable
     @_lifetime(copy self)
-    func values<let width: Int>(of _: Bits<width>.Type) -> BitsValues<width> {
+    func values<let width: Int>(of type: Bits<width>.Type) -> BitsValues<width> {
         BitsValues(span: span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
     }
 
     /// A cursor at the given position, for iterators.
+    ///
+    /// - Parameters:
+    ///   - span: The bytes to read.
+    ///   - byteOffset: The byte the next read starts in.
+    ///   - bitOffset: Bits already consumed from that byte, 0 through 7.
+    ///   - bitOrder: The order of bits within each byte.
     @inlinable
     @_lifetime(copy span)
     internal init(_ span: RawSpan, byteOffset: Int, bitOffset: Int, bitOrder: BitOrder) {

@@ -32,8 +32,15 @@ public struct HuffmanTable: ~Copyable {
     @usableFromInline static var subtableKind: UInt32 { 1 }
     @usableFromInline static var invalidKind: UInt32 { 2 }
 
-    /// Creates a table for codes of up to `symbolCount` symbols and `maximumCodeLength` bits (at most 16),
-    /// decoding codes of up to `rootBits` (by default, up to 10) with one lookup.
+    /// Creates a table for codes of up to `symbolCount` symbols and `maximumCodeLength` bits, decoding
+    /// codes of up to `rootBits` with one lookup.
+    ///
+    /// - Parameters:
+    ///   - symbolCount: The most symbols a code can have, 1 through 65,536.
+    ///   - maximumCodeLength: The longest code the table accepts, at most 16.
+    ///   - rootBits: The longest code decoded with one lookup, 1 through `maximumCodeLength`. By default,
+    ///     `maximumCodeLength` or 10, whichever is less.
+    /// - Precondition: The arguments are in the ranges above.
     public init(symbolCount: Int, maximumCodeLength: Int = 15, rootBits: Int? = nil) {
         let rootBits = rootBits ?? min(maximumCodeLength, 10)
         precondition(rootBits >= 1 && rootBits <= maximumCodeLength && maximumCodeLength <= 16, "Invalid table shape")
@@ -46,8 +53,17 @@ public struct HuffmanTable: ~Copyable {
         entries = UniqueArray(repeating: Self.invalidKind << 5, count: (1 << rootBits) + subtableSpace)
     }
 
-    /// Builds the table for the canonical code with these code lengths: one per symbol, 0 if unused.
+    /// Builds the table, in place, for the canonical code with these code lengths.
+    ///
     /// See the generic `build` for the bit orders and the codes accepted.
+    ///
+    /// - Parameters:
+    ///   - lengths: The code length of each symbol, 0 if unused. At most ``symbolCount`` of them.
+    ///   - bitOrder: The bit order of the codes in the stream.
+    ///   - allowingIncomplete: Whether to accept the incomplete codes DEFLATE allows (no codes, or a single
+    ///     1-bit code).
+    /// - Throws: ``BytesError/invalidValue`` if there are more lengths than ``symbolCount``, or for the
+    ///   reasons the generic `build` gives.
     public mutating func build(
         codeLengths lengths: Span<UInt8>, bitOrder: BitOrder, allowingIncomplete: Bool = true
     ) throws(BytesError) {
@@ -65,7 +81,10 @@ public struct HuffmanTable: ~Copyable {
     /// Decodes the next symbol from `buffer`, consuming its code. ``maximumCodeLength`` bits must be
     /// buffered (``BitBuffer/refill()`` first), in the bit order the table was built for.
     ///
-    /// Throws ``BytesError/invalidValue`` for bits that aren't a code, possible only for an incomplete code.
+    /// - Parameter buffer: The bits to decode from.
+    /// - Returns: The symbol.
+    /// - Throws: ``BytesError/invalidValue`` for bits that aren't a code, possible only for an incomplete
+    ///   code.
     @inlinable @inline(always)
     public func decode(_ buffer: inout BitBuffer) throws(BytesError) -> Int {
         let bits = buffer.bits
@@ -73,8 +92,9 @@ public struct HuffmanTable: ~Copyable {
         var entry: UInt32
         switch bitOrder {
         case .leastSignificantFirst:
-            entry = entries[Int(truncatingIfNeeded: bits) & ((1 &<< rootBits) &- 1)]
+            entry = entries[Int(truncatingIfNeeded: bits.bits(from: 0, upTo: rootBits))]
             if entry >> 5 & 3 == Self.subtableKind {
+                // Shift, then mask: `bits(from:upTo:)` would mask first, which needs the sum of the widths.
                 let index = Int(truncatingIfNeeded: bits &>> UInt64(truncatingIfNeeded: rootBits))
                     & ((1 &<< Int(entry & 0x1F)) &- 1)
                 entry = entries[Int(entry >> 8) &+ index]
@@ -96,8 +116,8 @@ public struct HuffmanTable: ~Copyable {
 // MARK: - Building tables
 
 extension HuffmanTable {
-    /// Fills `table` with a lookup table for the canonical Huffman code with these code lengths (one per
-    /// symbol, 0 if unused), its entries made by `symbol` and `subtable`. Returns how many entries it used.
+    /// Fills `table` with a lookup table for the canonical Huffman code with these code lengths, its
+    /// entries made by `symbol` and `subtable`.
     ///
     /// The table is indexed by the next `rootBits` bits of the stream: the low bits of
     /// ``BitBuffer/bits`` for ``BitOrder/leastSignificantFirst`` (codes are stored bit-reversed, as DEFLATE
@@ -115,13 +135,28 @@ extension HuffmanTable {
     /// buffer.consume(bitCount: entry.codeLength)
     /// ```
     ///
-    /// Throws ``BytesError/invalidValue`` for an over-subscribed code, a code longer than
-    /// `maximumCodeLength` (at most 16), a table too small for the code, or an incomplete code. With
-    /// `allowingIncomplete`, two incomplete codes are accepted, as DEFLATE decoders do: none at all, and a
-    /// single 1-bit code (code 0).
+    /// With `allowingIncomplete`, two incomplete codes are accepted, as DEFLATE decoders do: none at all,
+    /// and a single 1-bit code (code 0).
     ///
     /// libdeflate's algorithm: symbols are visited in canonical order, filling only the first `2^length`
     /// entries and doubling them with a copy at each longer length, so each root entry is written once.
+    ///
+    /// - Parameters:
+    ///   - lengths: The code length of each symbol, 0 if unused. At most 65,536.
+    ///   - bitOrder: The bit order of the codes in the stream.
+    ///   - rootBits: The number of bits indexing the root, 1 through 16.
+    ///   - maximumCodeLength: The longest code accepted, at most 16.
+    ///   - allowingIncomplete: Whether to accept the two incomplete codes above.
+    ///   - table: The span to fill. It needs at least `1 << rootBits` entries, and room for the subtables.
+    ///   - invalid: The entry for bits that aren't a code.
+    ///   - makeSymbol: Makes the entry for a symbol and the length of its code.
+    ///   - makeLink: Makes the root entry linking to a subtable, from the subtable's offset in `table`
+    ///     and the number of bits that index it.
+    /// - Returns: The number of entries of `table` used.
+    /// - Throws: ``BytesError/invalidValue`` for an over-subscribed code, a code longer than
+    ///   `maximumCodeLength`, a table too small for the code, or an incomplete code not accepted.
+    /// - Precondition: `rootBits` is 1 through 16, `maximumCodeLength` is at most 16, and `table` holds at
+    ///   least `1 << rootBits` entries.
     @inlinable
     public static func build<Entry: BitwiseCopyable>(
         codeLengths lengths: Span<UInt8>,
@@ -195,6 +230,18 @@ extension HuffmanTable {
     /// Sorts the used symbols into `sorted` by code length, then builds the table. A function of its own
     /// rather than a nested one: capturing the entry closures kept them from being inlined (5% more
     /// instructions decoding small DEFLATE files).
+    ///
+    /// - Parameters:
+    ///   - lengths: The code length of each symbol, 0 if unused.
+    ///   - sorted: Zeroed scratch, at least as long as `lengths`.
+    ///   - counts: How many symbols have each code length.
+    ///   - bitOrder: The bit order of the codes.
+    ///   - rootBits: The number of bits indexing the root.
+    ///   - table: The span to fill.
+    ///   - makeSymbol: Makes the entry for a symbol and its code's length.
+    ///   - makeLink: Makes the entry linking to a subtable.
+    /// - Returns: The number of entries of `table` used.
+    /// - Throws: ``BytesError/invalidValue`` if `table` is too small for the subtables.
     @inlinable @inline(__always)
     static func _sortAndBuild<Entry: BitwiseCopyable>(
         _ lengths: Span<UInt8>, _ sorted: inout MutableSpan<UInt16>, _ counts: InlineArray<17, Int>,
@@ -218,8 +265,14 @@ extension HuffmanTable {
         }
     }
 
-    /// The index width of a subtable whose first code has `length` bits, `count` of them left at that
-    /// length: wide enough for every code sharing its root prefix.
+    /// Finds the index width of a subtable: wide enough for every code sharing its root prefix.
+    ///
+    /// - Parameters:
+    ///   - length: The length of the subtable's first code.
+    ///   - count: How many codes of that length are left.
+    ///   - counts: How many symbols have each code length.
+    ///   - rootBits: The number of bits indexing the root.
+    /// - Returns: The number of bits indexing the subtable.
     @inlinable @inline(__always)
     static func _subtableBits(length: Int, count: Int, _ counts: InlineArray<17, Int>, rootBits: Int) -> Int {
         var bits = length &- rootBits
@@ -231,8 +284,18 @@ extension HuffmanTable {
         return bits
     }
 
-    /// Least significant bit first: codes bit-reversed, so a code's root entries are every `2^length`th.
-    /// Requires a complete code with at least one symbol.
+    /// Builds the table for least significant bit first: codes bit-reversed, so a code's root entries are
+    /// every `2^length`th. Requires a complete code with at least one symbol.
+    ///
+    /// - Parameters:
+    ///   - table: The span to fill.
+    ///   - sorted: The used symbols by code length, then value.
+    ///   - counts: How many symbols have each code length.
+    ///   - rootBits: The number of bits indexing the root.
+    ///   - makeSymbol: Makes the entry for a symbol and its code's length.
+    ///   - makeLink: Makes the entry linking to a subtable.
+    /// - Returns: The number of entries of `table` used.
+    /// - Throws: ``BytesError/invalidValue`` if `table` is too small for the subtables.
     @inlinable
     static func _buildReversed<Entry: BitwiseCopyable>(
         _ table: inout MutableSpan<Entry>, _ sorted: Span<UInt16>,
@@ -240,8 +303,13 @@ extension HuffmanTable {
         _ makeSymbol: (Int, Int) -> Entry, _ makeLink: (Int, Int) -> Entry
     ) throws(BytesError) -> Int {
         let rootSize = 1 &<< rootBits
-        /// The reversed code after `code` among codes of `length` bits (`code` isn't all ones): add one to
-        /// the reversed value by clearing the trailing ones and setting the bit above them.
+        /// Steps a reversed code to the next one of the same length: adds one to the reversed value by
+        /// clearing the trailing ones and setting the bit above them.
+        ///
+        /// - Parameters:
+        ///   - code: The reversed code, not all ones.
+        ///   - length: The code's length in bits.
+        /// - Returns: The reversed code after `code`.
         @inline(__always)
         func next(after code: Int, length: Int) -> Int {
             let differing = UInt32(truncatingIfNeeded: code ^ ((1 &<< length) &- 1))
@@ -250,6 +318,8 @@ extension HuffmanTable {
         }
         /// Doubles the filled entries: copies the first `end` to the next `end`. (Measured as fast as
         /// `memcpy` here: the tables are small.)
+        ///
+        /// - Parameter end: The number of entries filled so far.
         @inline(__always)
         func double(_ end: Int) {
             for index in 0..<end {
@@ -324,8 +394,18 @@ extension HuffmanTable {
         }
     }
 
-    /// Most significant bit first: codes as they are, so a code's entries are a contiguous run.
-    /// Requires a complete code with at least one symbol.
+    /// Builds the table for most significant bit first: codes as they are, so a code's entries are a
+    /// contiguous run. Requires a complete code with at least one symbol.
+    ///
+    /// - Parameters:
+    ///   - table: The span to fill.
+    ///   - sorted: The used symbols by code length, then value.
+    ///   - counts: How many symbols have each code length.
+    ///   - rootBits: The number of bits indexing the root.
+    ///   - makeSymbol: Makes the entry for a symbol and its code's length.
+    ///   - makeLink: Makes the entry linking to a subtable.
+    /// - Returns: The number of entries of `table` used.
+    /// - Throws: ``BytesError/invalidValue`` if `table` is too small for the subtables.
     @inlinable
     static func _buildForward<Entry: BitwiseCopyable>(
         _ table: inout MutableSpan<Entry>, _ sorted: Span<UInt16>,

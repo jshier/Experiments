@@ -15,6 +15,9 @@ struct ReceiveBuffer: ~Copyable {
     private var start = 0
     private var end = 0
 
+    /// Creates an empty buffer.
+    ///
+    /// - Parameter capacity: The buffer's size in bytes; it never grows.
     init(capacity: Int) {
         unsafe storage = .allocate(byteCount: capacity, alignment: 64)
         self.capacity = capacity
@@ -33,18 +36,28 @@ struct ReceiveBuffer: ~Copyable {
         }
     }
 
+    /// Whether no unread bytes remain.
     var isEmpty: Bool { start == end }
 
     /// Drops the first `count` unread bytes, which were parsed.
+    ///
+    /// - Parameter count: How many bytes to drop.
+    /// - Precondition: `count` is between 0 and the number of unread bytes.
     mutating func consume(_ count: Int) {
         precondition(count >= 0 && count <= end - start)
         start += count
         if start == end { (start, end) = (0, 0) } // Empty: start over at the front, for free.
     }
 
-    /// Reads once from `connection` into the free space, returning the bytes read (0 at the end of the
-    /// stream). First moves a partial packet to the front if less than half the buffer is free, so reads
-    /// stay large without moving bytes on every read.
+    /// Reads once from `connection` into the free space. First moves a partial packet to the front if less
+    /// than half the buffer is free, so reads stay large without moving bytes on every read.
+    ///
+    /// Runs on its caller's executor.
+    ///
+    /// - Parameter connection: The connection to read from.
+    /// - Returns: The bytes read (0 at the end of the stream).
+    /// - Throws: `IOError` if the read fails.
+    /// - Precondition: The buffer isn't full: a packet larger than the buffer can never be completed.
     nonisolated(nonsending) mutating func read(from connection: inout TCPConnection) async throws(IOError) -> Int {
         if capacity - end < capacity / 2, start > 0 {
             // `copyMemory` is `memmove`: the ranges can overlap.

@@ -11,7 +11,7 @@ public extension BytesReader {
     @_lifetime(self: copy self)
     mutating func read(_: LEB128.Type, maxByteCount: Int, requiringMinimal: Bool) throws(BytesError) -> UInt64 {
         guard requiringMinimal else { return try read(LEB128.self, maxByteCount: maxByteCount) }
-        return try atomically { (reader) throws(BytesError) in
+        return try atomically { reader throws(BytesError) in
             let start = reader.byteOffset
             let value = try reader.read(LEB128.self, maxByteCount: maxByteCount)
             let byteCount = reader.byteOffset &- start

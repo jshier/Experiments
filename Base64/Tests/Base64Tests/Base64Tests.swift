@@ -33,9 +33,8 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         }
     }
 
-    /// Every length that takes a different path (the vector loop's 16- and 8-group steps and the scalar
-    /// remainder, then 0, 1, or 2 trailing bytes), in both alphabets, with and without padding, against
-    /// Foundation.
+    /// Every length through several blocks (each last-block length, with 0, 1, or 2 trailing bytes), and
+    /// some longer, in both alphabets, with and without padding, against Foundation.
     @Test(arguments: Array(0...200) + [1_000, 4_095, 4_096, 65_537])
     func matchesFoundation(count: Int) throws {
         var generator = SystemRandomNumberGenerator()

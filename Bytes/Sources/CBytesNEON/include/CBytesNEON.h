@@ -58,8 +58,88 @@ BYTES_INLINE bytes_u8x16 bytes_table4(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 
 #endif
 }
 
+/// A lookup in a 16-byte table: `vqtbl1q_u8`.
+BYTES_INLINE bytes_u8x16 bytes_table1(bytes_u8x16 a, bytes_u8x16 index) {
+#if defined(__aarch64__)
+    return (bytes_u8x16)vqtbl1q_u8((uint8x16_t)a, (uint8x16_t)index);
+#else
+    uint8_t table[16];
+    for (int i = 0; i < 16; i++) table[i] = a[i];
+    return bytes_table_portable(table, 16, index);
+#endif
+}
+
+/// A lookup in a 16-byte table that keeps `fallback`'s lane where `index[i]` is 16 or more: `vqtbx1q_u8`.
+BYTES_INLINE bytes_u8x16 bytes_table1x(bytes_u8x16 fallback, bytes_u8x16 a, bytes_u8x16 index) {
+#if defined(__aarch64__)
+    return (bytes_u8x16)vqtbx1q_u8((uint8x16_t)fallback, (uint8x16_t)a, (uint8x16_t)index);
+#else
+    bytes_u8x16 looked = bytes_table1(a, index);
+    for (int lane = 0; lane < 16; lane++) {
+        if (index[lane] >= 16) looked[lane] = fallback[lane];
+    }
+    return looked;
+#endif
+}
+
+/// A lookup in a 48-byte table that keeps `fallback`'s lane where `index[i]` is 48 or more: `vqtbx3q_u8`.
+BYTES_INLINE bytes_u8x16 bytes_table3x(bytes_u8x16 fallback, bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 index) {
+#if defined(__aarch64__)
+    uint8x16x3_t table = { { (uint8x16_t)a, (uint8x16_t)b, (uint8x16_t)c } };
+    return (bytes_u8x16)vqtbx3q_u8((uint8x16_t)fallback, table, (uint8x16_t)index);
+#else
+    bytes_u8x16 looked = bytes_table3(a, b, c, index);
+    for (int lane = 0; lane < 16; lane++) {
+        if (index[lane] >= 48) looked[lane] = fallback[lane];
+    }
+    return looked;
+#endif
+}
+
+/// A lookup in a 64-byte table that keeps `fallback`'s lane where `index[i]` is 64 or more: `vqtbx4q_u8`.
+BYTES_INLINE bytes_u8x16 bytes_table4x(bytes_u8x16 fallback, bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 d, bytes_u8x16 index) {
+#if defined(__aarch64__)
+    uint8x16x4_t table = { { (uint8x16_t)a, (uint8x16_t)b, (uint8x16_t)c, (uint8x16_t)d } };
+    return (bytes_u8x16)vqtbx4q_u8((uint8x16_t)fallback, table, (uint8x16_t)index);
+#else
+    bytes_u8x16 looked = bytes_table4(a, b, c, d, index);
+    for (int lane = 0; lane < 16; lane++) {
+        if (index[lane] >= 64) looked[lane] = fallback[lane];
+    }
+    return looked;
+#endif
+}
+
 /// Four vectors, imported into Swift as a struct of four `SIMD16<UInt8>`s.
 typedef struct { bytes_u8x16 v0, v1, v2, v3; } bytes_u8x16x4;
+
+/// Every fourth byte of a, b, c, d (64 bytes in order), as NEON's `ld4` loads them: bytes 0, 4, … 60, then
+/// 1, 5, … 61, then 2, … 62, then 3, … 63. Two rounds of `uzp`s, 8 in all: the even and odd bytes of a and
+/// b, and of c and d, then the even and odd bytes of those. The empty `asm` between the rounds keeps LLVM
+/// from merging them into four-vector shuffles, as in `bytes_interleave4`. The one before them keeps it
+/// from narrowing the loads of a, b, c, and d: since each `uzp` takes only half the bytes of its sources,
+/// LLVM loaded each vector from memory in 8-, 4-, 2-, and 1-byte lanes (measured: 91 instructions per
+/// Base64 block against 45).
+BYTES_INLINE bytes_u8x16x4 bytes_deinterleave4(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 d) {
+    bytes_u8x16x4 result;
+#if defined(__aarch64__)
+    __asm__("" : "+w"(a), "+w"(b), "+w"(c), "+w"(d));
+    uint8x16_t abEven = vuzp1q_u8((uint8x16_t)a, (uint8x16_t)b), abOdd = vuzp2q_u8((uint8x16_t)a, (uint8x16_t)b);
+    uint8x16_t cdEven = vuzp1q_u8((uint8x16_t)c, (uint8x16_t)d), cdOdd = vuzp2q_u8((uint8x16_t)c, (uint8x16_t)d);
+    __asm__("" : "+w"(abEven), "+w"(abOdd), "+w"(cdEven), "+w"(cdOdd));
+    result.v0 = (bytes_u8x16)vuzp1q_u8(abEven, cdEven);
+    result.v1 = (bytes_u8x16)vuzp1q_u8(abOdd, cdOdd);
+    result.v2 = (bytes_u8x16)vuzp2q_u8(abEven, cdEven);
+    result.v3 = (bytes_u8x16)vuzp2q_u8(abOdd, cdOdd);
+#else
+    bytes_u8x16 *out[4] = { &result.v0, &result.v1, &result.v2, &result.v3 };
+    for (int i = 0; i < 64; i++) {
+        bytes_u8x16 source = (i < 16) ? a : (i < 32) ? b : (i < 48) ? c : d;
+        (*out[i % 4])[i / 4] = source[i % 16];
+    }
+#endif
+    return result;
+}
 
 /// The bytes of four vectors interleaved, as NEON's `st4` stores them: a[0], b[0], c[0], d[0], a[1], …, in
 /// the four result vectors in order. Two rounds of `zip`s: bytes of a and b, and of c and d, then 2-byte
