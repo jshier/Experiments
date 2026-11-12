@@ -49,8 +49,8 @@ public extension FixedWidthInteger {
     /// A mask of the low `count` bits (0 through `bitWidth`).
     @inlinable @inline(__always)
     static func lowBitMask(_ count: Int) -> Self {
-        precondition(count >= 0 && count <= Self.bitWidth, "Bit count out of range")
-        return count == Self.bitWidth ? ~0 : (1 &<< count) &- 1
+        precondition(count >= 0 && count <= bitWidth, "Bit count out of range")
+        return count == bitWidth ? ~0 : (1 &<< count) &- 1
     }
 }
 
@@ -70,14 +70,18 @@ public extension BytesReader {
 @inline(never) public func flagsBefore(_ span: RawSpan) throws(BytesError) -> Int {
     var reader = BytesReader(span)
     var count = 0
-    while reader.remainingBitCount >= 1 { if try reader.read(Bit.self).isSet { count &+= 1 } }
+    while reader.remainingBitCount >= 1 {
+        if try reader.read(Bit.self).isSet { count &+= 1 }
+    }
     return count
 }
 
 @inline(never) public func flagsAfter(_ span: RawSpan) throws(BytesError) -> Int {
     var reader = BytesReader(span)
     var count = 0
-    while reader.remainingBitCount >= 1 { if try reader.read(Bool.self) { count &+= 1 } }
+    while reader.remainingBitCount >= 1 {
+        if try reader.read(Bool.self) { count &+= 1 }
+    }
     return count
 }
 
@@ -131,7 +135,9 @@ public extension BytesReader {
 @inline(never) public func readSignedAfter(_ span: RawSpan) throws(BytesError) -> Int64 {
     var reader = BytesReader(span)
     var sum: Int64 = 0
-    while reader.remainingBitCount >= 13 { sum &+= try reader.readSigned(bitCount: 13) }
+    while reader.remainingBitCount >= 13 {
+        sum &+= try reader.readSigned(bitCount: 13)
+    }
     return sum
 }
 

@@ -4,20 +4,33 @@ import Foundation
 // it with the `Bytes`-based parser in ZipArchive.swift. Not used by the archive itself.
 
 public extension ZipArchive {
-    /// Parses `url`'s central directory with the original `ByteReader` parser.
+    /// Parses an archive's central directory with the original `ByteReader` parser.
+    ///
+    /// - Parameter url: The archive's file URL.
+    /// - Returns: The entries, as ``ZipArchive/init(url:)`` would index them.
+    /// - Throws: `Errno` if the file can't be opened or mapped; ``ZipError`` if the central directory is
+    ///   missing, truncated, or invalid.
     @_spi(Benchmarking)
     static func entriesUsingByteReader(of url: URL) throws -> [ZipEntry] {
         let file = try MappedFile(path: .init(url.path(percentEncoded: false)))
         return try ByteReaderParsing.readEntries(file.bytes)
     }
 
-    /// Finds `entry`'s payload with the original `ByteReader` parser, returning its byte count.
+    /// Finds `entry`'s payload with the original `ByteReader` parser.
+    ///
+    /// - Parameter entry: The entry whose payload to find.
+    /// - Returns: The payload's byte count.
+    /// - Throws: ``ZipError`` if the local header is missing or damaged, or the payload runs past the end.
     @_spi(Benchmarking)
     func payloadCountUsingByteReader(of entry: ZipEntry) throws -> Int {
         try ByteReaderParsing.payload(of: entry, in: file.bytes).byteCount
     }
 
-    /// Finds `entry`'s payload with the `Bytes`-based parser, returning its byte count.
+    /// Finds `entry`'s payload with the `Bytes`-based parser.
+    ///
+    /// - Parameter entry: The entry whose payload to find.
+    /// - Returns: The payload's byte count.
+    /// - Throws: ``ZipError`` if the local header is missing or damaged, or the payload runs past the end.
     @_spi(Benchmarking)
     func payloadCount(of entry: ZipEntry) throws -> Int {
         try Self.payload(of: entry, in: file.bytes).byteCount

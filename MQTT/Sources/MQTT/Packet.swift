@@ -47,35 +47,44 @@ public enum MQTTPacket: ~Escapable {
     /// Reads the next packet from `reader`, or returns `nil` without consuming anything if it isn't all there
     /// yet.
     ///
-    /// Throws ``MQTTError`` if the packet breaks a rule of MQTT 5.0, leaving the cursor where it was. MQTT then
-    /// ends the connection, sending the error's ``MQTTError/reasonCode`` in a DISCONNECT (or, for a CONNECT, a
-    /// CONNACK).
+    /// If the packet breaks a rule of MQTT 5.0, MQTT then ends the connection, sending the error's
+    /// ``MQTTError/reasonCode`` in a DISCONNECT (or, for a CONNECT, a CONNACK).
     ///
     /// A reserved packet type or reserved flags, like a packet larger than `maximumPacketSize`, throw as soon
     /// as the fixed header arrives (``MQTTFrame/read(from:maximumPacketSize:)``); the rest, once the whole
-    /// packet has.
+    /// packet has. The reader is left where it was unless a packet is returned.
     ///
-    /// - Parameter maximumPacketSize: The largest packet to accept, in bytes, such as the Maximum Packet
-    ///   Size you advertised.
+    /// - Parameters:
+    ///   - reader: The stream to read from. The packet borrows its bytes.
+    ///   - maximumPacketSize: The largest packet to accept, in bytes, fixed header included, such as the
+    ///     Maximum Packet Size you advertised.
+    /// - Returns: The packet, or `nil` if it isn't all there yet.
+    /// - Throws: ``MQTTError`` for a packet that breaks a rule: kind ``MQTTError/Kind/malformedPacket``,
+    ///   ``MQTTError/Kind/protocolError``, ``MQTTError/Kind/packetTooLarge``, or (CONNECT only)
+    ///   ``MQTTError/Kind/unsupportedProtocolVersion``.
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
     public static func read(from reader: inout BytesReader, maximumPacketSize: Int = .max) throws(MQTTError) -> MQTTPacket? {
-        let start = reader.byteOffset
+        let start = reader.position
         guard let frame = try MQTTFrame.read(from: &reader, maximumPacketSize: maximumPacketSize) else { return nil }
         do throws(MQTTError) {
             return try MQTTPacket(parsing: frame)
         } catch {
-            try! reader.seek(toByteOffset: start)
+            reader.rewind(to: start)
             throw error
         }
     }
 
-    /// Parses a frame's body as the packet its type says. The frame is consumed: if this throws, the stream's
-    /// cursor is past the packet (``read(from:maximumPacketSize:)`` moves it back).
+    /// Parses a frame's body as the packet its type says.
     ///
-    /// Each case parses in its own function (the packet types' `init(parsing:)`), so this function only
-    /// dispatches and wraps the result.
+    /// The frame is consumed: if this throws, the stream's cursor is past the packet
+    /// (``read(from:maximumPacketSize:)`` moves it back). Each case parses in its own function (the packet
+    /// types' `init(parsing:)`), so this function only dispatches and wraps the result.
+    ///
+    /// - Parameter frame: The frame to parse.
+    /// - Throws: ``MQTTError`` as the packet type's `init(parsing:)` does; for PINGREQ and PINGRESP,
+    ///   `MQTTError.malformed(_:)` if the body isn't empty.
     @inlinable
     @_lifetime(copy frame)
     public init(parsing frame: consuming MQTTFrame) throws(MQTTError) {
@@ -147,7 +156,13 @@ public enum MQTTPacket: ~Escapable {
     public var encodedByteCount: Int { 1 &+ Size.lengthPrefixed(remainingLength) }
 
     /// Checks the rules a receiver enforces: everything ``read(from:maximumPacketSize:)`` would throw for,
-    /// except that properties and lists are checked when created (``MQTTProperties/init(validating:)``).
+    /// except the maximum packet size, and except that properties and lists are checked when created
+    /// (``MQTTProperties/init(validating:)``).
+    ///
+    /// - Throws: `MQTTError.malformed(_:)` for a string or binary field too long, a U+0000 in a string, a
+    ///   wildcard in a topic name, a property the packet type doesn't allow, or a packet longer than
+    ///   ``maximumRemainingLength``; `MQTTError.protocolError(_:)` for a broken packet rule, such as a
+    ///   zero packet identifier or a reason code the type doesn't allow.
     @inlinable
     public func validate() throws(MQTTError) {
         try validateFields()
@@ -155,6 +170,8 @@ public enum MQTTPacket: ~Escapable {
     }
 
     /// ``validate()`` without the size check, which `write(to:)` makes with the size it computes anyway.
+    ///
+    /// - Throws: ``MQTTError`` as ``validate()`` does, except for the size.
     @inlinable
     func validateFields() throws(MQTTError) {
         switch self {
@@ -174,14 +191,15 @@ public enum MQTTPacket: ~Escapable {
         }
     }
 
-    /// Writes the packet. It's checked and its size computed first, so nothing is written if it throws, and
-    /// nothing is moved or copied twice.
-    ///
-    /// Throws ``BytesError/invalidValue`` if ``validate()`` throws (call it for the reason), and
-    /// ``BytesError/insufficientCapacity`` if `writer` doesn't have ``encodedByteCount`` bytes left.
+    /// Writes the packet. It's checked and its size computed first, so nothing is written if it throws.
     ///
     /// Tests the packet's case once, then the packet type writes itself (`write(to:)`); with the packet in
     /// hand, call that directly.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.invalidValue` if ``validate()`` would throw (call it for the reason) or the
+    ///   packet is longer than ``maximumRemainingLength``; `BytesError.insufficientCapacity` if `writer`
+    ///   doesn't have ``encodedByteCount`` bytes left.
     @inlinable
     public func write(to writer: inout BytesWriter) throws(BytesError) {
         switch self {

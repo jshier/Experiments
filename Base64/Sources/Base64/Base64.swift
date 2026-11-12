@@ -1,6 +1,7 @@
 public import Bytes
 
-/// Base64 encoding (RFC 4648), from a ``BytesReader`` into a ``BytesWriter``: no allocation, and vectorized.
+/// Base64 encoding and decoding (RFC 4648), from a `BytesReader` into a `BytesWriter`: no allocation, and
+/// vectorized. Decoding is in `Decoding.swift`: ``decode(_:into:alphabet:padding:)-(BytesReader,_,_,_)``.
 ///
 /// ```swift
 /// var reader = BytesReader(bytes.span)
@@ -25,8 +26,9 @@ public import Bytes
 public enum Base64 {
     /// The 64 characters: `A`–`Z`, `a`–`z`, `0`–`9`, then two that differ between alphabets.
     public struct Alphabet: Hashable, Sendable {
-        /// The characters for 62 and 63.
+        /// The ASCII character for the value 62.
         public let character62: UInt8
+        /// The ASCII character for the value 63.
         public let character63: UInt8
 
         /// `+` and `/` (RFC 4648 section 4).
@@ -34,6 +36,15 @@ public enum Base64 {
         /// `-` and `_`, safe in URLs and file names (RFC 4648 section 5).
         public static let urlSafe = Alphabet(character62: UInt8(ascii: "-"), character63: UInt8(ascii: "_"))
 
+        /// An alphabet of `A`–`Z`, `a`–`z`, `0`–`9`, and two more characters.
+        ///
+        /// Neither character is checked. Decoding uses the vectorized block kernel when both fit with the
+        /// letters and digits in a window of 80 consecutive ASCII characters (as `+`/`/` and `-`/`_` do), and
+        /// the portable kernel otherwise.
+        ///
+        /// - Parameters:
+        ///   - character62: The character for the value 62.
+        ///   - character63: The character for the value 63.
         @inlinable
         public init(character62: UInt8, character63: UInt8) {
             self.character62 = character62
@@ -44,15 +55,15 @@ public enum Base64 {
         @inlinable
         var table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>) {
             // The last vector is a `Byte16` constant with its last two bytes set: integer operations, then one
-            // move to a vector. (As `SIMD16(119, …, character62, character63)` it compiled to 16 lane inserts
-            // with Swift 6.4.2, as did an array literal changed lane by lane.)
+            // move to a vector (`Byte16.vector`). (As `SIMD16(119, …, character62, character63)` it compiled
+            // to 16 lane inserts with Swift 6.4.2, as did an array literal changed lane by lane.)
             var last: Byte16 = 0x77_78_79_7A_30_31_32_33_34_35_36_37_38_39_00_00 // "w"–"z", "0"–"9"
             last[14] = character62
             last[15] = character63
             return ([65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80], // "A"–"P"
                     [81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 97, 98, 99, 100, 101, 102], // "Q"–"Z", "a"–"f"
                     [103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118], // "g"–"v"
-                    bitCast(last.littleEndian, to: SIMD16<UInt8>.self))
+                    last.vector)
         }
 
         /// What to add from 62 on top of the digits' offset to get `character62`, then from 63 on top of that to
@@ -64,8 +75,14 @@ public enum Base64 {
         }
     }
 
-    /// The length of `byteCount` bytes encoded: 4 characters per 3 bytes, the last group padded with `=` to 4
-    /// characters, or without padding, 2 or 3.
+    /// The length of `byteCount` bytes encoded: 4 characters per 3 bytes, with a last group of 1 or 2 bytes
+    /// padded with `=` to 4 characters, or, without padding, 2 or 3.
+    ///
+    /// - Parameters:
+    ///   - byteCount: The number of bytes to encode.
+    ///   - padding: Whether the last group is padded with `=`.
+    /// - Returns: The number of characters.
+    /// - Precondition: `byteCount` is at least 0 and at most `Int.max / 4 * 3`.
     @inlinable
     public static func encodedByteCount(of byteCount: Int, padding: Bool = true) -> Int {
         precondition(byteCount >= 0 && byteCount <= Int.max / 4 * 3, "Byte count out of range")
@@ -74,10 +91,16 @@ public enum Base64 {
         return groups &* 4 &+ (padding ? 4 : remainder &+ 1)
     }
 
-    /// Encodes the rest of `reader` into `writer`. Requires `reader` to be byte-aligned and `writer` too.
+    /// Encodes the rest of `reader` into `writer`.
     ///
-    /// Throws ``BytesError/insufficientCapacity`` if `writer` doesn't have room for
-    /// ``encodedByteCount(of:padding:)`` bytes, before reading or writing anything.
+    /// - Parameters:
+    ///   - reader: The bytes to encode, from its position to the end of its span. Byte-aligned; left at the
+    ///     end.
+    ///   - writer: Where the characters go. Byte-aligned.
+    ///   - alphabet: The characters for 62 and 63.
+    ///   - padding: Whether to pad the last group with `=` to 4 characters.
+    /// - Throws: `BytesError.insufficientCapacity` if `writer` doesn't have room for
+    ///   ``encodedByteCount(of:padding:)`` bytes; nothing has been read or written then.
     @inlinable
     public static func encode(
         _ reader: inout BytesReader, into writer: inout BytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
@@ -102,17 +125,20 @@ public enum Base64 {
                 var bytes = InlineArray<48, UInt8>(repeating: 0)
                 var blockBytes = bytes.mutableSpan
                 var blockWriter = BytesWriter(&blockBytes)
-                try writeShort(reader.read(byteCount: rest), to: &blockWriter)
+                try blockWriter.write(reader.read(byteCount: rest))
                 block = bytes
             } else {
                 // After a block, the last 48 bytes overlap it: load them, and move the last `rest` to the
                 // front with zeros after, in registers, with no copy through memory (1,000 bytes: 6% faster).
-                try reader.seek(toByteOffset: reader.byteOffset &- (48 &- rest))
-                let last = try reader.load(InlineArray<3, SIMD16<UInt8>>.self)
+                // A new reader at that offset rather than `seek`: its bit offset is known to be 0, so the
+                // unaligned path of `load` folds away (and `seek` wasn't inlined).
+                var overlap = try BytesReader(reader.span, atByteOffset: reader.byteOffset &- (48 &- rest))
+                let last = try overlap.load(InlineArray<3, SIMD16<UInt8>>.self)
+                _ = reader.readRemainingBytes()
                 block = bitCast(shiftedDown(last, by: 48 &- rest), to: InlineArray<48, UInt8>.self)
             }
             let characters = encodeBlock(block, table: table)
-            try writeShort(characters.span.bytes.extracting(first: encodedByteCount(of: rest, padding: false)), to: &writer)
+            try writer.write(characters.span.bytes.extracting(first: encodedByteCount(of: rest, padding: false)))
             switch padding ? rest % 3 : 0 {
             case 1: try writer.write(0x3D_3D as Byte2) // "=="
             case 2: try writer.write(0x3D as Byte) // "="
@@ -144,6 +170,14 @@ public enum Base64 {
     }
 
     /// Encodes `bytes` into `writer`.
+    ///
+    /// - Parameters:
+    ///   - bytes: The bytes to encode.
+    ///   - writer: Where the characters go. Byte-aligned.
+    ///   - alphabet: The characters for 62 and 63.
+    ///   - padding: Whether to pad the last group with `=` to 4 characters.
+    /// - Throws: `BytesError.insufficientCapacity` if `writer` doesn't have room for
+    ///   ``encodedByteCount(of:padding:)`` bytes; nothing has been written then.
     @inlinable
     public static func encode(
         _ bytes: RawSpan, into writer: inout BytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
@@ -153,17 +187,17 @@ public enum Base64 {
     }
 
     /// `bytes` encoded as a `String`: one allocation, the string's (none for 15 characters or fewer).
+    ///
+    /// - Parameters:
+    ///   - bytes: The bytes to encode.
+    ///   - alphabet: The characters for 62 and 63.
+    ///   - padding: Whether to pad the last group with `=` to 4 characters.
+    /// - Returns: The encoded text.
     @inlinable
     public static func encodedString(_ bytes: RawSpan, alphabet: Alphabet = .standard, padding: Bool = true) -> String {
-        let count = encodedByteCount(of: bytes.byteCount, padding: padding)
-        // Unsafe: the string's uninitialized storage, which only this initializer exposes (no `OutputSpan`
-        // initializer is public). Safe: the writer covers exactly `count` bytes of it, `encode` fills all
-        // of them (it was given exactly the room it needs, so it can't throw), and the initializer gets that
-        // count back.
-        return String(unsafeUninitializedCapacity: count) { buffer in
-            var writer = unsafe BytesWriter(MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(buffer)))
+        String(utf8Capacity: encodedByteCount(of: bytes.byteCount, padding: padding)) { writer in
+            // Can't throw: the writer has exactly the room the characters need.
             try! encode(bytes, into: &writer, alphabet: alphabet, padding: padding)
-            return writer.byteCount
         }
     }
 
@@ -180,6 +214,12 @@ public enum Base64 {
     /// Blocks are elements of typed spans, a block of input and a block of output each, so a loop over the
     /// indices has one bounds check per span, which folds: offsets into raw spans (a check per load and
     /// store) took a third of the loop. Each block is bit-cast to and from vectors. Compiled once, here.
+    ///
+    /// - Parameters:
+    ///   - blocks: The input, 48 bytes per element.
+    ///   - output: Receives 64 characters per element.
+    ///   - table: The alphabet's 64 characters (``Alphabet/table``).
+    /// - Precondition: `output` and `blocks` have the same count.
     @usableFromInline @inline(never)
     static func encodeBlocks(
         _ blocks: Span<InlineArray<48, UInt8>>, into output: inout MutableSpan<InlineArray<64, UInt8>>,
@@ -192,6 +232,11 @@ public enum Base64 {
     }
 
     /// One block's 64 characters.
+    ///
+    /// - Parameters:
+    ///   - block: 48 bytes.
+    ///   - table: The alphabet's 64 characters (``Alphabet/table``).
+    /// - Returns: The 64 characters, in order.
     @inlinable @inline(__always)
     static func encodeBlock(
         _ block: InlineArray<48, UInt8>, table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>)
@@ -207,19 +252,13 @@ public enum Base64 {
         return bitCast([c0, c1, c2, c3] as InlineArray<4, SIMD16<UInt8>>, to: InlineArray<64, UInt8>.self)
     }
 
-    /// Writes `bytes`, at most 64, as at most two writes of 32 bytes or fewer, which Bytes copies inline
-    /// (it calls `memmove` for more: 95-byte inputs, whose last block is 63 characters, took 24% longer).
-    /// Not atomic, but `encode` has checked the room already.
-    @inlinable @inline(__always)
-    @_lifetime(writer: copy writer)
-    static func writeShort(_ bytes: RawSpan, to writer: inout BytesWriter) throws(BytesError) {
-        guard bytes.byteCount > 32 else { return try writer.write(bytes) }
-        try writer.write(bytes.extracting(first: 32))
-        try writer.write(bytes.extracting(droppingFirst: 32))
-    }
-
-    /// 48 bytes moved down by `count` (1 through 47), with zeros after: three 48-byte table lookups whose
+    /// 48 bytes moved down by `count` (1 through 47), with zeros after: three lookups in the 48 bytes, whose
     /// indices past the end give zero.
+    ///
+    /// - Parameters:
+    ///   - bytes: The 48 bytes.
+    ///   - count: How far to move them toward the front.
+    /// - Returns: `bytes` without its first `count`, zero-filled to 48.
     @inlinable @inline(__always)
     static func shiftedDown(_ bytes: InlineArray<3, SIMD16<UInt8>>, by count: Int) -> InlineArray<3, SIMD16<UInt8>> {
         let table = (bytes[0], bytes[1], bytes[2])
@@ -233,6 +272,12 @@ public enum Base64 {
     /// typed-span-to-typed-span loop with no table lookups (see the type's documentation). `package`, so
     /// the tests can call it on ARM64 (where `encode` doesn't) without `@testable`, which release builds
     /// don't support.
+    ///
+    /// - Parameters:
+    ///   - groups: The input, 3 bytes per element.
+    ///   - characters: Receives 4 characters per element.
+    ///   - alphabet: The characters for 62 and 63.
+    /// - Precondition: `characters` and `groups` have the same count.
     @usableFromInline @inline(never)
     package static func encode(
         _ groups: Span<InlineArray<3, UInt8>>, into characters: inout MutableSpan<InlineArray<4, UInt8>>,
@@ -258,6 +303,11 @@ public enum Base64 {
     /// No compares: written with `if`s or ternaries, the range tests are correlated (a value of at least
     /// 62 is at least 52), and LLVM threads them into branches instead of selects, depending on the pass
     /// pipeline, and branches stop the loop from vectorizing. Arithmetic can't become a branch.
+    ///
+    /// - Parameters:
+    ///   - value: A value from 0 through 63.
+    ///   - deltas: The alphabet's ``Alphabet/deltas``.
+    /// - Returns: The character.
     @inlinable @inline(__always)
     static func character(_ value: UInt8, _ deltas: (UInt8, UInt8)) -> UInt8 {
         let from26 = mask(value, atLeast: 26)
@@ -269,6 +319,11 @@ public enum Base64 {
 
     /// `0xFF` if `value` (below 64) is at least `bound` (1 through 64), otherwise 0: the high bit of
     /// `value + 128 - bound`, which doesn't wrap for these ranges, spread to the whole byte.
+    ///
+    /// - Parameters:
+    ///   - value: A value below 64.
+    ///   - bound: The threshold, 1 through 64.
+    /// - Returns: `0xFF` or 0.
     @inlinable @inline(__always)
     static func mask(_ value: UInt8, atLeast bound: UInt8) -> UInt8 {
         0 &- ((value &+ (128 &- bound)) &>> 7)

@@ -71,7 +71,10 @@ there's almost nothing to do.
 **Small packets are bound by per-packet work**, now 45 ns per packet (was 73) with each end on its own
 core. Each end alone, in memory on one core (`... in memory` benchmarks), checks 36.4 M or encodes 43.4 M
 packets per second, 23–27 ns per packet; the rest is the kernel copying each packet in and out of the
-socket, and the system calls.
+socket, and the system calls. (Since 2026-11-10 those two benchmarks report the framework's throughput,
+iterations per second, instead of timing inside the loop with a custom packet-rate metric: packets per
+second is that times 10,000. The socket transfers still record the transfer's own timing, from the first
+listener to the last end of stream, so starting executor threads isn't counted.)
 
 **With more connections, small packets reach the kernel's ceiling.** 2 connections carry 34 M packets/s
 (4.3 GB/s), and 4 carry 34–39 M (4.4–4.9 GB/s; 38–44 M before the enum work, in runs where raw TCP on 4

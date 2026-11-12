@@ -2,9 +2,17 @@ import Foundation
 import Synchronization
 
 public extension ZipArchive {
-    /// Decompresses every entry (in parallel) and checks its size and CRC-32 without writing anything.
+    /// Decompresses every non-directory entry (in parallel) and checks its size and CRC-32 without writing
+    /// anything.
     ///
-    /// - Returns: The entries that failed and why, in archive order. Empty means the archive is intact.
+    /// A failing entry doesn't stop the others. Failures are collected, so this doesn't throw.
+    ///
+    /// - Parameters:
+    ///   - entries: The entries to check; all of the archive's by default.
+    ///   - maxConcurrency: The most entries to decompress at once.
+    ///   - backend: Which DEFLATE and CRC-32 implementation to use.
+    /// - Returns: The entries that failed and why (the errors of ``contents(of:using:_:)``), in the order given.
+    ///   Empty means every entry is intact.
     func verify(
         _ entries: [ZipEntry]? = nil,
         maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount,

@@ -13,6 +13,8 @@ let benchmarks: @Sendable () -> Void = {
     registerBandwidthBenchmarks()
     registerWriteBenchmarks()
     registerCRCBenchmarks()
+    registerRunsAndCopiesBenchmarks()
+    registerBuildersAndSectionsBenchmarks()
 
     // MARK: Field parsing: a 2,000-entry zip central directory (~170 KB)
 
@@ -25,6 +27,26 @@ let benchmarks: @Sendable () -> Void = {
     Benchmark("Fields: Bytes") { benchmark in
         for _ in benchmark.scaledIterations {
             try blackHole(CentralDirectory.parseWithBytes(directory.span.bytes))
+        }
+    }
+    // Each entry all or nothing (a streaming parser's records): the closure of `atomically`, against
+    // `position` and `rewind(to:)`.
+    precondition(try! CentralDirectory.parseWithBytesAtomically(directory.span.bytes) == expected)
+    precondition(try! CentralDirectory.parseWithBytesRewinding(directory.span.bytes) == expected)
+    Benchmark("Fields: Bytes, entries in atomically") { benchmark in
+        for _ in benchmark.scaledIterations {
+            try blackHole(CentralDirectory.parseWithBytesAtomically(directory.span.bytes))
+        }
+    }
+    precondition(try! CentralDirectory.parseWithBytesAtomicallyLiteral(directory.span.bytes) == expected)
+    Benchmark("Fields: Bytes, entries in atomically, body in the closure") { benchmark in
+        for _ in benchmark.scaledIterations {
+            try blackHole(CentralDirectory.parseWithBytesAtomicallyLiteral(directory.span.bytes))
+        }
+    }
+    Benchmark("Fields: Bytes, entries between position and rewind(to:)") { benchmark in
+        for _ in benchmark.scaledIterations {
+            try blackHole(CentralDirectory.parseWithBytesRewinding(directory.span.bytes))
         }
     }
     Benchmark("Fields: Bytes, fixed-size records") { benchmark in
@@ -131,7 +153,10 @@ let benchmarks: @Sendable () -> Void = {
     registerAllocationBenchmarks([
         ("Fields: Bytes", { blackHole(try! CentralDirectory.parseWithBytes(directory.span.bytes)) }),
         ("Fields: Bytes, fixed-size records", { blackHole(try! CentralDirectory.parseWithBytesRecords(directory.span.bytes)) }),
+        ("Fields: Bytes, entries between position and rewind", { blackHole(try! CentralDirectory.parseWithBytesRewinding(directory.span.bytes)) }),
         ("Bits: Bytes", { blackHole(try! BitFields.parseWithBytes(bitStream.span)) }),
         ("Search 64 KB backwards: lastByteOffset(of:)", { blackHole(BytesReader(haystack.span).lastByteOffset(of: signature)) }),
-    ])
+    ] + runsAndCopiesWorkloads().filter { !$0.name.hasSuffix("(before)") }.map { workload in
+        (workload.name, { blackHole(workload.run()) })
+    })
 }

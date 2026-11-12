@@ -89,6 +89,17 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
 
+        // Runs of 2- to 7-byte pixels: matches 2 to 7 bytes back, which copy a repeating pattern.
+        Benchmark("Inflate + CRC 32 MB raster: \(suffix)") { benchmark in
+            let archive = try ZipArchive(url: Fixtures.raster)
+            let entry = firstFile(archive)
+            var decoder = ZipDecoder(backend: backend)
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+            }
+        }
+
         Benchmark("Inflate + CRC 2,000 small files: \(suffix)") { benchmark in
             let archive = try ZipArchive(url: Fixtures.smallFiles)
             let files = archive.entries.filter { $0.kind == .file }

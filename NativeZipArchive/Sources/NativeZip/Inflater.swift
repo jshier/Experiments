@@ -49,11 +49,15 @@ struct HuffmanEntry {
 
     /// The extra bits' value, from bits whose first is this entry's code's first.
     ///
-    /// A mask and a shift rather than `bits[bits: codeLength..<totalBits]`: with a range not known to be
-    /// valid, the subscript's checks stay in the decode loop (measured: 31 more instructions, two traps).
+    /// The unchecked `bits(from:upTo:)` rather than `bits[bits: codeLength..<totalBits]`: with a range not
+    /// known to be valid, the subscript's checks stay in the decode loop (measured: 31 more instructions,
+    /// two traps). `totalBits` is at most 31 here, as the unchecked form requires.
+    ///
+    /// - Parameter bits: The buffered bits, starting with this entry's code.
+    /// - Returns: The extra bits as an integer.
     @inline(__always)
     func extra(_ bits: UInt64) -> Int {
-        Int(truncatingIfNeeded: (bits & ((1 &<< UInt64(totalBits)) &- 1)) &>> UInt64(codeLength))
+        Int(truncatingIfNeeded: bits.bits(from: codeLength, upTo: totalBits))
     }
 
     static var invalid: Self { Self(codeLength: 0, kind: .invalid, value: 0) }
@@ -64,6 +68,12 @@ enum Alphabet {
     case literalLength, distance
 
     /// The entry for `symbol` with a code of `codeLength` bits.
+    ///
+    /// - Parameters:
+    ///   - symbol: The symbol the code stands for.
+    ///   - codeLength: The code's length in bits.
+    /// - Returns: A literal, end-of-block, or length or distance entry; `invalid` for reserved symbols
+    ///   (literal/length 286 and 287, distance 30 and 31).
     @inline(__always)
     func entry(_ symbol: Int, codeLength: Int) -> HuffmanEntry {
         switch self {
@@ -111,6 +121,7 @@ enum BlockType: UInt8 {
     case stored, fixedHuffman, dynamicHuffman
 }
 
+/// A resumable DEFLATE decoder: one stream at a time, decoded in steps into caller-supplied buffers.
 @safe
 struct Inflater: ~Copyable {
     /// Root table widths: codes up to this long take one lookup, longer ones a second in a subtable.
@@ -164,7 +175,7 @@ struct Inflater: ~Copyable {
         try! buildTable(distanceLengths.span, .distance, at: Self.fixedDistances, rootBits: Self.distanceRootBits)
     }
 
-    /// Prepares to decode a new stream.
+    /// Prepares to decode a new stream. The fixed tables are kept.
     mutating func reset() {
         state = .blockHeader
         isFinalBlock = false
@@ -172,16 +183,25 @@ struct Inflater: ~Copyable {
     }
 
     /// Decodes from `input` (the whole compressed stream, the same on every call) into `output`, writing
-    /// from `start`, until the stream ends or fewer than ``maximumMatch`` bytes are free. Bytes before
-    /// `start` are history that back-references may reach.
+    /// from `start`, until the stream ends or the output is nearly full (less than ``maximumMatch`` bytes,
+    /// plus a little slack for the copy's overrun, free). Bytes before `start` are history that
+    /// back-references may reach.
     ///
-    /// Returns where the output ends, and whether the stream is finished. Throws ``BytesError`` for corrupt
-    /// or truncated data.
+    /// Call again with the same `input` and a buffer whose start holds the last 32 KB of output to continue.
     ///
     /// Each kind of work is its own function taking and returning plain positions, building its own
     /// `BitBuffer` and `BytesWriter` as locals: the symbol loop's cursors then live in registers. (One big
     /// function was too large for the inliner, so `BytesWriter.copy` stayed a call, and passing the writer to
     /// it kept the writer in memory: 2x slower.)
+    ///
+    /// - Parameters:
+    ///   - input: The whole compressed stream.
+    ///   - output: The buffer to decode into.
+    ///   - start: Where in `output` to start writing, after the history.
+    /// - Returns: Where the output ends, and whether the stream is finished.
+    /// - Throws: `BytesError.insufficientData` for a truncated stream; `BytesError.invalidValue` for an
+    ///   invalid block type, code, or table, or a distance reaching before the output's start;
+    ///   `BytesError.mismatch` if a stored block's length doesn't match its complement.
     mutating func decode(
         _ input: RawSpan, into output: inout MutableRawSpan, start: Int
     ) throws(BytesError) -> (end: Int, finished: Bool) {
@@ -198,10 +218,8 @@ struct Inflater: ~Copyable {
                 }
             case let .stored(remaining):
                 let count = min(remaining, output.byteCount &- position)
-                var reader = BytesReader(input)
-                try reader.seek(toBitPosition: bitPosition)
-                var writer = BytesWriter(output._mutatingExtracting(...))
-                try writer.skip(byteCount: position)
+                var reader = try BytesReader(input, atBitPosition: bitPosition)
+                var writer = try BytesWriter(&output, atByteOffset: position)
                 try writer.write(reader.read(byteCount: count))
                 bitPosition = reader.bitPosition
                 position = writer.byteCount
@@ -230,11 +248,14 @@ struct Inflater: ~Copyable {
 
     /// Reads a block header at ``bitPosition``: the final flag, the type, and a stored block's length or a
     /// dynamic block's tables.
+    ///
+    /// - Parameter input: The whole compressed stream.
+    /// - Throws: `BytesError.insufficientData` if the header is truncated; `BytesError.invalidValue`
+    ///   for the reserved block type or invalid tables; `BytesError.mismatch` for a stored block's
+    ///   bad length complement.
     private mutating func readBlockHeader(_ input: RawSpan) throws(BytesError) {
-        var reader = BytesReader(input, bitOrder: .leastSignificantFirst)
-        try reader.seek(toBitPosition: bitPosition)
-        var bits = BitBuffer(reader)
-        isFinalBlock = bits.read(Bit.self).isSet
+        var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
+        isFinalBlock = bits.read(Bool.self)
         switch try bits.read(BlockType.self, as: Crumb.self) {
         case .stored:
             bits.alignToByte()
@@ -256,22 +277,33 @@ struct Inflater: ~Copyable {
     }
 
     /// Decodes Huffman-coded symbols from `bitPosition` into `output` from `end`, until the block ends or
-    /// fewer than ``maximumMatch`` bytes are free.
+    /// the output is nearly full (room for three literals, a longest match, and the copy's overrun is
+    /// required to continue).
     ///
     /// Table lookups are bounds-checked. Stating the tables' sizes once, here, makes those checks free for
     /// root lookups: with the count a known constant, the optimizer sees that a masked root index is in
     /// bounds. Only subtable lookups (codes longer than the root, rare) keep a check.
+    ///
+    /// - Parameters:
+    ///   - input: The whole compressed stream.
+    ///   - bitPosition: Where the block's symbols start or resume.
+    ///   - literals: The literal/length table, exactly ``tableSize`` entries.
+    ///   - distances: The distance table, exactly ``distanceTableSize`` entries.
+    ///   - output: The buffer to decode into.
+    ///   - end: Where in `output` to write next.
+    /// - Returns: The new bit position, the new output end, and whether the block's end code was reached
+    ///   (otherwise the output is full).
+    /// - Throws: `BytesError.insufficientData` if the stream is truncated; `BytesError.invalidValue` for an
+    ///   invalid code or a distance reaching before the output's start.
+    /// - Precondition: The tables have exactly those sizes.
     private static func decodeSymbols(
         _ input: RawSpan, from bitPosition: Int,
         literals: Span<UInt32>, distances: Span<UInt32>,
         into output: inout MutableRawSpan, at end: Int
     ) throws(BytesError) -> (bitPosition: Int, end: Int, endOfBlock: Bool) {
         precondition(literals.count == tableSize && distances.count == distanceTableSize)
-        var reader = BytesReader(input, bitOrder: .leastSignificantFirst)
-        try reader.seek(toBitPosition: bitPosition)
-        var bits = BitBuffer(reader)
-        var writer = BytesWriter(output._mutatingExtracting(...))
-        try writer.skip(byteCount: end)
+        var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
+        var writer = try BytesWriter(&output, atByteOffset: end)
         var endOfBlock = false
 
         // The next symbol's entry is looked up ahead of time (as libdeflate does): at the top of each
@@ -350,23 +382,44 @@ struct Inflater: ~Copyable {
     }
 
     /// The entry for the code at the start of `bits`.
+    ///
+    /// - Parameters:
+    ///   - table: A root table followed by its subtables.
+    ///   - bits: The buffered bits; enough must be valid for the longest code.
+    ///   - rootBits: The root table's index width.
+    /// - Returns: The entry, with any subtable link resolved.
     @inline(__always)
     private static func lookup(_ table: Span<UInt32>, _ bits: UInt64, rootBits: Int) -> HuffmanEntry {
         resolve(rootEntry(table, bits, rootBits: rootBits), table, bits, rootBits: rootBits)
     }
 
     /// The root table's entry for the start of `bits`: needs only `rootBits` valid bits.
+    ///
+    /// - Parameters:
+    ///   - table: A root table followed by its subtables.
+    ///   - bits: The buffered bits.
+    ///   - rootBits: The root table's index width.
+    /// - Returns: The root entry, which may be a subtable link.
     @inline(__always)
     private static func rootEntry(_ table: Span<UInt32>, _ bits: UInt64, rootBits: Int) -> HuffmanEntry {
-        HuffmanEntry(raw: table[Int(truncatingIfNeeded: bits) & ((1 &<< rootBits) &- 1)])
+        HuffmanEntry(raw: table[Int(truncatingIfNeeded: bits.bits(from: 0, upTo: rootBits))])
     }
 
     /// `entry`, or for a link to a subtable, the subtable's entry for the bits after the root's.
+    ///
+    /// - Parameters:
+    ///   - entry: A root entry.
+    ///   - table: The table `entry` came from.
+    ///   - bits: The buffered bits `entry` was looked up with.
+    ///   - rootBits: The root table's index width.
+    /// - Returns: `entry` unless it's a subtable link.
     @inline(__always)
     private static func resolve(
         _ entry: HuffmanEntry, _ table: Span<UInt32>, _ bits: UInt64, rootBits: Int
     ) -> HuffmanEntry {
         guard entry.kind == .subtable else { return entry }
+        // Shift, then mask, by hand: `bits.bits(from: rootBits, upTo: rootBits &+ entry.codeLength)` masks
+        // first, which needs the sum, and grew `decodeSymbols` by 5 instructions.
         let index = Int(truncatingIfNeeded: bits &>> UInt64(rootBits)) & ((1 &<< entry.codeLength) &- 1)
         return HuffmanEntry(raw: table[entry.value &+ index])
     }
@@ -379,6 +432,10 @@ struct Inflater: ~Copyable {
     }
 
     /// Reads a dynamic block's header (RFC 1951, 3.2.7) and builds its two tables.
+    ///
+    /// - Parameter bits: The bit buffer, positioned after the block type.
+    /// - Throws: `BytesError.invalidValue` for too many codes, an invalid or over-subscribed code, a bad
+    ///   repeat, or a missing end-of-block code; `BytesError.insufficientData` if the header is truncated.
     private mutating func readDynamicTables(_ bits: inout BitBuffer) throws(BytesError) {
         let literalCount = Int(bits.read(Bits<5>.self)) &+ 257 // HLIT
         let distanceCount = Int(bits.read(Bits<5>.self)) &+ 1 // HDIST
@@ -439,6 +496,13 @@ struct Inflater: ~Copyable {
     ///
     /// Accepts the incomplete codes zlib does: an empty one (a block without matches) and a single 1-bit
     /// code (RFC 1951 allows it for distances, zlib for literals too).
+    ///
+    /// - Parameters:
+    ///   - lengths: The code length of each symbol.
+    ///   - alphabet: Which alphabet's entries to build.
+    ///   - offset: Where the table starts in ``tables``.
+    ///   - rootBits: The root table's index width.
+    /// - Throws: `BytesError.invalidValue` if the lengths aren't a valid code.
     private mutating func buildTable(
         _ lengths: Span<UInt8>, _ alphabet: Alphabet, at offset: Int, rootBits: Int
     ) throws(BytesError) {

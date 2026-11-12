@@ -15,19 +15,17 @@ try reader.expect(0x50_4B_03_04 as Byte4)                     // a signature
 let version = try reader.read(Byte2.self, .littleEndian)      // UInt16
 let length = try reader.read(Byte3.self, .bigEndian)          // UInt32, from 3 bytes
 let type = try reader.read(Nibble.self)                       // 4 bits
-let isRetained = try reader.read(Bit.self).isSet
+let isRetained = try reader.read(Bool.self)                   // 1 bit
 let qos = try reader.read(QualityOfService.self, as: Crumb.self) // an enum from 2 bits
 ```
 
 Writing mirrors reading:
 
 ```swift
-let bytes = try [UInt8](capacity: 64) { output in
-    try output.withBytesWriter { writer in
-        try writer.write(0x50_4B_03_04 as Byte4)
-        try writer.write(20, as: Byte2.self, .littleEndian)
-        try writer.write(qos, as: Crumb.self)
-    }
+let bytes = try [UInt8](byteCapacity: 64) { writer in
+    try writer.write(0x50_4B_03_04 as Byte4)
+    try writer.write(20, as: Byte2.self, .littleEndian)
+    try writer.write(qos, as: Crumb.self)
 }
 ```
 
@@ -50,6 +48,7 @@ core's memory bandwidth; with all cores, nearly every width reaches the CPU's me
 - ``BytesReader``
 - ``BytesWriter``
 - ``BytesError``
+- ``LocatedBytesError``
 
 ### Field types
 

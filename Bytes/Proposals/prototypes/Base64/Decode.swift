@@ -59,7 +59,9 @@ func runDecode(size: Int, totalMB: Int) {
     let clock = ContinuousClock()
     let start = clock.now
     var ok = true
-    for _ in 0..<calls { ok = decodePrototype(text, into: &output) && ok }
+    for _ in 0..<calls {
+        ok = decodePrototype(text, into: &output) && ok
+    }
     let seconds: Double = (clock.now - start) / .seconds(1)
     print("decode \(bytes.count) bytes\tGB/s of text \((Double(text.count * calls) / seconds / 1e8).rounded() / 10)\tok \(ok)")
 }

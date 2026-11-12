@@ -34,16 +34,32 @@ public enum MQTTProperty: ~Escapable {
     /// Reads one property: its identifier (a Variable Byte Integer), then a value of that property's type.
     ///
     /// Checked, it validates the encoding: minimal Variable Byte Integers, UTF-8 without U+0000. Unchecked,
-    /// it trusts a list that was checked before, which makes iterating cheaper.
+    /// it trusts a list that was checked before, which makes iterating cheaper. Value rules
+    /// (``checkValue()``) aren't checked either way.
+    ///
+    /// - Parameters:
+    ///   - reader: The reader positioned at the identifier. Its position after a failure is unspecified.
+    ///   - checked: Whether to validate the encoding.
+    /// - Returns: The property, borrowing the reader's bytes.
+    /// - Throws: `BytesError.insufficientData` if the property is truncated; `BytesError.invalidValue`
+    ///   for an unknown identifier or, when `checked`, an invalid encoding.
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
     static func read(from reader: inout BytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
-        let identifier = checked ? try reader.readMQTTVariableByteInteger() : try reader.read(LEB128.self, maxByteCount: 4)
+        let identifier = try reader.read(LEB128.self, maxByteCount: 4, requiringMinimal: checked)
         return try read(identifier, from: &reader, checked: checked)
     }
 
     /// Reads the value of the property `identifier`, which has been read.
+    ///
+    /// - Parameters:
+    ///   - identifier: The property's identifier.
+    ///   - reader: The reader positioned at the value. Its position after a failure is unspecified.
+    ///   - checked: Whether to validate the encoding, as ``read(from:checked:)`` does.
+    /// - Returns: The property, borrowing the reader's bytes.
+    /// - Throws: `BytesError.insufficientData` if the value is truncated; `BytesError.invalidValue`
+    ///   for an unknown identifier or, when `checked`, an invalid encoding.
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
@@ -55,9 +71,7 @@ public enum MQTTProperty: ~Escapable {
         case 0x08: try .responseTopic(reader.readMQTTText(checked: checked))
         case 0x09: try .correlationData(reader.read(bytesPrefixedBy: Byte2.self, .bigEndian))
         case 0x0B:
-            try .subscriptionIdentifier(UInt32(
-                checked ? reader.readMQTTVariableByteInteger() : reader.read(LEB128.self, maxByteCount: 4)
-            ))
+            try .subscriptionIdentifier(UInt32(reader.read(LEB128.self, maxByteCount: 4, requiringMinimal: checked)))
         case 0x11: try .sessionExpiryInterval(reader.read(Byte4.self, .bigEndian))
         case 0x12: try .assignedClientIdentifier(reader.readMQTTText(checked: checked))
         case 0x13: try .serverKeepAlive(reader.read(Byte2.self, .bigEndian))
@@ -84,9 +98,11 @@ public enum MQTTProperty: ~Escapable {
         }
     }
 
-    /// Throws a protocol error for a value the spec forbids: a zero Topic Alias, Subscription Identifier,
-    /// Receive Maximum, or Maximum Packet Size, or a flag other than 0 or 1. Only these properties
-    /// (``PropertySet/valueChecked``) need it.
+    /// Checks the property's value: a Topic Alias, Subscription Identifier, Receive Maximum, or Maximum
+    /// Packet Size isn't zero, and a flag is 0 or 1. Only these properties (``PropertySet/valueChecked``)
+    /// need it.
+    ///
+    /// - Throws: `MQTTError.protocolError(_:)` for a value the spec forbids.
     @inlinable
     func checkValue() throws(MQTTError) {
         switch self {
@@ -153,6 +169,12 @@ struct PropertySet {
 extension BytesWriter {
     /// Writes `property`: its identifier, then its value. Build a property list in a buffer this way, then
     /// view it with ``MQTTProperties/init(validating:)``.
+    ///
+    /// Values aren't checked here; the list is, when viewed.
+    ///
+    /// - Parameter property: The property.
+    /// - Throws: `BytesError.invalidValue` if a string or binary value is longer than 65,535 bytes;
+    ///   `BytesError.insufficientCapacity` if there's no room.
     @inlinable
     @_lifetime(self: copy self)
     public mutating func write(_ property: borrowing MQTTProperty) throws(BytesError) {
@@ -251,8 +273,13 @@ public struct MQTTProperties: ~Escapable {
     }
 
     /// Views encoded properties (without a length prefix), checking that each is well-formed and has a valid
-    /// value, and that only User Property and Subscription Identifier repeat. Writing a packet checks that
-    /// it may carry them.
+    /// value, that only User Property and Subscription Identifier repeat, and that Authentication Data comes
+    /// with an Authentication Method. Writing a packet checks that it may carry them.
+    ///
+    /// - Parameter bytes: The encoded properties, as `BytesWriter` writes each ``MQTTProperty``.
+    /// - Throws: `MQTTError.malformed(_:)` for an unknown identifier or an invalid encoding;
+    ///   `MQTTError.protocolError(_:)` for a duplicate property, a forbidden value, or Authentication Data
+    ///   without a method.
     @inlinable
     @_lifetime(copy bytes)
     public init(validating bytes: RawSpan) throws(MQTTError) {
@@ -260,7 +287,15 @@ public struct MQTTProperties: ~Escapable {
     }
 
     /// Views encoded properties, checking them as ``init(validating:)`` does, and that each is `allowed`
-    /// (malformed otherwise) and appears once unless `repeatable` (a protocol error otherwise).
+    /// and appears once unless `repeatable`.
+    ///
+    /// - Parameters:
+    ///   - bytes: The encoded properties, without a length.
+    ///   - allowed: The properties the packet type may carry.
+    ///   - repeatable: The properties that may appear more than once.
+    /// - Throws: `MQTTError.malformed(_:)` for an invalid encoding or a property not in `allowed`;
+    ///   `MQTTError.protocolError(_:)` for a duplicate not in `repeatable`, a forbidden value, or
+    ///   Authentication Data without a method.
     @inlinable
     @_lifetime(copy bytes)
     init(validating bytes: RawSpan, allowing allowed: PropertySet, repeatable: PropertySet) throws(MQTTError) {
@@ -289,14 +324,20 @@ public struct MQTTProperties: ~Escapable {
 
     /// Reads a property list for a packet: its length (a minimal Variable Byte Integer), then properties
     /// checked as ``init(validating:allowing:repeatable:)`` does.
+    ///
+    /// - Parameters:
+    ///   - reader: The reader positioned at the length. Its position after a failure is unspecified.
+    ///   - allowed: The properties the packet type may carry.
+    ///   - repeatable: The properties that may appear more than once.
+    /// - Throws: `MQTTError.malformed(_:)` for a truncated or padded length, or as
+    ///   ``init(validating:allowing:repeatable:)`` throws; `MQTTError.protocolError(_:)` likewise.
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
     init(reading reader: inout BytesReader, allowing allowed: PropertySet, repeatable: PropertySet = .repeatable) throws(MQTTError) {
         let bytes: RawSpan
         do throws(BytesError) {
-            let length = try reader.readMQTTVariableByteInteger()
-            bytes = try reader.read(byteCount: Int(length))
+            bytes = try reader.read(bytesPrefixedBy: LEB128.self, maxByteCount: 4, requiringMinimal: true)
         } catch {
             throw .malformed("property length")
         }
@@ -307,7 +348,10 @@ public struct MQTTProperties: ~Escapable {
     @inlinable
     public var isEmpty: Bool { bytes.byteCount == 0 }
 
-    /// Calls `body` with each property, in order.
+    /// Calls `body` with each property, in order. The properties aren't validated again.
+    ///
+    /// - Parameter body: Called with each property; its error is rethrown.
+    /// - Throws: Whatever `body` throws.
     @inlinable
     public func forEach<E: Error>(_ body: (borrowing MQTTProperty) throws(E) -> Void) throws(E) {
         var reader = BytesReader(bytes)
@@ -317,7 +361,10 @@ public struct MQTTProperties: ~Escapable {
         }
     }
 
-    /// Throws ``MQTTError`` unless every property is allowed in a packet that allows `allowed`.
+    /// Checks that every property is allowed in a packet that allows `allowed`.
+    ///
+    /// - Parameter allowed: The properties the packet type may carry.
+    /// - Throws: `MQTTError.malformed(_:)` if one isn't.
     @inlinable
     func check(allowing allowed: PropertySet) throws(MQTTError) {
         guard identifiers.isSubset(of: allowed) else { throw .malformed("property not allowed in this packet") }
@@ -330,6 +377,9 @@ public struct MQTTProperties: ~Escapable {
 
 public extension BytesWriter {
     /// Writes a property list: its length, then the properties.
+    ///
+    /// - Parameter properties: The list.
+    /// - Throws: `BytesError.insufficientCapacity` if there's no room.
     @inlinable
     @_lifetime(self: copy self)
     mutating func write(_ properties: borrowing MQTTProperties) throws(BytesError) {

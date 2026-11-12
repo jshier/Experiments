@@ -31,7 +31,7 @@ func checkStream() throws -> Int {
     return checker.packets
 }
 
-/// Encodes the same packets into `batch`, a batch at a time.
+/// Encodes `packetCount` packets into `batch`, a batch at a time, returning the bytes encoded.
 func encodeStream() -> Int {
     var next = 0
     var bytes = 0
@@ -91,9 +91,12 @@ let benchmarks: @Sendable () -> Void = {
     }
 
     // Each end's per-packet work alone, in memory on one core: the most packets a connection could carry.
+    // Only the work in the loop: packets per second are the framework's throughput (iterations per second)
+    // times `packetCount`. Their results are checked once, here.
+    precondition(try! checkStream() == packetCount)
+    precondition(encodeStream() == stream.count)
     let inMemory = Benchmark.Configuration(
-        metrics: [.wallClock, .instructions, .mallocCountTotal, .packetRate],
-        units: [.packetRate: .count],
+        metrics: [.wallClock, .instructions, .mallocCountTotal, .throughput],
         warmupIterations: 3,
         scalingFactor: .one,
         maxDuration: .seconds(1),
@@ -101,19 +104,12 @@ let benchmarks: @Sendable () -> Void = {
     )
     Benchmark("Check 64 B payload packets in memory", configuration: inMemory) { benchmark in
         for _ in benchmark.scaledIterations {
-            let start = ContinuousClock.now
-            let checked = try checkStream()
-            precondition(checked == packetCount)
-            let seconds = (ContinuousClock.now - start) / .seconds(1)
-            benchmark.measurement(.packetRate, Int(Double(packetCount) / seconds / 1e3))
+            try blackHole(checkStream())
         }
     }
     Benchmark("Encode 64 B payload packets in memory", configuration: inMemory) { benchmark in
         for _ in benchmark.scaledIterations {
-            let start = ContinuousClock.now
-            precondition(encodeStream() == stream.count)
-            let seconds = (ContinuousClock.now - start) / .seconds(1)
-            benchmark.measurement(.packetRate, Int(Double(packetCount) / seconds / 1e3))
+            blackHole(encodeStream())
         }
     }
 

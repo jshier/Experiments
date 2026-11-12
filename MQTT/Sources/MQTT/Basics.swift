@@ -5,6 +5,7 @@ public import Bytes
 /// Why a packet couldn't be parsed or encoded, and the reason code to end the connection with: in a
 /// CONNACK if the error is in a CONNECT, otherwise in a DISCONNECT.
 public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
+    /// The category of failure, which determines the reason code.
     public enum Kind: Hashable, Sendable {
         /// The bytes don't follow the packet format (reason code 0x81).
         case malformedPacket
@@ -16,10 +17,16 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
         case unsupportedProtocolVersion
     }
 
+    /// The category of failure.
     public let kind: Kind
     /// What was wrong, for logs.
     public let detail: StaticString
 
+    /// Creates an error.
+    ///
+    /// - Parameters:
+    ///   - kind: The category of failure.
+    ///   - detail: What was wrong, for logs.
     @inlinable
     public init(_ kind: Kind, _ detail: StaticString) {
         self.kind = kind
@@ -43,6 +50,7 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
         }
     }
 
+    /// The kind and the detail, such as "Malformed packet: remaining length".
     public var description: String {
         let kind = switch kind {
         case .malformedPacket: "Malformed packet"
@@ -55,10 +63,19 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
 
     // By the detail's bytes, without building `String`s. Unsafe: `StaticString` exposes its bytes only as a
     // buffer pointer. Safe: they're immutable static data, read only within the closure.
+    /// Whether two errors have the same kind and the same detail text.
+    ///
+    /// - Parameters:
+    ///   - lhs: An error.
+    ///   - rhs: Another error.
+    /// - Returns: `true` if both are equal.
     public static func ==(lhs: Self, rhs: Self) -> Bool {
         lhs.kind == rhs.kind && lhs.detail.withUTF8Buffer { a in rhs.detail.withUTF8Buffer { b in unsafe a.elementsEqual(b) } }
     }
 
+    /// Hashes the kind and the detail text, consistent with `==`.
+    ///
+    /// - Parameter hasher: The hasher to combine into.
     public func hash(into hasher: inout Hasher) {
         hasher.combine(kind)
         detail.withUTF8Buffer { unsafe hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
@@ -92,14 +109,25 @@ public enum MQTTQoS: UInt8, Sendable, Comparable {
     case atLeastOnce
     case exactlyOnce
 
+    /// Whether `lhs` is a weaker guarantee than `rhs`.
+    ///
+    /// - Parameters:
+    ///   - lhs: A QoS.
+    ///   - rhs: Another QoS.
+    /// - Returns: `true` if `lhs` is lower.
     public static func <(lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 }
 
 /// A reason code: the outcome of an operation, 0x80 and above for failures. Each packet type allows a
 /// different subset, which parsing and encoding check.
 public struct MQTTReasonCode: RawRepresentable, Hashable, Sendable {
+    /// The code as it appears on the wire.
     public let rawValue: UInt8
 
+    /// Creates a reason code from its wire value; any value is representable, but each packet type allows
+    /// only some.
+    ///
+    /// - Parameter rawValue: The wire value.
     @inlinable
     public init(rawValue: UInt8) { self.rawValue = rawValue }
 
@@ -208,13 +236,22 @@ public enum MQTTRetainHandling: UInt8, Sendable {
 
 /// A subscription's options byte.
 public struct MQTTSubscriptionOptions: Hashable, Sendable {
+    /// The highest QoS at which the server may send messages for this subscription.
     public var maximumQoS: MQTTQoS
     /// Don't send the subscriber its own publications. Not allowed on a shared subscription.
     public var noLocal: Bool
     /// Keep the retain flag of forwarded messages as published.
     public var retainAsPublished: Bool
+    /// When retained messages are sent for this subscription.
     public var retainHandling: MQTTRetainHandling
 
+    /// Creates subscription options.
+    ///
+    /// - Parameters:
+    ///   - maximumQoS: The highest QoS the server may use.
+    ///   - noLocal: Whether to skip the subscriber's own publications.
+    ///   - retainAsPublished: Whether to keep the retain flag as published.
+    ///   - retainHandling: When to send retained messages.
     @inlinable
     public init(
         maximumQoS: MQTTQoS, noLocal: Bool = false, retainAsPublished: Bool = false,
@@ -226,9 +263,14 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
         self.retainHandling = retainHandling
     }
 
-    /// Reads the options byte. Its fields, from the most significant bit: 2 reserved bits (nonzero is
-    /// malformed), retain handling (3 is a protocol error), retain as published, no local, and maximum QoS
-    /// (3 is a protocol error).
+    /// Reads the options byte.
+    ///
+    /// Its fields, from the most significant bit: 2 reserved bits, retain handling, retain as published, no
+    /// local, and maximum QoS. Once the byte is read, the reader stays past it even if this throws.
+    ///
+    /// - Parameter reader: The reader to read one byte from.
+    /// - Throws: `MQTTError.malformed(_:)` if the byte is missing or a reserved bit is set;
+    ///   `MQTTError.protocolError(_:)` if retain handling or maximum QoS is 3.
     @inlinable
     @_lifetime(reader: copy reader)
     init(reading reader: inout BytesReader) throws(MQTTError) {
@@ -245,14 +287,17 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
         maximumQoS = qos
     }
 
-    /// The options byte, packed before it's written: one store.
+    /// Writes the options byte, packed first so it's one store.
+    ///
+    /// - Parameter writer: The writer to append to.
+    /// - Throws: `BytesError.insufficientCapacity` if there's no room for the byte.
     @inlinable
     func write(to writer: inout BytesWriter) throws(BytesError) {
         var options = Byte.zero
-        options[Crumb.self, at: 4] = Crumb(truncatingIfNeeded: retainHandling.rawValue)
+        options[Crumb.self, at: 4] = Crumb(rawBitsOf: retainHandling)
         options[bit: 3] = retainAsPublished
         options[bit: 2] = noLocal
-        options[Crumb.self, at: 0] = Crumb(truncatingIfNeeded: maximumQoS.rawValue)
+        options[Crumb.self, at: 0] = Crumb(rawBitsOf: maximumQoS)
         try writer.write(options)
     }
 }
@@ -261,8 +306,16 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
 
 /// MQTT's data representations (section 1.5), on top of `Bytes`.
 extension BytesReader {
-    /// A UTF-8 Encoded String: a 2-byte big-endian length, then UTF-8 without U+0000 [MQTT-1.5.4-2].
-    /// Unchecked, it trusts that the string was checked before: for iterating validated lists.
+    /// Reads a UTF-8 Encoded String: a 2-byte big-endian length, then UTF-8 without U+0000 [MQTT-1.5.4-2].
+    ///
+    /// Unchecked, it trusts that the string was validated before: for iterating validated lists. The
+    /// returned view borrows the reader's bytes.
+    ///
+    /// - Parameter checked: Whether to validate the UTF-8 and reject U+0000.
+    /// - Returns: The string.
+    /// - Throws: `BytesError.insufficientData` if the length or the string isn't all there;
+    ///   `BytesError.invalidValue` if it isn't valid UTF-8 or contains U+0000 (checked only). Nothing is
+    ///   consumed on failure when `checked`.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
@@ -277,7 +330,12 @@ extension BytesReader {
         return try read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: Text.null)
     }
 
-    /// A UTF-8 Encoded String, throwing a malformed-packet error with `detail`.
+    /// Reads a checked UTF-8 Encoded String (see ``readMQTTText(checked:)``).
+    ///
+    /// - Parameter detail: The detail for the error.
+    /// - Returns: The string, borrowing the reader's bytes.
+    /// - Throws: `MQTTError.malformed(_:)` with `detail` if the string is truncated, isn't valid UTF-8, or
+    ///   contains U+0000. Nothing is consumed on failure.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
@@ -285,7 +343,12 @@ extension BytesReader {
         do throws(BytesError) { return try readMQTTText(checked: true) } catch { throw .malformed(detail) }
     }
 
-    /// Binary Data: a 2-byte big-endian length, then bytes.
+    /// Reads Binary Data: a 2-byte big-endian length, then bytes.
+    ///
+    /// - Parameter detail: The detail for the error.
+    /// - Returns: The bytes, borrowing the reader's.
+    /// - Throws: `MQTTError.malformed(_:)` with `detail` if the length or the bytes aren't all there.
+    ///   Nothing is consumed on failure.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
@@ -293,14 +356,22 @@ extension BytesReader {
         do throws(BytesError) { return try read(bytesPrefixedBy: Byte2.self, .bigEndian) } catch { throw .malformed(detail) }
     }
 
-    /// A Two Byte Integer.
+    /// Reads a Two Byte Integer, big-endian.
+    ///
+    /// - Parameter detail: The detail for the error.
+    /// - Returns: The integer.
+    /// - Throws: `MQTTError.malformed(_:)` with `detail` if fewer than 2 bytes remain.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func readMQTTUInt16(_ detail: StaticString) throws(MQTTError) -> UInt16 {
         do throws(BytesError) { return try read(Byte2.self, .bigEndian) } catch { throw .malformed(detail) }
     }
 
-    /// A non-zero packet identifier [MQTT-2.2.1-3].
+    /// Reads a non-zero packet identifier [MQTT-2.2.1-3].
+    ///
+    /// - Returns: The identifier.
+    /// - Throws: `MQTTError.malformed(_:)` if fewer than 2 bytes remain; `MQTTError.protocolError(_:)`
+    ///   if the identifier is 0, which is consumed.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func readMQTTPacketIdentifier() throws(MQTTError) -> UInt16 {
@@ -309,35 +380,42 @@ extension BytesReader {
         return identifier
     }
 
-    /// A Byte.
+    /// Reads a Byte.
+    ///
+    /// - Parameter detail: The detail for the error.
+    /// - Returns: The byte.
+    /// - Throws: `MQTTError.malformed(_:)` with `detail` if no bytes remain.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func readMQTTByte(_ detail: StaticString) throws(MQTTError) -> Byte {
         do throws(BytesError) { return try read(Byte.self) } catch { throw .malformed(detail) }
     }
 
-    /// A reason code: a Byte, every value of which is representable (validity depends on the packet).
+    /// Reads a reason code: a Byte, every value of which is representable (validity depends on the packet).
+    ///
+    /// - Returns: The reason code.
+    /// - Throws: `MQTTError.malformed(_:)` if no bytes remain.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func readMQTTReasonCode() throws(MQTTError) -> MQTTReasonCode {
         do throws(BytesError) { return try read(MQTTReasonCode.self, as: Byte.self) } catch { throw .malformed("reason code") }
     }
 
-    /// A Variable Byte Integer: LEB128 of at most 4 bytes, in the fewest bytes [MQTT-1.5.5-1]. Throws
-    /// ``BytesError/invalidValue`` for a longer or padded encoding; consumes nothing if it throws.
+    /// Reads a Variable Byte Integer: LEB128 of at most 4 bytes, in the fewest bytes [MQTT-1.5.5-1].
+    ///
+    /// - Returns: The integer.
+    /// - Throws: `BytesError.insufficientData` if the data ends before the integer does;
+    ///   `BytesError.invalidValue` for a longer or padded encoding. Nothing is consumed on failure.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func readMQTTVariableByteInteger() throws(BytesError) -> UInt64 {
-        try atomically { reader throws(BytesError) in
-            let start = reader.byteOffset
-            let value = try reader.read(LEB128.self, maxByteCount: 4)
-            let byteCount = reader.byteOffset &- start
-            guard byteCount == 1 || byteCount == LEB128.byteCount(of: value) else { throw .invalidValue }
-            return value
-        }
+        try read(LEB128.self, maxByteCount: 4, requiringMinimal: true)
     }
 
-    /// Throws a malformed-packet error if bytes are left over.
+    /// Checks that every byte has been read.
+    ///
+    /// - Parameter detail: The detail for the error.
+    /// - Throws: `MQTTError.malformed(_:)` with `detail` if bytes are left over.
     @inlinable @inline(__always)
     func expectMQTTEnd(_ detail: StaticString) throws(MQTTError) {
         do throws(BytesError) { try expectEnd() } catch { throw .malformed(detail) }
@@ -345,12 +423,23 @@ extension BytesReader {
 }
 
 extension BytesWriter {
+    /// Writes a UTF-8 Encoded String: a 2-byte big-endian length, then the text. It doesn't check for U+0000
+    /// (``MQTTPacket/validate()`` does).
+    ///
+    /// - Parameter text: The string.
+    /// - Throws: `BytesError.invalidValue` if it's longer than 65,535 bytes;
+    ///   `BytesError.insufficientCapacity` if there's no room. Nothing is written on failure.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func writeMQTTString(_ text: UTF8Span) throws(BytesError) {
         try write(text, prefixedBy: Byte2.self, .bigEndian)
     }
 
+    /// Writes Binary Data: a 2-byte big-endian length, then the bytes.
+    ///
+    /// - Parameter bytes: The data.
+    /// - Throws: `BytesError.invalidValue` if it's longer than 65,535 bytes;
+    ///   `BytesError.insufficientCapacity` if there's no room. Nothing is written on failure.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func writeMQTTBinary(_ bytes: RawSpan) throws(BytesError) {
@@ -376,32 +465,49 @@ enum Size {
 /// (`read(utf8PrefixedBy:_:excluding:)`).
 @usableFromInline
 enum Text {
-    /// U+0000, which MQTT strings can't contain [MQTT-1.5.4-2].
+    /// Matches U+0000, which MQTT strings can't contain [MQTT-1.5.4-2].
+    ///
+    /// - Parameter lanes: 16 bytes of text.
+    /// - Returns: The lanes that are zero.
     @inlinable @inline(__always)
     static func null(_ lanes: ByteLanes) -> ByteMatches { lanes.matching(0) }
 
-    /// A wildcard (`+` or `#`) or U+0000, which topic names can't contain [MQTT-3.3.2-2, MQTT-4.7.3-2].
+    /// Matches a wildcard (`+` or `#`) or U+0000, which topic names can't contain [MQTT-3.3.2-2, MQTT-4.7.3-2].
+    ///
+    /// - Parameter lanes: 16 bytes of text.
+    /// - Returns: The lanes that are one of those.
     @inlinable @inline(__always)
     static func wildcardOrNull(_ lanes: ByteLanes) -> ByteMatches {
         lanes.matching(0) | lanes.matching(UInt8(ascii: "+")) | lanes.matching(UInt8(ascii: "#"))
     }
 
     /// Whether `text` contains U+0000.
+    ///
+    /// - Parameter text: The text to scan.
+    /// - Returns: `true` if it does.
     @inlinable
     static func containsNull(_ text: UTF8Span) -> Bool { text.span.bytes.containsByte(where: null) }
 
     /// Whether `text` contains a wildcard or U+0000.
+    ///
+    /// - Parameter text: The text to scan.
+    /// - Returns: `true` if it does.
     @inlinable
     static func containsWildcardOrNull(_ text: UTF8Span) -> Bool { text.span.bytes.containsByte(where: wildcardOrNull) }
 
-    /// Whether `text` is longer than a 2-byte length can describe.
+    /// Whether a byte count is more than a 2-byte length can describe.
+    ///
+    /// - Parameter count: The byte count of a string or binary data.
+    /// - Returns: `true` if it's over 65,535.
     @inlinable @inline(__always)
     static func isTooLong(_ count: Int) -> Bool { count > UInt16.max }
 
     /// Whether a topic filter names a shared subscription (`$share/…`).
+    ///
+    /// - Parameter filter: The topic filter.
+    /// - Returns: `true` if it starts with `$share/`.
     @inlinable
     static func isShared(_ filter: UTF8Span) -> Bool {
-        let reader = BytesReader(filter.span)
-        return (try? reader.peek(Byte7.self)) == 0x24_73_68_61_72_65_2F // "$share/"
+        filter.span.bytes.hasPrefix(0x24_73_68_61_72_65_2F as Byte7) // "$share/"
     }
 }

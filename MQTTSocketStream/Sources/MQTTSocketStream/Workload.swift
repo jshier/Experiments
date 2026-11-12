@@ -17,6 +17,16 @@ public struct Workload: Sendable, CustomStringConvertible {
     /// Threads in the executor pool that runs the senders and receivers (`nil`: one per core).
     public var poolSize: Int?
 
+    /// Creates a workload.
+    ///
+    /// - Parameters:
+    ///   - payloadSize: Bytes of application payload per PUBLISH.
+    ///   - packetsPerConnection: PUBLISH packets each connection carries.
+    ///   - connections: Client/server connection pairs.
+    ///   - batchSize: The sender's write size in bytes.
+    ///   - receiveCapacity: The receiver's buffer size in bytes.
+    ///   - poolSize: Threads in the shared executor pool (`nil`: one per core).
+    /// - Precondition: `batchSize` holds the first packet, and `receiveCapacity` is larger than it.
     public init(
         payloadSize: Int, packetsPerConnection: Int, connections: Int = 1,
         batchSize: Int = 256 << 10, receiveCapacity: Int = 256 << 10, poolSize: Int? = nil
@@ -41,6 +51,7 @@ public struct Workload: Sendable, CustomStringConvertible {
         return whole * cycle + rest
     }
 
+    /// A short summary: connections, packets per connection, and payload size.
     public var description: String {
         "\(connections)×\(packetsPerConnection) PUBLISH, \(payloadSize) B payloads"
     }
@@ -50,6 +61,7 @@ public struct Workload: Sendable, CustomStringConvertible {
 /// ~32-byte topic from a cycle of 16, a message expiry and a user property), with a payload of a chosen
 /// size.
 public enum Fixtures {
+    /// The 16 topics the packets cycle through, in order.
     public static let topics: [String] = (0..<16).map { "sensors/building-\($0 % 8)/floor-\($0 % 4)/temp-\($0)" }
 
     /// The topics' bytes end to end, and where each ends: what `PacketChecker` compares against.
@@ -60,6 +72,11 @@ public enum Fixtures {
 
     /// Packets `0..<count` with `payloadSize`-byte payloads, encoded end to end: a sender's stream, for
     /// measuring the receiving end without a socket.
+    ///
+    /// - Parameters:
+    ///   - payloadSize: Bytes of payload per packet.
+    ///   - count: How many packets to encode.
+    /// - Returns: The encoded packets.
     public static func stream(payloadSize: Int, count: Int) -> [UInt8] {
         let payload = payload(size: payloadSize)
         var stream: [UInt8] = []
@@ -73,20 +90,29 @@ public enum Fixtures {
     }
 
     /// Message expiry 60 s and a user property, encoded once.
-    static let propertyBytes: [UInt8] = try! [UInt8](capacity: 64) { output in
-        try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in
-            try writer.write(MQTTProperty.messageExpiryInterval(60))
-            try writer.write(MQTTProperty.userProperty(name: "unit".utf8Span, value: "celsius".utf8Span))
-        }
+    static let propertyBytes: [UInt8] = try! [UInt8](byteCapacity: 64) { writer in
+        try writer.write(MQTTProperty.messageExpiryInterval(60))
+        try writer.write(MQTTProperty.userProperty(name: "unit".utf8Span, value: "celsius".utf8Span))
     }
 
-    /// A payload of `size` bytes, its byte `i` a function of `i` so corruption shows.
+    /// A payload whose byte `i` is a function of `i`, so corruption shows.
+    ///
+    /// - Parameter size: The payload's length in bytes.
+    /// - Returns: The payload.
     public static func payload(size: Int) -> [UInt8] { (0..<size).map { UInt8(truncatingIfNeeded: $0 &* 37 &+ 11) } }
 
-    /// Packet `index`'s identifier: 1 through 65,535, in order.
+    /// Packet `index`'s identifier: 1 through 65,535, then 1 again.
+    ///
+    /// - Parameter index: The packet's position in the stream, from 0.
+    /// - Returns: The identifier.
     public static func packetIdentifier(_ index: Int) -> UInt16 { UInt16(index % 65_535 + 1) }
 
     /// Packet `index`'s encoded size.
+    ///
+    /// - Parameters:
+    ///   - payloadSize: Bytes of payload per packet.
+    ///   - index: The packet's position in the stream, from 0; picks the topic.
+    /// - Returns: The packet's size in bytes, header included.
     static func packetSize(payloadSize: Int, index: Int) -> Int {
         let payload = [UInt8](repeating: 0, count: payloadSize)
         let properties = try! MQTTProperties(validating: propertyBytes.span.bytes)

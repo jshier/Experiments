@@ -4,11 +4,6 @@ import Dispatch
 import Foundation
 import MQTT
 
-extension BenchmarkMetric {
-    static let bandwidth = BenchmarkMetric.custom("Bandwidth (MB/s)", polarity: .prefersLarger, useScalingFactor: false)
-    static let packetRate = BenchmarkMetric.custom("Packets (K/s)", polarity: .prefersLarger, useScalingFactor: false)
-}
-
 // MARK: - Fixtures
 
 let packetCount = 10_000
@@ -18,17 +13,13 @@ let unitName = "unit"
 let unitValue = "celsius"
 
 /// Message expiry 60 s and a user property, encoded once.
-let propertyBytes: [UInt8] = try! [UInt8](capacity: 64) { output in
-    try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in
-        try writer.write(MQTTProperty.messageExpiryInterval(60))
-        try writer.write(MQTTProperty.userProperty(name: unitName.utf8Span, value: unitValue.utf8Span))
-    }
+let propertyBytes: [UInt8] = try! [UInt8](byteCapacity: 64) { writer in
+    try writer.write(MQTTProperty.messageExpiryInterval(60))
+    try writer.write(MQTTProperty.userProperty(name: unitName.utf8Span, value: unitValue.utf8Span))
 }
 
 func encode(_ packet: borrowing MQTTPacket, into stream: inout [UInt8]) {
-    stream += try! [UInt8](capacity: packet.encodedByteCount) { output in
-        try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in try packet.write(to: &writer) }
-    }
+    try! stream.append(byteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
 }
 
 /// 10,000 QoS 1 PUBLISH packets.
@@ -49,18 +40,14 @@ let mixedStream: [UInt8] = {
     var stream: [UInt8] = []
     let properties = try! MQTTProperties(validating: propertyBytes.span.bytes)
     // CONNECT can't carry Message Expiry Interval: a session expiry and the user property instead.
-    let connectPropertyBytes = try! [UInt8](capacity: 64) { output in
-        try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in
-            try writer.write(MQTTProperty.sessionExpiryInterval(3_600))
-            try writer.write(MQTTProperty.userProperty(name: unitName.utf8Span, value: unitValue.utf8Span))
-        }
+    let connectPropertyBytes = try! [UInt8](byteCapacity: 64) { writer in
+        try writer.write(MQTTProperty.sessionExpiryInterval(3_600))
+        try writer.write(MQTTProperty.userProperty(name: unitName.utf8Span, value: unitValue.utf8Span))
     }
     let connectProperties = try! MQTTProperties(validating: connectPropertyBytes.span.bytes)
-    let subscriptions = try! [UInt8](capacity: 64) { output in
-        try output.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in
-            try writer.write(MQTTSubscription(topicFilter: "sensors/+/floor-1/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .atLeastOnce)))
-            try writer.write(MQTTSubscription(topicFilter: "alerts/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .exactlyOnce)))
-        }
+    let subscriptions = try! [UInt8](byteCapacity: 64) { writer in
+        try writer.write(MQTTSubscription(topicFilter: "sensors/+/floor-1/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .atLeastOnce)))
+        try writer.write(MQTTSubscription(topicFilter: "alerts/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .exactlyOnce)))
     }
     let codes: [UInt8] = [1, 2]
     var count = 0
@@ -93,17 +80,6 @@ let conventionalPublishes: [ConventionalPublish] = (0..<packetCount).map { index
         duplicate: false, qos: 1, retain: false, topic: topics[index % topics.count], packetIdentifier: UInt16(index % 65_535 + 1),
         properties: [.messageExpiryInterval(60), .userProperty(unitName, unitValue)], payload: payload
     )
-}
-
-/// Records bandwidth and packet rate for one pass over `byteCount` bytes and `packets` packets.
-func measure(_ benchmark: Benchmark, byteCount: Int, packets: Int, _ body: () throws -> Void) rethrows {
-    let clock = ContinuousClock()
-    let start = clock.now
-    try body()
-    let elapsed = clock.now - start
-    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) * 1e-18
-    benchmark.measurement(.bandwidth, Int(Double(byteCount) / seconds / 1e6))
-    benchmark.measurement(.packetRate, Int(Double(packets) / seconds / 1e3))
 }
 
 // MARK: - Copies for the all-core runs
@@ -229,7 +205,7 @@ func parsePublishesCopying(copy index: Int) {
     while let packet = try! MQTTPacket.read(from: &reader) {
         guard case let .publish(publish) = packet else { fatalError() }
         let topic = String(copying: publish.topic)
-        let body = publish.payload.withUnsafeBytes { Array($0) }
+        let body = [UInt8](copying: publish.payload)
         checksum &+= topic.utf8.count &+ body.count
         publish.properties.forEach { property in
             if case let .userProperty(name, value) = property {
@@ -331,8 +307,10 @@ let workloads: [Workload] = [
 
 let benchmarks: @Sendable () -> Void = {
     Benchmark.defaultConfiguration = .init(
-        metrics: [.wallClock, .instructions, .mallocCountTotal, .bandwidth, .packetRate],
-        units: [.bandwidth: .count, .packetRate: .count], // Unscaled, so MB/s and K packets/s read as labeled.
+        // Only the work runs inside `scaledIterations`. Bandwidth and packet rate are the framework's
+        // throughput (iterations per second) times a workload's bytes and packets per iteration: 10,000
+        // packets on one core, `copyCount` times that on every core.
+        metrics: [.wallClock, .instructions, .mallocCountTotal, .throughput],
         warmupIterations: 3,
         scalingFactor: .one,
         maxDuration: .seconds(1),
@@ -348,7 +326,7 @@ let benchmarks: @Sendable () -> Void = {
     for workload in workloads {
         Benchmark(workload.name) { benchmark in
             for _ in benchmark.scaledIterations {
-                measure(benchmark, byteCount: workload.byteCount, packets: workload.packetCount) { workload.run(0) }
+                workload.run(0)
             }
         }
     }
@@ -359,9 +337,7 @@ let benchmarks: @Sendable () -> Void = {
     for workload in workloads {
         Benchmark("\(workload.name), \(cores) cores") { benchmark in
             for _ in benchmark.scaledIterations {
-                measure(benchmark, byteCount: workload.byteCount * copyCount, packets: workload.packetCount * copyCount) {
-                    DispatchQueue.concurrentPerform(iterations: copyCount, execute: workload.run)
-                }
+                DispatchQueue.concurrentPerform(iterations: copyCount, execute: workload.run)
             }
         }
     }

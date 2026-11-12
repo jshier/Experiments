@@ -49,6 +49,10 @@ final class MappedFile: Sendable {
 
     /// A pointer to `range` that remains valid as long as `self` is alive. Used only where a decode loop
     /// must outlive a single `withUnsafeBytes` scope (across suspension points).
+    ///
+    /// - Parameter range: The byte range within the file.
+    /// - Returns: A buffer over `range`; empty (with a `nil` base) for an empty file.
+    /// - Precondition: `range` lies within `0...count`.
     func stableBuffer(_ range: Range<Int>) -> UnsafeRawBufferPointer {
         precondition(range.lowerBound >= 0 && range.upperBound <= count)
         guard let base = unsafe base else { return unsafe UnsafeRawBufferPointer(start: nil, count: 0) }

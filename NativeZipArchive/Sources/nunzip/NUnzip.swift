@@ -134,6 +134,12 @@ struct NUnzip: AsyncParsableCommand {
     }
 
     /// Applies include/exclude patterns, warning about include patterns that matched nothing.
+    ///
+    /// With no include patterns, every entry is included; exclude patterns then remove entries.
+    ///
+    /// - Parameter entries: The archive's entries.
+    /// - Returns: The entries that match an include pattern (if any) and no exclude pattern.
+    /// - Throws: `ExitCode(11)` if patterns were given and no entries remain.
     private func select(from entries: [ZipEntry]) throws -> [ZipEntry] {
         let flags = ignoreCase ? FNM_CASEFOLD : 0
         func matches(_ pattern: String, _ path: String) -> Bool {

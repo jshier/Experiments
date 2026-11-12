@@ -31,6 +31,10 @@ reproducers live outside the repo, in `~/Downloads/swift-bugs/` (numbered `NN-sw
   loop (and `Tools/counters --mode simd_fp_unit_instructions` shows SIMD work at run time); "no
   allocations" means a zero-malloc threshold passes (and `Tools/allocations` explains any that don't).
 - Don't touch project READMEs beyond what the user asks: they're for humans. Don't commit unless asked.
+- Code builds without warnings (sources, tests, and benchmark targets, with Xcode's toolchain), unless the
+  warning is the point of an experiment or compiler investigation. Check with `swift build --build-tests`
+  after touching the files (an incremental build doesn't repeat warnings for files it doesn't recompile).
+  In tests, `#expect(throws:) { _ = try … }` for calls whose result is only there to throw.
 - Swift style here: public API `@inlinable` (but measure: it can change codegen), `sending` over
   `@Sendable` where it fits, every `unsafe` expression with a comment saying why it's safe.
 - Executables that take options use [swift-argument-parser](https://github.com/apple/swift-argument-parser)
@@ -296,13 +300,74 @@ table) counts syscalls without the breakpoint perturbation.
 Enums: big `switch`es over payload enums in hot code can get poorly optimized; the MQTT fix was per-type
 `init(parsing:)`/`write(to:)` with a single dispatch (`MQTT/Sources/MQTT/Framing.swift`).
 
+Old and new code in one benchmark run (variants of a function chosen by a constant `Bool`, so one run
+compares them without drift): check that each variant really is specialized. LLVM's function merging can
+fold the two copies back into one `merged …` function taking the constant as a parameter, and a closure
+that captures the flag is specialized once, taking it at run time: both variants then test it in their
+hot loop. Look for `merged` symbols (`nm --defined-only X.o | xcrun swift-demangle | grep merged`), and pass
+the constant as a literal at the inlined call inside the closure (BinaryParsingComparison's LZ4). Likewise
+don't measure a new path and its reference in one function behind a run-time flag: changing one path moved
+the other's register allocation (an unchanged reference went 70 → 102 K instructions). Give each its own
+`@inline(never)` function over a shared `@inline(__always)` body. And compare instruction counts across two
+builds of a harness with care: identical code differed by a constant ~1.3 K per iteration between them.
+
+Rare paths stay out of line even when they're the thing being optimized: Bytes' faster short-distance
+back-reference, inlined, grew DEFLATE's decode loop 15% and cost 12–14% on text, where it never runs. As a
+static function taking values (Bytes' slow-path pattern), it kept its gain (−38% on pixel runs) at no cost
+elsewhere. Check the hot loop's size with `Tools/loops` before and after.
+
+`@inlinable` doesn't mean inlined: a new `BytesWriter` initializer, only `@inlinable`, was called out of line
+from NativeZip's decode function (789 → 891 instructions, the writer returned through memory). Anything a
+hot function calls once per entry, initializers included, should be `@inline(__always)`; check with
+`Tools/calls … --callee init` after adding API.
+
+Constant vectors: `SIMD16<UInt8>` array literals (`[0, 16, 32, …]`) inside inlinable library code compiled
+to calls to `SIMD.init(_:)` in the caller's loop (Base64's decoder: 3 calls per block, then 5 per call for
+its table, ~1,200 instructions); in other functions the same literals folded. Write them as `Byte16`
+literals (bytes in memory order, `0x00_10_20_…`) and take `.vector`: integer constants always fold. Check
+new kernels with `Tools/calls … --callee 'SIMD.init'`.
+
+LLVM narrows loads to the lanes a shuffle uses: the first round of `uzp1`s needs only the even bytes, so a
+64-byte block feeding `ByteLanes.deinterleave` was loaded as 8-, 4-, 2-, and 1-byte lane loads (`ld1.b`,
+`mov.h`, `ext`): 91 instructions per block against 45. An empty `asm` on the vectors before the shuffle
+(`CBytesNEON.h`) keeps the loads whole.
+
+Shifts bind tighter than multiplication in Swift: `count &* 3 &>> 2` is `count &* (3 &>> 2)`, which is 0.
+Parenthesize (`(count &* 3) &>> 2`).
+
+On M3, NEON `ld4`/`st3` didn't beat `uzp` and `tbl` shuffles for Base64 decoding (C, 12.9 against 12.5
+GB/s): the loop is bound by vector-pipe micro-ops, and each `tbl`/`tbx` costs one per table register. Count
+those (a 64-byte `tbx` is 4) when choosing a lookup: Base64's decoder went from a 128-byte table (`tbl` +
+`tbx` on 64 each) to an 80-byte window (64 + 16), 69 to 61 micro-ops per block, +11%.
+
+Closures passed to a generic `throws(E)` parameter: unannotated, `{ x in … }` is inferred as
+`throws(any Error)` (Swift 6.4, without `FullTypedThrows`), and such a closure wasn't inlined into Bytes'
+array builder: the writer went through memory, +3% instructions. Annotated `{ (x) throws(BytesError) in … }`,
+it was inlined. An overload taking only `throws(BytesError)` doesn't fix it: the unannotated closure still
+infers `any Error`, then fails to convert. Annotate the error type of closures in hot code. (The builder
+itself now reserves an empty array and appends, through the standard library's specialized
+`append(addingCapacity:)`, where both forms measure the same.)
+
+The standard library's `[UInt8](capacity:initializingWith:)` (the `OutputSpan` initializer) and
+`init(unsafeUninitializedCapacity:)` allocate through an unspecialized function: ~500 instructions and ~27
+ns per array more than `reserveCapacity` then `append(addingCapacity:)`, or `Array(UnsafeRawBufferPointer)`,
+at any size. For small arrays in hot code, use those.
+
 ## Benchmarks (ordo-one/package-benchmark)
 
 - Run: `swift package --disable-sandbox benchmark [--filter REGEX]`; save: `… baseline update NAME`;
   compare: `… baseline compare A B` or `Tools/bench-table PKG A B`. Thresholds: `… thresholds update`.
 - `baseline read --filter` is ignored (bench-table filters itself). JMH export requires the built-in
   throughput metric. Markdown units vary (K/M, μs/ms): bench-table normalizes.
-- A custom metric named `.throughput` collides with the built-in: name it otherwise (`.inputThroughput`).
+- **Only the work goes inside `for _ in benchmark.scaledIterations`**: no clocks, no `benchmark.measurement`
+  calls, no fixture lookups (dictionaries, removing and reinserting buffers), no result checks. Prepare
+  fixtures before registering (Base64's `Fixture`: inputs and raw output buffers made once), check results
+  once before registering, and capture what the loop needs. For bytes or packets per second, use the
+  framework's `.throughput` (iterations per second, measured outside the loop) times the work per
+  iteration, stated in the benchmark's name or a comment; don't time inside the loop with a custom metric.
+  The one exception is MQTTSocketStream's socket transfers, which report the transfer's own timing (first
+  listener to last end of stream, so starting executor threads isn't counted).
+- A custom metric named `.throughput` collides with the built-in: name it otherwise.
 - The malloc interposer costs ~10% on large transfers: keep allocation and timing benchmarks separate.
 - Closure type ambiguity in `Benchmark(...) { benchmark in }`: annotate `(benchmark: Benchmark) in`.
 - `--filter` must match the whole benchmark name (`'.*Bytes.*'`, not `'Bytes'`); a filter that matches

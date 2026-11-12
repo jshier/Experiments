@@ -4,13 +4,13 @@ import Bytes
 
 // MARK: - P: one closure to write a new array
 
-public extension Array where Element == UInt8 {
+public extension [UInt8] {
     /// A new array of what `body` writes, with room for `byteCapacity` bytes.
     @inlinable @inline(always)
     init<E: Error>(
         byteCapacity: Int, bitOrder: BitOrder = .mostSignificantFirst, writing body: (inout BytesWriter) throws(E) -> Void
     ) throws(E) {
-        try self.init(capacity: byteCapacity) { (output) throws(E) in
+        try self.init(capacity: byteCapacity) { output throws(E) in
             try output.withBytesWriter(bitOrder: bitOrder, body)
         }
     }
@@ -52,7 +52,7 @@ public extension BytesReader {
         _ body: (Tag.Integer, inout BytesReader) throws(BytesError) -> Void
     ) throws(BytesError) {
         while !isAtEnd {
-            try atomically { (reader) throws(BytesError) in
+            try atomically { reader throws(BytesError) in
                 let tag = try reader.read(Tag.self, byteOrder)
                 var section = try reader.read(sectionPrefixedBy: Length.self, byteOrder)
                 try body(tag, &section)
@@ -65,7 +65,7 @@ public extension BytesReader {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func read(minimal _: LEB128.Type, maxByteCount: Int) throws(BytesError) -> UInt64 {
-        try atomically { (reader) throws(BytesError) in
+        try atomically { reader throws(BytesError) in
             let start = reader.byteOffset
             let value = try reader.read(LEB128.self, maxByteCount: maxByteCount)
             guard reader.byteOffset &- start == LEB128.byteCount(of: value) else { throw .invalidValue }
@@ -131,14 +131,18 @@ public struct Header { public var kind: UInt16; public var length: UInt32; publi
 @inline(never) public func signedBefore(_ span: RawSpan) throws(BytesError) -> Int64 {
     var reader = BytesReader(span)
     var sum: Int64 = 0
-    while reader.remainingByteCount >= 4 { sum &+= Int64(try Int32(bitPattern: reader.read(Byte4.self, .littleEndian))) }
+    while reader.remainingByteCount >= 4 {
+        try sum &+= Int64(Int32(bitPattern: reader.read(Byte4.self, .littleEndian)))
+    }
     return sum
 }
 
 @inline(never) public func signedAfter(_ span: RawSpan) throws(BytesError) -> Int64 {
     var reader = BytesReader(span)
     var sum: Int64 = 0
-    while reader.remainingByteCount >= 4 { sum &+= Int64(try reader.readSigned(Byte4.self, .littleEndian, as: Int32.self)) }
+    while reader.remainingByteCount >= 4 {
+        try sum &+= Int64(reader.readSigned(Byte4.self, .littleEndian, as: Int32.self))
+    }
     return sum
 }
 
@@ -150,7 +154,7 @@ public struct Header { public var kind: UInt16; public var length: UInt32; publi
         let id = try extra.read(Byte2.self, .littleEndian)
         var field = try extra.read(sectionPrefixedBy: Byte2.self, .littleEndian)
         if id == 0x5455, field.remainingByteCount >= 5, try field.read(Byte.self)[bit: 0] {
-            sum &+= Int64(try Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
+            try sum &+= Int64(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
         }
     }
     return sum
@@ -159,9 +163,9 @@ public struct Header { public var kind: UInt16; public var length: UInt32; publi
 @inline(never) public func recordsAfter(_ span: RawSpan) throws(BytesError) -> Int64 {
     var extra = BytesReader(span)
     var sum: Int64 = 0
-    try extra.forEachRecord(tag: Byte2.self, length: Byte2.self, .littleEndian) { (id, field) throws(BytesError) in
+    try extra.forEachRecord(tag: Byte2.self, length: Byte2.self, .littleEndian) { id, field throws(BytesError) in
         if id == 0x5455, field.remainingByteCount >= 5, try field.read(Byte.self)[bit: 0] {
-            sum &+= Int64(try Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
+            try sum &+= Int64(Int32(bitPattern: field.read(Byte4.self, .littleEndian)))
         }
     }
     return sum
@@ -169,7 +173,9 @@ public struct Header { public var kind: UInt16; public var length: UInt32; publi
 
 @inline(never) public func padBefore(_ buffer: UnsafeMutableRawBufferPointer, _ count: Int) throws(BytesError) -> Int {
     var writer = unsafe BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
-    for _ in 0..<count { try writer.write(0x3D as Byte) }
+    for _ in 0..<count {
+        try writer.write(0x3D as Byte)
+    }
     return writer.byteCount
 }
 

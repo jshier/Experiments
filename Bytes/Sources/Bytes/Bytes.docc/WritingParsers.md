@@ -68,12 +68,12 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
 
         // A fixed-size header read as its own cursor: its length is a constant the optimizer can see,
         // so every field read inside it needs no bounds check of its own.
-        var header = BytesReader(try reader.read(byteCount: 5))
+        var header = try reader.readSection(byteCount: 5)
         try header.expect(0x53_52 as Byte2)
         let version = try header.read(Nibble.self)
         guard version == 1 else { throw .invalidValue }
         let unit = try header.read(Unit.self, as: Crumb.self)  // throws .invalidValue for 3
-        let hasTimestamp = try header.read(Bit.self).isSet
+        let hasTimestamp = try header.read(Bool.self)
         try header.expect(Bit(0))                               // reserved
         let count = Int(try header.read(Byte2.self, .bigEndian))
 
@@ -82,7 +82,7 @@ func parseReading(_ data: RawSpan) throws(ReadingError) -> Reading {
         // A run of values: one bounds check, then a vectorized loop.
         var samples: [Int32] = []
         samples.reserveCapacity(count)
-        var run = BytesReader(try reader.read(byteCount: count * 3))
+        var run = try reader.readSection(byteCount: count * 3)
         run.forEach(Byte3.self) { sample in
             samples.append(sample.signedInteger(.bigEndian, as: Int32.self)) // 24-bit, sign-extended
         }
@@ -101,29 +101,28 @@ same position.
 
 ### Serialize
 
-Write into uninitialized storage with `withBytesWriter`, which commits exactly the bytes written. Lengths
+Write a new array with `[UInt8](byteCapacity:writing:)` (or append to one with `append(byteCapacity:writing:)`),
+which keeps exactly the bytes written; `withBytesWriter` does the same for any `OutputSpan<UInt8>`. Lengths
 that prefix their data are usually known before writing; compute them first.
 
 ```swift
 func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
     let size = 5 + (reading.timestamp == nil ? 0 : 8) + reading.samples.count * 3 + 6
-    return try [UInt8](capacity: size) { (output) throws(BytesError) in
-        try output.withBytesWriter { (writer) throws(BytesError) in
-            try writer.write(0x53_52 as Byte2)
-            try writer.write(reading.version)
-            try writer.write(reading.unit, as: Crumb.self)
-            try writer.write(Bit(reading.timestamp != nil))
-            try writer.write(Bit(0))
-            try writer.write(UInt16(reading.samples.count), as: Byte2.self, .bigEndian)
-            if let timestamp = reading.timestamp {
-                try writer.write(timestamp, as: Byte8.self, .littleEndian)
-            }
-            // A generating write: the closure is fused into one vectorized loop.
-            try writer.write(Byte3.self, .bigEndian, count: reading.samples.count) {
-                UInt32(bitPattern: reading.samples[$0])
-            }
-            try writer.write(reading.sensor)
+    return try [UInt8](byteCapacity: size) { (writer) throws(BytesError) in
+        try writer.write(0x53_52 as Byte2)
+        try writer.write(reading.version)
+        try writer.write(reading.unit, as: Crumb.self)
+        try writer.write(reading.timestamp != nil)
+        try writer.write(Bit(0))                               // reserved
+        try writer.write(UInt16(reading.samples.count), as: Byte2.self, .bigEndian)
+        if let timestamp = reading.timestamp {
+            try writer.write(timestamp, as: Byte8.self, .littleEndian)
         }
+        // A generating write: the closure is fused into one vectorized loop.
+        try writer.write(Byte3.self, .bigEndian, count: reading.samples.count) {
+            UInt32(bitPattern: reading.samples[$0])
+        }
+        try writer.write(reading.sensor)
     }
 }
 ```
@@ -157,13 +156,18 @@ The MQTT package next to this one (`../MQTT`) parses and encodes every MQTT 5.0 
 - **Keep cursors local, or pass them `inout` to inlinable code.** A cursor passed `inout` to a closure
   or function the compiler doesn't inline lives in memory: every read then loads and stores its offset,
   and loops stop vectorizing. Most parsers are a few local functions in one module, which is fine.
-- **Read fixed-size records as sub-cursors** (`BytesReader(try reader.read(byteCount: n))`). Their bounds checks
+- **Read fixed-size records as sub-cursors** (`try reader.readSection(byteCount: n)`). Their bounds checks
   fold to one per record.
 - **Loop over runs with `forEach`, generating writes, or bulk reads/writes**, not field by field with
   calls the compiler can't see through. Plain loops of single reads and writes also vectorize when the
   cursor is local.
 - **Bits one at a time are inherently sequential.** For runs of bit fields, use `forEach(Nibble.self)` or
   `write(Nibble.self, count:)`, which work a byte or block at a time.
+- **Fields that fill a byte: read the `Byte`, then take it apart.** Each sub-byte read (`read(Bool.self)`,
+  `read(Crumb.self)`, …) takes the general bit path, a bounds check, a two-byte window, and an
+  advance, even at a byte boundary. Read the whole ``Byte`` once and split it with `[bit:]`,
+  `[Crumb.self, at:]`, `highHalf`/`lowHalf`, or ``Bits/matches(_:mask:)``, and pack a `Byte` before writing
+  it. In MQTT's flag bytes that was a third of the code, and 15.6% of the whole parse.
 - **Little-endian is free** on Apple platforms; big-endian adds a byte swap, which vectorizes.
 - **`for`-`in` works** (``BytesReader`` and its `values(of:)` views are `Iterable`), but typed views decode
   into a buffer first. For hot loops over decoded values, prefer `forEach`. For bytes, or 4-byte custom

@@ -155,7 +155,9 @@ func registerWriteBenchmarks() {
     let cores = ProcessInfo.processInfo.activeProcessorCount
 
     func configuration(maxDuration: Duration) -> Benchmark.Configuration {
-        .init(metrics: [.wallClock, .instructions, .bandwidth], warmupIterations: 2, scalingFactor: .one,
+        // Bandwidth: throughput (iterations per second, the framework's) times the bytes per iteration
+        // (4 MB or 512 MB, in the name). Only the writes run inside `scaledIterations`.
+        .init(metrics: [.wallClock, .instructions, .throughput], warmupIterations: 2, scalingFactor: .one,
               maxDuration: maxDuration, maxIterations: 2_000)
     }
 
@@ -166,11 +168,8 @@ func registerWriteBenchmarks() {
         ] {
             let target = UnsafeMutableRawBufferPointer(rebasing: buffer[..<(buffer.count / workload.unit * workload.unit)])
             Benchmark("Write: \(workload.name), \(label)", configuration: configuration(maxDuration: duration)) { benchmark in
-                let clock = ContinuousClock()
                 for _ in benchmark.scaledIterations {
-                    let start = clock.now
-                    let written = workload.write(target)
-                    benchmark.measurement(.bandwidth, megabytesPerSecond(written, clock.now - start))
+                    blackHole(workload.write(target))
                 }
             }
         }
@@ -179,14 +178,11 @@ func registerWriteBenchmarks() {
         let chunks = cores * 16
         let chunk = memoryWriteBuffer.count / chunks / workload.unit * workload.unit
         Benchmark("Write: \(workload.name), memory (512 MB), \(cores) cores", configuration: configuration(maxDuration: .seconds(1))) { benchmark in
-            let clock = ContinuousClock()
             for _ in benchmark.scaledIterations {
-                let start = clock.now
                 DispatchQueue.concurrentPerform(iterations: chunks) { index in
                     let slice = UnsafeMutableRawBufferPointer(rebasing: memoryWriteBuffer[index * chunk..<(index + 1) * chunk])
                     blackHole(workload.write(slice))
                 }
-                benchmark.measurement(.bandwidth, megabytesPerSecond(chunk * chunks, clock.now - start))
             }
         }
     }

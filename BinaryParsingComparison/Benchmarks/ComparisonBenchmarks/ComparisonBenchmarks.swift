@@ -40,7 +40,7 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
-    // MARK: Integers (1 MB of big-endian values)
+    // MARK: Integers (768 KB of big-endian values)
 
     var rng = SystemRandomNumberGenerator()
     let integers = (0..<(3 << 18)).map { _ in UInt8.random(in: 0...255, using: &rng) } // 768 KB: both widths fit
@@ -89,6 +89,12 @@ let benchmarks: @Sendable () -> Void = {
                 try blackHole(QOI.decodeWithBytes(data.span.bytes).pixels.count)
             }
         }
+        // The algorithm the example and the ParserSpan port use: runs a pixel per iteration.
+        Benchmark("QOI \(file): Bytes, pixel-at-a-time runs") { benchmark in
+            for _ in benchmark.scaledIterations {
+                try blackHole(QOI.decodeWithBytesPixelRuns(data.span.bytes).pixels.count)
+            }
+        }
         Benchmark("QOI \(file): ParserSpan, same algorithm") { benchmark in
             for _ in benchmark.scaledIterations {
                 try blackHole(QOI.decodeWithParserSpan(data.span.bytes).pixels.count)
@@ -108,6 +114,12 @@ let benchmarks: @Sendable () -> Void = {
         Benchmark("LZ4 \(file): Bytes") { benchmark in
             for _ in benchmark.scaledIterations {
                 try blackHole(LZ4.decodeWithBytes(data.span.bytes).count)
+            }
+        }
+        // The algorithm the ParserSpan port uses: exact literal copies.
+        Benchmark("LZ4 \(file): Bytes, exact literal copies") { benchmark in
+            for _ in benchmark.scaledIterations {
+                try blackHole(LZ4.decodeWithBytesExactLiterals(data.span.bytes).count)
             }
         }
         Benchmark("LZ4 \(file): ParserSpan, same algorithm") { benchmark in

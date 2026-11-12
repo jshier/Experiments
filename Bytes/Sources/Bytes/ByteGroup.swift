@@ -36,7 +36,8 @@ public protocol ByteGroup: BitwiseCopyable, Hashable, Sendable, ExpressibleByArr
     var bigEndian: Integer { get }
 
     /// Creates a value from the low `byteCount` bytes of `value`, least significant byte first.
-    /// Higher bytes are discarded.
+    ///
+    /// - Parameter value: The integer; bytes above `byteCount` are discarded.
     init(littleEndian value: Integer)
 }
 
@@ -52,7 +53,8 @@ public extension ByteGroup {
     }
 
     /// Creates a value from the low `byteCount` bytes of `value`, most significant byte first.
-    /// Higher bytes are discarded.
+    ///
+    /// - Parameter value: The integer; bytes above `byteCount` are discarded.
     @inlinable
     init(bigEndian value: Integer) {
         // Byte-swapping moves the low `byteCount` bytes to the top; shifting brings them back down, reversed.
@@ -60,6 +62,9 @@ public extension ByteGroup {
     }
 
     /// The bytes read as an integer in `byteOrder`.
+    ///
+    /// - Parameter byteOrder: Which end holds the most significant byte.
+    /// - Returns: The integer, with the group's bytes in its low `byteCount` bytes.
     @inlinable @inline(__always)
     func integer(_ byteOrder: ByteOrder) -> Integer {
         switch byteOrder {
@@ -75,6 +80,10 @@ public extension ByteGroup {
     /// let sample = try reader.read(Byte3.self).signedInteger(.bigEndian, as: Int32.self) // FF FF FE → -2
     /// ```
     ///
+    /// - Parameters:
+    ///   - byteOrder: Which end holds the most significant byte.
+    ///   - type: The signed integer type to return; defaults to `Int`.
+    /// - Returns: The sign-extended value.
     /// - Precondition: `I` is at least as wide as the group.
     @inlinable @inline(__always)
     func signedInteger<I: FixedWidthInteger & SignedInteger>(_ byteOrder: ByteOrder, as _: I.Type = Int.self) -> I {
@@ -85,6 +94,10 @@ public extension ByteGroup {
     }
 
     /// Creates a value from the low `byteCount` bytes of `value`, in `byteOrder`.
+    ///
+    /// - Parameters:
+    ///   - value: The integer; bytes above `byteCount` are discarded.
+    ///   - byteOrder: Which end of the group holds `value`'s most significant byte.
     @inlinable @inline(__always)
     init(_ value: Integer, _ byteOrder: ByteOrder) {
         switch byteOrder {
@@ -94,6 +107,9 @@ public extension ByteGroup {
     }
 
     /// The byte at `index`, in memory order.
+    ///
+    /// - Parameter index: The byte's position, 0 through `byteCount - 1`.
+    /// - Precondition: `index` is in range.
     @inlinable
     subscript(index: Int) -> UInt8 {
         get {
@@ -117,20 +133,52 @@ public extension ByteGroup {
     /// ```swift
     /// let unmasked = payload ^ maskingKey      // Byte4s
     /// ```
+    ///
+    /// - Parameters:
+    ///   - lhs: The first operand.
+    ///   - rhs: The second operand.
     @inlinable @inline(__always)
     static func ^(lhs: Self, rhs: Self) -> Self { Self(littleEndian: lhs.littleEndian ^ rhs.littleEndian) }
 
     /// The bitwise AND of each byte.
+    ///
+    /// - Parameters:
+    ///   - lhs: The first operand.
+    ///   - rhs: The second operand.
     @inlinable @inline(__always)
     static func &(lhs: Self, rhs: Self) -> Self { Self(littleEndian: lhs.littleEndian & rhs.littleEndian) }
 
     /// The bitwise OR of each byte.
+    ///
+    /// - Parameters:
+    ///   - lhs: The first operand.
+    ///   - rhs: The second operand.
     @inlinable @inline(__always)
     static func |(lhs: Self, rhs: Self) -> Self { Self(littleEndian: lhs.littleEndian | rhs.littleEndian) }
 
     /// Each byte's bits inverted.
+    ///
+    /// - Parameter value: The operand.
     @inlinable @inline(__always)
     static prefix func ~(value: Self) -> Self { Self(littleEndian: ~value.littleEndian) }
+
+    /// Whether the bits selected by `mask` equal `value`'s: a header's version and must-be-zero bits
+    /// checked in one test. Both are in memory order, like any group literal.
+    ///
+    /// ```swift
+    /// // Bytes 0–1: anything; byte 2: 0x01; byte 3: top bit clear.
+    /// guard header.matches(0x00_00_01_00, mask: 0x00_00_FF_80) else { … }
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - value: The expected bits, with every bit outside `mask` clear (checked by an assertion).
+    ///   - mask: The bits to compare.
+    /// - Returns: `true` if `self & mask == value`.
+    @inlinable @inline(__always)
+    func matches(_ value: Self, mask: Self) -> Bool {
+        assert(value & ~mask == Self(littleEndian: 0), "The value has bits outside the mask")
+        return self & mask == value
+    }
 
     @inlinable @inline(__always)
     static func ^=(lhs: inout Self, rhs: Self) { lhs = lhs ^ rhs }
@@ -154,6 +202,8 @@ public extension ByteGroup {
     }
 
     /// Replaces the first `H.byteCount` bytes.
+    ///
+    /// - Parameter half: The new first bytes.
     @inlinable @inline(__always)
     internal mutating func _setLowHalf<H: ByteGroup>(_ half: H) {
         let mask = Integer(truncatingIfNeeded: H._mask)
@@ -161,6 +211,8 @@ public extension ByteGroup {
     }
 
     /// Replaces the last `H.byteCount` bytes.
+    ///
+    /// - Parameter half: The new last bytes.
     @inlinable @inline(__always)
     internal mutating func _setHighHalf<H: ByteGroup>(_ half: H) {
         let shift = 8 &* H.byteCount
@@ -191,6 +243,10 @@ public extension Byte2 {
     }
 
     /// Creates a group from its two bytes, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first byte.
+    ///   - highHalf: The second byte.
     @inlinable
     init(lowHalf: Byte, highHalf: Byte) {
         self.init(littleEndian: UInt16(highHalf.rawValue) &<< 8 | UInt16(lowHalf.rawValue))
@@ -203,6 +259,10 @@ public extension Byte4 {
     /// The last two bytes.
     @inlinable var highHalf: Byte2 { get { _highHalf(Byte2.self) } set { _setHighHalf(newValue) } }
     /// Creates a group from its two halves, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first two bytes.
+    ///   - highHalf: The last two bytes.
     @inlinable init(lowHalf: Byte2, highHalf: Byte2) {
         self.init(littleEndian: UInt32(highHalf.littleEndian) &<< 16 | UInt32(lowHalf.littleEndian))
     }
@@ -214,6 +274,10 @@ public extension Byte6 {
     /// The last three bytes.
     @inlinable var highHalf: Byte3 { get { _highHalf(Byte3.self) } set { _setHighHalf(newValue) } }
     /// Creates a group from its two halves, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first three bytes.
+    ///   - highHalf: The last three bytes.
     @inlinable init(lowHalf: Byte3, highHalf: Byte3) {
         self.init(littleEndian: UInt64(highHalf.littleEndian) &<< 24 | UInt64(lowHalf.littleEndian))
     }
@@ -225,6 +289,10 @@ public extension Byte8 {
     /// The last four bytes.
     @inlinable var highHalf: Byte4 { get { _highHalf(Byte4.self) } set { _setHighHalf(newValue) } }
     /// Creates a group from its two halves, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first four bytes.
+    ///   - highHalf: The last four bytes.
     @inlinable init(lowHalf: Byte4, highHalf: Byte4) {
         self.init(littleEndian: UInt64(highHalf.littleEndian) &<< 32 | UInt64(lowHalf.littleEndian))
     }
@@ -236,6 +304,10 @@ public extension Byte10 {
     /// The last five bytes.
     @inlinable var highHalf: Byte5 { get { _highHalf(Byte5.self) } set { _setHighHalf(newValue) } }
     /// Creates a group from its two halves, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first five bytes.
+    ///   - highHalf: The last five bytes.
     @inlinable init(lowHalf: Byte5, highHalf: Byte5) {
         self.init(littleEndian: UInt128(highHalf.littleEndian) &<< 40 | UInt128(lowHalf.littleEndian))
     }
@@ -247,6 +319,10 @@ public extension Byte12 {
     /// The last six bytes.
     @inlinable var highHalf: Byte6 { get { _highHalf(Byte6.self) } set { _setHighHalf(newValue) } }
     /// Creates a group from its two halves, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first six bytes.
+    ///   - highHalf: The last six bytes.
     @inlinable init(lowHalf: Byte6, highHalf: Byte6) {
         self.init(littleEndian: UInt128(highHalf.littleEndian) &<< 48 | UInt128(lowHalf.littleEndian))
     }
@@ -258,6 +334,10 @@ public extension Byte14 {
     /// The last seven bytes.
     @inlinable var highHalf: Byte7 { get { _highHalf(Byte7.self) } set { _setHighHalf(newValue) } }
     /// Creates a group from its two halves, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first seven bytes.
+    ///   - highHalf: The last seven bytes.
     @inlinable init(lowHalf: Byte7, highHalf: Byte7) {
         self.init(littleEndian: UInt128(highHalf.littleEndian) &<< 56 | UInt128(lowHalf.littleEndian))
     }
@@ -269,13 +349,52 @@ public extension Byte16 {
     /// The last eight bytes.
     @inlinable var highHalf: Byte8 { get { _highHalf(Byte8.self) } set { _setHighHalf(newValue) } }
     /// Creates a group from its two halves, in memory order.
+    ///
+    /// - Parameters:
+    ///   - lowHalf: The first eight bytes.
+    ///   - highHalf: The last eight bytes.
     @inlinable init(lowHalf: Byte8, highHalf: Byte8) {
         self.init(littleEndian: UInt128(highHalf.littleEndian) &<< 64 | UInt128(lowHalf.littleEndian))
+    }
+
+    /// The bytes as a vector, in memory order: lane `i` is byte `i`. A bit cast, no instructions.
+    ///
+    /// Building a constant vector with a few lanes that vary at run time is cheaper this way than
+    /// with `SIMD16`'s lane initializer or subscript, which Swift 6.4 compiles to one lane insert each:
+    ///
+    /// ```swift
+    /// var last: Byte16 = 0x77_78_79_7A_30_31_32_33_34_35_36_37_38_39_00_00
+    /// last[14] = character62
+    /// last[15] = character63
+    /// let table = last.vector   // 12 scalar instructions and a move, against 16 inserts
+    /// ```
+    @inlinable @inline(__always)
+    var vector: SIMD16<UInt8> {
+        #if _endian(little)
+        bitCast(littleEndian, to: SIMD16<UInt8>.self)
+        #else
+        bitCast(littleEndian.byteSwapped, to: SIMD16<UInt8>.self)
+        #endif
+    }
+
+    /// Creates a group from a vector's lanes, in memory order: byte `i` is lane `i`.
+    ///
+    /// - Parameter vector: The 16 bytes.
+    @inlinable @inline(__always)
+    init(_ vector: SIMD16<UInt8>) {
+        #if _endian(little)
+        self.init(littleEndian: bitCast(vector, to: UInt128.self))
+        #else
+        self.init(littleEndian: bitCast(vector, to: UInt128.self).byteSwapped)
+        #endif
     }
 }
 
 public extension ByteGroup {
     /// Creates a value from exactly `byteCount` bytes, in memory order.
+    ///
+    /// - Parameter elements: The bytes.
+    /// - Precondition: `elements.count == byteCount`.
     @inlinable
     init(arrayLiteral elements: UInt8...) {
         precondition(elements.count == Self.byteCount, "\(Self.self) needs exactly \(Self.byteCount) bytes")
@@ -293,6 +412,9 @@ public extension ByteGroup {
     ///
     /// A literal with more than `byteCount` bytes is an error: at compile time for ``Byte2``, ``Byte4``,
     /// ``Byte8``, and ``Byte16``, whose integers are exactly their width; a trap for the others.
+    ///
+    /// - Parameter value: The literal's value.
+    /// - Precondition: `value` fits in `byteCount` bytes.
     @inlinable @inline(__always)
     init(integerLiteral value: Integer) {
         precondition(value <= Self._mask, "\(Self.self) literals have at most \(Self.byteCount) bytes")

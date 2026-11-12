@@ -1,6 +1,6 @@
 // MARK: - Testing 16 bytes at once
 
-/// Sixteen bytes of a span, tested together in ``Swift/RawSpan/containsByte(where:)``: build a
+/// Sixteen bytes of a span, tested together in `RawSpan.containsByte(where:)`: build a
 /// ``ByteMatches`` from ``matching(_:)`` and ``nonASCII``, combined with `|` (matches any) and `&`
 /// (matches all).
 ///
@@ -17,10 +17,16 @@
 public struct ByteLanes: Sendable {
     public var vector: SIMD16<UInt8>
 
+    /// Wraps 16 bytes for testing.
+    ///
+    /// - Parameter vector: The 16 bytes.
     @inlinable @inline(__always)
     public init(_ vector: SIMD16<UInt8>) { self.vector = vector }
 
-    /// The lanes equal to `byte`.
+    /// Tests which lanes equal `byte`.
+    ///
+    /// - Parameter byte: The byte to look for.
+    /// - Returns: The lanes equal to `byte`.
     @inlinable @inline(__always)
     public func matching(_ byte: UInt8) -> ByteMatches {
         // `x &- 1 & ~x` has its high bit set exactly when `x` is 0: 1 through 0x80 lose no high bit to the
@@ -41,6 +47,9 @@ public struct ByteMatches: Sendable {
     /// The high bit of each lane is set where it matched; the low bits are meaningless.
     public var highBits: SIMD16<UInt8>
 
+    /// Creates matches from the high bit of each lane.
+    ///
+    /// - Parameter highBits: Lanes whose high bit is set where they matched; the low bits are ignored.
     @inlinable @inline(__always)
     public init(highBits: SIMD16<UInt8>) { self.highBits = highBits }
 
@@ -48,11 +57,21 @@ public struct ByteMatches: Sendable {
     @inlinable @inline(__always)
     public static var none: Self { Self(highBits: .zero) }
 
-    /// Lanes that match either.
+    /// Combines two sets of matches into the lanes that match either.
+    ///
+    /// - Parameters:
+    ///   - lhs: One set of matches.
+    ///   - rhs: The other.
+    /// - Returns: The lanes that match `lhs` or `rhs`.
     @inlinable @inline(__always)
     public static func |(lhs: Self, rhs: Self) -> Self { Self(highBits: lhs.highBits | rhs.highBits) }
 
-    /// Lanes that match both.
+    /// Combines two sets of matches into the lanes that match both.
+    ///
+    /// - Parameters:
+    ///   - lhs: One set of matches.
+    ///   - rhs: The other.
+    /// - Returns: The lanes that match `lhs` and `rhs`.
     @inlinable @inline(__always)
     public static func &(lhs: Self, rhs: Self) -> Self { Self(highBits: lhs.highBits & rhs.highBits) }
 
@@ -72,6 +91,10 @@ public extension RawSpan {
     /// Shorter spans fill one block with overlapping loads (the first and last 8 bytes, or 4, or bytes 0,
     /// `count / 2`, and `count - 1`), which repeats some bytes but leaves none out, so they take one test
     /// too.
+    ///
+    /// - Parameter test: Builds the matches for one block of 16 bytes, from ``ByteLanes/matching(_:)`` and
+    ///   ``ByteLanes/nonASCII``. It may see some bytes more than once.
+    /// - Returns: `true` if `test` matched any byte; `false` for an empty span.
     @inlinable @inline(__always)
     func containsByte(where test: (ByteLanes) -> ByteMatches) -> Bool {
         // Checked loads: the offsets are in bounds by construction, and the checks fold away.
@@ -106,8 +129,11 @@ public extension RawSpan {
         return found.any
     }
 
-    /// Whether `self` and `other` hold the same bytes, compared 16 at a time as
-    /// ``containsByte(where:)`` scans: XOR each pair of blocks, OR the differences, and check once.
+    /// Compares two spans' bytes 16 at a time, as ``containsByte(where:)`` scans: XOR each pair of
+    /// blocks, OR the differences, and check once.
+    ///
+    /// - Parameter other: The span to compare with.
+    /// - Returns: `true` if both spans have the same length and bytes.
     @inlinable @inline(__always)
     func bytesEqual(_ other: RawSpan) -> Bool {
         let count = byteCount
@@ -143,16 +169,21 @@ public extension RawSpan {
 }
 
 public extension UTF8Span {
-    /// Views `bytes` as UTF-8 in which no byte matches `excluded`, checking both in one pass in the usual
-    /// case, ASCII: bytes below 0x80 are each a whole, valid UTF-8 character, so text that's ASCII and has
-    /// no `excluded` byte needs no other check. Anything else is validated in full, then scanned for
-    /// `excluded` again.
+    /// Views `bytes` as UTF-8 in which no byte matches `excluded`, or returns `nil` if the bytes aren't
+    /// valid UTF-8 or any matches `excluded`.
+    ///
+    /// Both are checked in one pass in the usual case, ASCII: bytes below 0x80 are each a whole, valid
+    /// UTF-8 character, so text that's ASCII and has no `excluded` byte needs no other check. Anything
+    /// else is validated in full, then scanned for `excluded` again.
     ///
     /// ```swift
     /// let name = UTF8Span(validating: bytes, excluding: { $0.matching(0) }) // no U+0000
     /// ```
     ///
-    /// Returns `nil` if the bytes aren't valid UTF-8 or any matches `excluded`.
+    /// - Parameters:
+    ///   - bytes: The bytes to view.
+    ///   - excluded: Builds the matches for one block of 16 bytes, as for `RawSpan.containsByte(where:)`;
+    ///     no byte may match.
     @inlinable @inline(__always)
     @_lifetime(copy bytes)
     init?(validating bytes: RawSpan, excluding excluded: (ByteLanes) -> ByteMatches) {

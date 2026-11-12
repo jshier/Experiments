@@ -26,6 +26,217 @@ dropped so that loops of reads vectorize (see "Making loops of single reads vect
 
 No benchmark allocates, apart from the output array in the bulk ones and one `for`-`in` shape (below).
 
+## 2026-11-10: conveniences, lane shuffles for a decoder, cheaper array builders (baselines `conv-old-*` → `conv-new-*`, `builder-ab`)
+
+New API (proposals 10–14 and parts of 16–17; `Tests/BytesTests/FieldHelperTests.swift`,
+`LaneShuffleTests.swift`):
+
+- **Flags and fields:** `read(Bool.self)`, `peek(Bool.self)`, `write(_: Bool)`, `BitBuffer.read(Bool.self)`;
+  `readSigned(_:_:as:)`, `readSigned(bitCount:)` (and on `BitBuffer`), `signedBits(_:as:)`,
+  `Bits.signedValue`; `bits(from:upTo:)` (unchecked), `keepingLowBits(_:)`, `lowBitMask(_:)`;
+  `matches(_:mask:)` on integers, `Bits`, and groups, and `expect(_:mask:)`; `Bits(rawBitsOf:)`.
+- **Records and errors:** `forEachRecord(tag:length:_:_:)` (all or nothing per record, no closure inside, so
+  the cursor stays in registers); `located(_:)` and `LocatedBytesError`.
+- **Small ones:** `readRemainingBytes()`, `CRC32.checksum(_:continuing:)`, `RawSpan.hasPrefix(_:)`,
+  `Byte16.vector`/`Byte16(_: SIMD16)`, `[UInt8].append(copying:)`, `String(utf8Capacity:writing:)` (a
+  non-throwing overload too: 10 instructions per call cheaper for bodies that can't fail).
+- **Lanes, for Base64's decoder:** `ByteLanes.deinterleave` of four vectors (8 `uzp`s, as `ld4`),
+  `interleave` of three (3 `tbl`s, as `st3`), `lookup(in:keepingOutOfRange:)` (`tbx`) for 16-, 48-, and
+  64-byte tables, a 16-byte `lookup(in:)`, and a 128-byte one.
+- **`BytesWriter.position` and `rewind(to:)`**, for all-or-nothing writes (the decoder's failures).
+- **Docs:** "Fields that fill a byte: read the `Byte`, then take it apart" (`WritingParsers.md`), and the
+  examples use the new forms.
+
+Every new helper was checked against the code it replaces (`@inline(never)` pairs in a probe package,
+instructions per function): the pairs merged into one function (`read(Bool.self)`, both signed reads,
+`signedValue`, `readRemainingBytes`, `Byte16.vector`, `append(copying:)`) or the new form was shorter:
+`keepingLowBits` 6 against 8, `bits(from:upTo:)` 5 against 8 (and 23 for the checked subscript),
+`CRC32.checksum(_:continuing:)` 6 against 12, `matches` 8 against 10, `hasPrefix` 14 against 34,
+`forEachRecord` 64 against 80. `located` in a `catch` adds 13 instructions to the function, all on the
+error path.
+
+Inside Bytes, the masks in `write(repeating:byteCount:count:)`, the run pattern, and `LEB128.maxValue` use
+`keepingLowBits`/`lowBitMask` (runs of 3- and 4-byte elements −2.0 to −2.6% instructions; the rest
+unchanged), and HuffmanTable's root lookup uses `bits(from:upTo:)` (same 138 instructions). Not
+`write(_:bitCount:)`: with a run-time bit count, a loop of those writes grew from 146 to 169 instructions
+(LLVM split the function's paths differently), so it keeps the explicit mask.
+
+The comparators now use the new API where Bytes code would (`readSection`, `forEachRecord`,
+`readSigned`, `[bit: 0]`):
+
+| Benchmark | Instructions | Time (rounds 1 / 2) |
+|---|---|---|
+| Fields: Bytes | 300.6 → 284.6 K (−5.3%) | −5.2% / −6.0% |
+| Fields: Bytes, position and rewind / in `atomically` | −5.2% / −5.3% | −3 to −8% |
+| Fields: fixed-size records | unchanged (198.6 K) | within noise |
+| Runs, back-references, other fields rows | within ±0.3% | within noise |
+
+**Array builders.** The standard library's `[UInt8](capacity:initializingWith:)` (and
+`init(unsafeUninitializedCapacity:)`) allocate through an unspecialized function: about 500 instructions
+and 27 ns more per array than `reserveCapacity` then `append(addingCapacity:)`, at 40 bytes and at 1 KB
+alike (a standalone driver). `[UInt8](byteCapacity:writing:)` now reserves and appends, and
+`[UInt8](copying:)` uses `Array(UnsafeRawBufferPointer)`:
+
+| Benchmark (`builder-ab`, `old5` against now) | Instructions |
+|---|---|
+| Array builder: 1,000 38-byte arrays, `[UInt8](byteCapacity:writing:)` | 1,696 → 1,228 K (−27.6%) |
+| …closure not annotated | 1,748 → 1,228 K (−29.8%): annotating no longer matters |
+| …`[UInt8](capacity:)` + `withBytesWriter` (the old form, unchanged) | 1,696 K |
+
+`[UInt8](copying:)` had been copying through `init(unsafeUninitializedCapacity:)`: once MQTT's copying
+benchmark used it, it ran 17.5% more instructions (about 590 per packet) until the change above.
+
+**Harness.** The bandwidth and write benchmarks no longer time inside `scaledIterations`: they report the
+framework's throughput (iterations per second); bandwidth is that times the bytes per iteration in the
+name.
+
+## 2026-11-09: runs, copies from a reader, short copies, minimal LEB128 (baseline `runs-copies-1`)
+
+The four highest-value proposals from `Proposals/INDEX.md` (1, 2, 3, 5), implemented:
+
+- `write(_: RawSpan)` copies 33–64 bytes inline (four overlapping 16-byte moves) instead of calling
+  `memmove`.
+- `write(repeating:count:)` for a `Byte` or any `ByteGroup`, and `write(repeating:byteCount:count:)` for a
+  1–8-byte element whose size is known only at run time. Capacity is checked once; the element is repeated
+  across 16 bytes in whole copies and stored 16 bytes at a time (`stp`); byte runs over 256 call `memset`.
+- `write(from: &reader, byteCount:allowingOverrun:)`: LZ4's literal copy. With room in both cursors, 16-byte
+  steps (one `ldr q`/`str q` for up to 16 bytes, a 5-instruction loop) that may overwrite up to 15 bytes
+  after the copy; otherwise exact.
+- `requiringMinimal:` on `read(LEB128.self…)`, `read(bytesPrefixedBy: LEB128.self…)`, and
+  `read(sectionPrefixedBy: LEB128.self…)`: one compare in the out-of-line multi-byte loop (a last byte of
+  zero after others is padding).
+
+Measured by `Benchmarks/BytesBenchmarks/RunsAndCopies.swift`: each new form next to the code it replaces,
+in the same run, filling or reading 64 KB (values below are per 64 KB; widths and sizes are run-time
+values). All allocate nothing (thresholds recorded).
+
+| Workload (64 KB) | New | Before (same run) | Change |
+|---|---|---|---|
+| Runs of 3-byte elements, 1–62 each (QOI RGB) | 129 K instr, 6.3 µs | one 8-byte overrun store per element: 174 K, 8.6 µs | −26% instr, −28% time |
+| Runs of 4-byte elements, 1–62 each (QOI RGBA) | 89 K, 4.2 µs | 150 K, 7.5 µs | −41%, −44% |
+| Runs of `Byte3`, 1–62 each (width known) | 93 K, 4.6 µs | generating `write(Byte3.self, count:)`: 100 K, 5.3 µs | −7%, −14% |
+| Byte runs, 8 / 40 / 1,000 each | 304 K, 10 µs / 71 K, 2.7 µs / 8.6 K, 1.3 µs | generating write: 304 K, 17 µs / 81 K, 6.3 µs / 8.1 K, 1.3 µs | time −41% / −57% / equal (both `memset`) |
+| Literals of 0–15 bytes (~8,700 copies) | 257 K, 10 µs (30 instr each) | `write(reader.read(byteCount:))`: 474 K, 18 µs (54 each) | −46%, −44% |
+| Literals of 16–64 bytes (~1,600) | 67 K, 4.1 µs | 101 K, 5.2 µs | −34%, −21% |
+| 40-byte span copies (1,638) | 110 K, 2.8 ns each | `memmove`: 127 K, 4.3 ns; two writes ≤ 32: 173 K, 4.1 ns | −13% instr, −34% time |
+| 48-byte | 92 K, 2.9 ns | `memmove`: 111 K, 4.7 ns; split: 144 K, 4.2 ns | −17%, −38% |
+| 63-byte | 70 K, 3.1 ns | `memmove`: 118 K, 7.3 ns; split: 111 K, 4.0 ns | −41%, −57% |
+| 64-byte | 69 K, 3.1 ns | `memmove`: 76 K, 3.0 ns | equal (an aligned size `memmove` handles well) |
+| LEB128, 1–4 bytes (~35 K values), `requiringMinimal: true` | 2,273 K, 103 µs | read, then compare with `byteCount(of:)` (MQTT's check): 2,396 K, 111 µs | −5%; +4% over an unchecked read (2,185 K) |
+
+In the consumers (interleaved runs of the old and new trees, baselines `ab-old-*`/`ab-new-*` in each):
+LZ4 −26% instructions and −42% time (`swift-help.lz4`), QOI `tricolor.qoi` −77% and −70%, Base64's 40–47-byte
+inputs −18% and −18% (after its `writeShort` workaround, now removed), MQTT's PUBLISH encoding −10% and −13%
+(its 64-byte payloads were `memmove`d), MQTT parsing −1.6 to −2.6% instructions. See each package's RESULTS.md.
+
+### Follow-ups: short-distance back-references, a cheaper pattern (baselines `fu3-old-*` → `fu3-new-*`)
+
+- **`copy(fromDistance:count:)` for distances 2–7** is now a run of the last `distance` bytes: one load,
+  then the run fill's 16-byte stores (libdeflate does the same). It copied a byte at a time, each byte
+  waiting on one just stored. The overrun form falls back to it for distances under 8, so DEFLATE and LZ4
+  matches use it too.
+- **The pattern** for a 1–8-byte element is two multiplies: the element times a constant with a 1 at
+  each copy's first bit gives the low 8 bytes, and the element rotated by `8 % period` bytes gives the
+  high 8 bytes. One `switch` gives the constant, rotation, and step. It compiles to a branch tree, not a
+  table, which is still cheaper than doubling a 128-bit value (16 instructions per doubling).
+
+Interleaved runs of the tree before these changes and after, two rounds; instructions are exact minimums,
+times from round 2:
+
+| Workload | Instructions | Time |
+|---|---|---|
+| Back-references 2–7 bytes back, 3–258 bytes each (~490 per 64 KB) | −69 to −77% | −80 to −94% |
+| …3–32 bytes each (~3,600) | −2 to −21% | −36 to −59% |
+| Back-references 1 back (`memset`, unchanged) and 8 back (control) | +1 to +21%: a constant ~1.3 K difference between the two benchmark binaries, plus noise on 34 K | ±3% |
+| Runs of 3- / 4-byte elements, 1–62 each | −20% / −15% | within noise: the fill is store-bound |
+| NativeZip: inflate 32 MB of pixel runs (new fixture) | −38% (227 → 141 M) | 18 → 9.2 ms (−49%), level with zlib (9.8 ms) |
+| NativeZip: inflate 32 MB text, 2,000 small files | +0.0%, +0.1% | unchanged |
+| QOI `tricolor.qoi` (run fills of 3-byte pixels) | 1.52 → 1.32 M (−13%) | within the run's drift |
+| LZ4 | ±0.7% | noise |
+
+Two things that went wrong first, both fixed:
+
+- **Inlined, the short-distance fill slowed the common case.** It made NativeZip's `decodeSymbols` loop
+  743 → 853 instructions and its text and small-file inflates +12–14% instructions, where almost every
+  match is 8 or more bytes back. Now it's out of line (`_copyRepeating`, static, taking values, like the
+  other slow paths), and the loop is 722 instructions (743 before any of this): the old byte loop moved
+  out too.
+- **Distance 1 through that function** (`memset` for more than 64 bytes, the fill below) cost 21% more
+  on long runs through the extra call, and short runs gained nothing. It's back to the inline `memset` it
+  was.
+
+The run benchmarks first measured the new path and its reference in one function behind a run-time flag.
+Changing the new path moved the reference's register allocation (the `Byte3` generating write 70 → 102 K
+instructions, unchanged source), so each is now its own `@inline(never)` function. Allocation thresholds
+for the back-reference workloads: 0.
+
+## 2026-11-09: inline span writes, array builders, one-check prefixed sections (baselines `bcd2-old-*` → `bcd2-new-*`)
+
+- **`write(_: RawSpan)` is `@inline(__always)`**, with copies over 64 bytes in an out-of-line `_copyLong`
+  (`memmove`). It was `@inlinable` and stayed a call: MQTT's encoder made three per packet, Base64 two
+  per input, and both LZ4 ports one per literal run.
+- **`[UInt8](byteCapacity:writing:)` and `append(byteCapacity:writing:)`**: one closure instead of
+  `[UInt8](capacity:)` plus `withBytesWriter`. Generic over the error type. **Annotate the closure in hot
+  code** (`{ (writer) throws(BytesError) in … }`): unannotated, Swift 6.4 infers `throws(any Error)`, and
+  that closure wasn't inlined. The writer went to it through memory with its unaligned slow paths, for
+  +3% here. A `BytesError`-only overload doesn't help: the unannotated closure still infers `any Error`,
+  which then doesn't convert.
+- **`read(bytesPrefixedBy:)` checks the length once** and builds the span unchecked. Before, it checked
+  in `peek`, in its own guard, and again in `read(byteCount:)`'s checked `extracting`. The LEB128 form
+  likewise. New: **`readSectionIfComplete(prefixedBy:_:)`**, which returns `nil` without consuming when
+  the section isn't all there, for tolerant parsers (zip extra fields) without `try?`.
+
+Same-run comparisons in Bytes' benchmarks (`BuildersAndSections.swift`; exact instruction counts, times from
+round 2):
+
+| Workload | Instructions | Time |
+|---|---|---|
+| 1,000 38-byte arrays: builder, closure annotated | 1,695,567 (same as the nested form, 1,695,589) | 66 µs (nested: 64) |
+| …closure not annotated | 1,747,460 (+3%) | 72 µs |
+| 64 KB of prefixed sections: `read(sectionPrefixedBy:)` | 96,559 → 74,207 (−23%); now below the hand-written form (81,585) | within noise |
+| …`readSectionIfComplete` | 70,362 (−14% against hand-written) | within noise |
+| Span copies of 24–64 bytes (`write(_: RawSpan)`) | −33 to −36% | −20 to −34% |
+| Literal copies of 0–15 bytes, overrun form | −3% | −12 to −14% |
+
+In the packages (old and new trees interleaved, two rounds): MQTT encoding −3.0% instructions and −8 to
+−11% time, parsing −2.2 to −3.2% instructions. Base64 40–47 B: −13% instructions, −14 to −18% time. LZ4
+(Bytes): −4.4%, and its exact-copy variant −21%. The `ParserSpan` LZ4 port: −15.6% instructions, −7 to
+−11% time, from its output side (Bytes' writer) alone. Zip directory (Bytes): −0.7%. NativeZip's central
+directory with `readSectionIfComplete`: +0.2% instructions, +1.7% time, against −14% in the micro-benchmark,
+so it's neutral there at best. Code size: `MQTTPublish.write(to:)` 364 → 427 instructions, `writeBody`
+127 → 294, NativeZip's `decodeSymbols` unchanged (769).
+
+## 2026-11-09: `position`/`rewind(to:)`, and cursors at an offset (baselines `pos-fields-*`)
+
+Proposals 7 and 8:
+
+- `reader.position` (a `BytesReader.Position`: byte and bit offset) and `rewind(to:)`, which can't fail
+  and doesn't throw: two stores and a precondition that the position isn't ahead of the cursor (which keeps
+  the invariant `_assumeInvariant` states). It replaces `let start = byteOffset … try! seek(toByteOffset:
+  start)` rollbacks, and `atomically { }` where its closure isn't inlined or can't return the result.
+- `BytesReader(span, atByteOffset:)` (any integer type: zip's `UInt64` offsets without `Int(clamping:)`),
+  `BytesReader(span, atBitPosition:)`, `BitBuffer(span, atBitPosition:bitOrder:)`, and
+  `BytesWriter(&bytes, atByteOffset:)` for a buffer passed `inout` with a prefix already written (no
+  `_mutatingExtracting(...)` plus `skip` at the call site). All `@inline(__always)`: the writer's
+  initializer, only `@inlinable` at first, was called out of line from NativeZip's `decodeSymbols` and grew
+  it from 789 to 891 instructions; inlined, it's 769.
+
+All-or-nothing entries in the 2,000-entry zip directory (field by field, same run; exact instruction counts):
+
+| Each entry… | Instructions | Time |
+|---|---|---|
+| not all or nothing (`Fields: Bytes`) | 300,588 | 10–11 µs |
+| in `atomically`, calling an `@inline(__always)` function with the body | 300,588 (free: the closure is inlined) | 10–11 µs |
+| in `atomically`, the body written in the closure | 452,574 (+51%) | 16–17 µs |
+| between `position` and `rewind(to:)` | 306,591 (+2%: 3 per entry) | 11 µs |
+
+So `atomically` costs nothing or half again depending on how the closure is written, and `rewind` costs a
+steady 3 instructions per entry. Its documentation now says so. In the packages (interleaved runs,
+`pos-old-*` → `pos-new-*`): MQTT's 5 rollbacks lose their out-of-line `seek` calls and
+`swift_unexpectedError` paths (parsing −0.4 to −1.1% instructions); NativeZip's 5 seek-after-create sites
+and 3 inflater cursors (raster inflate −1.2% instructions and time, the rest within ±0.3%). Details in
+their RESULTS.md files.
+
 ## Verification, 2026-11-09 (baseline `modern`)
 
 A full run after the renames, the formatting pass, and the `ByteLanes` additions. Other agents were

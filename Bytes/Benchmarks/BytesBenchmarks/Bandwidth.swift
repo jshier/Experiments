@@ -9,9 +9,9 @@ import Foundation
 // be skipped and the consumer costs one add per value in the narrowest lanes; byte groups are converted
 // from big-endian (a byte swap per value), so there's real per-value work.
 
-extension BenchmarkMetric {
-    static let bandwidth = BenchmarkMetric.custom("Bandwidth (MB/s)", polarity: .prefersLarger, useScalingFactor: false)
-}
+// Bandwidth is the framework's throughput (iterations per second, measured outside the loop) times the
+// bytes each iteration reads, which the benchmark's name gives (4 MB, 512 MB): nothing but the reads runs
+// inside `scaledIterations`.
 
 /// One way of reading a buffer: a name, the byte granularity it can be split at for parallel reads, and
 /// the read itself, returning a checksum.
@@ -190,7 +190,7 @@ func registerBandwidthBenchmarks() {
 
     func configuration(maxDuration: Duration) -> Benchmark.Configuration {
         .init(
-            metrics: [.wallClock, .instructions, .bandwidth],
+            metrics: [.wallClock, .instructions, .throughput],
             warmupIterations: 2,
             scalingFactor: .one,
             maxDuration: maxDuration,
@@ -206,11 +206,8 @@ func registerBandwidthBenchmarks() {
         ] {
             let byteCount = buffer.count / workload.unit * workload.unit
             Benchmark("Bandwidth: \(workload.name), \(label)", configuration: configuration(maxDuration: duration)) { benchmark in
-                let clock = ContinuousClock()
                 for _ in benchmark.scaledIterations {
-                    let start = clock.now
                     blackHole(workload.read(buffer.span.bytes.extracting(first: byteCount)))
-                    benchmark.measurement(.bandwidth, megabytesPerSecond(byteCount, clock.now - start))
                 }
             }
         }
@@ -221,19 +218,11 @@ func registerBandwidthBenchmarks() {
         let chunks = cores * 16
         let chunk = memory.count / chunks / workload.unit * workload.unit
         Benchmark("Bandwidth: \(workload.name), memory (512 MB), \(cores) cores", configuration: configuration(maxDuration: .seconds(1))) { benchmark in
-            let clock = ContinuousClock()
             for _ in benchmark.scaledIterations {
-                let start = clock.now
                 DispatchQueue.concurrentPerform(iterations: chunks) { index in
                     blackHole(workload.read(memory.span.bytes.extracting(index * chunk..<(index + 1) * chunk)))
                 }
-                benchmark.measurement(.bandwidth, megabytesPerSecond(chunk * chunks, clock.now - start))
             }
         }
     }
-}
-
-func megabytesPerSecond(_ byteCount: Int, _ elapsed: Duration) -> Int {
-    let seconds = Double(elapsed.components.seconds) + Double(elapsed.components.attoseconds) * 1e-18
-    return Int(Double(byteCount) / seconds / 1e6)
 }

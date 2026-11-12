@@ -10,6 +10,106 @@ cores), macOS 27.2, Swift 6.4.2. Single-core times vary about ±10% from run to 
 One core parses the same 1.25 MB again and again, from cache. All 32 cores each parse their own copies
 (4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput.
 
+## 2026-11-10: Bytes' conveniences adopted (baselines `conv-old-*` → `conv-new-*`, then `conv-fix`, `conv-qos`)
+
+- `readRemainingBytes()` for the payload, subscription list, topic filters, and reason codes (four
+  `do`/`catch` blocks gone); `RawSpan.hasPrefix` for `$share/`; `Crumb(rawBitsOf:)`/`Nibble(rawBitsOf:)`
+  for QoS, retain handling, and the packet type; `[UInt8](copying:)` in the tests and the copying benchmark.
+- Static sizes: `MQTTSubscribe`/`MQTTUnsubscribe` parsing −46 instructions each, SUBACK 177 → 126,
+  `isShared` 35 → 19, no function larger.
+
+| Benchmark | Instructions | Time (rounds 1 / 2) |
+|---|---|---|
+| Parse PUBLISH: Bytes views, frames, properties not iterated, mixed stream | −0.5 to −0.6% | within noise |
+| Parse PUBLISH: copying topic, payload, and strings | 33.63 → 39.52 M (+17.5%), then **33.60 M** | +18% / +18%, then level |
+| Encode PUBLISH: Bytes writer, `MQTTPublish.write(to:)` | 5.464 → 5.494 M (+0.5%), then **5.461 M** | +3 to +5% / 0 to +4% |
+
+Two regressions, both fixed:
+
+- **The copying benchmark** used `[UInt8](copying:)` instead of `withUnsafeBytes { Array($0) }`, and
+  Bytes' version allocated through the standard library's unspecialized
+  `ContiguousArray._allocateBufferUninitialized`: about 590 instructions more per packet. Bytes now copies
+  through `Array(UnsafeRawBufferPointer)` (see Bytes' RESULTS.md), and the benchmark is back to 33.60 M.
+- **PUBLISH's flags** kept `Crumb(qos.rawValue)`, not `Crumb(rawBitsOf: qos)`: the checked initializer's
+  range check lets the flags setter drop its mask, where `rawBitsOf` truncates with an `and` (3 instructions
+  per packet). With it restored, encoding is 5.461 M, as before. The other `rawBitsOf` sites are
+  unchanged in cost (CONNECT, the subscription options, the frame header).
+
+Not adopted: `read(Byte.self).rawValue` in properties stays (the same load as `load(UInt8.self)`).
+`located(_:)`: MQTT's errors say what was malformed, not where.
+
+**Harness:** the benchmarks no longer time inside `scaledIterations` (the custom bandwidth and packet-rate
+metrics are gone): bandwidth and packet rate are the framework's throughput (iterations per second) times
+a workload's bytes and packets per iteration (1.25 MB and 10,000 packets on one core, 128 times that on
+every core).
+
+## 2026-11-09: inline span writes and one-check prefixed reads in Bytes (baselines `bcd-old-*` → `bcd-new-*`)
+
+No MQTT source changed for the speed. Bytes' `write(_: RawSpan)` is now inlined: it was called three times
+per PUBLISH (topic, properties, payload). And `read(bytesPrefixedBy:)`, under every UTF-8 string and
+binary property, checks its length once. The tests and benchmark fixtures now build arrays with
+`[UInt8](byteCapacity:) { writer in … }` and `append(byteCapacity:)` (setup only, not measured).
+
+| Benchmark | Instructions per packet | Time (rounds 1 / 2) |
+|---|---|---|
+| Encode PUBLISH: `MQTTPublish.write(to:)` | 563 → 546 (−3.0%) | −8% / −8% |
+| Encode PUBLISH: Bytes writer | 563 → 546 (−3.0%) | −11% / −9% |
+| Parse PUBLISH: frames | 927 → 897 (−3.2%) | −2% / 0% |
+| Parse PUBLISH: Bytes views | 1,023 → 993 (−2.9%) | +3% / −1% |
+| Parse PUBLISH: properties not iterated | 826 → 808 (−2.2%) | +7% / +3% |
+| Parse mixed stream | 491 → 480 (−2.3%) | −2% / +2% |
+
+The encoders got faster; parse times are within this machine's run-to-run noise, the instruction counts
+aren't. `MQTTPublish.write(to:)` grew from 364 to 427 instructions and `writeBody` from 127 to 294 (the
+inlined copies).
+
+## 2026-11-09: rollbacks with `position`/`rewind(to:)` (baselines `pos-old-*` → `pos-new-*`)
+
+The five places that undo reads (`MQTTFrame.read`: incomplete, malformed, too large; `MQTTPacket.read`;
+the topic-name error classification) saved `byteOffset` and restored it with `try! seek(toByteOffset:)`,
+which can't fail but throws by signature. They now take `reader.position` and `rewind(to:)`, which doesn't
+throw. `Tools/calls`: the 5 out-of-line `BytesReader.seek` calls and 5 `swift_unexpectedError` paths are
+gone from `MQTTFrame.read`, `MQTTPacket.read`, and `readMQTTTopicName`.
+
+| Benchmark | Instructions per packet | Time (rounds 1 / 2) |
+|---|---|---|
+| Parse PUBLISH: Bytes views | 1,030 → 1,023 (−0.7%) | −10% / −6% |
+| Parse PUBLISH: frames | 931 → 927 (−0.4%) | −4% / −4% |
+| Parse PUBLISH: properties not iterated | 835 → 826 (−1.1%) | −3% / −7% |
+| Parse mixed stream | 495 → 491 (−0.8%) | −1% / −2% |
+| Encode PUBLISH (unchanged code) | identical | +5% / +9% |
+
+The encoders' identical instruction counts and +5–9% times set this run's noise; the parse times are
+within it. The change is the instruction counts and the removed trap paths.
+
+## 2026-11-09: minimal Variable Byte Integers from Bytes, and inline 64-byte copies (baselines `ab-old-*` → `ab-new-*`)
+
+Two Bytes changes:
+
+- `read(LEB128.self, maxByteCount: 4, requiringMinimal: true)` checks the shortest encoding
+  [MQTT-1.5.5-1] in Bytes' decode loop. `readMQTTVariableByteInteger` (`atomically`, the read, then a
+  comparison with `LEB128.byteCount(of:)`) is now that one call; the property reader's
+  `checked ? readMQTTVariableByteInteger() : read(LEB128…)` ternaries are `requiringMinimal: checked`; the
+  property list's length-then-bytes is `read(bytesPrefixedBy: LEB128.self, maxByteCount: 4,
+  requiringMinimal: true)`. The padded-encoding tests (remaining length, property length, property
+  identifier) pass unchanged.
+- `write(_: RawSpan)` copies up to 64 bytes inline instead of calling `memmove` above 32. No MQTT source
+  changed for this; the fixtures' 64-byte payloads take that path (`Tools/calls`: the same out-of-line
+  `BytesWriter.write(_:)` calls in both trees; the copy inside it changed).
+
+Interleaved runs of the previous commit's tree and this one, two rounds (per packet: 10,000 packets per
+iteration; instructions are exact minimums from the baselines):
+
+| Benchmark | Instructions per packet | Time, round 1 / round 2 |
+|---|---|---|
+| Encode PUBLISH: `MQTTPublish.write(to:)` | 626 → 563 (−10.0%) | −14% / −14% |
+| Encode PUBLISH: Bytes writer | 626 → 563 (−10.0%) | −10% / −13% |
+| Parse PUBLISH: Bytes views | 1,052 → 1,030 (−2.1%) | +5% / +2% (noise: ±10% run to run) |
+| Parse PUBLISH: frames, `MQTTPublish(parsing:)` | 953 → 931 (−2.3%) | +3% / −1% |
+| Parse PUBLISH: properties not iterated | 857 → 835 (−2.6%) | +4% / +1% |
+| Parse mixed stream | 503 → 495 (−1.6%) | −5% / +1% |
+| Conventional encoder and parser (no Bytes) | unchanged | −5% to +3% |
+
 ## 2026-11-09: flag bytes read and written whole (baselines `before-modern` → `modern`)
 
 Sub-byte fields that fill one byte are now read as one `Byte` and taken apart with Bytes' field

@@ -3,31 +3,42 @@ import System
 
 /// Something that happened while extracting, for progress reporting. Events arrive in archive order.
 public enum ExtractionEvent {
+    /// A directory is being created.
     case creatingDirectory(ZipEntry, path: FilePath)
+    /// A file is about to be decompressed and written. Files are written in parallel, so this precedes the
+    /// write, not its completion.
     case extracting(ZipEntry, path: FilePath)
+    /// A symbolic link is being created, pointing at `destination`.
     case linking(ZipEntry, path: FilePath, destination: String)
+    /// An existing item was kept, so the entry wasn't extracted.
     case skipped(ZipEntry, path: FilePath)
 }
 
 /// What to do when an item already exists at an entry's destination.
 public enum OverwritePolicy {
+    /// Replace existing items without asking. (An existing directory is never removed to make room for a file.)
     case always
+    /// Keep existing items and skip their entries.
     case never
     /// Ask per item; return `true` to replace it. Called serially, in archive order.
     case ask((_ entry: ZipEntry, _ path: FilePath) -> Bool)
 }
 
+/// Settings for ``ZipArchive/extract(_:to:options:)``.
 public struct ExtractionOptions {
+    /// Creates options with the defaults below.
     public init() {}
 
     /// Flatten the archive: write every file into the destination root and skip directory entries.
     public var junkPaths = false
     /// Apply the archive's modification dates to extracted items.
     public var restoreTimestamps = true
+    /// What to do when an item already exists. The default is ``OverwritePolicy/always``.
     public var overwrite = OverwritePolicy.always
     /// Progress reporting. Paths are relative to the destination.
     public var onEvent: ((ExtractionEvent) -> Void)?
-    /// How many files may be decompressed and written at once.
+    /// The most files that may be decompressed and written at once. Extraction uses fewer when
+    /// that's faster (see ``ZipArchive/extract(_:to:options:)``).
     public var maxConcurrency = ProcessInfo.processInfo.activeProcessorCount
     /// Which DEFLATE implementation decompresses.
     public var backend = ZipDecoder.Backend.bytes
@@ -51,7 +62,22 @@ extension ZipArchive {
     /// Extracts `entries` (all of them by default) beneath `destination`.
     ///
     /// Planning (path validation, directory creation, overwrite decisions, events) runs serially in
-    /// archive order; regular files are then decompressed and written in parallel.
+    /// archive order; regular files are then decompressed and written in parallel, then symlinks are
+    /// created, then directory permissions and timestamps are applied, deepest first.
+    ///
+    /// Paths that are absolute or would leave `destination` (`..` traversal) are refused, and files are never
+    /// written through symlinks. Parallelism is capped at 8 workers plus one per entry of 1 MB or more,
+    /// and by `options.maxConcurrency`. Deflated entries of 4 MB or more overlap decoding with writing. A file
+    /// that fails to extract is deleted; files extracted before the error stay.
+    ///
+    /// - Parameters:
+    ///   - entries: The entries to extract; all of the archive's by default.
+    ///   - destination: The directory to extract into, created if needed. A relative path is resolved
+    ///     against the current directory.
+    ///   - options: Path flattening, timestamps, overwrite policy, progress events, and concurrency.
+    /// - Throws: ``ZipError/unsafePath(_:)`` for a path that escapes `destination` (checked during planning,
+    ///   before any file is written); the errors of ``contents(of:using:_:)`` for damaged entries;
+    ///   `Errno` or `CocoaError` for file system failures.
     public func extract(_ entries: [ZipEntry]? = nil, to destination: FilePath, options: ExtractionOptions = .init()) async throws {
         let root = (destination.isAbsolute ? destination : FilePath(FileManager.default.currentDirectoryPath).pushing(destination))
             .lexicallyNormalized()
@@ -125,7 +151,16 @@ extension ZipArchive {
     /// Deflated entries at least this big overlap decoding with writing (several chunks' worth).
     static let pipelineThreshold: UInt64 = 4 << 20
 
-    /// Decompresses one file into place. Runs concurrently with other jobs.
+    /// Decompresses one file into place and applies its permissions and timestamp. Runs concurrently with
+    /// other jobs.
+    ///
+    /// A partial file is deleted if anything fails.
+    ///
+    /// - Parameters:
+    ///   - job: The entry, its target path, and its metadata.
+    ///   - decoder: This worker's decoder.
+    /// - Throws: `Errno` or `CocoaError` for file system failures, or the errors of
+    ///   ``contents(of:using:_:)``.
     private func write(_ job: FileJob, using decoder: inout ZipDecoder) async throws {
         let options: FileDescriptor.OpenOptions = [.create, .truncate, .noFollow, .closeOnExec]
         let descriptor: FileDescriptor
@@ -161,7 +196,18 @@ extension ZipArchive {
         }
     }
 
-    /// Applies the overwrite policy to an existing item. Returns false if the entry should be skipped.
+    /// Applies the overwrite policy to an existing item, removing it if it's to be replaced.
+    ///
+    /// Emits `.skipped` if the entry is to be skipped. A directory is left in place (so the later open fails)
+    /// rather than deleted recursively.
+    ///
+    /// - Parameters:
+    ///   - entry: The entry about to be extracted.
+    ///   - relative: Its path relative to the destination, for events and the `ask` policy.
+    ///   - target: Its absolute destination.
+    ///   - options: The extraction options.
+    /// - Returns: `false` if the entry should be skipped.
+    /// - Throws: `CocoaError` if the existing item can't be removed.
     private static func clearExisting(_ entry: ZipEntry, relative: FilePath, at target: FilePath, options: ExtractionOptions) throws -> Bool {
         // Regular files under `.always` need no check: open truncates, and `write` handles existing symlinks.
         if case .always = options.overwrite, entry.kind == .file { return true }
@@ -194,6 +240,13 @@ extension ZipArchive {
 
     /// Resolves a relative entry path inside `root`. `lexicallyResolving` returns nil for anything that
     /// would escape `root` (`..` traversal), which is exactly the "zip slip" check we need.
+    ///
+    /// - Parameters:
+    ///   - relative: The entry's relative path.
+    ///   - root: The extraction root.
+    ///   - entry: The entry, for the error.
+    /// - Returns: The absolute destination inside `root`.
+    /// - Throws: ``ZipError/unsafePath(_:)`` if the path escapes `root` or resolves to `root` itself.
     private static func resolve(_ relative: FilePath, in root: FilePath, entry: ZipEntry) throws(ZipError) -> FilePath {
         guard let resolved = root.lexicallyResolving(relative), resolved != root else {
             throw .unsafePath(entry.path)
@@ -207,6 +260,10 @@ extension ZipArchive {
 struct DirectoryCache {
     private var known: Set<FilePath> = []
 
+    /// Creates `path` and any missing parents with mode 0755, skipping ones already created.
+    ///
+    /// - Parameter path: The directory to create.
+    /// - Throws: `Errno` if `mkdir` fails for a reason other than the directory already existing.
     mutating func create(_ path: FilePath) throws {
         guard !path.isEmpty, !known.contains(path) else { return }
         let parent = path.removingLastComponent()
@@ -222,6 +279,11 @@ struct DirectoryCache {
 
 extension FileDescriptor {
     /// Sets permissions and timestamps through the open descriptor: two syscalls, no path lookups.
+    ///
+    /// Sets the access and modification times both to the entry's date. Fields that are `nil` are left alone.
+    ///
+    /// - Parameter metadata: The permissions and modification date to apply.
+    /// - Throws: `Errno` if `fchmod` or `futimens` fails.
     func apply(_ metadata: ItemMetadata) throws {
         if let permissions = metadata.permissions, fchmod(rawValue, mode_t(permissions)) != 0 {
             throw Errno(rawValue: errno)
