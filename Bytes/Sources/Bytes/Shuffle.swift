@@ -8,7 +8,8 @@ import CBytesNEON
 /// bytes (8 per step), so one step is always 64 bytes of lanes, exactly one 4-register `tbl` table. Packing
 /// turns those 64 bytes into the step's 48, 40, 48, or 56 packed bytes with up to four lookups; unpacking
 /// does the reverse. The index vectors also apply the byte order, so big-endian costs nothing extra.
-/// Without this, these widths can't use contiguous vector loads or stores, and are compute-bound.
+/// Used only where `tbl` is one instruction (`ByteLanes.isLookupVectorized`): emulated a lane at a time,
+/// these lookups were 37–113x slower than optimized. Elsewhere `GroupShuffle` does the same job portably.
 @usableFromInline
 enum Shuffle {
     /// Whether runs of `T` are shuffled: 3, 5, 6, and 7 bytes. (Power-of-two widths vectorize without

@@ -2,14 +2,15 @@
 // (`eor3`), and CRC32 instructions. Swift's SIMD types have no carry-less multiply, and its `Builtin`
 // module doesn't expose CPU-specific intrinsics. Each wrapper is `static inline`, so Swift inlines it as
 // the instruction itself. Only defined where the CPU has them (every Apple silicon Mac and device);
-// `Bytes` uses a portable table-driven CRC elsewhere.
+// `Bytes` uses a portable table-driven CRC elsewhere, and on ARM64 with `BYTES_PORTABLE` defined (the
+// package's `Portable` trait).
 
 #ifndef C_BYTES_CRC_H
 #define C_BYTES_CRC_H
 
 #include <stdint.h>
 
-#if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32) && defined(__ARM_FEATURE_AES)
+#if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32) && defined(__ARM_FEATURE_AES) && !defined(BYTES_PORTABLE)
 #define BYTES_HAS_HARDWARE_CRC 1
 #include <arm_acle.h>
 #include <arm_neon.h>

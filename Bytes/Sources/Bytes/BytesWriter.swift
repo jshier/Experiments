@@ -1027,13 +1027,33 @@ public extension BytesWriter {
             return
         }
         let start = _byteOffset
-        // One loop per byte order, so each is straight-line conversion and stores. With the `NEONShuffle`
-        // trait, odd widths first pack whole steps with table lookups; the loops finish the rest.
+        // One loop per byte order, so each is straight-line conversion and stores. Odd widths first pack
+        // whole vectors with shuffles (or, where lookups are single instructions, whole steps with table
+        // lookups); the loops finish the rest.
+        if GroupShuffle.isPreferred, GroupShuffle.handles(T.self), GroupShuffle.stages(T.self, count: count) {
+            // Long odd-width runs, where lookups aren't single instructions: whole vectors packed with
+            // shuffles, then the rest. Loops of their own, so shorter runs keep the loops below starting
+            // at 0 (with a run-time start, runs of 1 to 62 values took 20 more instructions each).
+            switch byteOrder {
+            case .littleEndian:
+                let packed = unsafe GroupShuffle.pack(T.self, bigEndian: false, count: count, to: &_bytes, at: start, value)
+                for index in packed..<count {
+                    unsafe Store.streamingGroup(T(littleEndian: value(index)), to: &_bytes, at: start &+ index &* T.byteCount)
+                }
+            case .bigEndian:
+                let packed = unsafe GroupShuffle.pack(T.self, bigEndian: true, count: count, to: &_bytes, at: start, value)
+                for index in packed..<count {
+                    unsafe Store.streamingGroup(T(bigEndian: value(index)), to: &_bytes, at: start &+ index &* T.byteCount)
+                }
+            }
+            _byteOffset &+= count &* T.byteCount
+            return
+        }
         var packed = 0
         switch byteOrder {
         case .littleEndian:
             #if NEONShuffle
-            if Shuffle.handles(T.self) {
+            if !GroupShuffle.isPreferred, Shuffle.handles(T.self) {
                 packed = unsafe Shuffle.pack(T.self, bigEndian: false, count: count, to: &_bytes, at: start, value)
             }
             #endif
@@ -1042,7 +1062,7 @@ public extension BytesWriter {
             }
         case .bigEndian:
             #if NEONShuffle
-            if Shuffle.handles(T.self) {
+            if !GroupShuffle.isPreferred, Shuffle.handles(T.self) {
                 packed = unsafe Shuffle.pack(T.self, bigEndian: true, count: count, to: &_bytes, at: start, value)
             }
             #endif

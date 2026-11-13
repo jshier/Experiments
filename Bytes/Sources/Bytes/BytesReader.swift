@@ -863,10 +863,18 @@ public extension BytesReader {
         unsafe output.withUnsafeMutableBufferPointer { buffer, initializedCount in
             let destination = unsafe buffer.baseAddress! + initializedCount
             var unpacked = 0
+            // Odd widths: unpacked straight into the output's lanes (each value's integer type is exactly
+            // one lane) with shuffles, 16 bytes at a time, or with table lookups, 64 bytes per step. The
+            // loops below finish the rest.
+            if GroupShuffle.isPreferred, GroupShuffle.handles(T.self) {
+                let raw = UnsafeMutableRawPointer(destination)
+                unpacked = switch byteOrder {
+                case .littleEndian: unsafe GroupShuffle.unpack(T.self, bigEndian: false, count: count, from: span, at: start, to: raw)
+                case .bigEndian: unsafe GroupShuffle.unpack(T.self, bigEndian: true, count: count, from: span, at: start, to: raw)
+                }
+            }
             #if NEONShuffle
-            // Odd widths: whole steps unpacked with table lookups straight into the output's lanes (each
-            // value's integer type is exactly one lane), 64 bytes per step. The loops below finish the rest.
-            if Shuffle.handles(T.self) {
+            if !GroupShuffle.isPreferred, Shuffle.handles(T.self) {
                 let steps = Shuffle.unpackableSteps(T.self, count: count, availableBytes: span.byteCount &- start)
                 let indices = Shuffle.unpackIndices(T.self, bigEndian: byteOrder == .bigEndian)
                 let raw = UnsafeMutableRawPointer(destination)
@@ -952,11 +960,15 @@ public extension BytesReader {
     ///
     /// - Parameters:
     ///   - limit: The most values to read.
+    ///   - staged: Whether shuffled values go through a buffer before `body` sees them, so `body` can
+    ///     vectorize. False when `body` itself only stores each value in a buffer, as iterators' do.
     ///   - body: Called with each value, in order.
     /// - Throws: Whatever `body` throws.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    internal mutating func _forEach<T: ByteGroup, E: Error>(_: T.Type, limit: Int, _ body: (T) throws(E) -> Void) throws(E) {
+    internal mutating func _forEach<T: ByteGroup, E: Error>(
+        _: T.Type, limit: Int, staged: Bool = true, _ body: (T) throws(E) -> Void
+    ) throws(E) {
         _assumeInvariant()
         let count = Swift.min(limit, remainingByteCount / T.byteCount)
         guard likely(_bitOffset == 0) else {
@@ -971,9 +983,47 @@ public extension BytesReader {
         let start = _byteOffset
         var index = 0
         do throws(E) {
+            // Odd widths: values unpacked a vector (or a step of table lookups) at a time, then `body` for
+            // each. 3 bytes only for iterators: with a body of its own, the plain loop below vectorizes with
+            // it (`ld3`).
+            if GroupShuffle.isPreferredForIteration(staged: staged), staged ? GroupShuffle.handlesIteration(T.self) : GroupShuffle.handles(T.self) {
+                let vectors = GroupShuffle.unpackableVectors(T.self, count: count, availableBytes: span.byteCount &- start)
+                if !staged {
+                    for vector in 0..<vectors {
+                        let lanes = unsafe GroupShuffle.unpack(T.self, bigEndian: false, vector: vector, from: span, at: start)
+                        for slot in 0..<GroupShuffle.valuesPerVector(T.byteCount) {
+                            try body(T(littleEndian: GroupShuffle.lane(T.self, lanes, slot)))
+                            index &+= 1
+                        }
+                    }
+                } else if GroupShuffle.stages(T.self, count: count) {
+                    // Unpacked a chunk at a time into a stack buffer, then `body` over the chunk: a plain loop
+                    // over contiguous values, which vectorizes together with `body` (taking each value from
+                    // the vector instead kept `body` scalar: 2x slower summing). Shorter runs take the plain
+                    // loop below. Unsafe: the buffer is uninitialized stack memory. Safe: `body` only sees
+                    // values unpacked into it first.
+                    let chunk = GroupShuffle.chunkVectors
+                    let perVector = GroupShuffle.valuesPerVector(T.byteCount)
+                    try withUnsafeTemporaryAllocation(of: T.Integer.self, capacity: chunk &* perVector) { buffer throws(E) in
+                        let lanes = UnsafeMutableRawPointer(buffer.baseAddress!)
+                        var done = 0
+                        while done < vectors {
+                            let unpacked = Swift.min(chunk, vectors &- done)
+                            for vector in 0..<unpacked {
+                                let values = unsafe GroupShuffle.unpack(T.self, bigEndian: false, vector: done &+ vector, from: span, at: start)
+                                unsafe lanes.storeBytes(of: values, toByteOffset: vector &* 16, as: SIMD16<UInt8>.self)
+                            }
+                            for slot in 0..<(unpacked &* perVector) {
+                                try body(T(littleEndian: unsafe buffer[slot]))
+                                index &+= 1
+                            }
+                            done &+= unpacked
+                        }
+                    }
+                }
+            }
             #if NEONShuffle
-            // 5 to 7 bytes: whole steps unpacked with table lookups, then `body` for each value in the step.
-            if Shuffle.handlesIteration(T.self) {
+            if !GroupShuffle.isPreferredForIteration(staged: staged), Shuffle.handlesIteration(T.self) {
                 let perStep = Shuffle.valuesPerStep(T.byteCount)
                 let steps = Shuffle.unpackableSteps(T.self, count: count, availableBytes: span.byteCount &- start)
                 let indices = Shuffle.unpackIndices(T.self, bigEndian: false)

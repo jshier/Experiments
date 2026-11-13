@@ -210,8 +210,9 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
     }
 }
 
-/// The NEON shuffle paths (3-, 5-, 6-, 7-byte runs) against single reads and writes, at every length from
-/// 0 to 70 values, so whole steps, partial steps, and the "64 bytes must remain" cutoff are all covered.
+/// The shuffle paths (3-, 5-, 6-, 7-byte runs; NEON lookups or portable shuffles) against single reads and
+/// writes, at every length from 0 to 70 values and around the staging cutoffs (64 and 128 values), so whole
+/// steps, partial steps, the bytes-that-must-remain cutoffs, and partial chunks are all covered.
 @Suite struct ShuffleTests {
     @Test func runsMatchSingleValues() throws {
         try check(Byte3.self); try check(Byte5.self); try check(Byte6.self); try check(Byte7.self)
@@ -220,7 +221,7 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
     func check<T: ByteGroup>(_: T.Type) throws {
         let mask = T.Integer.max >> (T.Integer.bitWidth - 8 * T.byteCount)
         for order in [ByteOrder.littleEndian, .bigEndian] {
-            for count in 0...70 {
+            for count in Array(0...70) + [127, 128, 129, 191, 192, 257, 300] {
                 let values = (0..<count).map { T.Integer(truncatingIfNeeded: UInt64($0 + 1) &* 0x9E37_79B9_7F4A_7C15) & mask }
                 // Writing: bulk (shuffled) against one at a time.
                 let bulk = try [UInt8](capacity: count * T.byteCount) { output in
@@ -246,6 +247,54 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
                 eachReader.forEach(T.self) { each.append($0.integer(order)) }
                 #expect(each == values, "forEach \(T.self) \(order) × \(count)")
                 #expect(bulkReader.isAtEnd == true && eachReader.byteOffset == single.count)
+            }
+        }
+    }
+
+    /// `forEach` stopped by its body partway through a run long enough to stage: everything up to and
+    /// including the value it threw on is consumed, wherever that falls in a chunk.
+    @Test func forEachThrowingMidChunk() {
+        struct Stop: Error {}
+        let data = (0..<(300 * 6)).map { UInt8(truncatingIfNeeded: $0 &* 13) }
+        for stop in [0, 1, 63, 64, 65, 150, 299] {
+            var reader = BytesReader(data.span)
+            var seen = 0
+            #expect(throws: Stop.self) {
+                try reader.forEach(Byte6.self) { (_: Byte6) throws(Stop) in
+                    if seen == stop { throw Stop() }
+                    seen += 1
+                }
+            }
+            let offset = reader.byteOffset
+            #expect(seen == stop && offset == (stop + 1) * 6, "stop at \(stop)")
+        }
+    }
+
+    /// Runs written after a prefix into a buffer with guard bytes after them, and read back from after the
+    /// prefix: vector stores stay within the run, and loads start where the run does.
+    @Test func runsStayInBounds() throws {
+        try checkBounds(Byte3.self); try checkBounds(Byte5.self); try checkBounds(Byte6.self); try checkBounds(Byte7.self)
+    }
+
+    func checkBounds<T: ByteGroup>(_: T.Type) throws {
+        for order in [ByteOrder.littleEndian, .bigEndian] {
+            for count in Array(0...40) + [63, 64, 65, 127, 128, 129, 200, 257] {
+                let values = (0..<count).map { T.Integer(truncatingIfNeeded: UInt64($0 + 7) &* 0x9E37_79B9_7F4A_7C15) }
+                var buffer = [UInt8](repeating: 0xEE, count: 3 + count * T.byteCount + 24)
+                var span = buffer.mutableSpan
+                var writer = BytesWriter(&span)
+                try writer.write(0x01_02_03 as Byte3)
+                try writer.write(values.span, as: T.self, order)
+                _ = consume writer
+                _ = consume span
+                let end = 3 + count * T.byteCount
+                #expect(buffer[end...].allSatisfy { $0 == 0xEE }, "wrote past \(T.self) \(order) × \(count)")
+
+                var reader = BytesReader(buffer.span)
+                try reader.skip(byteCount: 3)
+                let read = try [T.Integer](capacity: count) { try reader.read(T.self, order, into: &$0) }
+                let mask = T.Integer.max >> (T.Integer.bitWidth - 8 * T.byteCount)
+                #expect(read == values.map { $0 & mask }, "read \(T.self) \(order) × \(count)")
             }
         }
     }

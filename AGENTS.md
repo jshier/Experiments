@@ -335,6 +335,27 @@ LLVM narrows loads to the lanes a shuffle uses: the first round of `uzp1`s needs
 Shifts bind tighter than multiplication in Swift: `count &* 3 &>> 2` is `count &* (3 &>> 2)`, which is 0.
 Parenthesize (`(count &* 3) &>> 2`).
 
+Portable byte shuffles: a `SIMD16<UInt8>` built from `v[k]` picks of one vector with constant `k` (or
+constant zeros), `SIMD16(v[4], v[3], …, 0)`, compiles to one shuffle: a single-register `tbl` on ARM64,
+`pshufb` on x86-64 macOS (SSE2-only x86-64 expands it into a longer sequence). Bytes' `GroupShuffle` packs
+and unpacks 3- and 5–7-byte groups this way with no C; a one-register `tbl` is a quarter of a 64-byte
+one's micro-ops, and for iterators it beat the NEON lookups by 22–44%, so every build uses it there. Two traps, both from LLVM merging what it can see:
+building the vector from computed scalars and then shuffling became one byte insert per byte (40 per
+vector), and taking values out of the vector into a caller's body kept the body scalar. The portable fix
+for both (no `asm` barrier) is a small stack buffer (`withUnsafeTemporaryAllocation`, no allocation):
+compute values into it with a plain loop and load vectors back, or unpack into it and run the body over
+it, so the plain loops vectorize on their own.
+
+Emulating a lookup that's one instruction on one CPU is no portable fallback: Bytes' 64-byte `tbl` shuffles,
+emulated a lane at a time in C, ran 37–113x slower than the NEON build and 15–54x slower than the plain
+Swift loops. Gate such algorithms on the instruction being there (`ByteLanes.isLookupVectorized`), and
+measure the other builds (`Bytes/bench portable`, `portable-no-c`).
+
+Table lookups in a `Span` lose their bounds checks only while the optimizer knows the count: 256-entry
+spans for a CRC's byte tables folded the checks in one loop and not another, and a precondition stating
+the counts fixed that loop and made the other spill and check again. For hot tables, pointers into
+borrowed storage, with the reason in a comment (Bytes' `CRC32._Tables`).
+
 On M3, NEON `ld4`/`st3` didn't beat `uzp` and `tbl` shuffles for Base64 decoding (C, 12.9 against 12.5
 GB/s): the loop is bound by vector-pipe micro-ops, and each `tbl`/`tbx` costs one per table register. Count
 those (a 64-byte `tbx` is 4) when choosing a lookup: Base64's decoder went from a 128-byte table (`tbl` +
@@ -357,6 +378,11 @@ at any size. For small arrays in hot code, use those.
 
 - Run: `swift package --disable-sandbox benchmark [--filter REGEX]`; save: `… baseline update NAME`;
   compare: `… baseline compare A B` or `Tools/bench-table PKG A B`. Thresholds: `… thresholds update`.
+- Bytes has three builds, chosen by package traits, each benchmarked with `Bytes/bench BUILD [benchmark
+  args]`, which gives each its own build directory: `optimized` (default, the C modules' NEON and CRC
+  instructions), `portable` (`--traits Portable`: the C modules' fallbacks for other CPUs, on Apple
+  silicon), `portable-no-c` (`--disable-default-traits`: Swift only). Clients inlining Bytes' code compile
+  its C headers themselves, so a Swift target needs `-Xcc -DBYTES_PORTABLE` too for a portable build.
 - `baseline read --filter` is ignored (bench-table filters itself). JMH export requires the built-in
   throughput metric. Markdown units vary (K/M, μs/ms): bench-table normalizes.
 - **Only the work goes inside `for _ in benchmark.scaledIterations`**: no clocks, no `benchmark.measurement`

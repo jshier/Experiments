@@ -1,8 +1,8 @@
 # Bytes performance log
 
 Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
-Baselines are in `.benchmarkBaselines/` (the latest full run is `modern`, re-run on 2026-11-09 with no
-other benchmarks running); compare any two with
+Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (re-run on 2026-11-09 with no
+other benchmarks running); the 2026-11-12 sections have newer full runs. Compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
 ## Current: Bytes against the alternatives (same harness, same run; baseline `modern`)
@@ -25,6 +25,169 @@ dropped so that loops of reads vectorize (see "Making loops of single reads vect
 `extracting` added 3% (see "Safe constructs"); wall time is unchanged.
 
 No benchmark allocates, apart from the output array in the bulk ones and one `for`-`in` shape (below).
+
+## 2026-11-12: the optimized build adopts the portable iterator path; all four builds (baselines `cmp-old-*`, `cmp-optimized-*`, `cmp-portable-*`, `cmp-portable-no-c-*`)
+
+Each of `GroupShuffle`'s paths was tried in the optimized build against the NEON `Shuffle`, in alternating
+runs of a copy of the code with each (three rounds, against the working code just before the change; the
+four-build table below compares with the last commit, so its percentages differ a little):
+
+| Path | With `GroupShuffle` instead of NEON | Verdict |
+|---|---|---|
+| Iterators (`for`-`in` over `values(of:)`; `_forEach(…, staged: false)`), `Byte5`–`Byte7` | −22 to −32% time, both in cache and from memory (+21–25% instructions) | **Adopted** |
+| … `Byte3` (NEON had used the plain `ld3` loop) | −43 to −44% time, −18% instructions | **Adopted** |
+| `forEach` with a body (staged), `Byte5`–`Byte7` | +0 to +12% time, +60–100% instructions | NEON kept |
+| Bulk reads `read(_:_:into:)` | level (previous section) | NEON kept |
+| Generating writes | 1.25–2x slower (previous section) | NEON kept |
+
+An iterator's body only stores each value into its buffer, so there's nothing for the vector to be
+pulled apart for: a vector of two values (four for 3 bytes) per load, one single-register `tbl`, against a
+64-byte step of four-register `tbl`s (4 micro-ops each). `GroupShuffle.isPreferredForIteration(staged:)`
+makes the choice; `staged` is a constant at each call site, so it folds.
+
+Then all four builds, two alternating rounds of the full suite (old code from the last commit, the
+optimized build, `portable`, `portable-no-c`); times in µs, the mean of the rounds:
+
+| Workload | Old | Optimized | Portable | Portable, no C |
+|---|---|---|---|---|
+| `for`-`in` `Byte3`, 4 MB (portable builds before: 284, 290) | 294 | **160** | 163 | 158 |
+| `for`-`in` `Byte5` / `Byte6` / `Byte7` | 258 / 213 / 185 | **186 / 157 / 136** | 186 / 155 / 135 | 186 / 157 / 135 |
+| Bulk read `Byte3` / `Byte5` / `Byte7` | 83 / 99 / 81 | 88 / 99 / 81 | 89 / 92 / 82 | 88 / 100 / 81 |
+| `forEach` summing `Byte5` / `Byte6` / `Byte7` | 192 / 159 / 137 | 196 / 161 / 137 | 193 / 162 / 135 | 190 / 161 / 136 |
+| Generating write `Byte3` / `Byte6` | 96 / 147 | 97 / 146 | 189 / 200 | 189 / 198 |
+| CRC-32, 256 KB (`checksum`) | 471 | 470 | 3,874 | 3,900 |
+| CRC-32 tables, 256 KB / 64 B | 14,000 / 9,564 | **3,864 / 8,272** | 3,879 / 8,333 | 3,856 / 8,393 |
+
+Over all 337 rows (geometric mean of time): optimized against old **0.988**; portable against optimized
+1.020, portable-no-c 1.023; within 10% of the optimized build: 321 and 319 rows. The rest are the
+odd-width generating writes (1.25–2x), CRC-32 against `pmull` (8.2–8.3x), the MAC reference `forEach`
+(1.12–1.14x), and 32-core memory rows within the machine's two timing levels.
+
+The optimized build's instruction counts match the old code's except the CRC tables (−41% at 256 KB,
+−31.5% at 64 B), `for`-`in` over `Byte3` (−18%), and `for`-`in` over `Byte5`–`Byte7` (+21–25%, and 26–28%
+faster in the table above). Rows slower in both rounds were rerun three more times, alternating: most were
+noise, but "Runs: 3-/4-byte elements, per-element writes" (+11–15%) and the 3–32-byte back-references at
+distance 2 and 4 (+1–2 µs) stayed slower with identical instruction counts. The per-element writes'
+function is the same 132 instructions of machine code in both benchmark binaries, but starts 196 bytes
+earlier in the new one (the inlined code laid out before it changed size), so its loops sit at different
+offsets within 64-byte blocks: a layout effect in the benchmark executable, not a change in the code Bytes
+generates. Tests (129, 128 in the portable builds), warnings (none), and the zero-allocation thresholds
+pass in all three builds.
+
+## 2026-11-12: fast portable builds (baselines `final-old-*`, `final-optimized-*`, `final-portable-*`, `final-portable-no-c-*`)
+
+The `portable` and `portable-no-c` builds (previous section) made as fast as possible without CPU-specific
+code: no NEON, no `asm`, nothing that checks the architecture. Two changes cover nearly all of the gap.
+
+**Odd-width groups (3, 5, 6, 7 bytes): `GroupShuffle`**, portable Swift, used wherever `tbl` isn't a
+single instruction (the NEON `Shuffle` stays for the optimized build). A 16-byte vector holds whole
+values in lanes (four 32-bit lanes for 3 bytes, two 64-bit lanes for 5–7); unpacking loads the 12, 10, 12,
+or 14 bytes they take and builds the lanes with `SIMD16(v[k], …)` picks at constant `k`, which LLVM turns
+into one shuffle: a single-register `tbl` on ARM64 (1 micro-op against the NEON path's 4-register `tbl`'s
+4), `pshufb` on x86-64 macOS. Reads are 1 load, 1 shuffle, 1 store per 16 lane bytes. Two traps (LLVM
+seeing too much) and a threshold:
+
+- Writes that built each vector from the caller's computed values and then shuffled got merged into one
+  byte insert per byte (40 per `Byte3` vector), slower than the plain loop. Values now go through a
+  512-byte stack buffer (`withUnsafeTemporaryAllocation`, no allocation): a plain loop computes them (it
+  vectorizes the caller's closure), then lanes are loaded back, shuffled, and stored 16 bytes at a time
+  (each store overwrites the previous one's spare bytes, and the last stays within the run).
+- `forEach` that handed the caller's body each value from the vector kept the body scalar: 2x slower than
+  the plain loop when summing. It now unpacks a chunk into the same kind of buffer and runs the body over
+  it, so the body vectorizes. Iterators (`for`-`in`), whose body only stores values into their own buffer,
+  keep the direct form (`_forEach(…, staged: false)`).
+- Staging only pays for a full buffer (128 values of 3 bytes, 64 of 5–7): runs of 1–62 `Byte3`s took 37%
+  more instructions staged, and stay on the plain loops, which have code of their own (sharing it with a
+  run-time start cost 20 instructions per call).
+
+**CRC-32 tables: braided (zlib's method).** Slicing-by-8 is a latency chain: each word's 8 lookups wait for
+the previous word's. Five CRCs now run over interleaved 8-byte words, each jumping 40 bytes per step with
+tables that advance over the others' words, combined in the last block (126 instructions per 40 bytes,
+45 of them loads). The lookups had a bounds check each; 256-entry spans lost them in one loop and not the
+other, and stating the counts made the braided loop spill and check again (126 to 293 instructions), so
+the tables are pointers into the borrowed array, with that reasoning in `CRC32._Tables`. This is also the
+`CRC-32 tables` benchmark of the optimized build.
+
+Times in µs, two interleaved rounds (old code, new optimized, portable, portable-no-c, twice):
+
+| Workload | Optimized | Portable, before → now | No C, before → now |
+|---|---|---|---|
+| Bulk read `read(_:_:into:)`, `Byte3`, 4 MB | 87 | 8,485 → **88** | 222 → **88** |
+| … `Byte5` / `Byte6` / `Byte7` | 98 / 84 / 82 | 10,500 / 8,371 / 7,291 → **99 / 88 / 81** | 202 / 165 / 139 → **99 / 88 / 81** |
+| Bulk BE24 | 22.5 | 2,090 → **22** | 54.5 → **23** |
+| `forEach(Byte6.self, .bigEndian)`, 4 MB | 154 | 7,570 → **160** | 169 → **162** |
+| `forEach` summing `Byte5` / `Byte6` / `Byte7`, 4 MB | 193 / 161 / 137 | 9,535 / 7,742 / 6,931 → **200 / 165 / 139** | 202 / 171 / 146 → **194 / 162 / 139** |
+| `for`-`in` `Byte5` / `Byte6` / `Byte7`, 4 MB | 255 / 205 / 185 | 9,536 / 7,809 / 6,718 → **188 / 155 / 137** | 282 / 235 / 203 → **186 / 157 / 135** |
+| Generating write, `Byte3`, 4 MB | 97 | 6,699 → **189** | 204 → **189** |
+| … `Byte5` / `Byte6` / `Byte7` | 177 / 148 / 136 | 7,072 / 5,982 / 7,209 → **247 / 208 / 174** | 272 / 227 / 197 → **252 / 208 / 170** |
+| CRC-32, 256 KB | 466 (`pmull`) | 14,000 → **3,849** | 14,000 → **3,888** |
+| CRC-32 tables, 64 B (×524 K) | 8,342 | 9,417 → **8,315** | 9,532 → **8,254** |
+
+Over all 337 rows (geometric mean of the time against the new optimized build): portable 1.59 → **1.009**,
+portable-no-c 1.055 → **1.016**; within 10% of optimized: 292 → **323** and 307 → **322** rows. The rest:
+odd-width generating writes (1.25–2x: the stage through memory, and the vectorized loop building values
+from 64-bit indices, against the NEON path's lanes), CRC-32 against `pmull` (8.3x, from 30x), and a few
+32-core rows within the machine's bimodal memory timing (below). `for`-`in` over 5–7 bytes is now faster
+than the optimized build's, and summing `forEach` matches it. (The section above then adopted the portable
+path for the optimized build's iterators; staged `forEach` stayed on NEON.)
+
+Not regressed: the optimized build's instruction counts match the old code's in every row but the CRC
+tables (−41% at 256 KB, −31% at 64 B); its times average 1.005x the old code's. Five rows were slower in
+both rounds; the large ones were 32-core and single-core memory writes that switch between two levels
+(~2,250 and ~2,760 µs, also in unchanged code like `memset`), and three more alternating runs of each put
+old and new within 1%. All three builds pass their tests (new ones: runs written between guard bytes,
+`forEach` stopped mid-chunk), build without warnings, and pass the zero-allocation thresholds.
+
+## 2026-11-12: the three builds (baselines `optimized-*`, `portable-*`, `portable-no-c-*`)
+
+Bytes builds three ways, selected by package traits and run with `./bench BUILD [benchmark args]` (each
+build has its own build directory):
+
+- `optimized` (default traits `NEONShuffle`, `HardwareCRC`): CBytesNEON's `tbl` lookups and CBytesCRC's
+  `pmull`/`crc32` instructions.
+- `portable` (`--traits Portable`): both C modules, with `BYTES_PORTABLE` defined so their headers compile
+  the fallbacks other CPUs get, and `CRC32` uses its table path. The Swift targets get `-Xcc
+  -DBYTES_PORTABLE` too: a module inlining Bytes' code compiles the headers' `static inline` functions
+  itself.
+- `portable-no-c` (`--disable-default-traits`): no C modules, so the Swift fallbacks are used throughout.
+
+Checked: the benchmark plugin honors the traits (`pmull` and `crc32` counts 32 and 4 in the optimized
+benchmark binary, 0 in the others); tests pass in all three (126 in the portable builds: the folding
+constants test is hardware-only); no warnings.
+
+Two interleaved rounds (optimized, portable, no-C, twice), 179 benchmarks without the allocation-only
+ones. Times are the mean of the two rounds' medians, in µs. 291 of 337 rows are within 10% of optimized for
+`portable`, 301 for `portable-no-c`. The rest:
+
+| Workload | Optimized | Portable | Portable, no C |
+|---|---|---|---|
+| Bulk read `read(_:_:into:)`, `Byte3`, 4 MB in cache | 77 | 8,485 (110x) | 222 (2.9x) |
+| … `Byte5` | 93 | 10,500 (113x) | 202 (2.2x) |
+| … `Byte5`, 512 MB from memory | 13,000 | 1,318,500 (101x) | 26,000 (2.0x) |
+| Bulk BE24 (`read(_:_:into:)`) | 21 | 2,090 (100x) | 55 (2.6x) |
+| Generating write, `Byte3`, 4 MB | 97 | 6,699 (69x) | 204 (2.1x) |
+| … `Byte5` / `Byte7`, 4 MB | 178 / 136 | 7,072 / 7,209 (40x / 53x) | 272 / 197 (1.5x) |
+| `forEach`/`for`-`in` over `Byte5`–`Byte7`, 4 MB | 155–248 | 6,700–9,500 (37–51x) | 168–282 (1.1x) |
+| `Byte5`–`Byte7` reads, 512 MB, 32 cores | 2,323–2,333 | 35,000–49,000 (15–21x) | 2,309–2,322 (1.0x) |
+| CRC-32, 256 KB | 466 | 14,000 (30x) | 14,000 (30x) |
+| Runs: 3- and 4-byte elements, per-element writes | 5.9 / 8.1 | 6.9 / 9.2 (1.17x / 1.14x) | 7.1 / 9.5 (1.20x / 1.18x) |
+
+Instruction counts agree (bulk BE24: 267 K, 42 M, 900 K), so these aren't timing noise.
+
+What it shows:
+- Without the C modules, the odd-width group paths lose 1.1–2.9x on one core and nothing when memory-bound
+  on all cores: that is what the `NEONShuffle` trait buys.
+- The C modules' portable fallback is a disaster: 37–113x slower than optimized on one core (15–21x on all
+  cores, from memory), and 15–54x slower than not having the C module at all. Each lookup copies its 48- or
+  64-byte table to the stack and gathers lane by lane (`bytes_table_portable`), and the pack/unpack steps do
+  3–4 lookups per 64 bytes: the bulk `Byte3` read loop in the portable binary is 868 instructions per
+  64-byte step (64 lane extracts, 81 byte loads, 60 lane inserts, 77 stores, 63 branches), about 200 per
+  lookup, where NEON uses one `tbl`. On other CPUs with default traits, Bytes would take the shuffle paths with these
+  fallbacks. They should be taken only where lookups are single instructions (as
+  `ByteLanes.isLookupVectorized` already reports), and the plain Swift loops used elsewhere. Fixed in the
+  next section, which also replaces the plain loops with portable shuffles.
+- The table CRC is 30x slower than the folded hardware one at 256 KB, matching the `CRC-32 tables`
+  benchmark (14 ms in all three builds).
 
 ## 2026-11-10: conveniences, lane shuffles for a decoder, cheaper array builders (baselines `conv-old-*` → `conv-new-*`, `builder-ab`)
 
@@ -241,7 +404,8 @@ their RESULTS.md files.
 
 A full run after the renames, the formatting pass, and the `ByteLanes` additions. Other agents were
 building and benchmarking on the machine at the time (load average ~10), so times are not comparable.
-Instruction counts are, and they're what this check uses.
+Instruction counts are, and they're what this check uses. (The `modern` baseline was later re-run alone:
+see the top.)
 
 - **Instructions are unchanged from `safe-final` in every benchmark.** Of 280 rows, none differs by 1% or
   more, except two 32-core rows at +1.3% and +1.5%, which are scheduling noise. Wall times are 5–15%
@@ -299,7 +463,7 @@ only allocations (`mallocCountTotal`), for 10 iterations over 64 KB buffers. The
 - the field, bit-field, and search parsers;
 - a section round trip: LEB128-prefixed sections, length-prefixed UTF-8, and LEB128 values.
 
-`Thresholds/` holds a static p90 threshold for each (109 files):
+`Thresholds/` holds a static p90 threshold for each (140 files):
 
 ```sh
 # Fails (nonzero exit) if any workload allocates more than its threshold.
@@ -397,6 +561,10 @@ constants as literals, or as computed properties.
 
 ## Group operations: `ByteGroup` operators, `forEach` with a byte order, and the table CRC
 
+Superseded for the CRC (2026-11-12, "fast portable builds"): the table path is now braided, five
+interleaved CRCs, 3.6x faster at 256 KB than the slicing-by-8 measured here. The group operators and
+`forEach` with a byte order are unchanged.
+
 The table-driven CRC (the portable path) was written with hand shifts and masks:
 `tables[6][Int(word >> 8 & 0xFF)]`, eight times over. Rewritten with `Bytes` APIs:
 
@@ -465,7 +633,8 @@ and halves already say which byte is meant.
     accumulators every time.
   - `@inline(always)` on it gave the loop above (16 `pmull`, 8 `eor3`, 4 `ldp`, ~10 bookkeeping
     instructions per 128 bytes).
-- **Other CPUs:** slicing-by-8 tables. The tests check them against a bit-at-a-time reference too.
+- **Other CPUs:** tables (slicing-by-8 then, braided since 2026-11-12). The tests check them against a
+  bit-at-a-time reference too.
 
 ## Safe constructs instead of unsafe ones (baselines `pre-safety` → `safe-final`)
 
@@ -519,7 +688,7 @@ for 32 MB of text, 0 allocations; details in that package's RESULTS.md, step6) n
 
 - **`BitBuffer`**: 64 bits in a register, a branch-free refill (one unaligned load, `bits |= word << count`,
   `next += (63 - count) >> 3`, `count |= 56`), and no per-read end check: past the data it reads zeros,
-  and `isOverrun`/`finish()` reports it once per block. Both bit orders. `Bytes.withBitBuffer` and
+  and `isOverrun`/`finish()` reports it once per block. Both bit orders. `BytesReader.withBitBuffer` and
   `finish()` convert back to a cursor.
 - **`HuffmanTable`**: a canonical-code table for both bit orders (DEFLATE/Brotli least significant bit
   first, JPEG most), and the generic `HuffmanTable.build(…into:invalid:symbol:subtable:)` that fills a table
@@ -529,7 +698,7 @@ for 32 MB of text, 0 allocations; details in that package's RESULTS.md, step6) n
   8 bytes at a time and may write `copyOverrun` (32) bytes past the copy; `write(_:byteCount:allowingOverrun:)`
   for word-sized stores; `skip(byteCount:)`.
 - **`bitReversed`** on `UInt8`–`UInt64` and `Bits` (`Builtin.int_bitreverse`, one `rbit`).
-- **`peekBitWindow()`** on `Bytes`, **`bitPosition`** and **`seek(toBitPosition:)`** (a resumable decoder
+- **`peekBitWindow()`** on `BytesReader`, **`bitPosition`** and **`seek(toBitPosition:)`** (a resumable decoder
   stores one integer: `seek(toByteOffset:)` + `skip(bitCount:)` before).
 - **`[UInt8](copying: RawSpan)`**.
 
@@ -539,7 +708,7 @@ decoder APIs are `@inline(always)` (SE-0496, guaranteed), and the decoder keeps 
 `BytesWriter` as locals of small functions.
 
 API review afterwards: `BitBuffer.peek(_:)`/`consume(_:)` renamed `peek(bitCount:)`/`consume(bitCount:)`,
-matching `Bytes.peek(bitCount:)`, `read(bitCount:)`, and `skip(bitCount:)`. Considered and not added: a
+matching `BytesReader.peek(bitCount:)`, `read(bitCount:)`, and `skip(bitCount:)`. Considered and not added: a
 byte-sized write overload (`write(Byte(…))` is what the inflater's literal path uses), and a sliding-window helper
 for the writer (NativeZip alternates two buffers, which a single-writer helper doesn't fit).
 
@@ -561,7 +730,7 @@ always moved the section); unused code removed; docs corrected where they overst
 
 ## Writing (`BytesWriter`)
 
-`BytesWriter` mirrors `Bytes`: `write` for `Bits`, byte groups with a byte order, `ByteRepresentable` types,
+`BytesWriter` mirrors `BytesReader`: `write` for `Bits`, byte groups with a byte order, `ByteRepresentable` types,
 raw-value types, and spans, `store` for standard library types (native order), and bulk writes from spans
 or from a closure (`write(Byte4.self, .bigEndian, count: n) { index in … }`, the counterpart of `forEach`).
 It writes into a `MutableRawSpan`, or into uninitialized memory with `output.withBytesWriter { … }` on
@@ -574,10 +743,10 @@ cursor; a throwing write writes nothing.
 A combined reader/writer has to hold the memory exclusively (`MutableRawSpan`), so any span it hands out
 can only borrow the cursor itself, not the memory. That breaks the fixed-size-record idiom: with a
 prototype, `let header = cursor.read(byteCount: 4)` followed by another read from `cursor` is a compile
-error ("overlapping accesses to 'cursor'"), while the same code with `Bytes` compiles. Reading through a
-`MutableRawSpan` would be no faster either: the loads are identical. So `Bytes` reads shared memory and
-hands out spans that outlive it; `BytesWriter` writes exclusive or uninitialized memory. Patching data in
-place is a `Bytes` pass and a `BytesWriter` pass over the same memory, one after the other.
+error ("overlapping accesses to 'cursor'"), while the same code with `BytesReader` compiles. Reading
+through a `MutableRawSpan` would be no faster either: the loads are identical. So `BytesReader` reads
+shared memory and hands out spans that outlive it; `BytesWriter` writes exclusive or uninitialized memory.
+Patching data in place is a `BytesReader` pass and a `BytesWriter` pass over the same memory, one after the other.
 
 ### Write bandwidth (GB/s, p50; baseline `writes4`)
 
@@ -633,6 +802,10 @@ They compile to what you'd write by hand: setting a nibble half is `and` + `orr`
 one `orr`/`eor`, a `Byte4` half one `lsr`.
 
 ## NEON byte shuffles (`NEONShuffle` trait, CBytesNEON C module)
+
+Superseded in part (2026-11-12): `GroupShuffle`, portable constant shuffles, now handles these widths for
+iterators (`for`-`in`) in every build, and for bulk reads, writes, and staged `forEach` wherever
+`ByteLanes.isLookupVectorized` is false. This section describes the NEON `Shuffle`, still used otherwise.
 
 3-, 5-, 6-, and 7-byte groups can't use contiguous vector loads and stores: each value straddles lanes.
 NEON's table lookup (`tbl`, up to 64 bytes of table per instruction) packs and unpacks them, but Swift
@@ -749,7 +922,7 @@ Also from the assembly review:
 ## The standard library's `ConvertibleFromBytes`
 
 Only standard library types can conform (integers, `Float16`/`Float`/`Double`, `Duration`, `SIMD2`–`SIMD64`,
-and `InlineArray`s of them), but `Bytes` can read those (baseline `zerocopy`):
+and `InlineArray`s of them), but `BytesReader` can read those (baseline `zerocopy`):
 
 - `load(_:)`: one value in native byte order (little-endian on Apple), from any offset, e.g.
   `Float`, `SIMD4<UInt8>`, `InlineArray<4, UInt8>`. Same loads as `ByteRepresentable` (integer-sized values
@@ -769,12 +942,12 @@ and `InlineArray`s of them), but `Bytes` can read those (baseline `zerocopy`):
 So a zero-copy span closes the `for`-`in` gap for 4-byte elements (2.7x the decoding view, equal to
 `forEach`), but not for 6 or 16: the loop loads each element through `Span`'s subscript as a byte
 aggregate, the same problem `Load.rawBytes` solves with `bitCast`, and LLVM only merges those byte loads
-for 4 bytes. `Bytes` can't change how `Span` loads its elements; `forEach` stays the path that's at raw
+for 4 bytes. The library can't change how `Span` loads its elements; `forEach` stays the path that's at raw
 speed for every size.
 
 ## `for`-`in` (`Iterable`)
 
-`Bytes` conforms to the standard library's `Iterable` (macOS 27): `for byte in reader` iterates the unread
+`BytesReader` conforms to the standard library's `Iterable` (macOS 27): `for byte in reader` iterates the unread
 bytes as one zero-copy `Span<UInt8>`, at 111–113 GB/s in cache and 77–78 from memory, the same as the raw
 SIMD read. `reader.values(of: Byte4.self, .bigEndian)` and `reader.values(of: Nibble.self)` return typed
 `Iterable` views. Their iterators decode 1,024 (groups) or 4,096 (bits) values at a time into a buffer
@@ -861,7 +1034,8 @@ core's. Scaling: 1 thread 72, 2 → 133, 4 → 195, 8 → 205, 16 → 245, 32 �
   Everything else is compute-bound on one core (its in-cache speed is no faster than its memory speed):
   odd strides can't use contiguous vector loads, and the bit widths do several operations per value. In
   values per second the bit widths are fast (`Bit` at 11 GB/s is 88 billion values/s, ~22 per cycle), but
-  a byte holds 8 of them, so they need ~7 cores to saturate memory.
+  a byte holds 8 of them, so `Bit` needs ~7 cores to match one core's raw reads (77 GB/s); with all cores
+  it reaches the ceiling (237 GB/s).
 - `Bits<5>`–`Bits<7>` are the slowest: values straddle bytes irregularly, so they're extracted from 64-bit
   blocks with only two lanes per vector register.
 

@@ -3,7 +3,9 @@
 Bytes is a Swift library for parsing and writing binary formats: reading and writing cursors
 (`BytesReader`, `BytesWriter`) over borrowed memory, with fields from 1 bit to 16 bytes. This week it went
 from a first version to one that reads at memory speed, and three projects were built on it: an MQTT 5
-codec, a DEFLATE decoder that beats zlib, and a Base64 encoder at 93% of hand-written C.
+codec, a DEFLATE decoder that beats zlib, and a Base64 encoder and decoder at 93% and 99% of hand-written
+C. It builds three ways (with NEON, with portable C fallbacks, and in Swift alone), and the portable
+builds average within about 2% of the NEON one.
 
 This document covers the design and optimization techniques that got it there, with before-and-after code
 and the measurements behind each. It's for experienced Swift programmers who know CPUs only at the
@@ -27,7 +29,7 @@ x% less time unless it says "throughput".
 7. [Let LLVM vectorize your loops](#7-let-llvm-vectorize-your-loops)
 8. [Write SIMD yourself with `SIMD16`](#8-write-simd-yourself-with-simd16)
 9. [Reach instructions Swift can't express](#9-reach-instructions-swift-cant-express)
-10. [Case studies: Base64, CRC-32, DEFLATE](#10-case-studies)
+10. [Case studies: Base64, CRC-32, DEFLATE, three builds](#10-case-studies)
 11. [Smaller lessons](#11-smaller-lessons)
 12. [Limitations and bugs found in Swift and LLVM](#12-limitations-and-bugs-found-in-swift-and-llvm)
 13. [Glossary](#13-glossary)
@@ -70,9 +72,9 @@ A few facts explain almost every result below.
 
 Four habits replaced guessing with knowing:
 
-1. **Benchmark everything, including allocations.** Every Bytes workload also has an `Allocations:<name>`
-   benchmark that counts only `malloc` calls against a static threshold: zero for all but one, a known
-   compiler-caused allocation (section 12), which is how that compiler bug was found.
+1. **Benchmark everything, including allocations.** Every workload that shouldn't allocate also has an
+   `Allocations:<name>` benchmark that counts only `malloc` calls against a static threshold: zero for all
+   but one, a compiler-caused allocation (section 12), which is how that compiler bug was found.
 2. **Count instructions, not just time.** Instruction counts are deterministic; times vary ±10% between
    runs. A change that saves 20% of instructions but no time shows the loop is bound by something else
    (latency, memory, one busy execution unit), which is also worth knowing.
@@ -95,6 +97,23 @@ One harness lesson recurred: **measure the code, not the benchmark.** The first 
 folded each field into `checksum = checksum * 31 + value`: 13 dependent multiplies per record, each
 waiting about 3 cycles for the last. That took longer than the parsing, so all four parsers measured
 19 µs. A plain sum revealed the real differences (10 to 17 µs).
+
+Three more came later:
+
+- **Only the work goes inside the measured loop.** Early benchmarks read a clock, looked up fixtures in a
+  dictionary, or checked results inside package-benchmark's `scaledIterations` loop. Now fixtures (inputs
+  and output buffers) are made before a benchmark is registered, results are checked once beforehand, and
+  bytes per second come from the framework's own throughput metric (iterations per second, measured
+  outside the loop) times the bytes per iteration.
+- **Compare times only within one interleaved run.** Single-core times drift 5–10% between runs minutes
+  apart, unchanged code included, so a timing claim compares the old code (extracted with `git archive`)
+  and the new in alternating runs, round by round. Memory-bound runs were worse: they switched between two
+  levels about 20% apart (about 2,250 and 2,760 µs), unchanged code and `memset` included. A regression
+  that showed in both rounds of one comparison vanished in three more alternating runs. Instruction counts
+  don't drift; use them to judge, and times to confirm.
+- **Measure every build you ship.** Bytes builds three ways (NEON, portable C fallbacks, Swift only;
+  section 10). The portable fallback had never been benchmarked; when it was, it ran up to 113x slower
+  than the NEON build (section 9).
 
 ## 3. The cursor: a design that lets the compiler help
 
@@ -163,7 +182,7 @@ Each type exists to give the compiler something it can turn into a few instructi
   instructions on every Swift version, for scanning 16 bytes at a time (section 8), plus table lookups and
   shuffles through a small C module (section 9).
 - **`BitBuffer`**: 64 bits of input in one register, for decoders that read many small codes (DEFLATE,
-  JPEG). Its refill is branch-free, and it doesn't check for the end of input per read (section 10).
+  JPEG). Its refill has no loop, and it doesn't check for the end of input per read (section 10).
 - **`HuffmanTable`**: decoding a code is one table lookup (two for long codes), and the entry type is
   yours, so an entry can carry everything the next step needs (section 10).
 - **`CRC32`**: the zip/PNG checksum, at 63 GB/s with the CPU's carry-less multiply (section 10).
@@ -252,12 +271,12 @@ as help; each was tested alone.
 can see, so reads inside it need no checks:
 
 ```swift
-// Field by field: a check per field. 301 K instructions, 12 µs for 2,000 zip headers.
+// Field by field: a check per field. 301 K instructions, 11 µs for 2,000 zip headers.
 let signature = try reader.read(Byte4.self)
 let version = try reader.read(Byte2.self, .littleEndian)
 // … 15 more fields
 
-// One check for the record, none per field: 199 K instructions (−34%), 8.3 µs.
+// One check for the record, none per field: 199 K instructions (−34%), 7.8 µs.
 var record = BytesReader(try reader.read(byteCount: 46))
 let signature = try record.read(Byte4.self)
 let version = try record.read(Byte2.self, .littleEndian)   // bytes 4..<6 of 46: known in bounds
@@ -301,14 +320,23 @@ instructions for field parsing and 2–8x for odd widths, and stopped bulk loops
 unchecked accesses stay, confined to a few functions, each behind the cursor's own check with a comment
 on why it's safe.
 
+**A check folds only while the optimizer knows both sides.** The table CRC (section 10) looks up bytes in
+256-entry tables. As `Span`s of exactly 256 entries, a byte index is provably in range, and in the main
+loop the checks vanished. In the loop for short inputs they stayed: each table's count sat in a register,
+compared before every lookup. Stating the counts with a `precondition` fixed that loop and broke the main
+one, which now ran out of registers, spilled, and checked again (126 → 293 instructions per 40 bytes).
+The tables became pointers into the borrowed array, with the argument for safety (every index is a byte)
+in a comment. Whether a safe access is free can depend on register pressure in code nearby; check the
+loop, not the function.
+
 ## 7. Let LLVM vectorize your loops
 
 Most of Bytes' speed comes from loops written so LLVM vectorizes them on its own:
 
 **Independent loads, not a moving pointer.** A reader that advances a pointer field by field makes each
 load wait for the previous advance (a dependency chain). Bytes loads each field in a record from `base +
-constant offset`, independently. On the same zip directory, Bytes took half the time of a
-conventional pointer-advancing reader (9.3 against 19 µs) despite running 12% more instructions (291 K
+constant offset`, independently. On the same zip directory, Bytes took two-thirds of the time of a
+conventional pointer-advancing reader (11 against 17 µs) despite running 16% more instructions (301 K
 against 259 K).
 
 **Odd widths with overlapping loads.** There's no 3-byte load instruction, so a `Byte3` is read as two
@@ -391,7 +419,7 @@ search](http://0x80.pl/notesen/2016-11-28-simd-strfind.html).
 for offset in stride(from: last, through: 0, by: -1)
 where span.load(fromByteOffset: offset, as: UInt32.self) == signature { return offset }
 
-// 2.3 µs (14x): 16 offsets per 12 instructions. Simplified from BytesReader.lastByteOffset(of:).
+// 2.0 µs (16x): 16 offsets per 12 instructions. Simplified from BytesReader.lastByteOffset(of:).
 let head = SIMD16<UInt8>(repeating: pattern[0])         // the signature's first byte, in every lane
 let tail = SIMD16<UInt8>(repeating: pattern[3])         // and its last byte
 while offset >= 0 {
@@ -435,9 +463,10 @@ topics go on to the standard library's full UTF-8 validation.
 
 Some NEON instructions do in one step what otherwise takes a dozen, and Swift can't emit them: it has no
 intrinsics (functions that map to one specific instruction), `Builtin` doesn't expose CPU-specific ones,
-and `SIMD16`'s dynamic subscript (indexing a vector with another vector) compiles a lane at a time. The
-fix is a small C target of `static inline` functions over C vector types that Swift imports as
-`SIMD16<UInt8>`. Swift inlines these, so each call becomes the single instruction:
+and `SIMD16`'s dynamic subscript (indexing a vector with another vector) compiles a lane at a time
+(shuffles by *constant* positions are the exception; see below). The fix is a small C target of
+`static inline` functions over C vector types that Swift imports as `SIMD16<UInt8>`. Swift inlines these,
+so each call becomes the single instruction:
 
 ```c
 // CBytesNEON.h (ARM64 branch; the header also has a portable fallback)
@@ -459,7 +488,7 @@ Three instruction families were worth this:
   memory, done in registers. Bytes uses it to move the bytes of 3-, 5-, 6-, and 7-byte values into whole
   4- or 8-byte lanes and back (bulk reads 1.8–2.5x faster, writes 1.3–2.4x), and Base64 to map 6-bit
   values to characters. It sits behind the `NEONShuffle` package trait (SE-0450: an option declared in
-  Package.swift), with a portable fallback.
+  Package.swift); other CPUs use the portable shuffles below.
 - **`zip`: interleave.** `zip1` and `zip2` interleave two vectors lane by lane (a0 b0 a1 b1 …), giving
   the first and second halves of the result.
 - **`pmull`, `eor3`, `crc32x`: CRC.** `pmull` is a carry-less multiply (`pmull2` the same on the upper
@@ -489,7 +518,47 @@ flags all of these as `+lane-moves`.
 **When not to shuffle.** Unpacking 3-byte values with `tbl`, then calling the loop body once per value,
 was 5x *slower* than the plain loop, which LLVM had already vectorized, body included, using `ld3`:
 calling the body per value pulled each lane back out to scalar code. A specialized instruction helps only
-if the code around it stays vectorized.
+if the code around it stays vectorized. (Below: for 5–7-byte values, unpacking into a small buffer and
+running the body over it does keep the body vectorized.)
+
+**Constant shuffles don't need C.** A lookup with run-time indices needs `tbl`, so the C target. But if the
+indices are constants, Swift can do it: build a vector from lanes of another, picked at constant
+positions, and LLVM recognizes the whole initializer as one shuffle. Bytes' `GroupShuffle` unpacks 5-byte
+values this way, two per vector:
+
+```swift
+// 10 bytes in (two 5-byte values, big-endian), two zero-extended 64-bit lanes out.
+let v = span.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)
+let lanes = SIMD16<UInt8>(v[4], v[3], v[2], v[1], v[0], 0, 0, 0,
+                          v[9], v[8], v[7], v[6], v[5], 0, 0, 0)
+```
+
+In Bytes the positions come from a function of the width and byte order, which folds to constants once
+the generic code is specialized. The loop is a load, one single-register `tbl`, and a store; on x86-64 the
+same Swift compiles to one `pshufb` (only a generic x86-64 target without SSSE3 expands it into a longer
+sequence). It's portable, and cheaper than the 64-byte lookups it replaces: a
+`tbl` costs a micro-op per table register, so one over a single register is a quarter of one over four.
+Iterating 3-, 5-, 6-, and 7-byte values with it is 22–44% faster than with the NEON lookups, so every build
+uses it there (section 10); the portable builds use it for everything else too.
+
+**The same merging, without `asm`.** Writing with it, each vector was built from four computed values
+and then shuffled, and LLVM merged the two steps into one byte insert per byte (40 per vector for 3-byte
+values), slower than not shuffling. `forEach`, handing the caller's body each value straight out of the
+vector, kept the body scalar: summing ran 2x slower than the plain loop. An empty `asm` would stop the
+merging, but it's specific to each architecture. The portable fix is to go through memory: a 512-byte
+stack buffer (`withUnsafeTemporaryAllocation`, no heap allocation). To write, a plain loop computes a chunk
+of values into it, which LLVM vectorizes like any loop, and vectors are loaded back, shuffled, and stored.
+For `forEach`, vectors are unpacked into it and the caller's body runs over it as a plain loop, which
+vectorizes with the body. A load from memory is opaque enough. Staging only pays for a full buffer (64 or
+128 values): shorter runs took 37% more instructions that way, so they keep the plain loops.
+
+**An emulated instruction is no fallback.** The C header's fallback for other CPUs did each 64-byte `tbl`
+a lane at a time: copy the table to the stack, then compare, branch, load, and insert for each of 16
+lanes, about 200 instructions where NEON needs one. The shuffle algorithm around it assumed lookups were
+nearly free, so the portable build ran 37–113x slower than the NEON one, and 15–54x slower than plain
+Swift loops that didn't shuffle at all. An algorithm designed around one CPU's instruction belongs behind
+a check that the instruction is there (`ByteLanes.isLookupVectorized`), with a different algorithm
+elsewhere.
 
 ## 10. Case studies
 
@@ -533,11 +602,44 @@ vectors) reaches 23.1 GB/s. The Swift version is at 93% of that, and level with 
 limit is how many `tbl`s the core can start per cycle, not instruction count: cutting instructions 2.3x
 didn't change the speed, but replacing 4 four-register lookups with 8 cheaper `zip`s gained 15%.
 
+### Base64 decoding: 12.8 GB/s, at the C ceiling
+
+Decoding reverses it: 64 characters to 48 bytes, rejecting anything outside the alphabet. The kernel
+splits the characters into four vectors (8 `uzp`s, what `ld4` does on loading), maps each to its 6-bit value
+with table lookups, shifts and ORs the values into three vectors of bytes, and interleaves them (3 `tbl`s,
+what `st3` does on storing). Invalid characters map to 0xFF, ORed into an accumulator tested once after
+the loop, so there's no branch inside it. The steps, 1 MB:
+
+| Step | Kernel loop | Throughput |
+|---|---|---|
+| Prototype: lookups for the split and interleave, a 128-byte table | 52 instructions | 12.2 GB/s of text (≈ 9.2 of bytes) |
+| `uzp`s for the split, the table as two 64-byte lookups | 131 instructions, 3 calls | — |
+| Interleave indices as `Byte16` literals, not `SIMD16` array literals | 91, with byte-wise loads | — |
+| An empty `asm` on the loaded vectors, before the `uzp`s | 45 (69 micro-ops) | 11.5 GB/s of bytes |
+| An 80-byte window of the table instead of 128 bytes | 49 (61 micro-ops) | **12.8 GB/s** |
+
+Throughput counts decoded bytes except in the first row. Two compiler traps account for the middle rows
+(both in section 12). `SIMD16` array literals inside the library's inlinable code became calls to
+`SIMD.init` in the caller, three per block, and five more per call for the table: written as `Byte16`
+integer literals (bytes in memory order) and converted with `.vector`, they fold to constants. And LLVM
+*narrowed* the loads: the first round of `uzp`s only needs every other byte, so it loaded each 16-byte
+vector as single bytes, halves, and pieces (91 instructions per block); an empty `asm` on the vectors
+keeps the loads whole.
+
+The last row is the encoder's lesson again: the loop was bound by the vector pipes, not by instruction
+count, and each `tbl` or `tbx` costs one micro-op per table register. The alphabet runs from
+`+` (43) to `z` (122), so subtracting `+` leaves an 80-entry window: one 64-byte lookup and one 16-byte
+lookup (`tbx`, which keeps the lane's old value when the index is out of range, here 0xFF) instead of two
+64-byte ones, 61 micro-ops per block instead of 69, +11%. A C kernel with `vld4q`, the same window, and
+`vst3q` reaches 12.9 GB/s, so the Swift kernel is at 99% of it: `ld4`/`st3` save instructions but use the
+same pipes. Result: 4.2x Foundation's `Data(base64Encoded:)`, 50x a scalar table, and no allocations
+decoding into a buffer.
+
 ### CRC-32: 1.7–2.3x zlib
 
 A CRC is the remainder of dividing the data, as a polynomial over bits, by a fixed polynomial. Software
 computes it a byte at a time with a 256-entry table, or 8 bytes at a time with 8 tables ("slicing-by-8").
-Two lessons:
+Three lessons:
 
 - **The table version, rewritten with Bytes' own APIs** (byte-wise `^` on a `Byte8`, a byte subscript
   instead of shifts and masks), halved its instructions (336 M → 180 M) and ran 27% faster on 64-byte
@@ -550,6 +652,14 @@ Two lessons:
   zlib's `crc32_z`, and 2.3x on 64-byte inputs. The first version was 3.5x *slower* than zlib: a nested
   helper that loaded each 16 bytes wasn't inlined, and each call spilled the eight accumulators.
   `@inline(always)` fixed it.
+- **The table version, braided.** Fewer instructions couldn't shorten slicing-by-8's chain, but more
+  chains could. zlib's *braided* CRC runs five independent CRCs over interleaved 8-byte words: each takes
+  every fifth word and jumps 40 bytes per step, with tables that advance a byte past the other four
+  braids' words (as if they were zeros), and the five are combined in the last block, which works because
+  a CRC is linear. The loop became bound by loads (45 per 40 bytes) instead of latency: 3.6x faster at
+  256 KB (14 ms → 3.9 ms for 32 MB, 8.3 GB/s), and 12–14% faster at 64 bytes after the short-input path
+  lost its bounds checks (section 6). This is what CPUs without `pmull` use: 8.3x slower than folding, down
+  from 30x.
 
 Intel's [Fast CRC Computation for Generic Polynomials Using PCLMULQDQ
 Instruction](http://web.archive.org/web/20230315165408/https://www.intel.com/content/dam/www/public/us/en/documents/white-papers/fast-crc-computation-generic-polynomials-pclmulqdq-paper.pdf)
@@ -564,8 +674,8 @@ decodes 32 MB of text in 13 ms against zlib's 14, with zero allocations. In orde
    bit buffer and writer.
 2. **A register-only refill.** The slow refill, used near the end of the input, took the buffer's fields
    `inout`, keeping them in memory on the fast path too; it now takes and returns values. The fast path is
-   branch-free: one unaligned 8-byte load and three arithmetic steps, with no loop and no branch on how
-   many bytes fit:
+   loop-free: while 8 bytes remain, one unaligned 8-byte load and three arithmetic steps, with no branch on
+   how many bytes fit:
 
    ```swift
    _bits |= UInt64(littleEndian: raw) &<< shift      // raw: the next 8 bytes; shift: bits already held
@@ -582,6 +692,43 @@ decodes 32 MB of text in 13 ms against zlib's 14, with zero allocations. In orde
    so the lookup's latency overlaps the work.
 5. **Copies that may overrun.** Instead of an exact byte loop, back-references copy 16 bytes at a time and
    may write up to 32 bytes past their end; this loop runs only while 32 spare bytes remain in the output.
+
+### Three builds: NEON, portable C, Swift only
+
+Bytes' C targets are optional, chosen with package traits: `NEONShuffle` (the `tbl` wrappers) and
+`HardwareCRC` (`pmull` and `crc32`) are on by default, and `Portable` keeps both but compiles their
+headers' fallbacks for other CPUs (it defines `BYTES_PORTABLE`). `Bytes/bench optimized|portable|portable-no-c`
+benchmarks each in its own build directory. Swift modules compile a C header's `static inline` functions
+themselves, including ones inlined from Bytes into their own code, so a define on the C target isn't
+enough: each Swift target gets it too (`-Xcc -DBYTES_PORTABLE`).
+
+The first measurement of the portable builds was the "emulated instruction" lesson (section 9): odd-width
+reads 37–113x slower than NEON in the portable build, and the table CRC 30x slower in both. Three changes,
+none specific to a CPU, closed most of it:
+
+1. **Odd widths:** `GroupShuffle`'s constant shuffles (section 9) instead of the emulated lookups, with a
+   stack buffer for writes and `forEach`, only where `tbl` isn't one instruction.
+2. **CRC:** the braided table CRC (above).
+3. **Iterators, everywhere:** an iterator's body only stores each value into its buffer, so a one-register
+   `tbl` per two values beat the NEON build's four-register `tbl`s, and the optimized build adopted it:
+   `for`-`in` over 3-byte values 294 → 160 µs per 4 MB, 5–7 bytes 26–28% faster. The same path lost to
+   NEON for `forEach` with a body, and tied for bulk reads, so those stayed.
+
+Times in µs, two alternating rounds:
+
+| Workload | Before (NEON) | Optimized | Portable, before → now | Swift only, before → now |
+|---|---|---|---|---|
+| `for`-`in` `Byte3`, 4 MB | 294 | 160 | 284 → 163 | 290 → 158 |
+| `for`-`in` `Byte6`, 4 MB | 213 | 157 | 7,809 → 155 | 235 → 157 |
+| Bulk read `Byte5`, 4 MB | 99 | 99 | 10,500 → 92 | 202 → 100 |
+| `forEach` summing `Byte6`, 4 MB | 159 | 161 | 7,742 → 162 | 171 → 161 |
+| Generating write `Byte6`, 4 MB | 147 | 146 | 5,982 → 200 | 227 → 198 |
+| CRC-32, 256 KB | 471 | 470 | 14,000 → 3,874 | 14,000 → 3,900 |
+
+Across all 337 benchmarks, the portable builds now average 2% slower than the optimized one (from 1.59x
+for the portable build), and 319–321 of them are within 10%. The optimized build averages 1.2% faster
+than before. What's left: odd-width writes (1.25–2x: the trip through memory, and a value computation
+LLVM vectorizes less tightly than the NEON path's), and CRC without `pmull` (8.3x).
 
 ## 11. Smaller lessons
 
@@ -630,6 +777,35 @@ memory speed. For 6-byte elements it's about 2x slower than `forEach`, and up to
 `Span`'s subscript loads an `InlineArray` element byte by byte, and LLVM merges those loads only for 4
 bytes. Bytes' own loads use a same-size integer load and `bitCast` instead (section 4).
 
+**Building arrays: avoid the standard library's uninitialized-capacity initializers in hot code.**
+`[UInt8](capacity:initializingWith:)` and `init(unsafeUninitializedCapacity:initializingWith:)` allocate
+through a function that isn't specialized for the element type: about 500 instructions and 27 ns more per
+array than `reserveCapacity` followed by `append(addingCapacity:)`, at 40 bytes and at 1 KB alike. Bytes'
+array builder switched and made 1,000 38-byte arrays with 27.6% fewer instructions; MQTT's copying
+benchmark had run 17.5% more instructions (about 590 per packet) when `[UInt8](copying:)` went through the
+slow path.
+
+**Annotate the error type of closures passed to `throws(E)` parameters.** Without the `FullTypedThrows`
+feature, `{ writer in try writer.write(…) }` is inferred as `throws(any Error)`, and such a closure
+wasn't inlined into the array builder: the writer went through memory, +3% instructions. Written
+`{ (writer) throws(BytesError) in … }`, it was. An overload taking only `throws(BytesError)` doesn't help:
+the unannotated closure still infers `any Error`, then fails to match.
+
+**Measure each convenience against what it replaces.** New helpers were checked as `@inline(never)` pairs
+against hand-written code, counting instructions per function; most compiled to identical code or
+shorter. Three didn't, in context: `Bits(rawBitsOf:)` cost MQTT 3 instructions per packet over the
+explicit conversion; a throwing `String(utf8Capacity:writing:)` called with `try!` cost 10 instructions
+per call (hence a non-throwing overload); and `keepingLowBits` in place of an explicit mask grew a loop of
+`write(_:bitCount:)` calls from 146 to 169 instructions, because LLVM split the function differently. Each
+call site kept its old form, with a comment saying why.
+
+**A loop's start matters on short runs.** The generating write's plain loop finishes whatever the shuffle
+path leaves, so it started at a run-time index. For runs of 1–62 values that cost about 20 instructions
+per call over a loop starting at a constant 0. Giving the long-run path its own loops fixed it.
+
+**Mind Swift's precedence for shifts.** Shifts bind tighter than multiplication, so `count &* 3 &>> 2` is
+`count &* (3 &>> 2)`, which is 0. Base64's decoder briefly computed an output size of zero that way.
+
 **Measure hints.** Without its `likely`/`unlikely` hints (Bytes' wrappers for LLVM's branch weights,
 through `Builtin`), bit-field parsing took 14% more instructions (689 K → 787 K) in the same time; the
 hints were kept. `@frozen` changed nothing outside a binary framework, so it was removed. Spacing the CRC
@@ -645,8 +821,11 @@ have reports with reproducers written but not yet filed.
 | **`for x in reader` over a `~Copyable` `let`** keeps it in a heap box: the iterator depends on the `let`, and `AllocBoxToStack` (the pass that moves boxed locals to the stack) treats that dependence as an escape. Related: swiftlang/swift#93942 | One allocation per loop | Declare the cursor `var`, or take it `borrowing` |
 | **`~Escapable` structs with more than 6 leaf fields** are destroyed at `-O` even when every field is trivial. From another module, the destroy is an indirect call to a no-op through the type's value witness table | 2.5–3% of MQTT's per-packet time; a third of a tight loop | At most 6 leaf fields, or inlining: impractical for packet views |
 | **`SIMD16` comparisons against a scalar** (`v .== 0`) compile one lane at a time, and `any()` is sometimes out of line (section 8). Fixed in 6.5-dev | Scalar "vector" code | Compare against splatted vectors, or wrapping arithmetic |
-| **No CPU intrinsics in Swift**: no `tbl`, `ld3`/`st4` on explicit vectors, `pmull`, `crc32`; `SIMD16`'s dynamic subscript and swizzles compile a lane at a time | A byte shuffle written in Swift: 0.3 GB/s, against 16.7 for overlapping stores | A C target of `static inline` wrappers |
-| **LLVM merges consecutive shuffles** into ones ARM64 builds lane by lane. Separately, shuffles chosen by a `Bool` and vector literals changed per lane also become lane inserts | 14–16 inserts per vector | Empty `asm` between rounds, in C; one initializer per vector |
+| **No CPU intrinsics in Swift**: no `tbl` with run-time indices, `ld3`/`st4` on explicit vectors, `pmull`, `crc32`; `SIMD16`'s dynamic subscript and swizzles compile a lane at a time (shuffles by constant positions compile to one instruction) | A byte shuffle written in Swift: 0.3 GB/s, against 16.7 for overlapping stores | A C target of `static inline` wrappers |
+| **LLVM merges consecutive shuffles** into ones ARM64 builds lane by lane, and a vector built from computed values into the shuffle that follows. Separately, shuffles chosen by a `Bool` and vector literals changed per lane also become lane inserts | 14–40 inserts per vector | Empty `asm` between rounds, in C; or, portably, through a small stack buffer; one initializer per vector |
+| **`SIMD16` array literals in inlinable code** compiled to calls to `SIMD.init` in the caller (in other functions the same literals folded) | ~1,000 instructions per call in Base64's decoder | `Byte16` integer literals, then `.vector` |
+| **LLVM narrows loads to the lanes a shuffle uses** (`ld1.b`, `mov.h`, `ext` instead of `ldr q`) | 91 instead of 45 instructions per Base64 block | An empty `asm` on the loaded vectors, in C |
+| **The standard library's `[UInt8](capacity:initializingWith:)` and `init(unsafeUninitializedCapacity:)`** allocate through an unspecialized function | ~500 instructions, ~27 ns per array | `reserveCapacity`, then `append(addingCapacity:)` |
 | **LLVM threads correlated conditions into jumps**, then won't vectorize | Scalar loop | Arithmetic masks |
 | **Two-lane 64-bit loops and 128-bit arithmetic** aren't vectorized, and Swift has no loop pragmas | `Byte16` reads, `Byte8` writes scalar | Split 128-bit values into halves |
 | **`Builtin.assume(offset >= 0)`** stops loops of reads vectorizing | 14 against 113 GB/s | Leave that assumption out |

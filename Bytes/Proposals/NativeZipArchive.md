@@ -4,9 +4,12 @@ Gathered while modernizing NativeZip to the current Bytes API (2026-11-09). Most
 prototyped as an internal extension in a copy of NativeZip (a scratch copy), used at one call site,
 and compared by disassembly of the whole NativeZip object (`Tools/loops`/`Tools/calls` plus an
 `objdump` diff with addresses and label numbers normalized) and, where codegen changed, by benchmark
-instruction counts. All prototypes were reverted; none is kept as an internal helper (reasons per item).
+instruction counts. All prototypes were reverted in NativeZip (reasons per item).
 
-Line numbers are for the files as left by this run.
+**Status:** 2, 3, 5, and 6 are in Bytes and used by NativeZip. 1 (the Huffman entry type) and 4
+(`DOSDateTime`) are not implemented; `HuffmanEntry` still lives in `Inflater.swift`.
+
+Line numbers are for the files as left by that run.
 
 ---
 
@@ -61,7 +64,7 @@ helpers moved behind a public name, so codegen is unchanged by construction (it'
 own vocabulary at no cost. One trap to avoid in Bytes' version: `extra` must not be
 `bits[bits: codeLength..<totalBits]` (see proposal 2).
 
-Not kept as an internal helper: NativeZip already has it; the point is sharing it.
+NativeZip already has it; the point would be sharing it. **Not implemented.**
 
 ---
 
@@ -98,7 +101,11 @@ but a two-argument function avoids the `Range` precondition entirely.)
 **Evidence.** Prototyped at that call site: `decodeSymbols` has the same 995 lines and the same
 instructions; the 14 differing lines are the same six instructions scheduled in a different order
 (`lsr w8, w20, #16` hoisted above the `ubfx`/`lsl`/`bic`/`lsr`/`add`). Everything else in the object is
-identical. Not kept internally: one call site, and the current expression is already commented.
+identical.
+
+**Shipped** as `bits(from:upTo:)` (5 instructions against 8; 23 for the checked subscript). NativeZip uses
+it for `HuffmanEntry.extra` and the root-table index; the second subtable lookup keeps a hand-written
+shift and mask.
 
 ---
 
@@ -147,8 +154,13 @@ reborrow an `inout MutableRawSpan` as a consumable one.
 **Evidence.** Prototyped (`@inline(always)` extensions) in `readBlockHeader` and `decodeSymbols`:
 `decodeSymbols`' code is instruction-for-instruction the same apart from the throw paths, which got
 *shorter* (two `insufficientData` throw sites merged: 995 → 981 lines); `readBlockHeader` 343 → 306 lines,
-again only throw-path layout. No new calls (`Tools/calls` identical). Not kept internally: small saving
-in a file that otherwise uses only public Bytes API; better in Bytes.
+again only throw-path layout. No new calls (`Tools/calls` identical).
+
+**Shipped** with different names: `BitBuffer(_:atBitPosition:bitOrder:)`, `BytesReader(_:atBitPosition:)`,
+`BytesReader(_:atByteOffset:)` (any `BinaryInteger`, so zip's `UInt64` offsets need no `Int(clamping:)`),
+and `BytesWriter(&output, atByteOffset:)` (proposed as `startingAt:`). All `@inline(__always)`; the
+writer's, only `@inlinable` at first, was called out of line and grew `decodeSymbols` from 789 to 891
+instructions (769 inlined). NativeZip's raster inflate −1.2% instructions and time.
 
 ---
 
@@ -185,7 +197,7 @@ components.year = dos.year; components.month = dos.month; components.day = dos.d
 
 **Evidence.** Prototyped as an internal struct used in `ZipArchive.date(dosDate:dosTime:)`: the function's
 177 lines of assembly are identical. Not kept internally: one call site, and the subscripts with comments
-read fine; its value is in sharing the layout.
+read fine; its value is in sharing the layout. **Not implemented.**
 
 ---
 
@@ -210,8 +222,10 @@ explicit form.
 proven the bytes are there). (b) Optionally `readSectionIfPresent(prefixedBy:_:) -> BytesReader?` that
 returns `nil` without consuming when the section isn't all there, so tolerant parsers don't need `try?`.
 
-**Evidence needed in Bytes.** A parse benchmark of a prefixed-section loop before/after (a); here, the
-measured +0.7% is the cost to remove.
+**Shipped:** both. `read(bytesPrefixedBy:)` checks once (64 KB of prefixed sections: −23%, now below the
+hand-written form), and `readSectionIfComplete(prefixedBy:_:)` returns `nil` without consuming. NativeZip's
+extra-field loop uses the latter; its central-directory parse is neutral (+0.2% instructions, +1.7% time)
+against −14% in the micro-benchmark.
 
 ---
 
@@ -232,8 +246,8 @@ return UInt(checksum.value)
 **After.** `return UInt(CRC32.checksum(bytes, continuing: UInt32(truncatingIfNeeded: crc)))`.
 
 **Evidence.** Prototyped as an internal `@inline(__always)` extension used at that call site: the whole
-NativeZip object is byte-identical (after normalizing addresses). Not kept internally: one call site,
-a three-line saving.
+NativeZip object is byte-identical (after normalizing addresses). **Shipped** as proposed (6
+instructions against 12); NativeZip uses it.
 
 ---
 

@@ -2,8 +2,7 @@
 
 Parse and write binary formats field by field, at bit or byte granularity, with no copying and no
 allocation, at memory speed. `BytesReader` reads borrowed memory; `BytesWriter` writes into memory you
-provide.
-Both are `~Copyable`, `~Escapable` cursors.
+provide. Both are `~Copyable`, `~Escapable` cursors.
 
 ```swift
 import Bytes
@@ -141,8 +140,8 @@ let characters = ByteLanes(indices).lookup(in: (t0, t1, t2, t3))           // 64
 - **Table lookups and shuffles** are NEON's `tbl` and `zip`, through the CBytesNEON C module (the
   `NEONShuffle` trait, on by default). Swift can't express them: `SIMD16`'s dynamic subscript goes a lane
   at a time, and its zip patterns get merged into four-vector shuffles, which ARM64 builds a lane at a
-  time. `ByteLanes.isLookupVectorized` says whether lookups are single instructions (ARM64 with the trait),
-  so code can choose another way where they aren't.
+  time. `ByteLanes.isLookupVectorized` says whether lookups are single instructions (ARM64 with the trait,
+  not `Portable`), so code can choose another way where they aren't.
 - [Base64](../Base64) is built from these: 21 GB/s per core, 93% of a C kernel with `ld3` and `st4`.
 
 ## Decoders
@@ -173,8 +172,9 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
 - `bitReversed` on `UInt8`–`UInt64` and `Bits` is one instruction (`rbit` on ARM).
 - `CRC32` is the zip/gzip/PNG checksum (`CRC32.checksum(span)`, or `update` a running one). On Apple
   silicon it folds 128 bytes per step with carry-less multiplies (the small CBytesCRC C module wraps
-  `pmull`, `eor3`, and the CRC32 instructions, which Swift can't express): 1.7–2.3x zlib's `crc32`, from
-  63 GB/s on large inputs to 64-byte ones. Elsewhere, slicing-by-8 tables.
+  `pmull`, `eor3`, and the CRC32 instructions, which Swift can't express; the `HardwareCRC` trait, on by
+  default): 1.7–2.3x zlib's `crc32`, from 63 GB/s on large inputs to 64-byte ones. Elsewhere, five
+  interleaved table CRCs (zlib's braided method), 8.3x slower than the folded one at 256 KB.
 - In a hot loop, keep the buffer and writer as locals of small functions, so they stay in registers.
   Passing them `inout` to a call the compiler doesn't inline puts them in memory: `@inline(__always)` is
   only a hint and was refused for a large function; `@inline(always)` (SE-0496) is guaranteed.
@@ -201,16 +201,16 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
   `NEONShuffle` trait).
 - The library imports the compiler's `Builtin` module (the `BuiltinModule` experimental feature) for
   branch weights and an `assume` of the cursor's invariant, which lets LLVM fold consecutive bounds checks.
-- The `NEONShuffle` package trait (on by default) packs and unpacks runs of 3-, 5-, 6-, and 7-byte groups
-  with NEON table lookups, through a small C module (CBytesNEON) of `static inline` wrappers Swift inlines
-  to single `tbl` instructions: bulk reads 1.8–2.5x and writes 1.3–2.4x faster on one core. Other CPUs
-  get a portable fallback; `--disable-default-traits` turns it off.
+- Runs of 3-, 5-, 6-, and 7-byte groups are packed and unpacked with 16-byte constant shuffles
+  (`GroupShuffle`, portable Swift: one `tbl` on ARM64, `pshufb` on x86-64), or, with the `NEONShuffle`
+  trait (on by default, ARM64), with NEON table lookups through the CBytesNEON C module, whose
+  `static inline` wrappers Swift inlines to single `tbl` instructions. Iterators (`for`-`in`) use
+  `GroupShuffle` in every build. See Builds for what the portable path costs.
 - Span writes up to 32 bytes (strings, small payloads) copy inline with two overlapping loads and stores;
   longer ones call `memmove`.
 - Nothing allocates (one compiler-caused exception is under Caveats). Every workload is also registered as
   an `Allocations:<name>` benchmark that counts only allocations, checked against static thresholds in
   `Thresholds/`: `swift package --disable-sandbox benchmark thresholds check --filter 'Allocations:.*'`.
-
 - Memory safety: the package builds with strict memory safety, and its unchecked accesses are confined to
   a few funnels (`Load`, `Store`, the copy helpers, the NEON shuffles), each behind the cursor's own
   bounds check, with comments saying why. The standard library's checked loads and stores measured 24%
@@ -219,6 +219,22 @@ let resume = reader.bitPosition                      // save, then `seek(toBitPo
   fixed-size records 31% faster.
 
 `Benchmarks/RESULTS.md` has the measurements, the assembly review, and the experiments that didn't pay off.
+
+## Builds
+
+Package traits select three builds. `./bench [optimized|portable|portable-no-c] [benchmark arguments]` runs
+the benchmarks against one, each in its own build directory so switching doesn't rebuild.
+
+| Build | Traits | Uses |
+|---|---|---|
+| `optimized` (default) | `NEONShuffle`, `HardwareCRC` | CBytesNEON's `tbl` lookups and CBytesCRC's `pmull`/`crc32` instructions |
+| `portable` | `--traits Portable` | both C modules compiled with `BYTES_PORTABLE`, so their non-NEON fallbacks: what other CPUs get, measured on Apple silicon |
+| `portable-no-c` | `--disable-default-traits` | no C modules, Swift only |
+
+On the M3 Ultra, the portable builds average 2% slower than `optimized` (geometric mean of times over 337
+benchmarks: 1.020 for `portable`, 1.023 for `portable-no-c`), and 321 and 319 benchmarks are within 10% of
+it. The rest: odd-width generating writes (1.25–2x slower), CRC-32 against `pmull` (8.3x slower), and a few
+32-core rows within the machine's timing noise.
 
 ## Caveats
 

@@ -37,7 +37,7 @@ import Testing
         let data: [UInt8] = [0x00, 0x03, 0xAA, 0xBB, 0xCC, 0x00, 0x05, 0x01]
         var reader = BytesReader(data.span)
         let first = try reader.read(bytesPrefixedBy: Byte2.self, .bigEndian)
-        #expect(first.byteCount == 3 && first.withUnsafeBytes { Array($0) } == [0xAA, 0xBB, 0xCC])
+        #expect(first.byteCount == 3 && [UInt8](copying: first) == [0xAA, 0xBB, 0xCC])
         // The second says 5 bytes and has 1: throws, consuming nothing.
         #expect(throws: BytesError.insufficientData) { _ = try reader.read(bytesPrefixedBy: Byte2.self, .bigEndian) }
         let offset = reader.byteOffset
@@ -50,7 +50,7 @@ import Testing
         let leb: [UInt8] = [0x02, 0x10, 0x20, 0x05, 0x30]
         var lebReader = BytesReader(leb.span)
         let two = try lebReader.read(bytesPrefixedBy: LEB128.self)
-        #expect(two.withUnsafeBytes { Array($0) } == [0x10, 0x20])
+        #expect([UInt8](copying: two) == [0x10, 0x20])
         #expect(throws: BytesError.insufficientData) { _ = try lebReader.read(bytesPrefixedBy: LEB128.self) }
         let lebOffset = lebReader.byteOffset
         #expect(lebOffset == 3)

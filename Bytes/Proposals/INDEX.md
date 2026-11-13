@@ -6,24 +6,23 @@ real call site, and measured: instruction counts, or machine code compared with 
 Details, before/after code, and measurements are in the per-package files here; prototype sources are in
 `prototypes/`.
 
-**Implemented (2026-11-09): 6 and 9** (one length check in `read(bytesPrefixedBy:)`, plus
-`readSectionIfComplete(prefixedBy:_:)`; the array builders, which need the closure's error type annotated
-in hot code), with `write(_: RawSpan)` inlined (not a numbered proposal; MQTT encoding −8 to −11% time).
-**7 and 8** (`position`/`rewind(to:)`, cursors at an offset; adopted by MQTT and
-NativeZip; the `atomically` cost measured as +51% only when its closure isn't inlined, see
-`../Benchmarks/RESULTS.md`). **Also 1, 2, 3, and 5**, and adopted by Base64, MQTT, and BinaryParsingComparison's
-Bytes ports (its `ParserSpan` ports unchanged). Results: `../Benchmarks/RESULTS.md` ("runs, copies from a
-reader, short copies, minimal LEB128") and each package's RESULTS.md.
+## Status
 
-**Implemented (2026-11-10): 10–14** (signed reads and fields, `Bool` flags and `Bits(rawBitsOf:)`, the
-bit-field helpers including the unchecked `bits(from:upTo:)`, `located(_:)`, and the small conveniences:
-`readRemainingBytes()`, `CRC32.checksum(_:continuing:)`, `RawSpan.hasPrefix`, `forEachRecord`,
-`Byte16.vector`, `[UInt8].append(copying:)`, `String(utf8Capacity:writing:)`), the sub-byte docs note,
-and from **16 and 17**, for Base64's new decoder: the 4-way deinterleave (`uzp`), the 3-way interleave,
-`tbx` lookups (`lookup(in:keepingOutOfRange:)`, 16-, 48-, and 64-byte tables), a 128-byte lookup, and
-16-byte `tbl` lookups; plus the writer's `position`/`rewind(to:)`. Adopted where they don't cost
-(`../Benchmarks/RESULTS.md`, 2026-11-10, lists the places they weren't, and why). Not implemented: 4
-(`read(paddedTo:)`; both Base64 kernels now do it their own way), 15, 18, 19, integer-typed `Bits` access.
+**Implemented: 1–3, 5–14, 16, 17.** **Not implemented: 4, 15, 18, 19**, and integer-typed `Bits` access
+(Bytes §10).
+
+- **2026-11-09:** 1, 2, 3, 5 (`../Benchmarks/RESULTS.md`, "runs, copies from a reader, short copies, minimal
+  LEB128"); 6 and 9, with `write(_: RawSpan)` inlined (not a numbered proposal); 7 and 8 (`position`/
+  `rewind(to:)`, cursors at an offset).
+- **2026-11-10:** 10–14, the sub-byte docs note, and for Base64's decoder 16 and 17 (4-way deinterleave and
+  3-way interleave, `tbx` lookups for 16-, 48-, and 64-byte tables, a 128-byte lookup, 16-byte `tbl`
+  lookups). The 2026-11-10 section of RESULTS.md lists where they weren't adopted, and why.
+- Adopted by MQTT, NativeZip, Base64, and BinaryParsingComparison's Bytes ports (its `ParserSpan` ports are
+  unchanged). Package numbers are in each package's RESULTS.md.
+- Shipped names that differ from the proposals: `requiringMinimal:` on the LEB128 reads (5);
+  `BytesReader.position` of type `BytesReader.Position` (7); `BytesWriter(&bytes, atByteOffset:)`, not
+  `startingAt:`, and `BytesReader(_:atByteOffset:)` taking any `BinaryInteger` (8);
+  `readSectionIfComplete(prefixedBy:_:)` (6); `RawSpan.hasPrefix(_:)` (14).
 
 "Same code" means the prototype compiled to identical or equivalent machine code (often the compiler
 merged the before and after functions into one).
@@ -32,14 +31,14 @@ merged the before and after functions into one).
 
 | # | Proposal | From | Evidence |
 |---|---|---|---|
-| 1 | **Copy spans of up to 64 bytes inline** in `BytesWriter.write(_: RawSpan)` (today: inline up to 32, then `memmove`) | [Base64 §1](Base64.md) | Base64's `writeShort` workaround: 47 B inputs 22.2 → 15.5 ns. Removes the workaround. **Done**: Base64 40–47 B a further −18%; MQTT encoding −10% (64-byte payloads) |
-| 2 | **Copy from a reader with overrun**: `writer.write(from: &reader, byteCount:, allowingOverrun:)` (LZ4 "wildcopy" of literals) | [BinaryParsingComparison §1](BinaryParsingComparison.md) | LZ4 −22% instructions (65 → 51 M). **Done**: 62.7 → 48.1 M, −42% time |
-| 3 | **Run-length fills**: `write(repeating: byte, count:)` (a `memset`) and `write(repeating: group, count:)` for multi-byte elements | [Bytes §8](Bytes.md), [BinaryParsingComparison §2](BinaryParsingComparison.md), [Base64 §6](Base64.md) | QOI runs −65% instructions (6.57 → 2.27 M); byte fills become `memset`. **Done** (plus `byteCount:` for run-time widths): `tricolor.qoi` 5.87 → 1.52 M, −70% time |
-| 4 | **A zero-padded last block**: `read(paddedTo:)`, plus `ByteLanes.shiftDown` | [Base64 §2](Base64.md) | Kept inside Base64 as `shiftedDown`: 95 B inputs 26 → 15 ns |
+| 1 | **Copy spans of up to 64 bytes inline** in `BytesWriter.write(_: RawSpan)` (today: inline up to 32, then `memmove`) | [Base64 §1](Base64.md) | Base64's `writeShort` workaround: 47 B inputs 22.2 → 15.5 ns. Removes the workaround. **Done** (33–64 bytes inline; `writeShort` removed): Base64 40–47 B −14 to −18% time; MQTT PUBLISH encoding −10% instructions (64-byte payloads) |
+| 2 | **Copy from a reader with overrun**: `writer.write(from: &reader, byteCount:, allowingOverrun:)` (LZ4 "wildcopy" of literals) | [BinaryParsingComparison §1](BinaryParsingComparison.md) | LZ4 −22% instructions (65 → 51 M). **Done**: 64.9 → 48.1 M (−26%), −42% time |
+| 3 | **Run-length fills**: `write(repeating: byte, count:)` (a `memset`) and `write(repeating: group, count:)` for multi-byte elements | [Bytes §8](Bytes.md), [BinaryParsingComparison §2](BinaryParsingComparison.md), [Base64 §6](Base64.md) | QOI runs −65% instructions (6.57 → 2.27 M); byte fills become `memset`. **Done** (plus `write(repeating:byteCount:count:)` for run-time widths): `tricolor.qoi` 6.57 → 1.52 M (−77%), −70% time |
+| 4 | **A zero-padded last block**: `read(paddedTo:)`, plus `ByteLanes.shiftDown` | [Base64 §2](Base64.md) | **Not implemented.** Kept inside Base64 as `shiftedDown` (encoder and decoder): 95 B inputs 26 → 15 ns |
 | 5 | **Minimal LEB128** (`requiringMinimal:`) in Bytes' own decode loop | [MQTT §1](MQTT.md), [Bytes §3](Bytes.md) | Same code for the plain read; +20 instructions if built outside Bytes, so it belongs inside. **Done**: MQTT parsing −1.6 to −2.6% instructions |
-| 6 | **Cheaper `read(sectionPrefixedBy:)`**: check the length once, or a non-throwing "only if it's all there" form | [NativeZipArchive §5](NativeZipArchive.md) | The current form costs +0.7% in zip directory parsing against a hand-written check |
+| 6 | **Cheaper `read(sectionPrefixedBy:)`**: check the length once, or a non-throwing "only if it's all there" form | [NativeZipArchive §5](NativeZipArchive.md) | The old form cost +0.7% in zip directory parsing against a hand-written check. **Done**: one check (64 KB of prefixed sections −23%) and `readSectionIfComplete`; in NativeZip's directory it's neutral (+0.2%) |
 
-## Simpler code at no cost (prototypes compiled to the same code)
+## Simpler code at no cost (prototypes compiled to the same code; all done)
 
 | # | Proposal | From |
 |---|---|---|
@@ -56,11 +55,11 @@ merged the before and after functions into one).
 
 | # | Proposal | From | Note |
 |---|---|---|---|
-| 15 | **A packed Huffman entry type** (libdeflate's layout) with generic root/subtable lookups | [NativeZipArchive §1](NativeZipArchive.md) | NativeZip's code moved into Bytes: same code |
-| 16 | **4-way deinterleave and 3-way interleave** (`ld4`, `st3` equivalents, from `uzp`/`zip`) | [Base64 §3](Base64.md) | Needed for a Base64 decoder (prototyped at 12.2 GB/s with today's lookups) |
-| 17 | **A 128-byte `tbl`/`tbx` lookup** | [Base64 §6](Base64.md) | Larger tables in one step |
-| 18 | **MS-DOS date and time** (`DOSDateTime`) | [NativeZipArchive §4](NativeZipArchive.md) | Same code; may belong in NativeZip instead |
-| 19 | **LZ4-style saturated lengths** (a nibble continued by bytes while they're 255) | [BinaryParsingComparison §6](BinaryParsingComparison.md) | Low priority |
+| 15 | **A packed Huffman entry type** (libdeflate's layout) with generic root/subtable lookups | [NativeZipArchive §1](NativeZipArchive.md) | **Not implemented.** NativeZip's code moved into Bytes: same code |
+| 16 | **4-way deinterleave and 3-way interleave** (`ld4`, `st3` equivalents, from `uzp`/`zip`) | [Base64 §3](Base64.md) | **Done** (`ByteLanes.deinterleave`/`interleave`). Base64's decoder reaches 12.8 GB/s with them; the lookup-only prototype reached 12.2 |
+| 17 | **A 128-byte `tbl`/`tbx` lookup** | [Base64 §6](Base64.md) | **Done**, with `tbx` forms for 16-, 48-, and 64-byte tables. Base64's decoder uses an 80-byte window (64 + 16) instead: fewer micro-ops |
+| 18 | **MS-DOS date and time** (`DOSDateTime`) | [NativeZipArchive §4](NativeZipArchive.md) | **Not implemented.** Same code; may belong in NativeZip instead |
+| 19 | **LZ4-style saturated lengths** (a nibble continued by bytes while they're 255) | [BinaryParsingComparison §6](BinaryParsingComparison.md) | **Not implemented.** Low priority |
 
 ## Considered and not recommended
 
@@ -71,11 +70,13 @@ merged the before and after functions into one).
 
 ## Performance findings in Bytes (not new API)
 
-- **`atomically { }` around a large body** (a whole zip entry) costs +50% instructions (453 K against
-  301 K): the closure isn't inlined, so the cursor lives in memory, and 14 calls to the unaligned slow path
-  appear. Small bodies are fine. Worth fixing in Bytes, or documenting ([BinaryParsingComparison](BinaryParsingComparison.md)).
+- **`atomically { }` around a large body** (a whole zip entry) costs +51% instructions (452,574 against
+  300,588) when the body is written in the closure: the closure isn't inlined, so the cursor lives in
+  memory, and 14 calls to the unaligned slow path appear. With the body in an `@inline(__always)` function
+  it's free; `position`/`rewind(to:)` costs 3 instructions per entry. Documented, not fixed
+  ([BinaryParsingComparison](BinaryParsingComparison.md), `../Benchmarks/RESULTS.md`).
 - **Sub-byte reads and writes at a byte boundary** (`read(Bit.self)` × 8 when byte-aligned) are about 3x
-  the code of reading one `Byte` and splitting it; MQTT now reads whole flag bytes. A fast path, or a
-  documentation note ([MQTT §2](MQTT.md)).
+  the code of reading one `Byte` and splitting it; MQTT now reads whole flag bytes. Documented ("Fields
+  that fill a byte" in `WritingParsers.md`); a fast path was not added ([MQTT §2](MQTT.md)).
 - **`Byte16` `forEach`** shows as `vector128`, but only the consumer's sum is vectorized; the loads and
   byte swaps are scalar (0 SIMD loads in `Tools/counters`). RESULTS.md corrected.

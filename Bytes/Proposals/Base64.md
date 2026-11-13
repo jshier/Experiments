@@ -1,11 +1,14 @@
 # Bytes API proposals from Base64
 
 From modernizing `Base64` (2026-11-09). Most valuable first. Line numbers are in
-`Base64/Sources/Base64/Base64.swift` as left by this run. Measurements: a scratch driver
-(a scratch package, `driver SIZE TOTAL_MB`) that encodes one input repeatedly and reads retired
-instructions with `proc_pid_rusage`; times are ns per call, M3 Ultra under load from other agents (absolute
-numbers ~10% low, comparisons run back to back). Kernel checks are the README's two `Tools/loops`
-commands; both pass with every change kept here.
+`Base64/Sources/Base64/Base64.swift` as left by that run. Measurements: a scratch driver that encodes one
+input repeatedly and reads retired instructions with `proc_pid_rusage`; times are ns per call, M3 Ultra
+under load from other agents (absolute numbers ~10% low, comparisons run back to back). Kernel checks are
+the README's `Tools/loops` commands; they pass with every change kept here.
+
+**Status:** 1, 3, and the `Byte16.vector`, `write(repeating:count:)`, and 128-byte lookup parts of 6 are in
+Bytes. 2 is not (Base64 keeps `shiftedDown`, in both the encoder and the decoder). 4 and 5 were not
+recommended (Base64's `mask(_:atLeast:)` stays). Current Base64 numbers: `Base64/Benchmarks/RESULTS.md`.
 
 ## 1. Copy spans of up to 64 bytes inline in `BytesWriter.write(_: RawSpan)`
 
@@ -48,6 +51,10 @@ become one.
 | 1,000 B (40-byte remainder) | 63.6 ns | 59.3 ns |
 | 16 B, 64 B, 1 KB (16-byte remainder) | no change | no change |
 
+**Shipped** as proposed (`case 33...64` in `BytesWriter.write(_: RawSpan)`, now `@inline(__always)` with
+longer copies out of line); `writeShort` is gone. Bytes' 24–64-byte span copies −33 to −36% instructions;
+Base64 40–47 B −13% instructions, −14 to −18% time. The optional `write(_:prefix:)` was not added.
+
 ## 2. A zero-padded last block: `BytesReader.read(paddedTo:)` (and `ByteLanes.shiftDown`)
 
 **Motivation** (`Base64.swift:100-113`, `:221-229`): block kernels end with "the last 1 to N−1 bytes as one
@@ -88,11 +95,14 @@ become one line.
 95 B 24.4 → 18.9 ns and 1,000 B 66.3 → 62.2 ns (before `writeShort`). Kernel checks pass (the tail is
 outside the loops).
 
+**Not implemented.** Base64 keeps `shiftedDown` for the encoder (three 48-byte `tbl`s) and has its own for
+the decoder's 64-byte block, so one Bytes version would need both widths.
+
 ## 3. 4-way deinterleave and 3-way interleave (`ld4`, `st3`)
 
-**Motivation**: a decoder (Base64 has none; see `Benchmarks/RESULTS.md`, 2026-11-09) needs the inverse
-shuffles of the encoder's: 64 characters into every 4th byte (`ld4`), and 3 vectors of bytes into
-interleaved 48 (`st3`). `ByteLanes` has the 3-way deinterleave and 4-way interleave only. Prototype
+**Motivation**: a decoder needs the inverse shuffles of the encoder's: 64 characters into every 4th byte
+(`ld4`), and 3 vectors of bytes into interleaved 48 (`st3`). `ByteLanes` had the 3-way deinterleave and
+4-way interleave only. Prototype
 (`prototypes/Base64/DecodeBlocks.swift`) writes them as `lookup(in:)` with constant
 index vectors:
 
@@ -118,7 +128,13 @@ The 4-way deinterleave in C as two rounds of `uzp1`/`uzp2` with the same empty-`
 **Evidence**: the prototype block decoder, all with today's `lookup(in:)`: one loop of 52 instructions per
 64 characters, 15 `tbl`, no lane moves (`Tools/loops … 'decodeBlocks\(' --require tbl --forbid mov.b,ins`
 passes), 12.2 GB/s of text, against 5.0 GB/s for the auto-vectorized arithmetic kernel (`ld4`/`st3`, 176
-instructions per 64 characters). Not run with the proposed `uzp` version (needs C in Bytes).
+instructions per 64 characters).
+
+**Shipped** as `ByteLanes.deinterleave` (four vectors; 8 `uzp`s via `CBytesNEON`, with the empty-`asm`
+barrier that keeps the loads whole) and `ByteLanes.interleave` (three vectors; 3 `tbl`s). Base64's decoder
+reaches 12.8 GB/s of bytes on one core with them and an 80-byte `tbx` window (`Base64/Benchmarks/RESULTS.md`);
+NEON `ld4`/`st3` in C did no better (12.9). The 4-way deinterleave needs the `NEONShuffle` trait (on by
+default); without it, it falls back to a scalar loop.
 
 ## 4. Branch-free lane masks for scalar loops LLVM vectorizes
 
@@ -146,7 +162,7 @@ extension UInt8 {
 **Evidence**: prototyped the full-range `mask(atLeast:)` as an internal extension at
 `Base64.swift:263`: the portable kernel's loop stayed at 79 instructions, `vector128`, and the `ld3`/`st4`
 check passed (LLVM drops the extra `|` when it knows the value is below 64). Reverted: codegen-neutral,
-so it's only worth it shared, in Bytes.
+so it's only worth it shared, in Bytes. **Not implemented**; Base64's own `mask(_:atLeast:)` remains.
 
 ## 5. A typed transform into the writer
 
@@ -166,7 +182,7 @@ mutating func write<In, Out: ConvertibleFromBytes & ConvertibleToBytes>(
 **Evidence**: prototyped as an internal extension and used for the block kernel: the innermost loop was
 32 instructions, `vector128`, `tbl`/`zip`, no lane moves: identical to `encodeBlocks`. Reverted: Base64
 keeps its kernels `@inline(never)` (compiled once, and what the README's kernel checks name), which this
-shape doesn't need but doesn't give either.
+shape doesn't need but doesn't give either. **Not implemented.**
 
 ## 6. Small conveniences
 
@@ -177,10 +193,13 @@ shape doesn't need but doesn't give either.
   are bit casts); worth it because `Byte16` is the only way found to build a constant vector with two
   variable lanes without lane inserts: `SIMD16(119, …, character62, character63)` compiled to 16 `mov.b`
   inserts with Swift 6.4.2, the `Byte16` version to 12 scalar instructions, a `dup` and a `mov.d` (−17
-  instructions per call; a `SIMD8<UInt16>` with one lane set was 1 instruction worse).
-- **`BytesWriter.write(repeating: UInt8, count: Int)`** (`Base64.swift:116-120`): padding becomes
+  instructions per call; a `SIMD8<UInt16>` with one lane set was 1 instruction worse). **Shipped** as
+  `Byte16.vector` and `Byte16(_: SIMD16<UInt8>)`; no vector-array accessor.
+- **`BytesWriter.write(repeating: UInt8, count: Int)`** (`Base64.swift:116-120`; **shipped**): padding becomes
   `try writer.write(repeating: 0x3D, count: padding ? (3 &- rest % 3) % 3 : 0)`. The loop of single-byte
   writes it replaced cost 7 instructions per call at 64 B against the `Byte2`/`Byte` switch.
 - **A 128-byte lookup** (`tbl` + `tbx`, `lookup(in: (Table64, Table64))`): the decoder maps ASCII with
   `ByteLanes(c).lookup(in: low) | ByteLanes(c &- 64).lookup(in: high)` (2 `tbl` + `orr` per 16 characters,
-  correct today because out-of-range lanes give 0); `tbx` saves the `orr`. Low value.
+  correct today because out-of-range lanes give 0); `tbx` saves the `orr`. Low value. **Shipped**
+  (`lookup(in: (low, high))`), but the decoder moved to an 80-byte window (64 + 16): 61 micro-ops per block
+  against 69, +11%.

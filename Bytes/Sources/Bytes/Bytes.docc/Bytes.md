@@ -5,9 +5,9 @@ Parse and write binary formats field by field, at bit or byte granularity, at me
 ## Overview
 
 `Bytes` reads binary data from memory you already have (a `RawSpan` or `Span<UInt8>`) and writes it into
-memory you provide (a `MutableRawSpan`, `OutputSpan<UInt8>`, or `OutputRawSpan`), without copying or
-allocating. Fields are typed by their shape in the data, not by an integer type you have to pick and
-byte-swap yourself:
+memory you provide (a `MutableRawSpan`, `MutableSpan<UInt8>`, `OutputSpan<UInt8>`, or `OutputRawSpan`), or
+into a new array, without copying or allocating along the way. Fields are typed by their shape in the data,
+not by an integer type you have to pick and byte-swap yourself:
 
 ```swift
 var reader = BytesReader(packet.span)
@@ -16,7 +16,7 @@ let version = try reader.read(Byte2.self, .littleEndian)      // UInt16
 let length = try reader.read(Byte3.self, .bigEndian)          // UInt32, from 3 bytes
 let type = try reader.read(Nibble.self)                       // 4 bits
 let isRetained = try reader.read(Bool.self)                   // 1 bit
-let qos = try reader.read(QualityOfService.self, as: Crumb.self) // an enum from 2 bits
+let qos = try reader.read(QualityOfService.self, as: Crumb.self) // an enum with integer raw values, from 2 bits
 ```
 
 Writing mirrors reading:
@@ -30,15 +30,21 @@ let bytes = try [UInt8](byteCapacity: 64) { writer in
 ```
 
 The cursors are `~Copyable` and `~Escapable`: they can't outlive the memory they work on, and a position
-can't be duplicated by accident. Reads and writes that throw consume or write nothing (section writers
-may leave bytes past the cursor).
+can't be duplicated by accident. A read or write that throws consumes or writes nothing and leaves the
+cursor where it was (section writers may leave bytes ahead of it).
 
 Every operation is `@inlinable` and compiles to what you'd write by hand: a byte-aligned `Byte4` read is
 one bounds check and one load, and loops over values (`forEach`, generating writes, and loops of single
-reads) are vectorized.
-On an M3 Ultra, power-of-two widths and `InlineArray`-backed custom types read and write at a single
-core's memory bandwidth; with all cores, nearly every width reaches the CPU's memory ceiling.
-`Benchmarks/RESULTS.md` has the measurements.
+reads) are vectorized. On an M3 Ultra, power-of-two widths and `InlineArray`-backed custom types read and
+write at a single core's memory bandwidth; with all cores, nearly every width reaches the CPU's memory
+ceiling. `Benchmarks/RESULTS.md` has the measurements.
+
+Beyond the types below, `Bytes` extends the standard library (DocC can't link these extension members):
+`[UInt8](byteCapacity:writing:)`, `append(byteCapacity:writing:)`, `[UInt8](copying:)`, and
+`append(copying:)` on `Array`; `String(utf8Capacity:writing:)`; `withBytesWriter` on `OutputSpan` and
+`OutputRawSpan`; `hasPrefix`, `bytesEqual`, and `containsByte(where:)` on `RawSpan`; `UTF8Span(validating:excluding:)`;
+and bit helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bits(from:upTo:)`,
+`keepingLowBits(_:)`, `lowBitMask(_:)`, `signedBits(_:as:)`, and `matches(_:mask:)`.
 
 ## Topics
 
@@ -49,6 +55,8 @@ core's memory bandwidth; with all cores, nearly every width reaches the CPU's me
 - ``BytesWriter``
 - ``BytesError``
 - ``LocatedBytesError``
+- ``BytesReader/located(_:)``
+- ``BytesReader/atomically(_:)``
 
 ### Field types
 
@@ -78,13 +86,20 @@ core's memory bandwidth; with all cores, nearly every width reaches the CPU's me
 ### Variable-size data
 
 - ``LEB128``
+- ``BytesReader/read(sectionPrefixedBy:_:)``
+- ``BytesReader/read(utf8PrefixedBy:_:)``
+- ``BytesReader/forEachRecord(tag:length:_:_:)``
+- ``BytesWriter/write(sectionPrefixedBy:_:_:)``
 
 ### Scanning and shuffling 16 bytes at once
 
 - ``ByteLanes``
 - ``ByteMatches``
+- ``ByteLanes/lookup(in:)-(SIMD16<UInt8>)``
+- ``ByteLanes/deinterleave(_:_:_:)``
+- ``ByteLanes/interleave(_:_:_:)``
 
-### Decoders
+### Decoders and checksums
 
 - ``BitBuffer``
 - ``HuffmanTable``

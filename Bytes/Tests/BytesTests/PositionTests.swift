@@ -82,7 +82,7 @@ import Testing
         var writer = try BytesWriter(&raw, atByteOffset: 3)
         #expect(writer.byteCount == 3)
         try writer.copy(fromDistance: 3, count: 3) // The prefix counts as written: it can be copied from.
-        #expect(Array(writer.writtenBytes.withUnsafeBytes { Array($0) }) == [1, 2, 3, 1, 2, 3])
+        #expect([UInt8](copying: writer.writtenBytes) == [1, 2, 3, 1, 2, 3])
         #expect(throws: BytesError.insufficientCapacity) { try writer.write(Byte(9)) }
         _ = consume writer
         #expect(throws: BytesError.insufficientCapacity) { _ = try BytesWriter(&raw, atByteOffset: 7) }

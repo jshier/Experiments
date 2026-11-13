@@ -151,7 +151,7 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
             // Unsafe: unchecked stores. Safe: `_forEach` calls this at most `limit` times, which is at most
             // the buffer's capacity. Checked, the store is the only check left in `_forEach`'s loop, and it
             // stops the loop from vectorizing.
-            cursor._forEach(T.self, limit: Swift.min(maxCount, Self.capacity)) { group in
+            cursor._forEach(T.self, limit: Swift.min(maxCount, Self.capacity), staged: false) { group in
                 unsafe output[unchecked: count] = group.integer(byteOrder)
                 count &+= 1
             }
