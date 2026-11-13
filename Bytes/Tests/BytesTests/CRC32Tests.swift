@@ -64,7 +64,7 @@ import Testing
         #expect(whole == Self.reference(data))
     }
 
-    #if arch(arm64) && DEBUG
+    #if arch(arm64) && HardwareCRC && !Portable && DEBUG
     /// The folding constants: x^(n ± 32) mod P, bit-reflected, shifted left one.
     @Test func foldingConstants() {
         func constant(_ exponent: Int) -> UInt64 {

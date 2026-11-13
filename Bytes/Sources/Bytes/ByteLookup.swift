@@ -5,12 +5,13 @@ import CBytesNEON
 // MARK: - Looking up 16 bytes at once
 
 public extension ByteLanes {
-    /// Whether `lookup(in:)` is a single `tbl` or `tbx`: true on ARM64 with the `NEONShuffle` trait.
+    /// Whether `lookup(in:)` is a single `tbl` or `tbx`: true on ARM64 with the `NEONShuffle` trait and
+    /// without `Portable`.
     /// Otherwise lookups go a lane at a time, and code with another way (arithmetic, say) should use it.
     /// A constant, so a branch on it folds away.
     @inlinable @inline(__always)
     static var isLookupVectorized: Bool {
-        #if NEONShuffle && arch(arm64)
+        #if NEONShuffle && arch(arm64) && !Portable
         true
         #else
         false

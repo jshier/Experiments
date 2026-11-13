@@ -1,0 +1,31 @@
+#!/bin/bash
+# Runs the benchmarks against one of Bytes' three builds, each with its own build directory so switching
+# between them doesn't rebuild:
+#
+#   optimized       the default: the C modules' NEON lookups and CRC instructions (Apple silicon's build)
+#   portable        the C modules' portable fallbacks (other CPUs' build), via the `Portable` trait
+#   portable-no-c   no C modules, Swift only (`--disable-default-traits`)
+#
+# Usage: ./bench [optimized|portable|portable-no-c] [benchmark arguments...]
+#   ./bench portable
+#   ./bench portable baseline update portable --no-progress
+#   ./bench portable-no-c --filter '.*CRC.*'
+#
+# Plain `swift package --disable-sandbox benchmark` is the optimized build.
+set -euo pipefail
+cd "$(dirname "$0")"
+
+build=optimized
+case "${1:-}" in
+optimized | portable | portable-no-c) build=$1; shift ;;
+-h | --help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+case $build in
+optimized) options=() ;;
+portable) options=(--traits Portable --scratch-path .build-portable) ;;
+portable-no-c) options=(--disable-default-traits --scratch-path .build-portable-no-c) ;;
+esac
+
+# (Bash 3.2 calls an empty array unbound under `set -u`.)
+exec swift package ${options[@]+"${options[@]}"} --disable-sandbox benchmark "$@"

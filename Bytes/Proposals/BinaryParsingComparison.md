@@ -8,12 +8,14 @@ current Bytes API (2026-11-09). Most valuable first.
 `prototypes/BinaryParsingComparison/Prototypes.swift`),
 used in a copy of one decoder (`…Proto…`), checked for identical output by a test, and compared by
 benchmark instruction counts (package-benchmark, medians; wall-clock times were taken on a loaded machine
-and are only indicative) plus `Tools/loops`/`Tools/calls`. All prototypes were removed afterwards: the two
+and are only indicative) plus `Tools/loops`/`Tools/calls`. The prototypes were removed afterwards: the two
 that win big (1 and 2) change the *algorithm* of the Bytes port, and this package compares the libraries
-on the same algorithm, so adopting them here needs the `ParserSpan` port changed the same way (a decision
-for the user). Neither is kept as an internal helper for that reason, not for cost.
+on the same algorithm, so adopting them for the `ParserSpan` port is a separate decision (it is unchanged).
 
-Line numbers are for the files as left by this run.
+**Status:** 1–5 are in Bytes and used by the Bytes ports; 6 is not implemented. Tables below are the
+prototypes' numbers; the shipped numbers are noted per item and in `../../BinaryParsingComparison/RESULTS.md`.
+
+Line numbers are for the files as left by that run.
 
 ---
 
@@ -66,6 +68,10 @@ instead of two 8-byte stores, so better still. The block decoder's loops stay `v
 the literal path gains lane moves from `SIMD2` extraction in the prototype, which the internal version
 wouldn't have.
 
+**Shipped** as proposed (`write(from:byteCount:allowingOverrun:)`: 16-byte steps, a loop of 5 instructions;
+the writer may overwrite up to 15 bytes after the copy). LZ4 `swift-help.lz4` 64.9 → 48.1 M instructions
+(−26%), −42% time; literals of 0–15 bytes cost 30 instructions each against 54.
+
 ---
 
 ## 2. Writing a run of one repeated element (run-length fills)
@@ -114,6 +120,11 @@ default: // QOI_OP_RUN: this pixel and `value` more, at once (cut off at the end
 Identical pixels (test). It also makes the Bytes/`ParserSpan` gap on `tricolor.qoi` moot (that gap is the
 per-pixel run loop's register allocation, see RESULTS.md), but only if both ports adopt it.
 
+**Shipped** as `write(repeating:count:)` for a `Byte` or `ByteGroup`, and `write(repeating:byteCount:count:)`
+for the run-time width above (the optional `copy(fromDistance:)` pattern replication shipped too, as the
+short-distance back-reference path: −69 to −77% on 2–7-byte distances). Stores are 16 bytes at a time, so
+`tricolor.qoi` is 6.57 → 1.52 M instructions (−77%), −70% time, better than the prototype's 2.27 M.
+
 ---
 
 ## 3. Errors with their location: `reader.located(error)` (not a closure wrapper)
@@ -158,9 +169,12 @@ closure literal wasn't inlined even though the wrapper was `@inline(always)`: `T
 as `closure #1 in …parseWithBytesProtoLocated`, called with the cursor in memory, so the bit offset and bit
 order are no longer known and 14 `BytesReader._unalignedBytes` slow-path calls appear in it.
 
-Caveat to document: offsets are relative to the cursor `located` is called on; a failure inside a
-sub-cursor (`readSection`) reports the parent's position (the section's start or end), not the byte within
-the section.
+Caveat: offsets are relative to the cursor `located` is called on; a failure inside a sub-cursor
+(`readSection`) reports the parent's position (the section's start or end), not the byte within the
+section.
+
+**Shipped** as proposed (`LocatedBytesError`, `located(_:)`, no closure form). In the shipped build, a
+`catch` using it adds 13 instructions to the function, all on the error path.
 
 ---
 
@@ -199,6 +213,11 @@ try output.append(byteCapacity: blockMaximum) { (writer) throws(BytesError) in
 together with 5); the block decoder is still one closure with the writer local and its loops unchanged
 (`Tools/loops`: same 34 loops, same sizes and verdicts as the kept code's closure).
 
+**Shipped** as `append(byteCapacity:bitOrder:writing:)` (the proposal had no `writing:` label), with
+`[UInt8](byteCapacity:bitOrder:writing:)`. See Bytes §1 for the measured cost; it also reserves and appends
+instead of using the standard library's slower `append(addingCapacity:)` path (−27.6%). `ContiguousArray`
+and `Data` forms were not added.
+
 ---
 
 ## 5. Masked field comparison: `matches(_:mask:)`
@@ -231,6 +250,9 @@ guard flags.matches(0b0110_0000, mask: 0b1110_0010), descriptor.matches(0, mask:
 **Evidence.** Cold code; same instruction counts as the kept version (measured with 4). Value is
 readability and matching the spec's tables; it's a one-liner users can write, so lower priority.
 
+**Shipped** as proposed (`matches(_:mask:)` on integers, `Bits`, and groups; `expect(_:mask:)`): 8
+instructions against 10.
+
 ---
 
 ## 6. LZ4-style "saturated" lengths
@@ -250,7 +272,7 @@ extension BytesReader {
 
 **Evidence.** The prototype is the existing `@inline(always)` helper `LZ4.length(_:_:)`, which is what the
 port measures with (no change by construction). Low priority: small, and the atomic version (rewind on
-`.insufficientData`) costs a saved offset.
+`.insufficientData`) costs a saved offset. **Not implemented.**
 
 ---
 
@@ -261,9 +283,9 @@ port measures with (no change by construction). Low priority: small, and the ato
   wants): **453 K vs 301 K instructions (+50%)**. The closure literal isn't inlined (`Tools/calls`: one
   call to `closure #1 in …parseWithBytesProtoAtomic`, 14 `_unalignedBytes` slow-path calls inside, outer
   loop 391 instructions). Same cause as the closure form of 3. `atomically` is `@inline(__always)`; it's
-  the closure that stays out of line. Worth documenting next to the README's closure caveat, or offering a
-  non-closure form (`let mark = reader.byteOffset; … catch { try reader.seek(toByteOffset: mark) }`, or a
-  `checkpoint`/`restore` pair).
+  the closure that stays out of line. The non-closure form shipped as `position`/`rewind(to:)` (+3
+  instructions per entry), and `atomically`'s documentation names the cost; with the body in an
+  `@inline(__always)` function the closure is free.
 - **Bit-field subscripts cost nothing.** A QOI variant with the DIFF/LUMA fields taken out with shifts and
   masks (as the `ParserSpan` port does) instead of `first[Crumb.self, at: 4]`, `second.highHalf`: same
   instructions (6.574 M vs 6.574 M; 132 M vs 131 M) and the same loops.

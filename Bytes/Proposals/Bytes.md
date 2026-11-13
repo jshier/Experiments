@@ -1,13 +1,17 @@
 # Bytes: API proposals
 
-Proposals only: none of this is in Bytes. Each was prototyped as an extension in a scratch package that
-depends on Bytes (`prototypes/Bytes/Proposals.swift`, `Proposals2.swift`), and checked
-against the code it replaces. The probes are `@inline(never)` before/after function pairs, compared with
-a disassembly-comparison script, `Tools/loops`, and `Tools/calls`.
+Each proposal was prototyped as an extension in a scratch package that depends on Bytes
+(`prototypes/Bytes/Proposals.swift`, `Proposals2.swift`) and checked against the code it replaces. The
+probes are `@inline(never)` before/after function pairs, compared with a disassembly-comparison script,
+`Tools/loops`, and `Tools/calls`.
 
-"Merged" means Swift's LLVM folded the two functions into one, because their IR was identical. That is
-the strongest evidence of zero cost. Line numbers are from 2026-11-09. MQTT and NativeZip were being
-edited while this was gathered, so some of their sites may have moved.
+**Status: §1–§9 and most of §10 are implemented in Bytes** (INDEX.md has the dates); each section ends with
+the shipped form where it differs. Not implemented: integer-typed `Bits` access (§10). The proposed
+signatures below are as written then. Measurements are of the prototypes; for shipped numbers see
+`../Benchmarks/RESULTS.md`.
+
+"Merged" means Swift's LLVM folded the two functions into one, because their IR was identical: the
+strongest evidence of zero cost. File:line references are from 2026-11-09 and have since moved.
 
 Most valuable first.
 
@@ -21,14 +25,12 @@ try [UInt8](capacity: packet.encodedByteCount) { output in
 }
 ```
 
-- `MQTT/Tests/MQTTTests/MQTTTests.swift:9,16,448`
-- `MQTT/Benchmarks/MQTTBenchmarks/MQTTBenchmarks.swift:21,29,52,59`
-- `MQTTSocketStream/Sources/MQTTSocketStream/Workload.swift:76`
-- the tests' `fieldBytes { }` helper, used 23 times
-- Bytes' own docs: `README.md:20-26`, `Bytes.docc/Bytes.md:24-30`, `WritingParsers.md:105-125`, and the
-  `withBytesWriter` doc comment (`BytesWriter.swift:718`)
+- MQTT's tests and benchmarks (`MQTTTests.swift:9,16,448`; `MQTTBenchmarks.swift:21,29,52,59`), the tests'
+  `fieldBytes { }` helper (used 23 times), and `MQTTSocketStream/.../Workload.swift:76`
+- Bytes' own docs: `README.md`, `Bytes.docc/Bytes.md`, `WritingParsers.md`, and the `withBytesWriter` doc
+  comment
 
-An appending form, `output.append(addingCapacity:) { $0.withBytesWriter { … } }`, is at
+An appending form, `output.append(addingCapacity:) { $0.withBytesWriter { … } }`, is in
 `BinaryParsingComparison/Sources/Workloads/LZ4.swift:42-49`.
 
 **Proposed:**
@@ -62,6 +64,11 @@ try [UInt8](byteCapacity: packet.encodedByteCount) { writer in try packet.write(
 `@inline(always)` matters. RESULTS' caveat about cursors captured in closures that aren't inlined applies
 to the old form as much as the new one.
 
+**Shipped** as proposed (`BytesWriter.swift`). Both forms now reserve capacity and append, because the
+standard library's `[UInt8](capacity:initializingWith:)` allocates through an unspecialized function:
+1,000 38-byte arrays −27.6% instructions. Annotating the closure's error type no longer changes the
+count; do it anyway in hot code.
+
 ## 2. `read(Bool.self)` and `write(_: Bool)`: one-bit flags
 
 **Motivation:**
@@ -70,9 +77,8 @@ to the old form as much as the new one.
   `WritingParsers.md:76`, `Tests/BytesTests/BytesTests.swift:421,1392`, and
   `NativeZipArchive/Sources/NativeZip/Inflater.swift:237` (on `BitBuffer`).
 - Writes: `try writer.write(Bit(flag))` at `WritingParsers.md:115-116` and `BytesTests.swift:449-450`.
-- The survey found 9 reads and 9 writes in MQTT's CONNECT and PUBLISH flags (`Packets.swift:139-145,
-  202-208`, `Basics.swift:241-242, 258-259`). MQTT has since been rewritten around them; one remains:
-  `Packets.swift:276 write(Byte(Bit(sessionPresent)))`.
+- The survey found 9 reads and 9 writes in MQTT's CONNECT and PUBLISH flags. MQTT has since been rewritten
+  to read and write whole flag bytes (see MQTT §2), so it no longer needs them.
 
 **Proposed:**
 
@@ -99,17 +105,13 @@ try writer.write(reading.timestamp != nil)
 **Cost.** Merged in both directions. Probes: a loop of flag reads (`flagsBefore`/`After`), and two flag
 writes (`writeFlagBefore`/`After`).
 
-## 3. Rolling back: `read(minimal: LEB128.self, maxByteCount:)`, and a non-throwing rewind
+**Shipped** as proposed, plus `Bits(rawBitsOf:)` (MQTT §4).
+
+## 3. Rolling back: minimal LEB128 reads, and a non-throwing rewind
 
 **Motivation.** MQTT rolls back by hand with `let start = reader.byteOffset … try! reader.seek(toByteOffset:
-start)` at:
-
-- `MQTT/Sources/MQTT/Framing.swift:64,77,82`
-- `Packet.swift:69`
-- `Packets.swift:62`
-- `Basics.swift:333-343`
-
-Two things push it to do so:
+start)` (`Framing.swift:64,77,82`, `Packet.swift:69`, `Packets.swift:62`, `Basics.swift:333-343`). Two
+things push it to do so:
 
 - `atomically` can't return `nil` without consuming. Framing returns `nil` for "need more data".
 - MQTT's variable byte integer must be minimally encoded. It's a LEB128 read, a length check, and a
@@ -145,6 +147,11 @@ let start = reader.position
 - `rewind(to:)` is `seek` without the throw. Inside Bytes it's two stores and the existing
   `_assumeInvariant`.
 
+**Shipped** with different spelling for the first half: a `requiringMinimal: Bool = false` parameter on
+`read(LEB128.self, maxByteCount:)` and on the prefixed `bytes`/`section` reads, not `read(minimal:)`. The
+check is one compare in the decode loop; MQTT parsing −1.6 to −2.6% instructions. `position` and
+`rewind(to:)` shipped as proposed (`BytesReader.Position`), and `BytesWriter` has both too.
+
 ## 4. `BytesReader(span, atByteOffset:)` and `atBitPosition:`: start a reader at an offset
 
 **Motivation:**
@@ -171,8 +178,12 @@ extension BitBuffer {
 **Cost.** Merged (`atOffsetBefore`/`After`).
 
 Consider `some BinaryInteger` offsets too, throwing `.insufficientData` when out of range. They would
-remove NativeZip's five `Int(clamping:)` conversions of `UInt64` zip offsets (`ZipArchive.swift:76, 77,
-113, 372, 380`).
+remove NativeZip's five `Int(clamping:)` conversions of `UInt64` zip offsets.
+
+**Shipped:** `BytesReader(_:atByteOffset: some BinaryInteger, bitOrder:)`, `BytesReader(_:atBitPosition:bitOrder:)`,
+`BitBuffer(_:atBitPosition:bitOrder:)`, and for writers `BytesWriter(&bytes, atByteOffset:)` (not
+`startingAt:`). All `@inline(__always)`: the writer's, only `@inlinable` at first, was called out of line
+from NativeZip's inflater.
 
 ## 5. Signed values: group reads, bit fields, and bit counts
 
@@ -217,6 +228,10 @@ let delta = word.signedBits(4..<16, as: Int32.self)
 - `signedNibbleBefore`/`After`: a vectorized `forEach(Nibble.self)`, so the sign extension stays vectorized.
 - `readSignedBefore`/`After`: 13-bit reads.
 
+**Shipped:** `readSigned(_:_:as:)`, `readSigned(bitCount:)` on `BytesReader` (throws, 1…64 bits) and
+`BitBuffer` (non-throwing, 1…56 bits), `signedBits(_:as:)`, and `Bits.signedValue`. Not shipped: the
+`forEach(_:_:signedAs:)` overload; use `forEach(Byte3.self, .bigEndian) { $0 … }` with `signedInteger`.
+
 ## 6. `forEachRecord(tag:length:_:_:)`: tag-length-value records
 
 **Motivation.** Zip extra fields, a 2-byte id then a 2-byte size:
@@ -256,6 +271,10 @@ try extra.forEachRecord(tag: Byte2.self, length: Byte2.self, .littleEndian) { id
 **Cost.** `recordsBefore`/`After`: 116 against 115 instructions. The record loops are 28 and 27
 instructions, with the same mix.
 
+**Shipped** as proposed (`Sections.swift`), with no closure inside so the cursor stays in registers
+(64 against 80 instructions for the same loop). A tolerant loop that stops quietly at an incomplete
+record uses `readSectionIfComplete(prefixedBy:_:)` instead.
+
 ## 7. `readRemainingBytes()`
 
 **Motivation.** `payload = try body.read(byteCount: body.remainingByteCount)` at
@@ -266,6 +285,8 @@ has to be in a `do`/`catch`.
 as a precondition.
 
 **Cost.** Merged (`remainingBefore`/`After`).
+
+**Shipped** as proposed.
 
 ## 8. `write(repeating:count:)`
 
@@ -285,6 +306,10 @@ generating `write(Byte.self, count:) { _ in byte }`.
   instructions).
 
 The generating write already gets the `memset` today. This is the discoverable name for it.
+
+**Shipped** as `write(repeating: Byte, count:)`, plus `write(repeating: some ByteGroup, count:)` and
+`write(repeating: UInt64, byteCount:, count:)` for run-time element widths, which store 16 bytes at a
+time (QOI runs −65 to −77% instructions; see BinaryParsingComparison §2).
 
 ## 9. Low-bit masks: `keepingLowBits(_:)` and `lowBitMask(_:)`
 
@@ -312,7 +337,16 @@ extension FixedWidthInteger {
 
 The precondition is one compare that folds when `count` is known.
 
+**Shipped** as proposed, but without a precondition on the upper end: a count above `bitWidth` keeps every
+bit (a negative count traps in debug builds only). Inside Bytes the run pattern and `LEB128.maxValue` use
+them (runs of 3- and 4-byte elements −2.0 to −2.6% instructions). `bits(from:upTo:)` (NativeZip §2)
+shipped alongside.
+
 ## 10. Smaller ones (not prototyped: thin wrappers, or adoption notes)
+
+Shipped: `CRC32.checksum(_:continuing:)`, `[UInt8].append(copying:)` (with `[UInt8](copying:)`),
+`RawSpan.hasPrefix(_:)` (the test half of `expect`), `String(utf8Capacity:writing:)` (with a non-throwing
+overload), `Byte16.vector`, `matches(_:mask:)`. Not shipped: integer-typed `Bits` access.
 
 - **Adoption, no new API:**
   - `read(Byte.self).rawValue` (MQTT `Properties.swift:52-82`, 9 sites) is `load(UInt8.self)`, which
@@ -321,13 +355,14 @@ The precondition is one compare that folds when `count` is known.
     sites) is `readSection(byteCount:)`.
   - MQTT tests' `array(_:)` helper (`MQTTTests.swift:22`) and `withUnsafeBytes { Array($0) }`
     (`MQTTBenchmarks.swift:232`) are `[UInt8](copying:)`.
-  - Base64's padding loop can use the generating write today.
+  - Base64's padding loop is `write(repeating:count:)` (§8).
 - **`CRC32.checksum(_:continuing:)`:** the static counterpart of `init(continuing:)` + `update` + `value`
   (`NativeZipArchive/.../ZipDecoder.swift:244-246`).
 - **`[UInt8].append(copying: RawSpan)`:** next to `[UInt8](copying:)`. It removes `withUnsafeBytes` at
   `ZipArchive.swift:360-362` and `ZipDecoder.swift:225`.
-- **`RawSpan.starts(with: some ByteGroup)` or a non-throwing `reader.matches(_:)`:** the test half of
-  `expect`. MQTT builds a throwaway reader for `peek(Byte7.self) == "$share/"` (`MQTT/Sources/MQTT/Basics.swift:408-411`).
+- **`RawSpan.hasPrefix(_: some ByteGroup)`** (proposed as `starts(with:)`, or a non-throwing
+  `reader.matches(_:)`): the test half of `expect`. MQTT built a throwaway reader for
+  `peek(Byte7.self) == "$share/"` (`Basics.swift`).
 - **`String(utf8Capacity:writing:)`:** keeps Base64's `String(unsafeUninitializedCapacity:)` +
   `MutableRawSpan(_unsafeBytes:)` (`Base64.swift:153-157`) in one audited place.
 - **Integer-typed `Bits` access:** `value[Bits<7>.self, at: 9, as: Int.self]` and

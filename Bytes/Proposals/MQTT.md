@@ -1,10 +1,12 @@
 # Bytes API proposals from MQTT and MQTTSocketStream
 
-Most valuable first. Each was prototyped as an extension in a scratch copy of MQTT
-(a scratch copy of the package; prototypes in `prototypes/MQTT/`), used at its call sites, and
-compared by per-function instruction counts in the release `MQTT.o` (`Tools/loops --target` builds it)
-against the `modern` code. None were kept in the packages (reasons per item). Swift 6.4.2, M3 Ultra.
-File:line references are to MQTT/Sources/MQTT as of this run.
+Most valuable first. Each was prototyped as an extension in a scratch copy of MQTT (prototypes in
+`prototypes/MQTT/`), used at its call sites, and compared by per-function instruction counts in the release
+`MQTT.o` (`Tools/loops --target` builds it) against the `modern` code. The prototypes were reverted in MQTT
+(reasons per item). Swift 6.4.2, M3 Ultra. File:line references are to MQTT/Sources/MQTT as of that run.
+
+**Status:** 1, 3, 4, and 6 are now in Bytes and used by MQTT; 2 is a documentation note ("Fields that fill
+a byte" in `WritingParsers.md`), with no fast path; 5 is not implemented.
 
 ## 1. Minimal (canonical) LEB128: `requiringMinimal:`
 
@@ -48,8 +50,13 @@ Properties.swift:42 and :59: **identical instruction counts** for every function
 prototyped over Bytes' `read(bytesPrefixedBy: LEB128.self, maxByteCount:)` with the minimal check after
 it: `MQTTProperties.init(reading:allowing:repeatable:)` 124 → 144 instructions (+20, for the
 consume-nothing guarantee MQTT's two-step read doesn't make). Implemented inside Bytes, with the check
-in the decode loop, it should be the existing prefixed read's cost. **Reverted**: the prefixed form isn't
-free from outside, and the scalar form alone saves only the ternaries.
+in the decode loop, it should be the existing prefixed read's cost. Reverted in MQTT at the time: the
+prefixed form isn't free from outside, and the scalar form alone saves only the ternaries.
+
+**Shipped** as proposed, with `requiringMinimal: Bool = false` (a default, not required) on all three
+reads. In Bytes' benchmark (35 K values of 1–4 bytes) the checked read is 5% cheaper than reading then
+comparing with `byteCount(of:)`, and 4% dearer than an unchecked read. MQTT uses it
+(`readMQTTVariableByteInteger` is a one-line wrapper); parsing −1.6 to −2.6% instructions.
 
 ## 2. Sub-byte fields at a byte boundary are 3x the code of a `Byte` read (docs, or a fast path)
 
@@ -77,7 +84,7 @@ cheaper than the general path once inlined, so measure it in Bytes first. A pack
 several fields (`let (a, b, c) = try reader.read(Bit.self, Crumb.self, Nibble.self)`) needs parameter
 packs over value generics; not prototyped.
 
-## 3. A non-throwing rewind: `mark` / `rewind(to:)`
+## 3. A non-throwing rewind: `position` / `rewind(to:)` (proposed as `mark`)
 
 **Motivation.** Five places save the offset and later `try! seek(toByteOffset: start)` to undo a read,
 where `atomically` can't be used because a closure can't return a lifetime-dependent value (a frame, a
@@ -111,7 +118,11 @@ reader.rewind(to: start)
 **Evidence.** Prototype (`Mark` wraps the byte offset; `rewind` calls `seek`) at all four Framing.swift
 sites: **identical instruction counts** in `MQTTFrame.read`, `MQTTPacket.read`, and every other
 function. Inside Bytes, `rewind` needs no bounds check, and a bit-level mark would restore the bit
-offset too. **Reverted**: a wrapper over `seek` in MQTT would only hide the `try!`.
+offset too. Reverted in MQTT at the time: a wrapper over `seek` would only hide the `try!`.
+
+**Shipped** as `BytesReader.position` / `Position` / `rewind(to:)` (and the same on `BytesWriter`); MQTT's
+rollbacks use them. Each rollback costs about 3 instructions; MQTT parsing −0.4 to −1.1% instructions from
+losing the out-of-line `seek` calls.
 
 ## 4. The write side of `init?(rawBits:)`: `Bits(rawBitsOf:)`
 
@@ -133,9 +144,11 @@ extension Bits {
 **After.** `options[Crumb.self, at: 0] = Crumb(rawBitsOf: maximumQoS)`;
 `Byte(highHalf: Nibble(rawBitsOf: type), lowHalf: flags)`.
 
-**Evidence.** All five sites: **identical instruction counts** for every writing function. **Reverted**
-rather than kept as an internal helper: an MQTT-internal `init(rawBitsOf:)` would become ambiguous with
-Bytes' own if it's added.
+**Evidence.** All five sites: **identical instruction counts** for every writing function. Not kept as an
+MQTT-internal helper: it would become ambiguous with Bytes' own.
+
+**Shipped** as proposed. One exception in MQTT: PUBLISH's QoS uses the checked `Crumb(_:)`, because its
+range check lets the setter drop its mask, where `rawBitsOf` truncates (3 more instructions per packet).
 
 ## 5. Byte-value sets from a list of members (needs compile-time construction)
 
@@ -173,4 +186,7 @@ the prototype:
 **After.** `filter.span.bytes.hasPrefix(0x24_73_68_61_72_65_2F as Byte7) // "$share/"`
 
 **Evidence.** **Identical instruction counts** (`Text.isShared`, `MQTTSubscriptions.init(validating:)`).
-**Reverted**: one call site.
+Reverted in MQTT at the time (one call site).
+
+**Shipped** as `RawSpan.hasPrefix(_:)` (14 instructions against 34 for the throwaway reader); MQTT uses it.
+Not added for `UTF8Span`.

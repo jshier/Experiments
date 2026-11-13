@@ -4,14 +4,16 @@
 // `bytes_table4` returns, for every lane i, byte `index[i]` of the four concatenated table vectors, or 0 if
 // `index[i]` is past the end: exactly NEON's `vqtbl4q_u8`. Swift imports `bytes_u8x16` as
 // `SIMD16<UInt8>`, and the `static inline` function is inlined into Swift code as a single `tbl`
-// instruction. Other architectures get a portable fallback with the same results.
+// instruction. Other architectures get a portable fallback with the same results; so does ARM64 with
+// `BYTES_PORTABLE` defined (the package's `Portable` trait), to measure that fallback on Apple silicon.
 
 #ifndef C_BYTES_NEON_H
 #define C_BYTES_NEON_H
 
 #include <stdint.h>
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) && !defined(BYTES_PORTABLE)
+#define BYTES_NEON 1
 #include <arm_neon.h>
 #endif
 
@@ -20,7 +22,7 @@ typedef uint8_t bytes_u8x16 __attribute__((ext_vector_type(16)));
 
 #define BYTES_INLINE static inline __attribute__((always_inline))
 
-#if !defined(__aarch64__)
+#if !defined(BYTES_NEON)
 BYTES_INLINE bytes_u8x16 bytes_table_portable(const uint8_t *table, int count, bytes_u8x16 index) {
     bytes_u8x16 result;
     for (int lane = 0; lane < 16; lane++) {
@@ -32,7 +34,7 @@ BYTES_INLINE bytes_u8x16 bytes_table_portable(const uint8_t *table, int count, b
 
 /// A lookup in a 48-byte table.
 BYTES_INLINE bytes_u8x16 bytes_table3(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 index) {
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     uint8x16x3_t table = { { (uint8x16_t)a, (uint8x16_t)b, (uint8x16_t)c } };
     return (bytes_u8x16)vqtbl3q_u8(table, (uint8x16_t)index);
 #else
@@ -46,7 +48,7 @@ BYTES_INLINE bytes_u8x16 bytes_table3(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 
 
 /// A lookup in a 64-byte table.
 BYTES_INLINE bytes_u8x16 bytes_table4(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 d, bytes_u8x16 index) {
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     uint8x16x4_t table = { { (uint8x16_t)a, (uint8x16_t)b, (uint8x16_t)c, (uint8x16_t)d } };
     return (bytes_u8x16)vqtbl4q_u8(table, (uint8x16_t)index);
 #else
@@ -60,7 +62,7 @@ BYTES_INLINE bytes_u8x16 bytes_table4(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 
 
 /// A lookup in a 16-byte table: `vqtbl1q_u8`.
 BYTES_INLINE bytes_u8x16 bytes_table1(bytes_u8x16 a, bytes_u8x16 index) {
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     return (bytes_u8x16)vqtbl1q_u8((uint8x16_t)a, (uint8x16_t)index);
 #else
     uint8_t table[16];
@@ -71,7 +73,7 @@ BYTES_INLINE bytes_u8x16 bytes_table1(bytes_u8x16 a, bytes_u8x16 index) {
 
 /// A lookup in a 16-byte table that keeps `fallback`'s lane where `index[i]` is 16 or more: `vqtbx1q_u8`.
 BYTES_INLINE bytes_u8x16 bytes_table1x(bytes_u8x16 fallback, bytes_u8x16 a, bytes_u8x16 index) {
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     return (bytes_u8x16)vqtbx1q_u8((uint8x16_t)fallback, (uint8x16_t)a, (uint8x16_t)index);
 #else
     bytes_u8x16 looked = bytes_table1(a, index);
@@ -84,7 +86,7 @@ BYTES_INLINE bytes_u8x16 bytes_table1x(bytes_u8x16 fallback, bytes_u8x16 a, byte
 
 /// A lookup in a 48-byte table that keeps `fallback`'s lane where `index[i]` is 48 or more: `vqtbx3q_u8`.
 BYTES_INLINE bytes_u8x16 bytes_table3x(bytes_u8x16 fallback, bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 index) {
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     uint8x16x3_t table = { { (uint8x16_t)a, (uint8x16_t)b, (uint8x16_t)c } };
     return (bytes_u8x16)vqtbx3q_u8((uint8x16_t)fallback, table, (uint8x16_t)index);
 #else
@@ -98,7 +100,7 @@ BYTES_INLINE bytes_u8x16 bytes_table3x(bytes_u8x16 fallback, bytes_u8x16 a, byte
 
 /// A lookup in a 64-byte table that keeps `fallback`'s lane where `index[i]` is 64 or more: `vqtbx4q_u8`.
 BYTES_INLINE bytes_u8x16 bytes_table4x(bytes_u8x16 fallback, bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 d, bytes_u8x16 index) {
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     uint8x16x4_t table = { { (uint8x16_t)a, (uint8x16_t)b, (uint8x16_t)c, (uint8x16_t)d } };
     return (bytes_u8x16)vqtbx4q_u8((uint8x16_t)fallback, table, (uint8x16_t)index);
 #else
@@ -122,7 +124,7 @@ typedef struct { bytes_u8x16 v0, v1, v2, v3; } bytes_u8x16x4;
 /// Base64 block against 45).
 BYTES_INLINE bytes_u8x16x4 bytes_deinterleave4(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 d) {
     bytes_u8x16x4 result;
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     __asm__("" : "+w"(a), "+w"(b), "+w"(c), "+w"(d));
     uint8x16_t abEven = vuzp1q_u8((uint8x16_t)a, (uint8x16_t)b), abOdd = vuzp2q_u8((uint8x16_t)a, (uint8x16_t)b);
     uint8x16_t cdEven = vuzp1q_u8((uint8x16_t)c, (uint8x16_t)d), cdOdd = vuzp2q_u8((uint8x16_t)c, (uint8x16_t)d);
@@ -148,7 +150,7 @@ BYTES_INLINE bytes_u8x16x4 bytes_deinterleave4(bytes_u8x16 a, bytes_u8x16 b, byt
 /// instead of 3 `zip`s per vector).
 BYTES_INLINE bytes_u8x16x4 bytes_interleave4(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 d) {
     bytes_u8x16x4 result;
-#if defined(__aarch64__)
+#if defined(BYTES_NEON)
     uint8x16_t ab0 = vzip1q_u8((uint8x16_t)a, (uint8x16_t)b), ab1 = vzip2q_u8((uint8x16_t)a, (uint8x16_t)b);
     uint8x16_t cd0 = vzip1q_u8((uint8x16_t)c, (uint8x16_t)d), cd1 = vzip2q_u8((uint8x16_t)c, (uint8x16_t)d);
     __asm__("" : "+w"(ab0), "+w"(ab1), "+w"(cd0), "+w"(cd1));

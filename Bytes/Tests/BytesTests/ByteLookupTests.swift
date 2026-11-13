@@ -45,7 +45,7 @@ import Testing
     }
 
     @Test func lookupsAreVectorizedOnARM64() {
-        #if arch(arm64) && NEONShuffle
+        #if arch(arm64) && NEONShuffle && !Portable
         #expect(ByteLanes.isLookupVectorized)
         #endif
     }

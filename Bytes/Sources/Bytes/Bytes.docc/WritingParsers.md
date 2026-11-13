@@ -29,8 +29,9 @@ Pick each field's type from its shape in the data:
   such as 24-bit samples are first-class.
 - Fields that are really enumerations become enums with integer raw values, read through their field type.
 - Fields packed inside a multi-byte value (flags in a `Byte2`, a DOS date's day and month) are read with
-  the value, then taken out of its integer as ``Bits``: `flags[bit: 0]`, `date[Bits<5>.self, at: 0]`, or
-  wider ones as integers, `attributes[bits: 16..<32]`. `Unit(rawBits: field)` makes an enum of one.
+  the value, then taken out of the integer it returns: `flags[bit: 0]`, `date[Bits<5>.self, at: 0]`, or
+  wider ones as integers, `attributes[bits: 16..<32]`. `Unit(rawBits: field)` makes an enum of one (`nil`
+  for an unknown value).
 - Opaque fixed-size values (addresses, identifiers, digests) become your own types conforming to
   ``ByteRepresentable``, backed by an `InlineArray` of their bytes.
 
@@ -39,7 +40,7 @@ import Bytes
 
 enum Unit: UInt8 { case celsius, fahrenheit, kelvin }
 
-struct SensorID: ByteRepresentable, Equatable {
+struct SensorID: ByteRepresentable {
     var rawBytes: InlineArray<6, UInt8>
     init(rawBytes: InlineArray<6, UInt8>) { self.rawBytes = rawBytes }
 }
@@ -102,8 +103,9 @@ same position.
 ### Serialize
 
 Write a new array with `[UInt8](byteCapacity:writing:)` (or append to one with `append(byteCapacity:writing:)`),
-which keeps exactly the bytes written; `withBytesWriter` does the same for any `OutputSpan<UInt8>`. Lengths
-that prefix their data are usually known before writing; compute them first.
+which keeps exactly the bytes written; `withBytesWriter` does the same for any `OutputSpan<UInt8>`. Annotate the
+closure's error type, as below: unannotated, it throws `any Error`. Lengths that prefix their data are
+usually known before writing; compute them first.
 
 ```swift
 func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
@@ -118,7 +120,8 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
         if let timestamp = reading.timestamp {
             try writer.write(timestamp, as: Byte8.self, .littleEndian)
         }
-        // A generating write: the closure is fused into one vectorized loop.
+        // A generating write: the closure is fused into one vectorized loop, and keeps each value's low
+        // 3 bytes, so negative samples come out as 24-bit two's complement.
         try writer.write(Byte3.self, .bigEndian, count: reading.samples.count) {
             UInt32(bitPattern: reading.samples[$0])
         }
@@ -169,8 +172,10 @@ The MQTT package next to this one (`../MQTT`) parses and encodes every MQTT 5.0 
   `[Crumb.self, at:]`, `highHalf`/`lowHalf`, or ``Bits/matches(_:mask:)``, and pack a `Byte` before writing
   it. In MQTT's flag bytes that was a third of the code, and 15.6% of the whole parse.
 - **Little-endian is free** on Apple platforms; big-endian adds a byte swap, which vectorizes.
-- **`for`-`in` works** (``BytesReader`` and its `values(of:)` views are `Iterable`), but typed views decode
-  into a buffer first. For hot loops over decoded values, prefer `forEach`. For bytes, or 4-byte custom
-  types, iterate zero-copy spans: `for byte in reader`, or `reader.read(InlineArray<4, UInt8>.self, count:)`.
+- **`for`-`in` works** (``BytesReader`` and its `values(of:_:)` views are `Iterable`; declare the reader
+  with `var`, and bind a view to a constant before looping), but typed views decode into a buffer first.
+  For power-of-two widths `forEach` is about 2.5x faster; for 3-, 5-, 6-, and 7-byte groups `for`-`in` is
+  as fast, or faster (3 bytes). For bytes, or 4-byte custom types, iterate zero-copy spans: `for byte in
+  reader`, or `reader.read(InlineArray<4, UInt8>.self, count:)`.
 - **Measure.** `Benchmarks/BytesBenchmarks` shows how to benchmark against hand-written code and record
   bandwidth, and `Benchmarks/RESULTS.md` records what each choice in this library cost or saved.
