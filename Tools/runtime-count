@@ -19,7 +19,7 @@
 #
 # examples:
 #   Tools/runtime-count --break swift_task_switch@libswift_Concurrency.dylib --break swift_job_run \
-#       -- .build/release/mqtt-socket-stream --packets 20000 --runs 1
+#       -- .build/release/socket-stream --packets 20000 --runs 1
 #   Tools/runtime-count --who swift_task_switch=x0 -- ./server --requests 100
 source "$(dirname "$0")/lib/common.sh"
 

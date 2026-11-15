@@ -1,0 +1,59 @@
+#!/bin/bash
+# Usage: Tools/corpus [fetch|path|list]
+#
+# The compression benchmark corpus, kept outside the repository in a cache directory
+# ($EXPERIMENTS_CORPUS, default ~/Library/Caches/Experiments/corpus).
+#
+#   fetch   Download and unpack the Silesia corpus (68 MB download, 212 MB unpacked) into silesia/, and copy
+#           web assets (WebKit's Web Inspector JavaScript and CSS, from this Mac) into web/. Idempotent.
+#   path    Print the corpus directory (what benchmarks read; they skip files that are missing).
+#   list    Print each file with its size, tab-separated.
+#
+# Silesia is the standard corpus for general-purpose compressors (libdeflate, zlib-ng, and brotli publish
+# results on it): https://sun.aei.polsl.pl/~sdeor/index.php?page=silesia
+source "$(dirname "$0")/lib/common.sh"
+
+ROOT="${EXPERIMENTS_CORPUS:-$HOME/Library/Caches/Experiments/corpus}"
+SILESIA_URL="https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip"
+SILESIA_FILES="dickens mozilla mr nci ooffice osdb reymont samba sao webster x-ray xml"
+WEB_SOURCE="/System/Library/PrivateFrameworks/WebInspectorUI.framework/Resources"
+
+fetch() {
+    mkdir -p "$ROOT/silesia" "$ROOT/web"
+    local missing=0 name
+    for name in $SILESIA_FILES; do [[ -f "$ROOT/silesia/$name" ]] || missing=1; done
+    if (( missing )); then
+        local tmp
+        tmp="$(mktemp -d)"
+        [[ -n "$tmp" && -d "$tmp" ]] || die "mktemp failed"
+        note "Downloading $SILESIA_URL"
+        curl -fSL --retry 3 -o "$tmp/silesia.zip" "$SILESIA_URL" || { rm -rf "$tmp"; die "download failed"; }
+        unzip -q -o "$tmp/silesia.zip" -d "$ROOT/silesia" || { rm -rf "$tmp"; die "unzip failed"; }
+        rm -rf "$tmp"
+    fi
+    for name in $SILESIA_FILES; do [[ -f "$ROOT/silesia/$name" ]] || die "silesia/$name missing after unpacking"; done
+    if [[ -d "$WEB_SOURCE" ]]; then
+        local file
+        for file in Main.js Main.css Main.html CodeMirror.js Three.js; do
+            if [[ -f "$WEB_SOURCE/$file" ]]; then cp "$WEB_SOURCE/$file" "$ROOT/web/$file"; fi
+        done
+    else
+        note "No $WEB_SOURCE on this system: web/ stays empty"
+    fi
+    list
+}
+
+list() {
+    [[ -d "$ROOT" ]] || fail "no corpus at $ROOT (run Tools/corpus fetch)"
+    (cd "$ROOT" && find . -type f ! -name '.*' | sort | while read -r file; do
+        printf '%s\t%s\n' "${file#./}" "$(stat -f %z "$file")"
+    done)
+}
+
+case "${1:-}" in
+    fetch) fetch ;;
+    path) echo "$ROOT" ;;
+    list) list ;;
+    -h|--help|"") usage ;;
+    *) usage 2 ;;
+esac

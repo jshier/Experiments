@@ -211,10 +211,16 @@ extension HuffmanTable {
         }
 
         // Symbols sorted by code length, then value: the order canonical codes are assigned in. Scratch on
-        // the stack: an `InlineArray` big enough for the common alphabets (DEFLATE's 288 literal/lengths,
-        // JPEG's 256), and for bigger ones (Brotli's 704), the standard library's temporary allocation.
+        // the stack: an `InlineArray` big enough for DEFLATE's 288 literal/lengths (and JPEG's 256), a bigger
+        // one for Brotli's 704 insert-and-copy codes (a 1.4 KB temporary allocation went to the heap: an
+        // allocation per Brotli meta-block), and the standard library's temporary allocation beyond.
         if lengths.count <= 320 {
             var storage = InlineArray<320, UInt16>(repeating: 0)
+            var sorted = storage.mutableSpan
+            return try _sortAndBuild(lengths, &sorted, counts, bitOrder, rootBits, &table, makeSymbol, makeLink)
+        }
+        if lengths.count <= 720 {
+            var storage = InlineArray<720, UInt16>(repeating: 0)
             var sorted = storage.mutableSpan
             return try _sortAndBuild(lengths, &sorted, counts, bitOrder, rootBits, &table, makeSymbol, makeLink)
         }

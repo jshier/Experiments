@@ -17,7 +17,7 @@
 #     unmerged PRs) and, once installed, its directory and bundle id.
 #   - PACKAGE/.swift-toolchain: the registry name a package needs (one line).
 #
-#   NAME       a registry name ("pr-91981"); a package directory with a .swift-toolchain ("MQTTSocketStream");
+#   NAME       a registry name ("pr-91981"); a package directory with a .swift-toolchain ("SocketStream");
 #              a path to an .xctoolchain; or a substring of an installed toolchain's directory name, bundle
 #              id, or alias ("PR91981")
 #   list       registry entries (installed or missing, who uses them), then unregistered installed
@@ -36,15 +36,15 @@
 #              which then loads the OS runtime. TESTING_ARGS default to --testing-library swift-testing.
 #
 # Programs started by tools that don't pass the environment through (the benchmark plugin) need the runtime
-# path embedded at link time: see MQTTSocketStream/Package.swift, which derives it from TOOLCHAIN_RUNTIME or
+# path embedded at link time: see SocketStream/Package.swift, which derives it from TOOLCHAIN_RUNTIME or
 # TOOLCHAINS (so `swift build` with either set works) and adds `-Xlinker -dyld_env`.
 #
 # examples:
 #   Tools/toolchain list
-#   eval "$(Tools/toolchain MQTTSocketStream env)"
-#   Tools/toolchain MQTTSocketStream -- swift run --package-path MQTTSocketStream -c release mqtt-socket-stream --payload 1024
-#   Tools/toolchain MQTTSocketStream -- swift package --package-path MQTTSocketStream --disable-sandbox benchmark
-#   Tools/toolchain MQTTSocketStream test
+#   eval "$(Tools/toolchain SocketStream env)"
+#   Tools/toolchain SocketStream -- swift run --package-path SocketStream -c release socket-stream --payload 1024
+#   Tools/toolchain SocketStream -- swift package --package-path SocketStream --disable-sandbox benchmark
+#   Tools/toolchain SocketStream test
 #   Tools/toolchain pr-91981 -- Tools/loops --target Base64 Base64 encodeBlocks
 source "$(dirname "$0")/lib/common.sh"
 have jq || die "needs jq: brew install jq"

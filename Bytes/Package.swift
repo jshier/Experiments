@@ -22,6 +22,8 @@ let package = Package(
     platforms: [.macOS(.v27), .iOS(.v27), .tvOS(.v27), .watchOS(.v27), .visionOS(.v27)],
     products: [
         .library(name: "Bytes", targets: ["Bytes"]),
+        .library(name: "BytesCompression", targets: ["BytesCompression"]),
+        .library(name: "BytesCrypto", targets: ["BytesCrypto"]),
     ],
     // Three builds, for measuring each (see Benchmarks/RESULTS.md):
     // - default: the C modules' NEON and CRC instructions (what Apple silicon gets);
@@ -64,6 +66,47 @@ let package = Package(
             name: "BytesTests",
             dependencies: ["Bytes"],
             swiftSettings: strictSettings + portableSwiftSettings
+        ),
+        // DEFLATE (raw, zlib, gzip) and Brotli, compressing and decompressing.
+        .target(
+            name: "BytesCompression",
+            dependencies: ["Bytes"],
+            swiftSettings: strictSettings + portableSwiftSettings + [.enableExperimentalFeature("BuiltinModule")]
+        ),
+        // Authenticated encryption on spans: ChaCha20-Poly1305, and TLS 1.3 record protection.
+        .target(
+            name: "BytesCrypto",
+            dependencies: ["Bytes"],
+            swiftSettings: strictSettings + portableSwiftSettings
+        ),
+        .testTarget(
+            name: "BytesCryptoTests",
+            dependencies: ["Bytes", "BytesCompression", "BytesCrypto"],
+            // Not strict memory safety: CryptoKit, the reference, takes `Data`.
+            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+        ),
+        // Reference implementations, for differential tests and comparison benchmarks only. Found through
+        // pkg-config: `brew install libdeflate brotli`. (zlib and Apple's Compression come with the SDK.)
+        .systemLibrary(name: "CLibDeflate", pkgConfig: "libdeflate", providers: [.brew(["libdeflate"])]),
+        .systemLibrary(name: "CBrotli", pkgConfig: "libbrotlienc", providers: [.brew(["brotli"])]),
+        .testTarget(
+            name: "BytesCompressionTests",
+            dependencies: ["Bytes", "BytesCompression", "CLibDeflate", "CBrotli"],
+            // Not strict memory safety: the tests call the reference libraries' C APIs.
+            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+        ),
+        .executableTarget(
+            name: "CompressionBenchmarks",
+            dependencies: [
+                "BytesCompression",
+                "BytesCrypto",
+                "CLibDeflate",
+                "CBrotli",
+                .product(name: "Benchmark", package: "benchmark"),
+            ],
+            path: "Benchmarks/CompressionBenchmarks",
+            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings,
+            plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
         ),
         .executableTarget(
             name: "BytesBenchmarks",

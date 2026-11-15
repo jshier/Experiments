@@ -5,6 +5,245 @@ Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (r
 other benchmarks running); the 2026-11-12 sections have newer full runs. Compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
+## 2026-11-15: BytesCompression, BytesCrypto, and pipelines (baselines `dec-1`, `enc-1`, `all-1`, `c3-optimized`, `c3-portable`, `c3-portable-no-c`, `pipe-1`, `pipe-2`, `final-1`)
+
+All baselines are in `.benchmarkBaselines/CompressionBenchmarks/`. M3 Ultra, macOS 27, Swift 6.4. Corpus:
+`Tools/corpus fetch` (Silesia's dickens, xml, x-ray, samba; WebKit Web Inspector's Main.js 3.8 MB and Main.css
+376 KB) plus generated JSON (16 and 1,200 records: 1.6 KB, 119 KB). References: system zlib, Apple
+Compression (zlib and Brotli), Homebrew libdeflate 1.26 and brotli 1.2.1. Times are medians in µs from
+`Tools/bench-table` (values of 10 ms and up carry two significant digits in the baselines); comparisons are
+within one run (`final-1`) unless a table says otherwise. What each baseline holds: `all-1` is the first
+full optimized run (before the Brotli decoder's fast path and the encoder's tags); `c3-*` the three builds
+after both; `pipe-1` the crypto, pipeline, and Brotli encode rows before the q1 parse split, `pipe-2` the
+Brotli encode rows after it; `final-1` everything below.
+
+Every Bytes row in `final-1` (compression, decompression, checksums, crypto, pipelines) allocates 0 times in
+steady state. The comparators allocate: Google's Brotli 5–428 times per call, Apple Compression 8–20,
+CryptoKit 2 per seal (below).
+
+### DEFLATE encode (`final-1`, µs)
+
+| Input | L1 Bytes | L1 libdeflate | L1 zlib | L1 Apple | L6 Bytes | L6 libdeflate | L6 zlib | L9 Bytes | L9 libdeflate | L9 zlib |
+|---|---|---|---|---|---|---|---|---|---|---|
+| JSON 1.6 KB | 8.96 | **6.71** | 6.58 | 9.30 | 11 | **9.63** | 10 | | | |
+| JSON 119 KB | 150 | **119** | 153 | 575 | 514 | **470** | 700 | | | |
+| Main.js 3.8 MB | 9,011 | **8,045** | 17,000 | 38,000 | 24,000 | **22,000** | 55,000 | **56,000** | 59,000 | 82,000 |
+| dickens 9.7 MB | 38,000 | **35,000** | 70,000 | 218,000 | 119,000 | **105,000** | 315,000 | 228,000 | **221,000** | 412,000 |
+| x-ray 8.1 MB | 50,000 | **47,000** | 90,000 | 189,000 | 76,000 | **64,000** | 202,000 | | | |
+| xml 5.1 MB | 9,462 | **8,421** | 17,000 | 37,000 | 23,000 | **21,000** | 51,000 | | | |
+
+(Apple Compression has one level; it is listed in the L1 column.)
+
+- Level 1: Bytes is 6–14% slower than libdeflate on files of 376 KB and up (x-ray +6%, dickens +9%, Main.js
+  +12%, xml +12%, Main.css +14%), 26–34% slower on the JSON inputs (fixed costs matter at 1.6 KB: 8.96
+  against 6.71 µs). It is about 2x faster than zlib on the large files and 4–6x faster than Apple
+  Compression. On JSON 1.6 KB zlib is as fast as libdeflate.
+- Level 6: 9–19% slower than libdeflate (x-ray +19%, dickens +13%, Main.js +9%, xml +10%), 2.3–2.7x faster
+  than zlib on Main.js, dickens and x-ray.
+- Level 9: equal to libdeflate (Main.js 56 against 59 ms, dickens 228 against 221 ms), 1.5–1.8x faster than
+  zlib.
+- Instructions (L1, millions): Main.js 135 against libdeflate's 96, dickens 519 against 372. The gap in
+  time is smaller than the gap in instructions.
+- Streaming through a 64 KB window costs 0–2% (Main.js L1 9,093 against 9,011).
+- Output sizes (FINDINGS' ratio report): L1's output is the same size as libdeflate's L1.
+- `all-1` to `final-1` is flat for DEFLATE encode (Main.js L1 9,216 → 9,011, dickens L6 119,000 →
+  119,000), apart from the rebase fix below, which changes output size, not speed.
+
+### DEFLATE decode and the wrappers (`final-1`, µs)
+
+| Input | Bytes | libdeflate | zlib | Apple | gzip: Bytes | gzip: libdeflate | gzip: zlib |
+|---|---|---|---|---|---|---|---|
+| JSON 1.6 KB | **2.54** | 2.63 | 2.46 | 3.58 | 2.54 | 2.71 | 2.42 |
+| JSON 119 KB | 28 | 28 | 27 | 58 | 29 | 29 | 30 |
+| Main.js 3.8 MB | 1,894 | **1,673** | 2,092 | 3,592 | 1,943 | 1,752 | 2,118 |
+| dickens 9.7 MB | 8,806 | 8,479 | **8,430** | 17,000 | 9,191 | 8,618 | 8,610 |
+| x-ray 8.1 MB | 15,000 | 14,000 | 14,000 | 23,000 | 15,000 | 14,000 | 14,000 |
+| xml 5.1 MB | 1,696 | **1,518** | 1,724 | 3,013 | 1,760 | 1,616 | 1,860 |
+
+- Bytes is 0–13% slower than libdeflate (Main.js +13%, xml +12%, dickens +4%), about equal to zlib, and
+  1.4–2x faster than Apple Compression. Instructions on Main.js: Bytes 28 M, zlib 23 M, libdeflate 19 M.
+- The gzip wrapper (header, CRC-32 trailer) adds 2–5% over raw inflate (Main.js 1,894 → 1,943,
+  xml 1,696 → 1,760; libdeflate's gzip adds 5% on Main.js).
+- Adler-32 (zlib's trailer): 1 MB in 28 µs (libdeflate 15, zlib 56); 64 B × 16 K in 114 µs (zlib 154). The
+  baselines have no CRC-32 rows of their own; its cost shows in the gzip rows above.
+
+### Brotli (`final-1`, µs; Google is brotli 1.2.1)
+
+Decode, Bytes against Google and Apple Compression:
+
+| Input | q5 Bytes | q5 Google | q5 Apple | q11 Bytes | q11 Google | q11 Apple |
+|---|---|---|---|---|---|---|
+| JSON 1.6 KB | 7.38 | 3.08 | **2.79** | 8.17 | 3.79 | **3.59** |
+| JSON 119 KB | 112 | 72 | **57** | 125 | 75 | **70** |
+| Main.css 376 KB | 425 | 261 | **222** | 387 | 268 | **258** |
+| Main.js 3.8 MB | 4,727 | 3,742 | **3,316** | 4,841 | 3,666 | **3,545** |
+| dickens 9.7 MB | 22,000 | 17,000 | **14,000** | 18,000 | 15,000 | **12,000** |
+| x-ray 8.1 MB | 43,000 | 26,000 | **22,000** | 41,000 | 35,000 | **35,000** |
+| xml 5.1 MB | 4,207 | 3,443 | **3,187** | 4,317 | 3,224 | **3,082** |
+
+- Bytes' decoder is 17–67% slower than Google's on inputs of 119 KB and larger (q5 x-ray +65%, q5 Main.css
+  +63%, q11 JSON 119 KB +67%, q11 x-ray +17%, q5 dickens +29%) and slower still than Apple's. Short inputs cost 2x (q5 1.6 KB: 7.4 against 3.1 µs).
+- Against `all-1`, the decoder's fast path made `c3-optimized` and `final-1` 8–26% faster (Main.js q11
+  6,525 → 4,542 µs in `c3-optimized`, 4,841 in `final-1`; dickens q11 22,000 → 18,000; xml q5 5,067 →
+  4,012 and 4,207); x-ray q5 did not move (43,000 → 42,000 and 43,000). The 64 KB streaming rows track the
+  one-shot rows within 1–10%.
+
+Encode, Bytes against Google:
+
+| Input | q1 Bytes | q1 Google | q5 Bytes | q5 Google | q9 Bytes | q9 Google |
+|---|---|---|---|---|---|---|
+| JSON 1.6 KB | 11 | **5.92** | **16** | 18 | | |
+| JSON 119 KB | 239 | **157** | 738 | 736 | | |
+| Main.css 376 KB | 996 | **610** | **2,669** | 2,716 | | |
+| Main.js 3.8 MB | 13,000 | **9,101** | 34,000 | 33,000 | **59,000** | 94,000 |
+| dickens 9.7 MB | 54,000 | **43,000** | 168,000 | 156,000 | **318,000** | 522,000 |
+| x-ray 8.1 MB | 53,000 | **27,000** | 146,000 | 121,000 | | |
+| xml 5.1 MB | 14,000 | **7,447** | 32,000 | 29,000 | | |
+
+- q5 is within 0–20% of Google in time (x-ray +21%, dickens +8%, xml +10%, Main.js +3%); q9 is 1.6x faster
+  than Google's (Main.js 59 against 94 ms, dickens 318 against 522 ms); q1 is 1.3–2x slower than Google's.
+- Sizes (FINDINGS' ratio report): q5 output is within 3–6% of Google's q5; q1 is larger (xml +26%); q9 is
+  larger by 7% (Bytes has no context modeling or block splitting).
+
+### The Brotli encoder's adaptive tag filter
+
+The hash-bucket search can store a 1-byte tag per entry (Google's SIMD hasher idea) and compare 16 tags
+at once before touching candidates. Always on, it loses on text. Chosen per meta-block now. A/B in one
+harness, alternating runs, identical output bytes (ms, q5, 2 iterations each; this table is from the
+harness, not a baseline):
+
+| File | scan only | tags always | adaptive |
+|---|---|---|---|
+| dickens | 166 | 191 | **167** |
+| Main.js | **33.0** | 38.0 | 33.3 |
+| x-ray | 222 | 147 | **146** |
+| sao | 174 | 128 | **130** |
+| mozilla | 662 | **608** | 620 |
+| ooffice | 118 | **103** | 105 |
+| osdb | 136 | 117 | **115** |
+| samba | **180** | 196 | 185 |
+
+At q9: dickens 344 / 436 / 316 ms, Main.js 61 / 71 / 60, x-ray 409 / 230 / 240, osdb 300 / 243 / 236
+(scan only / tags always / adaptive).
+
+- The signal: per search, the filled bucket entries (16 per bucket at q5) the tags rule out. Text 3–6
+  (dickens 3.8, Main.js 4.0, xml 2.9, samba 6.1); binaries and tables 10–14 (mozilla 10.3, osdb 11.2,
+  ooffice 11.7, sao 13.0, x-ray 14.2). Tags win when they rule out more than half the bucket. The encoder
+  measures every search with tags and every 32nd without, and decides per meta-block. The copied fraction
+  and the average match length did not separate the files (x-ray copies 60–78%; osdb's average match is 13
+  bytes and tags still win).
+- Why tags lose on text: most candidates pass, so the tag compare is an extra load (a separate cache line) and
+  a data-dependent branchy loop in front of the loads the scan would have issued in parallel anyway.
+  Storing tags costs about 5% alone.
+- Instructions (millions, comparable across runs), `all-1` / `pipe-1` / `pipe-2` / `final-1`:
+
+| Brotli encode | all-1 | pipe-1 | pipe-2 | final-1 |
+|---|---|---|---|---|
+| q1 dickens | 858 | 921 | 835 | 835 |
+| q1 x-ray | 877 | 900 | 833 | 833 |
+| q1 Main.js | 194 | 212 | 191 | 191 |
+| q5 dickens | 2,487 | 2,448 | 2,414 | 2,485 |
+| q5 x-ray | 3,575 | 2,430 | 2,419 | 2,495 |
+| q5 Main.js | 528 | 548 | 533 | 549 |
+| q5 xml | 466 | 505 | 484 | 501 |
+| q9 dickens | 4,913 | 4,424 | 4,333 | 4,441 |
+| q9 Main.js | 964 | 949 | 922 | 939 |
+
+- q1 split (`parseSingle` / `parseBuckets`: `@inline(never)` wrappers over an `@inline(__always)` body with a
+  constant): q1 is 7–10% below `pipe-1` and 1–5% below `all-1`.
+- x-ray q5: −30% instructions against `all-1` (the tags). Text at q5 sits within ±2% of `all-1` (dickens
+  −0.1%, samba +1.5%) and Main.js, Main.css, xml, JSON +4–12%, the price of measuring both ways.
+- Stale buckets: a reused encoder keeps earlier streams' entries (out of every window, by `streamBase`),
+  and a short stream checked all 16 per search. Checking the newest entry first (if it is out, all are):
+  1.6 KB input 24 → 18 µs (−24%, harness), large inputs unchanged. Breaking out of the scan loop at the
+  first stale entry cost large inputs 3–5% (a second loop exit).
+
+### The three builds (`c3-optimized`, `c3-portable`, `c3-portable-no-c`, µs)
+
+| Row | optimized | portable | portable-no-c |
+|---|---|---|---|
+| Deflate 6 dickens | 118,000 | 118,000 | 118,000 |
+| Deflate 6 x-ray | 78,000 | 75,000 | 78,000 |
+| Inflate Main.js | 1,874 | 1,901 | 1,910 |
+| Inflate xml | 1,713 | 1,669 | 1,676 |
+| Brotli decode q11 Main.js | 4,542 | 4,751 | 4,948 |
+| Brotli encode q5 dickens | 191,000 | 190,000 | 192,000 |
+| Adler-32 1 MB | 27 | 27 | 28 |
+| **Inflate gzip JSON 119 KB** | **29** | 41 | 41 |
+| **Inflate gzip Main.js** | **1,916** | 2,310 | 2,296 |
+| **Inflate gzip xml** | **1,797** | 2,308 | 2,259 |
+| **Inflate gzip dickens** | **9,044** | 10,000 | 10,000 |
+
+Everything else is within a few percent across the three builds. The exception is gzip inflate, whose
+CRC-32 uses the hardware CRC instructions in the optimized build (through `CBytes`): the portable builds are
+7–41% slower there (x-ray +7%, dickens +11%, Main.js +20%, xml +26%, JSON 119 KB +41%). Raw inflate has no
+checksum and shows no such gap.
+
+### ChaCha20-Poly1305 against CryptoKit (µs per iteration; `pipe-1` → `final-1`)
+
+| Seal | Bytes pipe-1 | Bytes final-1 | CryptoKit ChaChaPoly | CryptoKit AES-128-GCM |
+|---|---|---|---|---|
+| 1 MB × 1 | 1,047 | **690** (1.52 GB/s) | 1,239 | 103 |
+| 16 KB × 64 | 1,051 | **714** | 1,315 | 151 |
+| 1 KB × 1024 | 1,170 | **805** | 2,222 | 891 |
+| 64 B × 16,384 | 4,575 | **4,461** | 16,000 | 12,000 |
+
+- Two changes took 1 MB from 1.00 to 1.50 GB/s (harness): ChaCha20 eight blocks at a time (`SIMD8<UInt32>`,
+  all 32 NEON registers: four blocks are four dependent quarter-round chains and leave half the vector pipes
+  idle) 1.00 → 1.34, then Poly1305 in radix 2^64 (OpenSSL's scheme: 4 wide and 2 narrow products per block
+  instead of 9 wide; the loop went from 56 to 43 instructions per 16 bytes) 1.34 → 1.50. Before them,
+  ChaCha was about 65% of the time and Poly1305 about 33%. Instructions in `final-1`: 1 MB 8.77 M, 16 KB × 64
+  8.91 M, 1 KB × 1024 11 M.
+- Bytes beats CryptoKit's ChaChaPoly at every size: 1.8x at 1 MB and 16 KB, 2.8x at 1 KB, 3.6x at 64 B, where CryptoKit's
+  per-call allocation and setup dominate. CryptoKit allocates twice per seal: 2 for 1 MB × 1, 128 for 16 KB ×
+  64, 2,048 for 1 KB × 1024, 33,000 for 64 B × 16,384.
+- AES-128-GCM with hardware AES is 6.7x faster than Bytes' ChaCha at 1 MB (10 GB/s): ChaCha cannot match
+  it. At 1 KB and below AES-GCM is slower than Bytes' ChaCha (891 against 805 µs; 12,000 against 4,461).
+- Not done: stitching, interleaving Poly1305's scalar multiplies with ChaCha's vector rounds.
+
+### Pipelines against two passes (`final-1`, µs)
+
+| Work | Pipeline | Two passes |
+|---|---|---|
+| deflate 1 + TLS send, JSON 1.6 KB | 9.58 | 9.34 |
+| deflate 1 + TLS send, JSON 119 KB | 187 | 184 |
+| deflate 1 + TLS send, Main.js | 11,000 | 11,000 |
+| TLS + inflate receive, JSON 1.6 KB | 3.38 | 3.34 |
+| TLS + inflate receive, JSON 119 KB | 60 | 61 |
+| TLS + inflate receive, Main.js | 3,297 | 3,297 |
+
+Other pipeline rows: brotli 5 + TLS send 16 µs (1.6 KB), 840 (119 KB), 37,000 (Main.js); TLS + brotli receive
+6.96, 149, 6,840.
+
+- A pipeline equals the same work as two passes through a buffer: it is not a speed-up, and costs nothing.
+  It saves the intermediate buffer and, with `ResettableByteTransform`, lets pipelines built once serve
+  stream after stream.
+- The TLS sealer's `reset` does not restart the record sequence (the same keys and sequence would reuse a
+  nonce); the opener's `reset(sequence:)` replays it.
+
+### Bugs found, and compiler issues
+
+- **DEFLATE encoder rebase (found by SocketStream):** 16-bit positions are relative to a base, and the
+  encoder rebased when `position - base == 32768`. Positions that are not inserted (a flush's last 4 bytes,
+  the end of a match too near the end) can step over 32768; then the check never matches again, entries wrap
+  in `Int16`, and no match is found for the rest of the stream. The output stays correct (matches are
+  verified) and only grows: the socket stream went from 14% to 62% of the input size after batch 100
+  (26 MB). Fixed with `while current >= windowSize { rebase; base += 32K; current -= 32K }` at all four
+  sites. Test `flushAcrossTheRebasePointKeepsMatching` (first flush at 32,770): before, 2.1–2.6x bigger than
+  one-shot; after, within 10%. Speed rows did not change.
+- **Benchmark evaluation order (not the library):** `Array(wire.prefix(send(into: &wire)))` reads `wire`
+  before the argument mutates it, so `prefix` saw the old, empty array (the copy-on-write made by the
+  `inout` access).
+- **Swift 6.4 issues met:** (1) SILGen crash on a typed-throws closure returning a tuple passed to
+  `Array.withUnsafeMutableBytes` ("unsupported collection upcast kind"); (2) a `~Copyable` struct `init`
+  that reads a `let` before `UniqueArray` fields are initialized: `-O` emits deallocs of uninitialized fields
+  (release-only crash; not reduced); (3) `SIMD16<UInt16>(truncatingIfNeeded:)` is not inlined; (4) indexing
+  an `InlineArray` field of a struct value copies the whole array per access (take `.span` once: DEFLATE L1
+  x-ray 153 → 55 ms); (5) loops of `Int16` stores and `MutableSpan.update(repeating:)` compile scalar
+  (explicit `SIMD8` stores); (6) variadic `min(a, b, c, …)` allocates an array per call; (7) default
+  cross-module optimization inlined `BrotliEncoder`'s deinit into clients and referenced an internal type's
+  metadata (link error; `@usableFromInline` on the type).
+
 ## Current: Bytes against the alternatives (same harness, same run; baseline `modern`)
 
 The times below were first taken on a loaded machine (see the 2026-11-09 section). Re-run alone, `modern`

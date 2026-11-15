@@ -1,0 +1,5 @@
+module CLibDeflate [system] {
+    header "shim.h"
+    link "deflate"
+    export *
+}

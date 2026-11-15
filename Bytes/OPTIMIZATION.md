@@ -5,7 +5,11 @@ Bytes is a Swift library for parsing and writing binary formats: reading and wri
 from a first version to one that reads at memory speed, and three projects were built on it: an MQTT 5
 codec, a DEFLATE decoder that beats zlib, and a Base64 encoder and decoder at 93% and 99% of hand-written
 C. It builds three ways (with NEON, with portable C fallbacks, and in Swift alone), and the portable
-builds average within about 2% of the NEON one.
+builds average within about 2% of the NEON one. Then it grew compression (DEFLATE, zlib, gzip, and Brotli,
+both directions: DEFLATE 6–19% slower than libdeflate on large inputs and up to a third on small ones,
+encoding 2x faster than zlib; Brotli decoding still 17–67% behind Google's), ChaCha20-Poly1305 and TLS 1.3 records (1.8x
+CryptoKit's ChaChaPoly), and pipelines that compose them with no allocation and no measurable cost, carrying
+MQTT over a socket compressed and encrypted.
 
 This document covers the design and optimization techniques that got it there, with before-and-after code
 and the measurements behind each. It's for experienced Swift programmers who know CPUs only at the
@@ -29,7 +33,7 @@ x% less time unless it says "throughput".
 7. [Let LLVM vectorize your loops](#7-let-llvm-vectorize-your-loops)
 8. [Write SIMD yourself with `SIMD16`](#8-write-simd-yourself-with-simd16)
 9. [Reach instructions Swift can't express](#9-reach-instructions-swift-cant-express)
-10. [Case studies: Base64, CRC-32, DEFLATE, three builds](#10-case-studies)
+10. [Case studies: Base64, CRC-32, DEFLATE, three builds, compression, ChaCha20-Poly1305, pipelines](#10-case-studies)
 11. [Smaller lessons](#11-smaller-lessons)
 12. [Limitations and bugs found in Swift and LLVM](#12-limitations-and-bugs-found-in-swift-and-llvm)
 13. [Glossary](#13-glossary)
@@ -730,6 +734,106 @@ for the portable build), and 319–321 of them are within 10%. The optimized bui
 than before. What's left: odd-width writes (1.25–2x: the trip through memory, and a value computation
 LLVM vectorizes less tightly than the NEON path's), and CRC without `pmull` (8.3x).
 
+### Compression: DEFLATE and Brotli, both directions
+
+`BytesCompression` encodes and decodes raw DEFLATE, zlib, gzip, and Brotli (RFC 7932), in one call or
+streaming (zlib's model: input span, output span, consumed and produced counts, a status). State is
+`~Copyable`, allocated once, and reset per stream; nothing allocates after that, in any of the three
+builds. The encoder follows [libdeflate](https://github.com/ebiggers/libdeflate)'s levels (a 2-entry hash
+table at level 1, hash chains above, lazy parsing from 5, block splitting from statistics) and the Brotli
+encoder Google's scoring and distance coding. Times in µs (`final-1`):
+
+| | Bytes | libdeflate | zlib | Google brotli |
+|---|---|---|---|---|
+| DEFLATE level 1, Main.js (3.8 MB) | 9,011 | **8,045** | 17,000 | |
+| DEFLATE level 6, dickens (9.7 MB) | 119,000 | **105,000** | 315,000 | |
+| DEFLATE level 9, Main.js | **56,000** | 59,000 | 82,000 | |
+| Inflate, Main.js | 1,894 | **1,673** | 2,092 | |
+| Brotli quality 5, Main.js | 34,000 | | | **33,000** |
+| Brotli quality 9, dickens | **318,000** | | | 522,000 |
+| Brotli decode (quality 11), Main.js | 4,841 | | | **3,666** |
+
+Level 1's output is the same size as libdeflate's; Brotli's is within 3–6% of Google's at quality 5 (7% at
+9, without context modeling). What made the difference, in order of payoff:
+
+1. **InlineArray fields copied whole on every access** (section 12): indexing an `InlineArray` stored in a
+   struct value, through a `borrowing` parameter or a non-mutating method, copied the whole array first.
+   The block writer copied 1.4 KB per literal. Taking `.span` once and indexing it: level 1 on x-ray 153
+   → 55 ms, a 2.7 KB input 37 → 11 µs.
+2. **Rare paths out of line, so the hot loop inlines.** The decoders have a fast loop, used while 32 (DEFLATE)
+   or 128 (Brotli) bytes of input remain, and a careful, resumable one for the rest. With both in one
+   function the inliner gave up on the fast one; split, it went from 1,390 to 667 instructions, and Brotli's
+   decoder got 10–30% faster with its own fast path.
+3. **Clears as vector stores.** A loop resetting `Int16` tables compiled to one `strh` per entry (59% of a
+   small input's time); explicit `SIMD8<Int16>` stores fixed it.
+4. **An adaptive path picked by what it saves.** Google's newer hashers keep 8 more bits of each entry's
+   hash (a tag) and compare 16 at once, loading only entries whose tag matches. On x-ray, 35% faster; on
+   text, 17–30% slower: most candidates match there, so the tags are one more load and a branchy loop in
+   front of loads the plain scan issues anyway, in parallel. Neither the share of bytes copied nor the
+   average match length predicted which (x-ray copies 60–78%; a database file averaging 13-byte matches
+   still preferred tags). What the tags save did: the bucket entries they rule out, 3–6 of 16 for text and
+   10–14 for binaries. The encoder counts them (every search with tags, every 32nd without) and picks the
+   next meta-block's mode: within 2% of the faster path on every file tried. Storing the tags isn't free
+   (about 5% on its own): quality 5 on text runs 4–12% more instructions than before tags.
+5. **A copy of the loop per constant.** Quality 1's one-entry table ran through the bucket code's loop: 7–10%
+   more instructions. Two `@inline(never)` wrappers over an `@inline(__always)` body taking a constant
+   `Bool` gave each its own loop.
+6. **Stale entries after a reset.** Keeping the table across streams (old entries fall out of every window
+   by moving a position base) left short streams checking 16 dead entries per search. Checking only the
+   newest first (if it's out, all are): a 1.6 KB stream 24 → 18 µs. Breaking out of the loop at the first
+   dead entry cost large inputs 3–5%: a second exit changes how the loop compiles.
+
+A bug that shows only as size: DEFLATE's tables hold 16-bit positions relative to a base, moved forward
+when a position reaches 32 KB past it. The check was `==`. Positions that are never inserted (a flush's last
+few bytes) can step over the boundary, and from then on no position equals it: entries wrap, no match is
+found, and output stays correct (matches are verified), only bigger. A socket stream went from 14% to 62%
+of its size after 26 MB. Boundary checks are `>=`, and the tests compare long streams with flushes
+against one-shot output size.
+
+### ChaCha20-Poly1305: 1.0 → 1.52 GB/s
+
+`BytesCrypto`'s AEAD seals and opens in place, allocating nothing, for TLS 1.3 records (keys from
+CryptoKit's X25519 and HKDF). ChaCha20 holds one block per vector lane, 16 state words; Poly1305 is scalar.
+Sealing 1 MB took 1.0 ms, ChaCha20 two thirds of it.
+
+1. **Independent work, not just lanes.** Each quarter-round step depends on the one before. Four blocks in
+   `SIMD4<UInt32>` gave four chains, which kept Apple silicon's vector pipes half busy. Eight blocks in
+   `SIMD8<UInt32>` (two registers per word, all 32 registers): +36%.
+2. **Fewer, wider multiplies.** Poly1305 with 44-bit limbs took nine 64 × 64 → 128-bit products per
+   16-byte block; in radix 2^64, as OpenSSL's 64-bit code, four of those and two 64-bit ones (56 → 43
+   instructions per block): +12%.
+
+| Seal, 1 MB per iteration (µs) | Bytes | CryptoKit ChaChaPoly | CryptoKit AES-128-GCM |
+|---|---|---|---|
+| 64 B messages | **4,461** | 16,000 | 13,000 |
+| 1 KB messages | **805** | 2,222 | 905 |
+| 1 MB message | 690 | 1,239 | **104** |
+
+CryptoKit allocates per call, which dominates short messages. Nothing in Swift matches AES-GCM on hardware
+AES instructions (10 GB/s). Not done: "stitching" Poly1305's scalar multiplies into ChaCha20's vector
+rounds, so the integer and vector units work at once.
+
+### Pipelines: composing stages for free
+
+A pipeline stage (`ByteTransform`) transforms input spans into an output span, reporting what it consumed
+and produced, with a typed error (`Never` for stages that can't fail, so a pipeline of them doesn't throw).
+`DeflateEncoder(format: .raw).then(TLSRecordSealer(keys: keys))` composes two through a buffer allocated
+once; in-place stages (`InPlaceByteTransform`) fuse with no buffer. Pipelines are `~Copyable` but not
+`~Escapable`, so one can live across `await` in a socket loop, and generic all the way down, so a pipeline
+of concrete stages specializes to one function of their code. Compressing and sealing Main.js through a
+pipeline took the same 11 ms as the two stages run one after the other through a buffer of the whole
+stream; opening and inflating, 3,297 µs both.
+
+- **Reset, and what not to reset.** `ResettableByteTransform` lets a pipeline built once carry stream after
+  stream. A TLS sealer's reset keeps its record sequence: restarting it under the same keys would reuse
+  nonces. Replaying records (tests, benchmarks) is the opener's `reset(sequence:)`.
+- **A buffer smaller than a stage's unit** (a TLS record needs 16 KB of room) can't make progress; that's a
+  precondition failure, not a loop that never returns.
+- **Over a socket** (`SocketStream`), MQTT packets encoded, compressed, sealed, sent, opened, decompressed,
+  and checked: TLS alone about 1 GB/s on one connection (ChaCha20-Poly1305 bound, against 3.4–7.4 GB/s
+  plain), DEFLATE level 1 plus TLS 0.49–0.60 GB/s with 64-byte to 1 KB JSON payloads, at 14–16% of the
+  bytes on the wire: the compressor bounds it. No allocation per packet on either end.
+
 ## 11. Smaller lessons
 
 **Write constants as literals.** A `static let` the compiler can't evaluate at compile time is a lazily
@@ -806,6 +910,14 @@ per call over a loop starting at a constant 0. Giving the long-run path its own 
 **Mind Swift's precedence for shifts.** Shifts bind tighter than multiplication, so `count &* 3 &>> 2` is
 `count &* (3 &>> 2)`, which is 0. Base64's decoder briefly computed an output size of zero that way.
 
+**`a.f(g(&a))` reads `a` first.** `Array(wire.prefix(send(into: &wire)))` evaluates `wire` before the
+argument mutates it, and the mutation then copies the array (it's no longer uniquely referenced): `prefix`
+saw the old, empty one. Take the result into a local first.
+
+**A span of a class's stored array lasts only for that access.** In a method, `batch.span` on a
+stored property is rejected as escaping its scope; `let batch = batch` (a retain, not a copy) gives the
+span a local to depend on. Release it before mutating the property, or the mutation copies.
+
 **Measure hints.** Without its `likely`/`unlikely` hints (Bytes' wrappers for LLVM's branch weights,
 through `Builtin`), bit-field parsing took 14% more instructions (689 K → 787 K) in the same time; the
 hints were kept. `@frozen` changed nothing outside a binary framework, so it was removed. Spacing the CRC
@@ -840,10 +952,19 @@ have reports with reproducers written but not yet filed.
 | **A span of a global `let` declared in another file** is rejected ("lifetime-dependent value escapes its scope") when files compile separately, as in SwiftPM debug builds, and accepted with whole-module compilation (release). Also on 6.5-dev | Debug builds fail, release builds pass | Bind the global to a local first |
 | **`atomically { }` around a large body** isn't inlined, so the cursor lives in memory | +50% instructions for a whole zip entry | Keep atomic bodies small |
 | **Typed-throw sites check OS availability** (`_stdlib_isOSVersionAtLeast…` before `swift_willThrowTypedImpl`) even when the deployment target is macOS 27 | Code size on every throw path | None |
+| **Indexing an `InlineArray` field of a struct value** (a `borrowing` or by-value parameter, a non-mutating method, a nested function reading `self`) copies the whole array per access | 1.4 KB `memmove` per literal in a DEFLATE block writer: 2.8x slower | Take `.span` once and index that |
+| **Loops of `Int16` stores, and `MutableSpan.update(repeating:)`,** compile to one scalar store per element | Table resets 59% of a small input's time | Explicit `SIMD8<Int16>` stores |
+| **`min(a, b, c, …)` with three or more arguments** is the variadic overload: an array per call | An allocation in Brotli's literal loop | Nested two-argument `min` |
+| **A `~Copyable` initializer reading a stored `let` before its `UniqueArray` fields are set**: the optimized build frees those uninitialized fields as if reassigning them | Crash, release builds only | Compute into locals first |
+| **Default cross-module optimization inlined a public type's `deinit` into clients**, referencing an internal type's metadata | Link error in clients | `@usableFromInline` on the internal type |
+| **A typed-throws closure returning a tuple, passed to `Array.withUnsafeMutableBytes`**, crashes SILGen ("unsupported collection upcast kind"); and typed errors don't pass through it at all (it rethrows `any Error`) | Compiler crash; doesn't compile | `array.mutableSpan.withUnsafeMutableBytes`, which keeps the error type |
+| **`SIMD16<UInt16>(truncatingIfNeeded:)`** isn't inlined | A call per vector | Bit casts, masks, and shifts |
 | **package-benchmark's thresholds** for names with spaces or `/` are written under one name and looked up under another ([ordo-one/benchmark#301](https://github.com/ordo-one/benchmark/issues/301), [#373](https://github.com/ordo-one/benchmark/issues/373)) | A check that silently doesn't run | Names without spaces |
 
 ## 13. Glossary
 
+- **AEAD**: authenticated encryption with associated data: encrypts a message and computes a tag over it
+  and unencrypted data (a record header), so tampering with either is detected. ChaCha20-Poly1305 is one.
 - **Auto-vectorization**: the compiler rewriting a loop to use SIMD instructions on several elements per
   iteration.
 - **Back-reference**: in LZ77 compression (DEFLATE), "copy N bytes from D bytes back in the output".
@@ -883,7 +1004,10 @@ have reports with reproducers written but not yet filed.
 - **Mask**: a value with all bits set (0xFF) or clear (0), used to select or zero values without a branch.
 - **Memory bandwidth**: bytes per second from main memory: ~72–77 GB/s for one core here, ~245–250 GB/s
   for all.
+- **Meta-block**: a Brotli stream's unit, with its own prefix codes; the encoder chooses settings per
+  meta-block (here 256 KB).
 - **NEON**: Arm's 128-bit SIMD instruction set.
+- **Nonce**: a number used once per message under a key; an AEAD's security fails if one repeats.
 - **Package trait**: an optional feature of a Swift package, declared in Package.swift and turned on or off
   by its users (SE-0450).
 - **Prefetching**: the CPU loading cache lines before they're asked for, when it detects a pattern.

@@ -18,7 +18,7 @@
 # Compiled with xcrun clang -O2 on first use (and when the source changes) into
 # ~/Library/Caches/experiments-tools/.
 #
-# examples (MQTTSocketStream/RESULTS.md compares its transfers with these):
+# examples (SocketStream/RESULTS.md compares its transfers with these):
 #   Tools/socket-ceiling --pairs 1 --bytes 512M --write 256K
 #   Tools/socket-ceiling --pairs 4 --bytes 256M --unix --runs 3
 source "$(dirname "$0")/lib/common.sh"

@@ -10,9 +10,9 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 
 | Project | What | Record |
 |---|---|---|
-| `Bytes` | Span-based binary reading/writing (`BytesReader`, `BytesWriter`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC, DEFLATE | `Benchmarks/RESULTS.md` |
+| `Bytes` | Span-based binary reading/writing (`BytesReader`, `BytesWriter`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC, byte pipelines (`ByteTransform`); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions); `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records) | `Benchmarks/RESULTS.md` |
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
-| `MQTTSocketStream` | MQTT over sockets with a PR toolchain's I/O interfaces; concurrency hops | `RESULTS.md` |
+| `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
 | `Base64` | Vectorized Base64 encoder on Bytes (`tbl` kernel, auto-vectorized `ld3`/`st4` kernel) | `Benchmarks/RESULTS.md` |
 | `NativeZipArchive` | ZIP/DEFLATE | `Benchmarks/RESULTS.md` |
 | `BinaryParsingComparison` | Bytes vs swift-binary-parsing | `RESULTS.md` |
@@ -41,7 +41,7 @@ reproducers live outside the repo, in `~/Downloads/swift-bugs/` (numbered `NN-sw
   (`@main struct …: ParsableCommand`/`AsyncParsableCommand`, so not in a `main.swift`), never hand-parsed
   `CommandLine.arguments`: `--help`, typed values, and validation for free. Make option enums
   `ExpressibleByArgument` (`String`-backed and `CaseIterable` need no more than the conformance). Examples:
-  `NativeZipArchive/Sources/nunzip`, `MQTTSocketStream/Sources/mqtt-socket-stream`. Benchmark executables
+  `NativeZipArchive/Sources/nunzip`, `SocketStream/Sources/socket-stream`. Benchmark executables
   (package-benchmark parses their arguments) are the exception.
 - Use Edit/Write for file changes rather than `sed -i`/scripts; jq for JSON, yq for XML/YAML/TOML (no inline
   Python); never `rm -rf "$VAR"` without checking the variable is set and points where you expect.
@@ -189,7 +189,7 @@ with change, units normalized (counts unscaled, times in µs).
 
 **`Tools/socket-ceiling [--pairs N] [--bytes SIZE] [--write SIZE] [--buffer SIZE] [--unix] [--runs N]`** — the
 kernel's local-socket throughput with blocking C sockets on plain threads (loopback TCP or a Unix socketpair):
-the ceiling to compare networking benchmarks against (MQTTSocketStream's transfers reach most of it).
+the ceiling to compare networking benchmarks against (SocketStream's transfers reach most of it).
 
 **`Tools/toolchain …`** — non-Xcode toolchains: `list`, `install`, `register`, and running commands,
 programs (`--runtime`), and tests (`test`) with one. See Toolchains below.
@@ -204,7 +204,7 @@ Tool honor it), and never on PATH (the shell profile doesn't add them).
   (`{"swiftly": SPEC}` for releases and snapshots; `{"url": TARBALL}` for what swiftly can't install, like PR
   builds from `download.swift.org/tmp/pull-request/<PR>/<build>/xcode/swift-PR-<PR>-<build>-osx.tar.gz`, which
   extract into `~/Library/Developer/Toolchains` and **expire**) and, once installed, its directory and
-  bundle id. A package needing one names it in `PACKAGE/.swift-toolchain` (MQTTSocketStream: `pr-91981`).
+  bundle id. A package needing one names it in `PACKAGE/.swift-toolchain` (SocketStream: `pr-91981`).
 - **`Tools/toolchain list`** shows each entry (installed or missing, used by which packages), plus
   unregistered installed toolchains and broken links (a `swift-latest` symlink to a deleted snapshot is
   typical). `Tools/doctor` reports the same problems.
@@ -216,16 +216,16 @@ Tool honor it), and never on PATH (the shell profile doesn't add them).
 - **Using one:** NAME is a registry name, a package directory (its `.swift-toolchain`), or an installed
   toolchain's name, bundle id, or alias.
   ```sh
-  eval "$(Tools/toolchain MQTTSocketStream env)"     # TOOLCHAINS, TOOLCHAIN, TOOLCHAIN_RUNTIME
-  Tools/toolchain MQTTSocketStream -- swift run --package-path MQTTSocketStream -c release mqtt-socket-stream
-  Tools/toolchain MQTTSocketStream -- swift package --package-path MQTTSocketStream --disable-sandbox benchmark
-  Tools/toolchain MQTTSocketStream test             # tests against the toolchain's runtime
+  eval "$(Tools/toolchain SocketStream env)"     # TOOLCHAINS, TOOLCHAIN, TOOLCHAIN_RUNTIME
+  Tools/toolchain SocketStream -- swift run --package-path SocketStream -c release socket-stream
+  Tools/toolchain SocketStream -- swift package --package-path SocketStream --disable-sandbox benchmark
+  Tools/toolchain SocketStream test             # tests against the toolchain's runtime
   Tools/toolchain pr-91981 -- Tools/loops --target Base64 Base64 encodeBlocks   # codegen with another compiler
   ```
 - **The toolchain's runtime:** code using APIs newer than the OS's Concurrency/stdlib must load the
   toolchain's runtime. `swift test` and the benchmark plugin replace `DYLD_LIBRARY_PATH` for the processes
   they start, so executables embed it (`-Xlinker -dyld_env -Xlinker DYLD_LIBRARY_PATH=…`), computed in
-  Package.swift from `TOOLCHAIN_RUNTIME` or `TOOLCHAINS` (see MQTTSocketStream/Package.swift: no path is
+  Package.swift from `TOOLCHAIN_RUNTIME` or `TOOLCHAINS` (see SocketStream/Package.swift: no path is
   hardcoded); tests run through `Tools/toolchain NAME test`, which drives `swiftpm-testing-helper` itself.
 
 ## Swift's LLVM vs Homebrew's
@@ -292,7 +292,7 @@ spaces: thresholds for names with spaces break, ordo-one/package-benchmark#373).
 Concurrency: find actual hops with `Tools/tasks` (Instruments' `SwiftTaskStateTable`: thread and actor per
 Running interval); count executor checks with `Tools/runtime-count --break
 swift_task_switch@libswift_Concurrency.dylib` (and `--who …=x0`); check suspension points statically with
-`Tools/calls --target PKG TARGET PATTERN --callee swift_task_switch`. In MQTTSocketStream, 55–113
+`Tools/calls --target PKG TARGET PATTERN --callee swift_task_switch`. In SocketStream, 55–113
 `swift_task_switch` calls per transfer turned out to be zero hops for the socket tasks.
 `nonisolated(nonsending)` keeps async functions on the caller's executor. System Call Trace (`syscall`
 table) counts syscalls without the breakpoint perturbation.
@@ -374,6 +374,34 @@ The standard library's `[UInt8](capacity:initializingWith:)` (the `OutputSpan` i
 ns per array more than `reserveCapacity` then `append(addingCapacity:)`, or `Array(UnsafeRawBufferPointer)`,
 at any size. For small arrays in hot code, use those.
 
+Compression and crypto (details: `Bytes/Benchmarks/RESULTS.md`, `SocketStream/RESULTS.md`):
+
+- **Compression bugs often show only as size.** Matches are verified, so a broken match finder still
+  round-trips: DEFLATE's 16-bit positions rebased on `position - base == 32768`, positions that weren't
+  inserted (a flush's last bytes) stepped over it, and every match after was lost (14% → 62% after 26 MB of
+  a socket stream). Use `>=` for boundary checks, and test long streams with flushes against one-shot size.
+- **Pick an adaptive path by what the optimization saves, measured, not a proxy.** Brotli's tag filter
+  (8 extra hash bits per bucket entry, 16 compared at once) was 17–30% slower on text and 35% faster on
+  x-ray. Copied fraction and average match length didn't predict it; the entries the tags rule out did
+  (text 3–6 of 16, binaries 10–14). Sampled every 32nd search, decided per meta-block: best of both.
+- **Specialize hot loops on a constant, as a copy:** Brotli quality 1's one-entry table ran through the
+  bucket code's loop, 7–10% more instructions. Two `@inline(never)` wrappers over an `@inline(__always)`
+  body with a constant `Bool` fixed it (check for `merged` symbols, above).
+- **Reused state carries stale entries.** A reset that keeps a table by moving the position base leaves
+  every old entry out of range but still scanned: check the newest entry first (a 1.6 KB stream −24%).
+  Breaking out of the scan loop instead cost large inputs 3–5%.
+- **Vector code needs independent chains, not just lanes.** ChaCha20 on four blocks (`SIMD4<UInt32>`) was
+  four dependent quarter-round chains, the vector pipes half idle; eight blocks (`SIMD8<UInt32>`, all 32
+  registers) +36%. For scalar multiply chains, fewer wide products: Poly1305 in radix 2^64 (4 + 2
+  products per block) against 2^44 (9), +12%.
+- **`a.f(g(&a))` reads `a` before `g` mutates it:** `Array(wire.prefix(send(into: &wire)))` copied the old,
+  empty array (the inout access made a copy-on-write). Take the result into a local first.
+- **Typed throws through `Array.withUnsafeMutableBytes` don't compile** (it rethrows `any Error`): use
+  `array.mutableSpan.withUnsafeMutableBytes`, which keeps the error type. A span of a class instance's
+  stored array lasts only for that property access: bind the array to a local `let` (a retain, no copy).
+- **Nonce reuse hides in `reset()`.** A TLS sealer reset with the same keys must not restart its record
+  sequence; the opener gets `reset(sequence:)` to replay records in tests and benchmarks.
+
 ## Benchmarks (ordo-one/package-benchmark)
 
 - Run: `swift package --disable-sandbox benchmark [--filter REGEX]`; save: `… baseline update NAME`;
@@ -391,7 +419,7 @@ at any size. For small arrays in hot code, use those.
   once before registering, and capture what the loop needs. For bytes or packets per second, use the
   framework's `.throughput` (iterations per second, measured outside the loop) times the work per
   iteration, stated in the benchmark's name or a comment; don't time inside the loop with a custom metric.
-  The one exception is MQTTSocketStream's socket transfers, which report the transfer's own timing (first
+  The one exception is SocketStream's socket transfers, which report the transfer's own timing (first
   listener to last end of stream, so starting executor threads isn't counted).
 - A custom metric named `.throughput` collides with the built-in: name it otherwise.
 - The malloc interposer costs ~10% on large transfers: keep allocation and timing benchmarks separate.

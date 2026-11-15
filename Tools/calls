@@ -18,7 +18,7 @@
 # stubs ("symbol stub for: _swift_retain"); plain objdump mislabels stub calls as the nearest symbol.
 #
 # examples:
-#   Tools/calls --target MQTTSocketStream MQTTSocketStream 'Transfer\.' --callee 'swift_task_switch'
+#   Tools/calls --target SocketStream SocketStream 'Transfer\.' --callee 'swift_task_switch'
 #   Tools/calls .build/release/MQTTBenchmarks 'parsePublish' --callee 'outlined|swift_(retain|release)'
 source "$(dirname "$0")/lib/common.sh"
 

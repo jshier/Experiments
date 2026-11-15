@@ -1,0 +1,7 @@
+module CBrotli [system] {
+    header "shim.h"
+    link "brotlienc"
+    link "brotlidec"
+    link "brotlicommon"
+    export *
+}
