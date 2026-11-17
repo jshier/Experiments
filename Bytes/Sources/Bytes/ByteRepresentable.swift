@@ -88,7 +88,7 @@ extension Load {
     }
 }
 
-public extension BytesReader {
+public extension GenericBytesReader {
     /// Returns the next `T`, from its `MemoryLayout<T.RawBytes>.size` bytes, without consuming them.
     ///
     /// - Parameter type: The type to read, such as `IPv4Address.self`. Inferred from context when omitted.
@@ -224,7 +224,7 @@ public extension BytesReader {
         withUnsafeTemporaryAllocation(of: R.self, capacity: 1) { buffer in
             let bytes = UnsafeMutableRawBufferPointer(buffer)
             for index in 0..<MemoryLayout<R>.size {
-                unsafe bytes[index] = _bits(8, in: span, atByte: byteOffset &+ index, bit: bit, bitOrder: bitOrder)
+                unsafe bytes[index] = BytesReader._bits(8, in: span, atByte: byteOffset &+ index, bit: bit, bitOrder: bitOrder)
             }
             return unsafe bytes.load(as: R.self)
         }

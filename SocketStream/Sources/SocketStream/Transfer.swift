@@ -45,7 +45,7 @@ public struct TransferError: Error, CustomStringConvertible {
 
 /// How the bytes are produced and consumed.
 public enum TransferMode: String, Sendable, CaseIterable {
-    /// MQTT PUBLISH packets: encoded with `BytesWriter`, parsed and checked with `BytesReader`.
+    /// MQTT PUBLISH packets: encoded with `AlignedBytesWriter`, parsed and checked with `AlignedBytesReader`.
     case mqtt
     /// The same number of bytes, unencoded and unparsed: the socket's own ceiling.
     case raw
@@ -147,7 +147,9 @@ public enum Transfer {
         let address = try listener.localAddress
         let protected = mode == .mqtt && !protection.isNone
         let keys = Protection.connectionKeys()
-        let result = try await withThrowingTaskGroup(of: Int.self) { group in
+        let result: PairResult
+        do {
+        result = try await withThrowingTaskGroup(of: Int.self) { group in
             group.addTask(executorPreference: senderExecutor) {
                 switch mode {
                 case .mqtt where protected: try await sendProtected(workload, to: address, protection: protection, keys: keys)
@@ -170,6 +172,11 @@ public enum Transfer {
             }
             let sent = try await group.next()!
             return PairResult(sent: sent, received: received, packets: packets, wire: wire)
+        }
+        } catch {
+            // A listener must be closed before it's destroyed, or the executors trap (hiding `error`).
+            try? await listener.close()
+            throw error
         }
         try await listener.close()
         return result
@@ -241,7 +248,7 @@ public enum Transfer {
     /// - Precondition: `batch` can hold at least one packet, and encoding fails only for lack of capacity.
     public static func encode(into batch: inout [UInt8], from next: inout Int, until end: Int, payloads: Payloads) -> Int {
         var span = batch.mutableSpan
-        var writer = BytesWriter(&span)
+        var writer = AlignedBytesWriter(&span)
         // Bound to a local first: a span of another file's global is rejected ("lifetime-dependent value
         // escapes its scope") when files compile separately (debug builds), though not with whole-module
         // optimization (release builds). Once per batch, not per packet.
@@ -281,7 +288,7 @@ public enum Transfer {
         _ workload: Workload, on connection: consuming TCPConnection
     ) async throws -> (Int, Int) {
         var connection = connection
-        var buffer = ReceiveBuffer(capacity: workload.receiveCapacity)
+        var buffer = ByteBuffer(capacity: workload.receiveCapacity)
         var checker = PacketChecker(payloadSize: workload.payloadSize)
         var bytes = 0
         while true {
@@ -326,7 +333,7 @@ public enum Transfer {
     /// - Throws: Socket errors from reading or closing.
     nonisolated(nonsending) static func receiveRaw(_ workload: Workload, on connection: consuming TCPConnection) async throws -> Int {
         var connection = connection
-        var buffer = ReceiveBuffer(capacity: workload.receiveCapacity)
+        var buffer = ByteBuffer(capacity: workload.receiveCapacity)
         var bytes = 0
         while true {
             let count = try await buffer.read(from: &connection)

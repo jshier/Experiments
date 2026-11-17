@@ -64,7 +64,7 @@ public enum CentralDirectory {
     /// - Throws: `BytesError.mismatch` if an entry doesn't start with the signature;
     ///   `BytesError.insufficientData` if one is cut short.
     public static func parseWithBytes(_ span: RawSpan) throws -> UInt64 {
-        var reader = BytesReader(span)
+        var reader = AlignedBytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
             try reader.expect(signature)
@@ -102,7 +102,7 @@ public enum CentralDirectory {
     /// - Returns: The sum of the fields read, as ``parseWithBytes(_:)``.
     /// - Throws: As ``parseWithBytes(_:)``.
     public static func parseWithBytesRecords(_ span: RawSpan) throws -> UInt64 {
-        var reader = BytesReader(span)
+        var reader = AlignedBytesReader(span)
         var fields = Fields()
         while !reader.isAtEnd {
             var header = try reader.readSection(byteCount: 46)

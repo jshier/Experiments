@@ -8,8 +8,8 @@ struct TransferCommand: AsyncParsableCommand {
         commandName: "socket-stream",
         abstract: "Send MQTT PUBLISH packets through local TCP sockets, optionally compressed and encrypted, and print the throughput.",
         discussion: """
-        Each connection pair is a sender encoding packets with BytesWriter and a receiver parsing them with \
-        BytesReader, with Bytes pipelines between them and the socket for --compression and --encrypted. Run \
+        Each connection pair is a sender encoding packets with AlignedBytesWriter and a receiver parsing them with \
+        AlignedBytesReader, with Bytes pipelines between them and the socket for --compression and --encrypted. Run \
         it with the toolchain in .swift-toolchain (../Tools/toolchain . -- swift run …).
         """
     )
@@ -22,6 +22,9 @@ struct TransferCommand: AsyncParsableCommand {
 
     @Flag(help: "Encrypt the MQTT stream in TLS 1.3 records (ChaCha20-Poly1305).")
     var encrypted = false
+
+    @Option(help: ArgumentHelp("Cores compressing each sender's DEFLATE stream (ParallelDeflateEncoder above 1).", valueName: "count"))
+    var lanes = 1
 
     @Option(help: ArgumentHelp("Bytes of application payload per PUBLISH.", valueName: "bytes"))
     var payload = 1_024
@@ -53,7 +56,7 @@ struct TransferCommand: AsyncParsableCommand {
     func validate() throws {
         guard payload >= 0 else { throw ValidationError("--payload must not be negative.") }
         for (name, value) in [("packets", packets), ("connections", connections), ("batch", batch),
-                              ("buffer", buffer), ("pool", pool), ("runs", runs)] {
+                              ("buffer", buffer), ("pool", pool), ("runs", runs), ("lanes", lanes)] {
             if let value, value < 1 { throw ValidationError("--\(name) must be at least 1.") }
         }
     }
@@ -70,7 +73,7 @@ struct TransferCommand: AsyncParsableCommand {
             receiveCapacity: buffer,
             poolSize: pool
         )
-        let protection = Protection(compression: compression, encrypted: encrypted)
+        let protection = Protection(compression: compression, encrypted: encrypted, compressionLanes: lanes)
         print("\(mode), \(protection), \(placement): \(workload), batches of \(workload.batchSize) B")
         for _ in 0..<runs {
             try await print("  " + String(describing: Transfer.run(workload, mode: mode, placement: placement, protection: protection)))

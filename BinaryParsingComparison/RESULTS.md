@@ -12,6 +12,21 @@ decoders reproduce the original files, and the QOI decoders match the example's 
 
 Medians from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
 
+## 2026-11-16: byte-aligned cursors (baselines `p4-generic` → `p4-aligned` → `p4-aligned2`)
+
+The Bytes parsers now use `AlignedBytesReader` and `AlignedBytesWriter` (Bytes' byte-only cursors), except one.
+
+| Workload | Change (instructions) |
+|---|---|
+| QOI, runs written a pixel at a time (tricolor.qoi) | −22.3% (5,874 K → 4,567 K) |
+| Zip directory, LZ4, integer runs | unchanged |
+
+**QOI's run-filling decoder keeps `BytesReader`.** With the aligned reader, LLVM nested the run fills' loops
+inside the per-pixel loop: +54% on antelope.qoi, +9% on tricolor.qoi (`p4-aligned`). The decoder is generic
+over the reader's mode, so each variant uses the faster cursor (`p4-aligned2`).
+
+The tables below predate this change. Details: `../Bytes/Benchmarks/RESULTS.md`, 2026-11-16.
+
 ## Results
 
 | Workload | Bytes | `ParserSpan` | Example as published |

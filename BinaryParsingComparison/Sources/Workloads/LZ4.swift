@@ -3,7 +3,7 @@ import Bytes
 
 // LZ4 frame decoding (independent blocks, as `lz4` writes by default), written two ways:
 //
-// - `decodeWithBytes`: `Bytes` reading the frame and sequences, `BytesWriter` writing each block straight
+// - `decodeWithBytes`: `Bytes` reading the frame and sequences, `AlignedBytesWriter` writing each block straight
 //   into the output array's new capacity, with `copy(fromDistance:count:allowingOverrun:)` for matches and
 //   `write(from:byteCount:allowingOverrun:)` for literals (16-byte steps, as LZ4's reference decoder).
 // - `decodeWithBytesExactLiterals`: the same, but copying literals exactly (`write(_: RawSpan)`), as
@@ -54,7 +54,7 @@ public enum LZ4 {
     /// - Throws: As ``decodeWithBytes(_:)``.
     @inline(always)
     static func decodeWithBytes(_ data: RawSpan, overrunningLiterals: Bool) throws -> [UInt8] {
-        var reader = BytesReader(data)
+        var reader = AlignedBytesReader(data)
         try reader.expect(0x04_22_4D_18 as Byte4) // 0x184D2204, little-endian
         let flags = try reader.read(Byte.self)
         let descriptor = try reader.read(Byte.self)
@@ -77,9 +77,9 @@ public enum LZ4 {
             let block = try reader.read(byteCount: Int(size[bits: 0..<31]))
             if hasBlockChecksums { try reader.skip(byteCount: 4) }
             if size[bit: 31] { // Stored uncompressed.
-                try output.append(byteCapacity: block.byteCount) { writer throws(BytesError) in try writer.write(block) }
+                try output.append(alignedByteCapacity: block.byteCount) { writer throws(BytesError) in try writer.write(block) }
             } else {
-                try output.append(byteCapacity: blockMaximum) { writer throws(BytesError) in
+                try output.append(alignedByteCapacity: blockMaximum) { writer throws(BytesError) in
                     // A constant in each call, so each inlined decoder has one literal copy. (Passing the flag
                     // through made LLVM merge the two variants into one function and kept the flag as a run-time
                     // test in the sequence loop.) This is one test per block.
@@ -105,8 +105,8 @@ public enum LZ4 {
     ///   `BytesError.invalidValue` if a match distance is 0 or reaches before the start of `writer`'s
     ///   output; `BytesError.insufficientCapacity` if the output outgrows `writer`.
     @inline(always)
-    static func decodeBlock(_ block: RawSpan, into writer: inout BytesWriter, overrunningLiterals: Bool) throws(BytesError) {
-        var reader = BytesReader(block)
+    static func decodeBlock(_ block: RawSpan, into writer: inout AlignedBytesWriter, overrunningLiterals: Bool) throws(BytesError) {
+        var reader = AlignedBytesReader(block)
         while true {
             let token = try reader.read(Byte.self)
             let literalCount = try length(Int(token.highHalf), &reader)
@@ -133,7 +133,7 @@ public enum LZ4 {
     /// - Returns: The length, before the match's minimum of 4 is added.
     /// - Throws: `BytesError.insufficientData` if the block ends inside the length.
     @inline(always)
-    static func length(_ nibble: Int, _ reader: inout BytesReader) throws(BytesError) -> Int {
+    static func length(_ nibble: Int, _ reader: inout AlignedBytesReader) throws(BytesError) -> Int {
         guard nibble == 15 else { return nibble }
         var length = nibble
         while true {
@@ -175,11 +175,11 @@ public enum LZ4 {
             if hasBlockChecksums { try input.seek(toRelativeOffset: 4) }
             if size & 0x8000_0000 != 0 {
                 try output.append(addingCapacity: block.byteCount) { (span: inout OutputSpan<UInt8>) throws(BytesError) in
-                    try span.withBytesWriter { (writer: inout BytesWriter) throws(BytesError) in try writer.write(block) }
+                    try span.withAlignedBytesWriter { (writer: inout AlignedBytesWriter) throws(BytesError) in try writer.write(block) }
                 }
             } else {
                 try output.append(addingCapacity: blockMaximum) { (span: inout OutputSpan<UInt8>) throws in
-                    try span.withBytesWriter { (writer: inout BytesWriter) throws in
+                    try span.withAlignedBytesWriter { (writer: inout AlignedBytesWriter) throws in
                         try decodeBlockParserSpan(block, into: &writer)
                     }
                 }
@@ -189,7 +189,7 @@ public enum LZ4 {
     }
 
     @inline(always)
-    static func decodeBlockParserSpan(_ block: RawSpan, into writer: inout BytesWriter) throws {
+    static func decodeBlockParserSpan(_ block: RawSpan, into writer: inout AlignedBytesWriter) throws {
         var input = ParserSpan(block)
         while true {
             let token = try UInt8(parsing: &input)

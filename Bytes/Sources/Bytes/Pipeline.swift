@@ -148,10 +148,9 @@ public struct Pipeline<First: ByteTransform & ~Copyable, Second: ByteTransform &
     public var first: First
     /// The second stage.
     public var second: Second
-    @usableFromInline var buffer: UniqueArray<UInt8>
-    /// The first stage's output not yet taken by the second: `buffer[start..<end]`.
-    @usableFromInline var start = 0
-    @usableFromInline var end = 0
+    /// The first stage's output not yet taken by the second, as its unread bytes. Compacted when less than a
+    /// quarter is free at the end.
+    @usableFromInline var buffer: ByteBuffer
     /// The first stage's status from its last call.
     @usableFromInline var firstStatus = TransformStatus.needsInput
 
@@ -160,7 +159,7 @@ public struct Pipeline<First: ByteTransform & ~Copyable, Second: ByteTransform &
     public init(_ first: consuming First, _ second: consuming Second, bufferCapacity: Int = 64 << 10) {
         self.first = first
         self.second = second
-        buffer = UniqueArray(repeating: 0, count: bufferCapacity)
+        buffer = ByteBuffer(capacity: bufferCapacity, compactingBelow: bufferCapacity &>> 2)
     }
 }
 
@@ -179,27 +178,23 @@ extension Pipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
         while true {
             var progressed = false
             if firstStatus != .finished {
-                // Keep the second stage's unconsumed input together at the front.
-                if start > 0 && buffer.count &- end < buffer.count &>> 2 {
-                    compact()
-                }
-                if end < buffer.count {
+                // The fill compacts first when less than a quarter is free at the end, keeping the second
+                // stage's unconsumed input together at the front.
+                if !buffer.isFull {
                     let result = try runFirst(input.extracting(consumed...), flush: flush)
                     consumed &+= result.consumed
-                    end &+= result.produced
                     firstStatus = result.status
                     progressed = result.consumed > 0 || result.produced > 0
                 }
             }
             let firstDone = firstStatus == .finished || (firstStatus == .needsInput && consumed == input.byteCount)
-            let pending = buffer.span.bytes.extracting(start..<end)
-            let result = try second.transform(pending, into: &output, flush: firstDone ? flush : .none)
-            start &+= result.consumed
-            produced &+= result.produced
-            if start == end {
-                start = 0
-                end = 0
+            let result: TransformProgress
+            do {
+                let pending = buffer.unread
+                result = try second.transform(pending, into: &output, flush: firstDone ? flush : .none)
             }
+            buffer.consume(result.consumed)
+            produced &+= result.produced
             progressed = progressed || result.consumed > 0 || result.produced > 0
             switch result.status {
             case .finished:
@@ -207,10 +202,16 @@ extension Pipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
             case .needsOutput:
                 return TransformProgress(consumed: consumed, produced: produced, status: .needsOutput)
             case .needsInput:
-                if firstDone && (start == end || !progressed) {
+                if firstDone && (buffer.isEmpty || !progressed) {
                     return TransformProgress(consumed: consumed, produced: produced, status: .needsInput)
                 }
                 if !progressed {
+                    // The first stage wants more room than is free at the end (a TLS record's body, up to
+                    // 16,624 bytes, with 16,384 free: too much free to compact in the fill), and the second keeps
+                    // a few bytes it can't use yet (a decoder's partial byte). Move them to the front.
+                    if firstStatus == .needsOutput && buffer.compact() {
+                        continue
+                    }
                     // The first stage wants room the buffer can't give: the second keeps all of the buffer
                     // (a partial unit, such as a TLS record bigger than the buffer). No call could move.
                     precondition(firstStatus != .needsOutput, "A pipeline's buffer is smaller than its second stage's unit: raise bufferCapacity")
@@ -223,30 +224,9 @@ extension Pipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
     /// Runs the first stage into the buffer's free space.
     @inlinable
     mutating func runFirst(_ input: RawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {
-        let end = end
-        var span = buffer.mutableSpan
-        // Unsafe: an output span over the buffer's free tail. Safe: it covers exactly `buffer[end...]` and ends
-        // with the closure; the produced bytes are counted by the caller from the stage's report.
-        return try span.withUnsafeMutableBytes { bytes throws(Failure) -> TransformProgress in
-            var output = unsafe OutputRawSpan(buffer: UnsafeMutableRawBufferPointer(rebasing: bytes[end...]), initializedCount: 0)
-            let result = try first.transform(input, into: &output, flush: flush)
-            _ = unsafe output.finalize(for: UnsafeMutableRawBufferPointer(rebasing: bytes[end...]))
-            return result
+        try buffer.fill { (output: inout OutputRawSpan) throws(Failure) -> TransformProgress in
+            try first.transform(input, into: &output, flush: flush)
         }
-    }
-
-    /// Moves the buffered bytes to the front.
-    @inlinable
-    mutating func compact() {
-        let count = end &- start
-        let from = start
-        var span = buffer.mutableSpan
-        // Unsafe: a raw copy within the buffer. Safe: both ranges are inside it; `copyMemory` allows overlap.
-        span.withUnsafeMutableBytes { bytes in
-            unsafe bytes.baseAddress!.copyMemory(from: bytes.baseAddress!.advanced(by: from), byteCount: count)
-        }
-        start = 0
-        end = count
     }
 }
 
@@ -256,8 +236,7 @@ extension Pipeline: ResettableByteTransform where First: ResettableByteTransform
     public mutating func reset() {
         first.reset()
         second.reset()
-        start = 0
-        end = 0
+        buffer.removeAll()
         firstStatus = .needsInput
     }
 }

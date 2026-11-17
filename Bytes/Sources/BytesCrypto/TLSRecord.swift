@@ -144,7 +144,7 @@ public struct TLSRecordSealer: ~Copyable {
         header[3] = UInt8(truncatingIfNeeded: encrypted &>> 8)
         header[4] = UInt8(truncatingIfNeeded: encrypted)
         do {
-            var writer = BytesWriter(destination._mutatingExtracting(0..<total))
+            var writer = AlignedBytesWriter(destination._mutatingExtracting(0..<total))
             // Can't throw: `destination` has room for the record.
             try! writer.write(header.span.bytes)
             try! writer.write(bytes)
@@ -157,7 +157,7 @@ public struct TLSRecordSealer: ~Copyable {
             var body = destination._mutatingExtracting(TLSRecord.headerSize..<(TLSRecord.headerSize &+ count &+ 1))
             tag = aead.seal(&body, nonce: nonce.span.bytes, authenticating: header.span.bytes)
         }
-        var tagWriter = try! BytesWriter(&destination, atByteOffset: TLSRecord.headerSize &+ count &+ 1)
+        var tagWriter = try! AlignedBytesWriter(&destination, atByteOffset: TLSRecord.headerSize &+ count &+ 1)
         try! tagWriter.write(tag.span.bytes)
         return total
     }
@@ -174,15 +174,7 @@ public struct TLSRecordSealer: ~Copyable {
     private mutating func deliverSealed(into output: inout OutputRawSpan) -> Int {
         let count = min(sealedEnd &- sealedStart, output.freeCapacity)
         guard count > 0 else { return 0 }
-        let start = sealedStart
-        // Unsafe: a raw copy into the output's free capacity. Safe: `count` sealed bytes fit, and only they
-        // are counted as initialized.
-        sealed.span.withUnsafeBytes { source in
-            unsafe output.withUnsafeMutableBytes { buffer, initializedCount in
-                unsafe buffer.baseAddress!.advanced(by: initializedCount).copyMemory(from: source.baseAddress!.advanced(by: start), byteCount: count)
-                initializedCount &+= count
-            }
-        }
+        output.append(copying: sealed.span.bytes.extracting(sealedStart..<(sealedStart &+ count)))
         sealedStart &+= count
         if sealedStart == sealedEnd {
             sealedStart = 0
@@ -220,12 +212,8 @@ extension TLSRecordSealer: ResettableByteTransform {
                     // Straight into the output.
                     let bytes = input.extracting(consumed..<(consumed &+ count))
                     let size = TLSRecord.size(plaintext: count)
-                    // Unsafe: a span over the output's free capacity. Safe: it covers `size` bytes of it, ends with
-                    // the closure, and exactly those are counted as initialized.
-                    unsafe output.withUnsafeMutableBytes { buffer, initializedCount in
-                        var span = unsafe MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount..<(initializedCount &+ size)]))
-                        _ = Self.seal(bytes, into: &span, aead: aead, iv: iv, sequence: &sequence)
-                        initializedCount &+= size
+                    output.withFreeCapacity(byteCount: size) { span, written in
+                        written = Self.seal(bytes, into: &span, aead: aead, iv: iv, sequence: &sequence)
                     }
                     consumed &+= count
                     produced &+= size
@@ -233,9 +221,7 @@ extension TLSRecordSealer: ResettableByteTransform {
                 }
                 let take = min(available, TLSRecord.maximumPlaintext &- fill)
                 var target = plaintext.mutableSpan
-                var raw = MutableRawSpan(mutating: &target)
-                var writer = try BytesWriter(&raw, atByteOffset: fill)
-                try writer.write(input.extracting(consumed..<(consumed &+ take)))
+                target.copyBytes(from: input.extracting(consumed..<(consumed &+ take)), toByteOffset: fill)
                 fill &+= take
                 consumed &+= take
                 if fill == TLSRecord.maximumPlaintext {
@@ -293,7 +279,7 @@ extension TLSRecordOpener: ResettableByteTransform {
         while true {
             let available = input.byteCount &- consumed
             guard available >= TLSRecord.headerSize else { break }
-            var header = BytesReader(input.extracting(consumed..<(consumed &+ TLSRecord.headerSize)))
+            var header = AlignedBytesReader(input.extracting(consumed..<(consumed &+ TLSRecord.headerSize)))
             let type = try header.read(Byte.self).rawValue
             let version = try header.read(Byte2.self, .bigEndian)
             let length = Int(try header.read(Byte2.self, .bigEndian))
@@ -308,14 +294,10 @@ extension TLSRecordOpener: ResettableByteTransform {
             let body = input.extracting((consumed &+ TLSRecord.headerSize)..<(consumed &+ TLSRecord.headerSize &+ bodyLength))
             let tag = input.extracting((consumed &+ TLSRecord.headerSize &+ bodyLength)..<(consumed &+ TLSRecord.headerSize &+ length))
             let nonce = TLSRecord.nonce(iv, sequence: sequence)
-            var plaintextLength = 0
-            // Unsafe: a span over the output's free capacity. Safe: it covers `bodyLength` bytes of it and ends
-            // with the closure; only the authenticated plaintext is counted as initialized.
+            // Decrypted in the output's free capacity; only the authenticated plaintext is kept.
             let aead = aead
-            try unsafe output.withUnsafeMutableBytes { buffer, initializedCount throws(BytesError) in
-                var span = unsafe MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount..<(initializedCount &+ bodyLength)]))
-                var writer = BytesWriter(span._mutatingExtracting(0..<bodyLength))
-                try writer.write(body)
+            let plaintextLength = try output.withFreeCapacity(byteCount: bodyLength) { span, written throws(BytesError) -> Int in
+                span.copyBytes(from: body, toByteOffset: 0)
                 try aead.open(&span, nonce: nonce.span.bytes, authenticating: headerBytes, tag: tag)
                 // The inner plaintext ends with its content type, then zero padding.
                 var end = bodyLength
@@ -323,8 +305,8 @@ extension TLSRecordOpener: ResettableByteTransform {
                 guard end > 0, span.bytes.load(fromByteOffset: end &- 1, as: UInt8.self) == TLSRecord.applicationData else {
                     throw .invalidValue
                 }
-                plaintextLength = end &- 1
-                initializedCount &+= plaintextLength
+                written = end &- 1
+                return written
             }
             sequence &+= 1
             consumed &+= TLSRecord.headerSize &+ length

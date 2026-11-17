@@ -75,6 +75,52 @@ public struct CRC32: Hashable, Sendable {
         checksum(bytes.bytes, continuing: value)
     }
 
+    /// The checksum of two pieces end to end, from each piece's checksum and the second's length (zlib's
+    /// `crc32_combine`): for pieces checksummed in parallel.
+    ///
+    /// The first piece's CRC is multiplied by `x^(8·length)` modulo the polynomial, from a table of
+    /// `x^(2^k)`: about `log2(length)` multiplications of 32 steps each.
+    ///
+    /// - Parameters:
+    ///   - first: The first piece's checksum.
+    ///   - second: The second piece's checksum.
+    ///   - length: The second piece's length in bytes.
+    /// - Returns: The checksum of the first piece followed by the second.
+    public static func combine(_ first: UInt32, _ second: UInt32, secondLength length: Int) -> UInt32 {
+        precondition(length >= 0, "Negative length")
+        // x^(8·length) = x^(length·2^3): the bits of `length` pick powers x^(2^(k+3)).
+        var power: UInt32 = 1 << 31 // x^0, bit-reflected.
+        var remaining = UInt64(length)
+        var square: UInt32 = 1 << 30 // x^1
+        for _ in 0..<3 {
+            square = multiply(square, square)
+        } // x^8 = x^(2^3): one byte.
+        while remaining != 0 {
+            if remaining & 1 != 0 {
+                power = multiply(square, power)
+            }
+            remaining &>>= 1
+            square = multiply(square, square)
+        }
+        return multiply(power, first) ^ second
+    }
+
+    /// `a·b` modulo the CRC polynomial, both bit-reflected (zlib's `multmodp`).
+    @inline(__always)
+    static func multiply(_ a: UInt32, _ b: UInt32) -> UInt32 {
+        var mask: UInt32 = 1 << 31
+        var product: UInt32 = 0
+        var b = b
+        while mask != 0 {
+            if a & mask != 0 {
+                product ^= b
+            }
+            mask &>>= 1
+            b = b & 1 != 0 ? b &>> 1 ^ 0xEDB8_8320 : b &>> 1
+        }
+        return product
+    }
+
     /// Updates the unconditioned register with `bytes`.
     ///
     /// - Parameters:

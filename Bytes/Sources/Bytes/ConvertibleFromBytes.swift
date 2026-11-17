@@ -46,6 +46,27 @@ public extension BytesReader {
         _advance(bitCount: width)
         return value
     }
+}
+
+public extension GenericBytesReader {
+    /// Reads a byte as an `R`, through its raw value: as the ``Bits`` form, for the one width both kinds of
+    /// cursor read.
+    ///
+    /// - Parameters:
+    ///   - type: The type to read, such as a reason-code enum.
+    ///   - fieldType: `Byte.self`.
+    /// - Returns: The value.
+    /// - Throws: ``BytesError/insufficientData`` if no whole byte remains; ``BytesError/invalidValue`` if the
+    ///   byte isn't a valid raw value. Nothing is consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<R: RawRepresentable>(_ type: R.Type, as fieldType: Byte.Type) throws(BytesError) -> R
+        where R.RawValue: BinaryInteger {
+        let byte = try peek(Byte.self)
+        guard let raw = R.RawValue(exactly: byte.rawValue), let value = R(rawValue: raw) else { throw .invalidValue }
+        _advance(bitCount: 8)
+        return value
+    }
 
     /// Reads a `T` field in `byteOrder` as an `R`, through its raw value.
     ///
@@ -112,6 +133,24 @@ public extension BytesWriter {
         assert(Bits<width>(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in \(width) bits")
         try write(Bits<width>(truncatingIfNeeded: value.rawValue))
     }
+}
+
+public extension GenericBytesWriter {
+    /// Writes `value`'s raw value as a byte: as the ``Bits`` form, for the one width both kinds of writer
+    /// write. A raw value that doesn't fit is a programming error: debug builds trap, release builds write its
+    /// low 8 bits.
+    ///
+    /// - Parameters:
+    ///   - value: The value whose raw value to write.
+    ///   - fieldType: `Byte.self`.
+    /// - Throws: ``BytesError/insufficientCapacity`` if there isn't room.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write<R: RawRepresentable>(_ value: R, as fieldType: Byte.Type) throws(BytesError)
+        where R.RawValue: BinaryInteger {
+        assert(Byte(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in 8 bits")
+        try write(Byte(truncatingIfNeeded: value.rawValue))
+    }
 
     /// Writes `value`'s raw value as a `T` field in `byteOrder`. A raw value that doesn't fit is a
     /// programming error: debug builds trap, release builds write its low `T.byteCount` bytes.
@@ -139,7 +178,7 @@ public extension BytesWriter {
 // these types, so they can be loaded from arbitrary bytes, or viewed in place, safely. Each takes
 // `MemoryLayout<T>.size` bytes, which for 3-lane vectors includes a padding lane: `SIMD3<Float>` is 16.
 
-public extension BytesReader {
+public extension GenericBytesReader {
     /// Returns the next `T`, from its `MemoryLayout<T>.size` bytes in native byte order (little-endian on
     /// Apple platforms), without consuming them.
     ///

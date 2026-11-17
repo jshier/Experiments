@@ -3,11 +3,11 @@ import Bytes
 import Foundation
 import Testing
 
-/// Encodes `bytes` into an exactly sized array through a `BytesWriter`.
+/// Encodes `bytes` into an exactly sized array through a `AlignedBytesWriter`.
 func encoded(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding: Bool = true) throws -> String {
     var output = [UInt8](repeating: 0, count: Base64.encodedByteCount(of: bytes.count, padding: padding))
     var span = output.mutableSpan
-    var writer = BytesWriter(&span)
+    var writer = AlignedBytesWriter(&span)
     try Base64.encode(bytes.span.bytes, into: &writer, alphabet: alphabet, padding: padding)
     let written = writer.byteCount
     precondition(written == output.count)
@@ -68,8 +68,8 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         let bytes: [UInt8] = Array("foobar!".utf8)
         var output = [UInt8](repeating: 0xAA, count: 11) // needs 12
         var span = output.mutableSpan
-        var writer = BytesWriter(&span)
-        var reader = BytesReader(bytes.span)
+        var writer = AlignedBytesWriter(&span)
+        var reader = AlignedBytesReader(bytes.span)
         #expect(throws: BytesError.insufficientCapacity) { try Base64.encode(&reader, into: &writer) }
         let (read, written) = (reader.byteOffset, writer.byteCount)
         #expect(read == 0 && written == 0)
@@ -81,9 +81,9 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         let bytes: [UInt8] = Array("xxfoobar".utf8)
         var output = [UInt8](repeating: 0, count: 10)
         var span = output.mutableSpan
-        var writer = BytesWriter(&span)
+        var writer = AlignedBytesWriter(&span)
         try writer.write(0x3E_3E as Byte2) // ">>"
-        var reader = BytesReader(bytes.span)
+        var reader = AlignedBytesReader(bytes.span)
         try reader.skip(byteCount: 2)
         try Base64.encode(&reader, into: &writer)
         let atEnd = reader.isAtEnd
@@ -99,8 +99,8 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         let bytes = (0..<(count + 5)).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
         var output = [UInt8](repeating: 0, count: Base64.encodedByteCount(of: count))
         var span = output.mutableSpan
-        var writer = BytesWriter(&span)
-        var reader = BytesReader(bytes.span)
+        var writer = AlignedBytesWriter(&span)
+        var reader = AlignedBytesReader(bytes.span)
         try reader.skip(byteCount: 5)
         try Base64.encode(&reader, into: &writer)
         let atEnd = reader.isAtEnd
@@ -124,9 +124,9 @@ func reference(_ bytes: [UInt8], alphabet: Base64.Alphabet = .standard, padding:
         for alphabet in [Base64.Alphabet.standard, .urlSafe] {
             var output = [UInt8](repeating: 0, count: groupCount * 4)
             var span = output.mutableSpan
-            var reader = BytesReader(bytes.span)
+            var reader = AlignedBytesReader(bytes.span)
             let groups = try! reader.read(InlineArray<3, UInt8>.self, count: groupCount)
-            var writer = BytesWriter(&span)
+            var writer = AlignedBytesWriter(&span)
             try! writer.write(InlineArray<4, UInt8>.self, count: groupCount, filling: { characters in
                 Base64.encode(groups, into: &characters, alphabet: alphabet)
             })

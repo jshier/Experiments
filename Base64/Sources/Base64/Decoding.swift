@@ -40,16 +40,16 @@ extension Base64 {
     /// Decodes the rest of `reader` into `writer`.
     ///
     /// ```swift
-    /// var reader = BytesReader(text.span)
+    /// var reader = AlignedBytesReader(text.span)
     /// var output = [UInt8](repeating: 0, count: Base64.maximumDecodedByteCount(of: text.count))
     /// var span = output.mutableSpan
-    /// var writer = BytesWriter(&span)
+    /// var writer = AlignedBytesWriter(&span)
     /// try Base64.decode(&reader, into: &writer)
     /// let bytes = output.prefix(writer.byteCount)
     /// ```
     ///
     /// With `padding`, the text must be a multiple of 4 characters, the last group padded with `=`, as
-    /// ``encode(_:into:alphabet:padding:)-(BytesReader,_,_,_)`` writes it; without, it must have no `=`, and its last
+    /// ``encode(_:into:alphabet:padding:)-(AlignedBytesReader,_,_,_)`` writes it; without, it must have no `=`, and its last
     /// group is 2 to 4 characters. Empty text decodes to nothing.
     ///
     /// - Parameters:
@@ -68,7 +68,7 @@ extension Base64 {
     /// - Precondition: `reader` and `writer` are byte-aligned.
     @inlinable
     public static func decode(
-        _ reader: inout BytesReader, into writer: inout BytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
+        _ reader: inout AlignedBytesReader, into writer: inout AlignedBytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
     ) throws(LocatedBytesError) {
         let start = reader.position
         let text = reader.readRemainingBytes()
@@ -81,7 +81,7 @@ extension Base64 {
     }
 
     /// Decodes `text` into `writer`. Strict and all or nothing, as
-    /// ``decode(_:into:alphabet:padding:)-(BytesReader,_,_,_)``, with errors' offsets in `text`.
+    /// ``decode(_:into:alphabet:padding:)-(AlignedBytesReader,_,_,_)``, with errors' offsets in `text`.
     ///
     /// - Parameters:
     ///   - text: The Base64 text.
@@ -93,13 +93,13 @@ extension Base64 {
     /// - Precondition: `writer` is byte-aligned.
     @inlinable
     public static func decode(
-        _ text: RawSpan, into writer: inout BytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
+        _ text: RawSpan, into writer: inout AlignedBytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
     ) throws(LocatedBytesError) {
         try _decode(text, at: 0, into: &writer, alphabet: alphabet, padding: padding)
     }
 
     /// `text` decoded into a new array: one allocation, the array's. Strict, as
-    /// ``decode(_:into:alphabet:padding:)-(BytesReader,_,_,_)``, with errors' offsets in `text`.
+    /// ``decode(_:into:alphabet:padding:)-(AlignedBytesReader,_,_,_)``, with errors' offsets in `text`.
     ///
     /// - Parameters:
     ///   - text: The Base64 text.
@@ -113,7 +113,7 @@ extension Base64 {
     public static func decodedBytes(
         _ text: RawSpan, alphabet: Alphabet = .standard, padding: Bool = true
     ) throws(LocatedBytesError) -> [UInt8] {
-        try [UInt8](byteCapacity: maximumDecodedByteCount(of: text.byteCount)) { (writer) throws(LocatedBytesError) in
+        try [UInt8](alignedByteCapacity: maximumDecodedByteCount(of: text.byteCount)) { (writer) throws(LocatedBytesError) in
             try _decode(text, at: 0, into: &writer, alphabet: alphabet, padding: padding)
         }
     }
@@ -141,22 +141,21 @@ extension Base64 {
     ///   - writer: Where the bytes go. Rewound to where it started on failure.
     ///   - alphabet: The characters for 62 and 63.
     ///   - padding: Whether the text is padded with `=` to a multiple of 4 characters.
-    /// - Throws: `LocatedBytesError`, as for ``decode(_:into:alphabet:padding:)-(BytesReader,_,_,_)``.
+    /// - Throws: `LocatedBytesError`, as for ``decode(_:into:alphabet:padding:)-(AlignedBytesReader,_,_,_)``.
     /// - Precondition: `writer` is byte-aligned.
     @inlinable
     static func _decode(
-        _ text: RawSpan, at offset: Int, into writer: inout BytesWriter, alphabet: Alphabet, padding: Bool
+        _ text: RawSpan, at offset: Int, into writer: inout AlignedBytesWriter, alphabet: Alphabet, padding: Bool
     ) throws(LocatedBytesError) {
-        precondition(writer.isByteAligned, "Decoding requires a byte-aligned writer: call alignToByte() first")
         let count = text.byteCount
         guard count > 0 else { return }
         // The characters that carry data: all of them, less a trailing "=" or "==" with padding.
         let dataCount: Int
         if padding {
             guard count & 3 == 0 else { throw LocatedBytesError(.insufficientData, byteOffset: offset &+ count) }
-            // Unsafe: an unchecked load. Safe: the text has at least 4 characters.
-            let end = unsafe text.unsafeLoadUnaligned(fromUncheckedByteOffset: count &- 2, as: UInt16.self)
-            dataCount = count &- (end == 0x3D3D ? 2 : end &>> 8 == 0x3D ? 1 : 0) // "==", "?="
+            // Checked loads: the guard above leaves at least 4 characters, so the checks fold.
+            let last = text.load(fromByteOffset: count &- 1, as: UInt8.self)
+            dataCount = count &- (text.hasSuffix(0x3D_3D as Byte2) ? 2 : last == 0x3D ? 1 : 0) // "==", "?="
         } else {
             guard count & 3 != 1 else { throw LocatedBytesError(.insufficientData, byteOffset: offset &+ count) }
             dataCount = count
@@ -194,13 +193,13 @@ extension Base64 {
     ///   alphabet, or at the last data character if its unused bits aren't zero.
     @inlinable
     static func _decodeBlocks(
-        _ text: RawSpan, dataCount: Int, into writer: inout BytesWriter, alphabet: Alphabet,
+        _ text: RawSpan, dataCount: Int, into writer: inout AlignedBytesWriter, alphabet: Alphabet,
         window table: Alphabet.DecodingWindow, at offset: Int
     ) throws(LocatedBytesError) {
         var invalid: SIMD16<UInt8>
         var unusedBits: UInt8 = 0
         do throws(BytesError) {
-            var reader = BytesReader(text)
+            var reader = AlignedBytesReader(text)
             let blocks = try reader.read(InlineArray<64, UInt8>.self, count: (dataCount &- 1) &>> 6)
             invalid = try writer.write(InlineArray<48, UInt8>.self, count: blocks.count, filling: { bytes in
                 decodeBlocks(blocks, into: &bytes, table: table)
@@ -212,7 +211,7 @@ extension Base64 {
                 // as they are, with no shift, the padding's lanes made "A"s. Their first groups may repeat
                 // the last block's, and are left out of the write.
                 let padCount = count &- dataCount
-                var overlap = try BytesReader(text, atByteOffset: count &- 64)
+                var overlap = try AlignedBytesReader(text, atByteOffset: count &- 64)
                 var last = try overlap.load(InlineArray<4, SIMD16<UInt8>>.self)
                 let iota: Byte16 = 0x00_01_02_03_04_05_06_07_08_09_0A_0B_0C_0D_0E_0F
                 let padding = iota.vector .>= SIMD16(repeating: UInt8(truncatingIfNeeded: 16 &- padCount))
@@ -254,7 +253,7 @@ extension Base64 {
     ///   rule out.
     @inlinable @inline(__always)
     static func _decodeShiftedBlock(
-        _ text: RawSpan, dataCount: Int, rest: Int, into writer: inout BytesWriter, table: Alphabet.DecodingWindow,
+        _ text: RawSpan, dataCount: Int, rest: Int, into writer: inout AlignedBytesWriter, table: Alphabet.DecodingWindow,
         invalid: inout SIMD16<UInt8>, unusedBits: inout UInt8
     ) throws(BytesError) {
         let block: InlineArray<64, UInt8>
@@ -263,13 +262,13 @@ extension Base64 {
             // the front with "A"s after, in registers (as the encoder does). A new reader at that offset,
             // rather than `seek`: its bit offset is known to be 0, so the unaligned path of `load` folds
             // away (and `seek` wasn't inlined).
-            var overlap = try BytesReader(text, atByteOffset: dataCount &- 64)
+            var overlap = try AlignedBytesReader(text, atByteOffset: dataCount &- 64)
             let last = try overlap.load(InlineArray<4, SIMD16<UInt8>>.self)
             block = bitCast(shiftedDown(last, by: 64 &- rest), to: InlineArray<64, UInt8>.self)
         } else {
             var characters = InlineArray<64, UInt8>(repeating: 0x41) // "A"
             var span = characters.mutableSpan
-            var blockWriter = BytesWriter(&span)
+            var blockWriter = AlignedBytesWriter(&span)
             try blockWriter.write(text.extracting(first: rest))
             block = characters
         }
@@ -293,13 +292,13 @@ extension Base64 {
     ///   alphabet, or at the last data character if its unused bits aren't zero.
     @inlinable
     package static func _decodeGroups(
-        _ text: RawSpan, padding: Bool, into writer: inout BytesWriter, alphabet: Alphabet, at offset: Int
+        _ text: RawSpan, padding: Bool, into writer: inout AlignedBytesWriter, alphabet: Alphabet, at offset: Int
     ) throws(LocatedBytesError) {
         let count = text.byteCount
         let bodyCount = count &- (padding || count & 3 == 0 ? 4 : count & 3)
         let valid: Bool
         do throws(BytesError) {
-            var body = BytesReader(text.extracting(first: bodyCount))
+            var body = AlignedBytesReader(text.extracting(first: bodyCount))
             let groups = try body.read(InlineArray<4, UInt8>.self, count: bodyCount &>> 2)
             valid = try writer.write(InlineArray<3, UInt8>.self, count: groups.count, filling: { bytes in
                 decode(groups, into: &bytes, alphabet: alphabet)
@@ -328,7 +327,7 @@ extension Base64 {
     ///   alphabet, or at the last data character if its unused bits aren't zero.
     @inlinable
     static func _decodeLastGroup(
-        _ group: RawSpan, into writer: inout BytesWriter, alphabet: Alphabet, padding: Bool, at offset: Int
+        _ group: RawSpan, into writer: inout AlignedBytesWriter, alphabet: Alphabet, padding: Bool, at offset: Int
     ) throws(LocatedBytesError) {
         // Four characters, with zeros (never valid) past the end of an unpadded group.
         var characters: UInt32 = 0
@@ -579,7 +578,7 @@ extension Base64.Alphabet {
         guard base >= 43, max(character62, character63) &- base < 80 else { return nil }
         let table = decodingTable
         // Can't throw: `base` is 43 through 48, so the 80 bytes from it are within the table's 128.
-        var reader = try! BytesReader(table.span.bytes, atByteOffset: Int(base))
+        var reader = try! AlignedBytesReader(table.span.bytes, atByteOffset: Int(base))
         let vectors = try! reader.load(InlineArray<5, SIMD16<UInt8>>.self)
         return DecodingWindow(low: (vectors[0], vectors[1], vectors[2], vectors[3]), high: vectors[4],
                               base: SIMD16(repeating: base))

@@ -38,6 +38,29 @@ public struct Adler32: Hashable, Sendable {
     /// The modulus: the largest prime below 65,536.
     static var modulus: UInt32 { 65521 }
 
+    /// The checksum of two pieces end to end, from each piece's checksum and the second's length (zlib's
+    /// `adler32_combine`): for pieces checksummed in parallel.
+    ///
+    /// - Parameters:
+    ///   - first: The first piece's checksum.
+    ///   - second: The second piece's checksum (started from 1, as ``checksum(_:)`` does).
+    ///   - length: The second piece's length in bytes.
+    /// - Returns: The checksum of the first piece followed by the second.
+    public static func combine(_ first: UInt32, _ second: UInt32, secondLength length: Int) -> UInt32 {
+        precondition(length >= 0, "Negative length")
+        let base = UInt64(modulus)
+        let remainder = UInt64(length) % base
+        var sum1 = UInt64(first & 0xFFFF)
+        var sum2 = remainder &* sum1 % base
+        sum1 &+= UInt64(second & 0xFFFF) &+ base &- 1
+        sum2 &+= UInt64(first &>> 16) &+ UInt64(second &>> 16) &+ base &- remainder
+        if sum1 >= base { sum1 &-= base }
+        if sum1 >= base { sum1 &-= base }
+        if sum2 >= base &<< 1 { sum2 &-= base &<< 1 }
+        if sum2 >= base { sum2 &-= base }
+        return UInt32(truncatingIfNeeded: sum1 | sum2 &<< 16)
+    }
+
     /// 32-byte blocks per reduction: 64 keeps the sum of four column totals below 65,536 (4 × 64 × 255).
     static var blocksPerChunk: Int { 64 }
 

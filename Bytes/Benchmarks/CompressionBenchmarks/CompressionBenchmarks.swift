@@ -16,6 +16,7 @@ let benchmarks: @Sendable () -> Void = {
     registerDeflateBenchmarks()
     registerBrotliDecodeBenchmarks()
     registerBrotliEncodeBenchmarks()
+    registerParallelBenchmarks()
     registerCryptoBenchmarks()
     registerPipelineBenchmarks()
 }
@@ -48,10 +49,9 @@ func registerBrotliEncodeBenchmarks() {
 @inline(__always)
 func brotliEncodeAll(_ encoder: inout BrotliEncoder, _ input: [UInt8], into output: inout [UInt8]) -> Int {
     encoder.reset()
-    return output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    return output.withOutputRawSpan { span in
         try! encoder.compressAll(input.span.bytes, into: &span)
-        return span.finalize(for: buffer)
+        return span.byteCount
     }
 }
 
@@ -99,10 +99,9 @@ func registerBrotliDecodeBenchmarks() {
 @inline(__always)
 func brotliDecodeAll(_ decoder: inout BrotliDecoder, _ input: [UInt8], into output: inout [UInt8]) -> Int {
     decoder.reset()
-    return output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    return output.withOutputRawSpan { span in
         _ = try! decoder.decompressAll(input.span.bytes, into: &span)
-        return span.finalize(for: buffer)
+        return span.byteCount
     }
 }
 
@@ -112,16 +111,17 @@ func brotliDecodeStreaming(_ decoder: inout BrotliDecoder, _ input: [UInt8], chu
     var offset = 0
     var total = 0
     let span = input.span.bytes
-    return output.withUnsafeMutableBytes { buffer in
-        let window = UnsafeMutableRawBufferPointer(rebasing: buffer[..<min(buffer.count, 1 << 16)])
-        while true {
-            var out = OutputRawSpan(buffer: window, initializedCount: 0)
-            let end = min(offset + chunk, span.byteCount)
+    var bytes = output.mutableSpan
+    var window = bytes._mutatingExtracting(..<min(bytes.count, 1 << 16))
+    while true {
+        let end = min(offset + chunk, span.byteCount)
+        let progress = window.withOutputRawSpan { out in
             let progress = try! decoder.decompress(span.extracting(offset..<end), into: &out)
-            total += out.finalize(for: window)
-            offset += progress.consumed
-            if progress.status == .finished { return total }
+            total += out.byteCount
+            return progress
         }
+        offset += progress.consumed
+        if progress.status == .finished { return total }
     }
 }
 
@@ -180,10 +180,9 @@ func registerDeflateBenchmarks() {
 @inline(__always)
 func encodeAll(_ encoder: inout DeflateEncoder, _ input: [UInt8], into output: inout [UInt8]) -> Int {
     encoder.reset()
-    return output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    return output.withOutputRawSpan { span in
         try! encoder.compressAll(input.span.bytes, into: &span)
-        return span.finalize(for: buffer)
+        return span.byteCount
     }
 }
 
@@ -195,16 +194,17 @@ func encodeStreaming(_ encoder: inout DeflateEncoder, _ input: [UInt8], chunk: I
     var offset = 0
     var total = 0
     let span = input.span.bytes
-    return output.withUnsafeMutableBytes { buffer in
-        let window = UnsafeMutableRawBufferPointer(rebasing: buffer[..<min(buffer.count, 1 << 16)])
-        while true {
-            var out = OutputRawSpan(buffer: window, initializedCount: 0)
-            let end = min(offset + chunk, span.byteCount)
+    var bytes = output.mutableSpan
+    var window = bytes._mutatingExtracting(..<min(bytes.count, 1 << 16))
+    while true {
+        let end = min(offset + chunk, span.byteCount)
+        let progress = window.withOutputRawSpan { out in
             let progress = try! encoder.compress(span.extracting(offset..<end), into: &out, flush: end == span.byteCount ? .finish : .none)
-            total += out.finalize(for: window)
-            offset += progress.consumed
-            if progress.status == .finished { return total }
+            total += out.byteCount
+            return progress
         }
+        offset += progress.consumed
+        if progress.status == .finished { return total }
     }
 }
 
@@ -317,10 +317,9 @@ func registerInflateBenchmarks() {
 @inline(__always)
 func decodeAll(_ decoder: inout DeflateDecoder, _ input: [UInt8], into output: inout [UInt8]) -> Int {
     decoder.reset()
-    return output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    return output.withOutputRawSpan { span in
         _ = try! decoder.decompressAll(input.span.bytes, into: &span)
-        return span.finalize(for: buffer)
+        return span.byteCount
     }
 }
 
@@ -332,15 +331,16 @@ func decodeStreaming(_ decoder: inout DeflateDecoder, _ input: [UInt8], chunk: I
     var offset = 0
     var total = 0
     let span = input.span.bytes
-    return output.withUnsafeMutableBytes { buffer in
-        let window = UnsafeMutableRawBufferPointer(rebasing: buffer[..<min(buffer.count, 1 << 16)])
-        while true {
-            var out = OutputRawSpan(buffer: window, initializedCount: 0)
-            let end = min(offset + chunk, span.byteCount)
+    var bytes = output.mutableSpan
+    var window = bytes._mutatingExtracting(..<min(bytes.count, 1 << 16))
+    while true {
+        let end = min(offset + chunk, span.byteCount)
+        let progress = window.withOutputRawSpan { out in
             let progress = try! decoder.decompress(span.extracting(offset..<end), into: &out)
-            total += out.finalize(for: window)
-            offset += progress.consumed
-            if progress.status == .finished { return total }
+            total += out.byteCount
+            return progress
         }
+        offset += progress.consumed
+        if progress.status == .finished { return total }
     }
 }

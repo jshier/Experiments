@@ -46,7 +46,7 @@ public enum MQTTProperty: ~Escapable {
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    static func read(from reader: inout BytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
+    static func read(from reader: inout AlignedBytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
         let identifier = try reader.read(LEB128.self, maxByteCount: 4, requiringMinimal: checked)
         return try read(identifier, from: &reader, checked: checked)
     }
@@ -63,7 +63,7 @@ public enum MQTTProperty: ~Escapable {
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    static func read(_ identifier: UInt64, from reader: inout BytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
+    static func read(_ identifier: UInt64, from reader: inout AlignedBytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
         switch identifier {
         case 0x01: try .payloadFormatIndicator(reader.read(Byte.self).rawValue)
         case 0x02: try .messageExpiryInterval(reader.read(Byte4.self, .bigEndian))
@@ -166,7 +166,7 @@ struct PropertySet {
     @inlinable static var valueChecked: Self { Self(bits: 0x7BA_0280_0800) }
 }
 
-extension BytesWriter {
+extension AlignedBytesWriter {
     /// Writes `property`: its identifier, then its value. Build a property list in a buffer this way, then
     /// view it with ``MQTTProperties/init(validating:)``.
     ///
@@ -276,7 +276,7 @@ public struct MQTTProperties: ~Escapable {
     /// value, that only User Property and Subscription Identifier repeat, and that Authentication Data comes
     /// with an Authentication Method. Writing a packet checks that it may carry them.
     ///
-    /// - Parameter bytes: The encoded properties, as `BytesWriter` writes each ``MQTTProperty``.
+    /// - Parameter bytes: The encoded properties, as `AlignedBytesWriter` writes each ``MQTTProperty``.
     /// - Throws: `MQTTError.malformed(_:)` for an unknown identifier or an invalid encoding;
     ///   `MQTTError.protocolError(_:)` for a duplicate property, a forbidden value, or Authentication Data
     ///   without a method.
@@ -299,7 +299,7 @@ public struct MQTTProperties: ~Escapable {
     @inlinable
     @_lifetime(copy bytes)
     init(validating bytes: RawSpan, allowing allowed: PropertySet, repeatable: PropertySet) throws(MQTTError) {
-        var reader = BytesReader(bytes)
+        var reader = AlignedBytesReader(bytes)
         var seen = PropertySet.none
         while !reader.isAtEnd {
             let identifier: UInt64
@@ -334,7 +334,7 @@ public struct MQTTProperties: ~Escapable {
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    init(reading reader: inout BytesReader, allowing allowed: PropertySet, repeatable: PropertySet = .repeatable) throws(MQTTError) {
+    init(reading reader: inout AlignedBytesReader, allowing allowed: PropertySet, repeatable: PropertySet = .repeatable) throws(MQTTError) {
         let bytes: RawSpan
         do throws(BytesError) {
             bytes = try reader.read(bytesPrefixedBy: LEB128.self, maxByteCount: 4, requiringMinimal: true)
@@ -354,7 +354,7 @@ public struct MQTTProperties: ~Escapable {
     /// - Throws: Whatever `body` throws.
     @inlinable
     public func forEach<E: Error>(_ body: (borrowing MQTTProperty) throws(E) -> Void) throws(E) {
-        var reader = BytesReader(bytes)
+        var reader = AlignedBytesReader(bytes)
         while !reader.isAtEnd {
             // Checked when the list was created, so reading can't fail, and needn't check again.
             try body(try! MQTTProperty.read(from: &reader, checked: false))
@@ -375,7 +375,7 @@ public struct MQTTProperties: ~Escapable {
     var encodedByteCount: Int { Size.lengthPrefixed(bytes.byteCount) }
 }
 
-public extension BytesWriter {
+public extension AlignedBytesWriter {
     /// Writes a property list: its length, then the properties.
     ///
     /// - Parameter properties: The list.

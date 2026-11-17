@@ -91,4 +91,18 @@ import Testing
         _ = consume span
         #expect(buffer == [1, 2, 3, 1, 2, 3])
     }
+
+    @Test func writerAfterAPrefixOfATypedSpan() throws {
+        var buffer: [UInt8] = [1, 2, 3, 0, 0, 0]
+        var span = buffer.mutableSpan
+        var writer = try BytesWriter(&span, atByteOffset: 3)
+        #expect(writer.byteCount == 3)
+        try writer.copy(fromDistance: 3, count: 3)
+        #expect(throws: BytesError.insufficientCapacity) { try writer.write(Byte(9)) }
+        _ = consume writer
+        #expect(throws: BytesError.insufficientCapacity) { _ = try BytesWriter(&span, atByteOffset: 7) }
+        #expect(throws: BytesError.invalidValue) { _ = try BytesWriter(&span, atByteOffset: -1) }
+        _ = consume span
+        #expect(buffer == [1, 2, 3, 1, 2, 3])
+    }
 }

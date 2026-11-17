@@ -1,8 +1,8 @@
 # SocketStream
 
 (Formerly MQTTSocketStream.) How fast can structured data go through a local socket? MQTT 5 PUBLISH packets
-are encoded with `BytesWriter` (../MQTT, ../Bytes) on one end of a loopback TCP connection, read and parsed
-with `BytesReader` on the other, and every packet is checked: its identifier is the next in sequence, its
+are encoded with `AlignedBytesWriter` (../MQTT, ../Bytes) on one end of a loopback TCP connection, read and parsed
+with `AlignedBytesReader` on the other, and every packet is checked: its identifier is the next in sequence, its
 topic matches byte for byte, and its payload is the size sent. Optionally the stream is compressed (Bytes'
 DEFLATE or Brotli) and encrypted (TLS 1.3 records, ChaCha20-Poly1305) through Bytes pipelines on the way, and
 decrypted and decompressed on the other end. The sockets and executors are
@@ -45,10 +45,10 @@ Unix-domain socketpair (`--unix`).
 
 ## How it works
 
-- **Sender** (`Transfer.sendPackets`): encodes packets into a 256 KB batch with `BytesWriter` until the next
+- **Sender** (`Transfer.sendPackets`): encodes packets into a 256 KB batch with `AlignedBytesWriter` until the next
   one doesn't fit (`MQTTPublish.write(to:)` throws `insufficientCapacity` without writing anything), then
   `TCPConnection.write(from:)`s the batch.
-- **Receiver** (`Transfer.receivePackets`): `TCPConnection.read(into:)` appends to a `ReceiveBuffer`. A
+- **Receiver** (`Transfer.receivePackets`): `TCPConnection.read(into:)` appends to a `ByteBuffer`. A
   `PacketChecker` reads complete packets out of it as frames (`MQTTFrame.read(from:)` returns `nil`,
   consuming nothing, for a packet that hasn't fully arrived), parses each as `MQTTPublish(parsing:)`, and
   checks it. A partial packet left at the end moves to the front before the buffer runs out of room.

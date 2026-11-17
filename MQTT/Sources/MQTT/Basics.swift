@@ -273,7 +273,7 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
     ///   `MQTTError.protocolError(_:)` if retain handling or maximum QoS is 3.
     @inlinable
     @_lifetime(reader: copy reader)
-    init(reading reader: inout BytesReader) throws(MQTTError) {
+    init(reading reader: inout AlignedBytesReader) throws(MQTTError) {
         let options: Byte
         do throws(BytesError) { options = try reader.read(Byte.self) } catch { throw .malformed("subscription options") }
         guard options[Crumb.self, at: 6] == 0 else { throw .malformed("reserved subscription option bits") }
@@ -292,7 +292,7 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
     /// - Parameter writer: The writer to append to.
     /// - Throws: `BytesError.insufficientCapacity` if there's no room for the byte.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         var options = Byte.zero
         options[Crumb.self, at: 4] = Crumb(rawBitsOf: retainHandling)
         options[bit: 3] = retainAsPublished
@@ -305,7 +305,7 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
 // MARK: - Field encodings
 
 /// MQTT's data representations (section 1.5), on top of `Bytes`.
-extension BytesReader {
+extension AlignedBytesReader {
     /// Reads a UTF-8 Encoded String: a 2-byte big-endian length, then UTF-8 without U+0000 [MQTT-1.5.4-2].
     ///
     /// Unchecked, it trusts that the string was validated before: for iterating validated lists. The
@@ -422,7 +422,7 @@ extension BytesReader {
     }
 }
 
-extension BytesWriter {
+extension AlignedBytesWriter {
     /// Writes a UTF-8 Encoded String: a 2-byte big-endian length, then the text. It doesn't check for U+0000
     /// (``MQTTPacket/validate()`` does).
     ///

@@ -127,9 +127,7 @@ public struct BrotliEncoder: ~Copyable {
                 if room > 0 {
                     let count = min(room, input.byteCount &- consumed)
                     var span = window.mutableSpan
-                    var raw = MutableRawSpan(mutating: &span)
-                    var writer = try BytesWriter(&raw, atByteOffset: windowEnd)
-                    try writer.write(input.extracting(consumed..<(consumed &+ count)))
+                    span.copyBytes(from: input.extracting(consumed..<(consumed &+ count)), toByteOffset: windowEnd)
                     windowEnd &+= count
                     consumed &+= count
                     flushed = false
@@ -172,13 +170,8 @@ public struct BrotliEncoder: ~Copyable {
     private mutating func slide() {
         let start = max(0, position &- engine.windowSize)
         guard start > 0 else { return }
-        let count = windowEnd &- start
         var span = window.mutableSpan
-        // Unsafe: a raw copy within the window. Safe: both ranges are inside it, and `copyMemory` allows them
-        // to overlap.
-        span.withUnsafeMutableBytes { buffer in
-            unsafe buffer.baseAddress!.copyMemory(from: buffer.baseAddress!.advanced(by: start), byteCount: count)
-        }
+        span.copyBytes(within: start..<windowEnd, toByteOffset: 0)
         position &-= start
         windowEnd &-= start
         engine.windowOrigin &+= start
@@ -187,14 +180,7 @@ public struct BrotliEncoder: ~Copyable {
     private mutating func deliver(into output: inout OutputRawSpan) -> Int {
         let count = min(engine.stagedByteCount, output.freeCapacity)
         guard count > 0 else { return 0 }
-        // Unsafe: a raw copy into the output's free capacity. Safe: `count` bytes are staged and fit, and only
-        // they are counted as initialized.
-        engine.stagedBytes.withUnsafeBytes { source in
-            unsafe output.withUnsafeMutableBytes { buffer, initializedCount in
-                unsafe buffer.baseAddress!.advanced(by: initializedCount).copyMemory(from: source.baseAddress!, byteCount: count)
-                initializedCount &+= count
-            }
-        }
+        output.append(copying: engine.stagedBytes.extracting(0..<count))
         engine.consumeStaged(count)
         return count
     }
@@ -255,7 +241,7 @@ struct BrotliEngine: ~Copyable {
         let bucketBits: Int
         let blockBits: Int
         switch quality {
-        case 1, 2: (bucketBits, blockBits) = (16, 0)
+        case 1, 2: (bucketBits, blockBits) = (17, 0)
         case 3: (bucketBits, blockBits) = (16, 1)
         case 4: (bucketBits, blockBits) = (15, 2)
         case 5: (bucketBits, blockBits) = (14, 4)
@@ -314,14 +300,32 @@ struct BrotliEngine: ~Copyable {
         }
     }
 
+    /// Hands the staged bytes over without copying them: swaps the staging buffer with `buffer`, an empty one
+    /// of ``stagingCapacity`` bytes, and returns where in it the staged bytes are.
+    ///
+    /// - Precondition: The output is byte-aligned (after a flush marker or the last meta-block).
+    mutating func takeStaged(swapping buffer: inout UniqueArray<UInt8>) -> Range<Int> {
+        precondition(pendingBitCount == 0 && buffer.count == Self.stagingCapacity)
+        swap(&staging, &buffer)
+        let range = stagingStart..<stagingEnd
+        stagingStart = 0
+        stagingEnd = 0
+        return range
+    }
+
+    /// Runs `body` with a bit writer at the end of the staged output, then keeps what it wrote. The writers
+    /// flush unchecked (`unsafeFlush`): a meta-block's size is estimated before it's written, and stored
+    /// uncompressed if that's smaller, so it takes at most its input plus a few bytes. ``stagingCapacity``
+    /// holds two meta-blocks' input plus 16 KB each. The one-shot and streaming encoders deliver the staged
+    /// bytes before each meta-block, and a parallel lane's chunk is at most 512 KB, two meta-blocks.
     @inline(__always)
-    private mutating func withWriter<R>(_ body: (inout DeflateBitWriter) -> R) -> R {
+    private mutating func withWriter<R>(_ body: (inout BitWriter) -> R) -> R {
         var span = staging.mutableSpan
-        var writer = DeflateBitWriter(MutableRawSpan(mutating: &span), offset: stagingEnd, bits: pendingBits, count: pendingBitCount)
+        var writer = BitWriter(MutableRawSpan(mutating: &span), byteOffset: stagingEnd, bits: pendingBits, bitCount: pendingBitCount)
         let result = body(&writer)
-        stagingEnd = writer.offset
-        pendingBits = writer.bits
-        pendingBitCount = writer.count
+        stagingEnd = writer.byteOffset
+        pendingBits = writer.pendingBits
+        pendingBitCount = writer.pendingBitCount
         return result
     }
 
@@ -382,6 +386,25 @@ struct BrotliEngine: ~Copyable {
         }
         streamEnd = max(streamEnd, origin &+ parsedEnd)
         return parsedEnd
+    }
+
+    /// Inserts `buffer[start..<end]` into the hash table without emitting anything: history for a stream
+    /// that continues at `end` in another engine's output (a parallel encoder's chunk). Call after
+    /// ``reset()``.
+    mutating func prime(_ buffer: RawSpan, from start: Int, to end: Int, origin: Int) {
+        var buckets = buckets.mutableSpan
+        var counts = bucketCounts.mutableSpan
+        var tags = bucketTags.mutableSpan
+        matcher.prime(buffer, from: start, to: min(end, buffer.byteCount &- BrotliMatcher.margin(single: matcher.blockBits == 0)), origin: origin, &buckets, &counts, &tags)
+    }
+
+    /// Forgets the last distances, for a stream that continues another engine's: the decoder's are then
+    /// unknown here. Each becomes a distance beyond any window, which no match equals or comes within 3 of,
+    /// so no command refers to one until this engine's own distances have replaced it, and the stream decodes
+    /// the same whatever the decoder's were.
+    mutating func forgetDistances() {
+        let unknown = 1 << 40
+        matcher.distanceCache = [unknown, unknown, unknown, unknown]
     }
 
     @inline(__always)
@@ -452,9 +475,28 @@ struct BrotliMatcher {
     }
     static var maximumCommands: Int { BrotliEngine.maximumCommands }
     static var maximumCopy: Int { BrotliEngine.maximumCopy }
+    /// The positions at a copy's end inserted into a one-entry table.
+    static var singleInsertions: Int { 5 }
+    /// Bytes a one-entry table hashes and compares (qualities 1 and 2): its matches' minimum length.
+    static var singleHashLength: Int { 6 }
+    /// Bytes a search or insertion loads at a position: 8 for the one-entry table's hash, 4 otherwise.
+    @inline(__always) static func margin(single: Bool) -> Int { single ? 8 : 4 }
+
+    /// The one-entry table's hash: the first `singleHashLength` bytes, multiplied (Google's `kHashMul64`).
+    @inline(__always)
+    static func singleKey(_ buffer: RawSpan, _ position: Int, bits: Int) -> (key: Int, head: UInt64) {
+        let head = DeflateCompressor.load64(buffer, position) & (UInt64.max &>> UInt64(64 &- 8 &* singleHashLength))
+        let key = Int(truncatingIfNeeded: ((head &<< UInt64(64 &- 8 &* singleHashLength)) &* 0x1FE3_5A7B_D357_9BD3) &>> UInt64(64 &- bits))
+        return (key, head)
+    }
 
     /// The best match at `position`: the last distances first, then the hash bucket's positions. Inserts
     /// `position` into its bucket.
+    ///
+    /// Two functions behind it, one per table, each inlined into its own copy of the parse: one function
+    /// covering both, with `single` a constant at each call, was left out of line at both calls of the
+    /// buckets' parse (after the one-entry table's search grew), which cost quality 5 2–8% more
+    /// instructions (x-ray 146 → 156 ms).
     ///
     /// - Parameters:
     ///   - statistics: Accumulates what the tags rule out, to choose `filterByTags` for the next meta-block.
@@ -465,43 +507,70 @@ struct BrotliMatcher {
         _ buckets: inout MutableSpan<UInt32>, _ counts: inout MutableSpan<UInt32>, _ tags: inout MutableSpan<UInt8>,
         _ statistics: inout TagStatistics, single: Bool
     ) -> (length: Int, distance: Int, score: Int) {
-        var bestLength = 0
-        var bestDistance = 0
-        var bestScore = 0
-        let cacheChecks = quality >= 5 ? 4 : quality >= 3 ? 2 : 1
-        for index in 0..<cacheChecks {
+        if single {
+            return findSingleMatch(buffer, position, maxLength: maxLength, maxDistance: maxDistance, origin: origin, &buckets)
+        }
+        return findBucketMatch(buffer, position, maxLength: maxLength, maxDistance: maxDistance, origin: origin, &buckets, &counts, &tags, &statistics)
+    }
+
+    /// The best match at the last distances: the first `checks` of them.
+    @inline(__always)
+    func lastDistanceMatch(_ buffer: RawSpan, _ position: Int, maxLength: Int, maxDistance: Int, checks: Int) -> (length: Int, distance: Int, score: Int) {
+        var best = (length: 0, distance: 0, score: 0)
+        for index in 0..<checks {
             let distance = distanceCache[index]
             guard distance <= maxDistance else { continue }
             let length = DeflateCompressor.extend(buffer, position, position &- distance, from: 0, maxLength: maxLength)
             guard length >= (index == 0 ? 3 : 4) else { continue }
             let score = Self.lastDistanceScore(length: length, cacheIndex: index)
-            if score > bestScore {
-                bestLength = length
-                bestDistance = distance
-                bestScore = score
+            if score > best.score {
+                best = (length, distance, score)
             }
         }
-        let head = Self.load32(buffer, position)
-        let key = Self.hash(head, bits: bucketBits)
+        return best
+    }
+
+    /// ``findMatch(_:_:maxLength:maxDistance:origin:_:_:_:_:single:)`` for the one-entry table: the last
+    /// distance, then the bucket's position (``singleHashLength`` bytes hashed and compared).
+    @inline(always)
+    func findSingleMatch(
+        _ buffer: RawSpan, _ position: Int, maxLength: Int, maxDistance: Int, origin: Int, _ buckets: inout MutableSpan<UInt32>
+    ) -> (length: Int, distance: Int, score: Int) {
+        var best = lastDistanceMatch(buffer, position, maxLength: maxLength, maxDistance: maxDistance, checks: 1)
         let absolute = streamBase &+ UInt32(truncatingIfNeeded: origin &+ position) &+ 1
-        if single {
-            let entry = buckets[key]
-            buckets[key] = absolute
-            let distance = Int(absolute &- entry)
-            if entry != 0 && distance <= maxDistance && distance > 0 {
-                let candidate = position &- distance
-                if Self.load32(buffer, candidate) == head {
-                    let length = DeflateCompressor.extend(buffer, position, candidate, from: 4, maxLength: maxLength)
-                    let score = Self.score(length: length, distance: distance)
-                    if score > bestScore {
-                        bestLength = length
-                        bestDistance = distance
-                        bestScore = score
-                    }
+        let (key, head) = Self.singleKey(buffer, position, bits: bucketBits)
+        let entry = buckets[key]
+        buckets[key] = absolute
+        let distance = Int(absolute &- entry)
+        if entry != 0 && distance <= maxDistance && distance > 0 && maxLength >= Self.singleHashLength {
+            let candidate = position &- distance
+            let mask = UInt64.max &>> UInt64(64 &- 8 &* Self.singleHashLength)
+            if DeflateCompressor.load64(buffer, candidate) & mask == head {
+                let length = DeflateCompressor.extend(buffer, position, candidate, from: Self.singleHashLength, maxLength: maxLength)
+                let score = Self.score(length: length, distance: distance)
+                if score > best.score {
+                    best = (length, distance, score)
                 }
             }
-            return (bestLength, bestDistance, bestScore)
         }
+        return best
+    }
+
+    /// ``findMatch(_:_:maxLength:maxDistance:origin:_:_:_:_:single:)`` for buckets of several entries.
+    @inline(always)
+    func findBucketMatch(
+        _ buffer: RawSpan, _ position: Int, maxLength: Int, maxDistance: Int, origin: Int,
+        _ buckets: inout MutableSpan<UInt32>, _ counts: inout MutableSpan<UInt32>, _ tags: inout MutableSpan<UInt8>,
+        _ statistics: inout TagStatistics
+    ) -> (length: Int, distance: Int, score: Int) {
+        let cacheChecks = quality >= 5 ? 4 : quality >= 3 ? 2 : 1
+        let last = lastDistanceMatch(buffer, position, maxLength: maxLength, maxDistance: maxDistance, checks: cacheChecks)
+        var bestLength = last.length
+        var bestDistance = last.distance
+        var bestScore = last.score
+        let absolute = streamBase &+ UInt32(truncatingIfNeeded: origin &+ position) &+ 1
+        let head = Self.load32(buffer, position)
+        let key = Self.hash(head, bits: bucketBits)
         let size = 1 &<< blockBits
         let mask = size &- 1
         let first = key &<< blockBits
@@ -584,7 +653,7 @@ struct BrotliMatcher {
         while group < size {
             // Unsafe: an unchecked 16-byte load of tags. Safe: `first + group + 16` is within the bucket.
             let lanes = unsafe tags.unsafeLoadUnaligned(fromUncheckedByteOffset: first &+ group, as: SIMD16<UInt8>.self)
-            matches |= UInt64(laneMask(ByteLanes(lanes ^ wanted.vector).matching(0))) &<< UInt64(group)
+            matches |= UInt64(ByteLanes(lanes ^ wanted.vector).matching(0).bitmask) &<< UInt64(group)
             group &+= 16
         }
         return matches
@@ -596,19 +665,17 @@ struct BrotliMatcher {
         UInt8(truncatingIfNeeded: (value &* 0x1E35_A7BD) &>> UInt32(24 &- bucketBits))
     }
 
-    /// Which of 16 lanes matched, one bit each (lane 0 in bit 0): each half's high bits shifted to bit 0 of
-    /// their bytes, then gathered into one byte by a multiply (byte i's bit lands in bit 56 + i). Portable,
-    /// and two multiplies; NEON's `shrn` would be one instruction.
-    @inline(__always)
-    static func laneMask(_ matches: ByteMatches) -> UInt32 {
-        let halves = unsafe unsafeBitCast(matches.highBits, to: SIMD2<UInt64>.self) // Safe: both are 16 plain bytes.
-        // Lane i is byte i of the halves on a little-endian CPU; a big-endian one swaps them back.
-        let first = UInt64(littleEndian: halves[0])
-        let second = UInt64(littleEndian: halves[1])
-        // Parenthesized: Swift's shifts bind tighter than multiplication.
-        let low = (((first &>> 7) & 0x0101_0101_0101_0101) &* 0x0102_0408_1020_4080) &>> 56
-        let high = (((second &>> 7) & 0x0101_0101_0101_0101) &* 0x0102_0408_1020_4080) &>> 56
-        return UInt32(truncatingIfNeeded: low | high &<< 8)
+    /// Inserts positions `start..<end` (each with 4 bytes after it) without searching.
+    func prime(
+        _ buffer: RawSpan, from start: Int, to end: Int, origin: Int,
+        _ buckets: inout MutableSpan<UInt32>, _ counts: inout MutableSpan<UInt32>, _ tags: inout MutableSpan<UInt8>
+    ) {
+        let single = blockBits == 0
+        var position = start
+        while position < end {
+            insertPosition(buffer, position, origin: origin, &buckets, &counts, &tags, single: single)
+            position &+= 1
+        }
     }
 
     /// Inserts `position` into its bucket without searching.
@@ -617,18 +684,18 @@ struct BrotliMatcher {
         _ buffer: RawSpan, _ position: Int, origin: Int,
         _ buckets: inout MutableSpan<UInt32>, _ counts: inout MutableSpan<UInt32>, _ tags: inout MutableSpan<UInt8>, single: Bool
     ) {
-        let head = Self.load32(buffer, position)
-        let key = Self.hash(head, bits: bucketBits)
         let absolute = streamBase &+ UInt32(truncatingIfNeeded: origin &+ position) &+ 1
         if single {
-            buckets[key] = absolute
-        } else {
-            let count = Int(counts[key])
-            let slot = (key &<< blockBits) &+ (count & ((1 &<< blockBits) &- 1))
-            buckets[slot] = absolute
-            if blockBits >= 4 { tags[slot] = Self.tag(head, bucketBits: bucketBits) }
-            counts[key] = UInt32(truncatingIfNeeded: count &+ 1)
+            buckets[Self.singleKey(buffer, position, bits: bucketBits).key] = absolute
+            return
         }
+        let head = Self.load32(buffer, position)
+        let key = Self.hash(head, bits: bucketBits)
+        let count = Int(counts[key])
+        let slot = (key &<< blockBits) &+ (count & ((1 &<< blockBits) &- 1))
+        buckets[slot] = absolute
+        if blockBits >= 4 { tags[slot] = Self.tag(head, bucketBits: bucketBits) }
+        counts[key] = UInt32(truncatingIfNeeded: count &+ 1)
     }
 
     /// Google's `ComputeDistanceCode`: a short code for the last distances and the last two plus or minus 1
@@ -700,18 +767,20 @@ struct BrotliMatcher {
         let skipWindow = quality < 9 ? 64 : 512
         var skipFrom = position &+ skipWindow
         // A match needs 4 bytes to hash and compare; near the end, only literals.
-        while position &+ 4 <= end && count < limit {
+        while position &+ Self.margin(single: single) <= end && count < limit {
             // Capped so a meta-block stays far below Brotli's 2^24-byte limit.
             let maxLength = min(dataEnd &- position, Self.maximumCopy)
             let maxDistance = min(origin &+ position, windowSize)
-            var match = findMatch(buffer, position, maxLength: maxLength, maxDistance: maxDistance, origin: origin, &buckets, &counts, &tags, &statistics, single: single)
+            var match = single
+                ? findSingleMatch(buffer, position, maxLength: maxLength, maxDistance: maxDistance, origin: origin, &buckets)
+                : findBucketMatch(buffer, position, maxLength: maxLength, maxDistance: maxDistance, origin: origin, &buckets, &counts, &tags, &statistics)
             guard match.length >= 4 || (match.length == 3 && match.distance == distanceCache[0]) else {
                 insert &+= 1
                 position &+= 1
                 // Long without a match: skip ahead, hashing less often (incompressible data).
                 if position > skipFrom {
                     let step = position > skipFrom &+ 4 &* skipWindow ? 4 : 2
-                    let jump = min(position &+ step &* 4, end &- 4)
+                    let jump = min(position &+ step &* 4, end &- Self.margin(single: single))
                     while position < jump {
                         insertPosition(buffer, position, origin: origin, &buckets, &counts, &tags, single: single)
                         insert &+= step
@@ -724,9 +793,14 @@ struct BrotliMatcher {
                 // Look one position ahead (up to four times) for a clearly better match.
                 var delayed = 0
                 while position &+ 5 <= end && delayed < 4 {
-                    let next = findMatch(
-                        buffer, position &+ 1, maxLength: maxLength &- 1, maxDistance: min(origin &+ position &+ 1, windowSize),
-                        origin: origin, &buckets, &counts, &tags, &statistics, single: single
+                    // The longest copy from the next position: from `position`, which moves on with each delay
+                    // (`maxLength - 1`, fixed, let a second delay's copy run a byte past `dataEnd`: reading
+                    // past the input, or in a parallel chunk, into the next chunk, which decoded a byte long).
+                    // (Buckets only: lazy matching starts at quality 3.)
+                    let next = findBucketMatch(
+                        buffer, position &+ 1, maxLength: min(dataEnd &- position &- 1, Self.maximumCopy),
+                        maxDistance: min(origin &+ position &+ 1, windowSize),
+                        origin: origin, &buckets, &counts, &tags, &statistics
                     )
                     guard next.score >= match.score &+ 175 else { break }
                     position &+= 1
@@ -744,9 +818,12 @@ struct BrotliMatcher {
             }
             commands[count] = Self.command(insert: insert, copy: match.length, distanceCode: code)
             count &+= 1
-            // Insert the copy's positions (the first was inserted by the search).
-            let copyEnd = min(position &+ match.length, end &- 4)
-            var inserted = position &+ 1
+            // Insert the copy's positions (the first was inserted by the search); for the one-entry table, only
+            // the last 5, as Google's fast qualities do. Against all of them: 4–22% faster, output -10% (xml:
+            // a one-entry bucket keeps a later position) to +4.4% (Main.css); 2 or 8 move further along that
+            // curve (see Benchmarks/RESULTS.md).
+            let copyEnd = min(position &+ match.length, end &- Self.margin(single: single))
+            var inserted = single ? max(position &+ 1, copyEnd &- Self.singleInsertions) : position &+ 1
             while inserted < copyEnd {
                 insertPosition(buffer, inserted, origin: origin, &buckets, &counts, &tags, single: single)
                 inserted &+= 1
@@ -897,12 +974,12 @@ extension BrotliEngine {
         }
 
         var span = staging.mutableSpan
-        var writer = DeflateBitWriter(MutableRawSpan(mutating: &span), offset: stagingEnd, bits: pendingBits, count: pendingBitCount)
+        var writer = BitWriter(MutableRawSpan(mutating: &span), byteOffset: stagingEnd, bits: pendingBits, bitCount: pendingBitCount)
         Self.writeMetablockLength(length, isUncompressed: false, to: &writer)
         // One block type per category, NPOSTFIX 0, NDIRECT 0, context mode 0 (LSB6), one literal tree, one
         // distance tree: 1 + 1 + 1 + 2 + 4 + 2 + 1 + 1 bits.
         writer.add(0, bitCount: 13)
-        writer.flush()
+        unsafe writer.unsafeFlush()
         literalCodes.store(to: &writer)
         commandCodes.store(to: &writer)
         distanceCodes.store(to: &writer)
@@ -910,20 +987,20 @@ extension BrotliEngine {
             buffer, from: start, commands.span.extracting(0..<commandCount), lastSymbol: lastSymbol,
             literals: literalCodes, commands: commandCodes, distances: distanceCodes, to: &writer
         )
-        stagingEnd = writer.offset
-        pendingBits = writer.bits
-        pendingBitCount = writer.count
+        stagingEnd = writer.byteOffset
+        pendingBits = writer.pendingBits
+        pendingBitCount = writer.pendingBitCount
         return true
     }
 
     /// ISLAST 0, MNIBBLES, MLEN - 1, ISUNCOMPRESSED.
-    private static func writeMetablockLength(_ length: Int, isUncompressed: Bool, to writer: inout DeflateBitWriter) {
+    private static func writeMetablockLength(_ length: Int, isUncompressed: Bool, to writer: inout BitWriter) {
         let value = length &- 1
         let nibbles = value < 1 &<< 16 ? 4 : value < 1 &<< 20 ? 5 : 6
         writer.add(UInt64(nibbles &- 4) &<< 1, bitCount: 3)
         writer.add(UInt64(value), bitCount: nibbles &* 4)
         writer.add(isUncompressed ? 1 : 0, bitCount: 1)
-        writer.flush()
+        unsafe writer.unsafeFlush()
     }
 
     private mutating func writeUncompressedMetablock(_ buffer: RawSpan, from start: Int, to end: Int) {
@@ -940,7 +1017,7 @@ extension BrotliEngine {
     private static func writeCommands(
         _ buffer: RawSpan, from start: Int, _ commands: Span<BrotliCommand>, lastSymbol: Int,
         literals: borrowing BrotliCode<256>, commands commandCode: borrowing BrotliCode<704>,
-        distances: borrowing BrotliCode<64>, to writer: inout DeflateBitWriter
+        distances: borrowing BrotliCode<64>, to writer: inout BitWriter
     ) {
         let literalCodewords = literals.codewords.span
         let literalLengths = literals.lengths.span
@@ -960,17 +1037,17 @@ extension BrotliEngine {
             let copyCode = Int(Brotli.cellCopyCodes[cell]) &+ (symbol & 7)
             writer.add(UInt64(commandCodewords[symbol]), bitCount: Int(commandLengths[symbol]))
             writer.add(UInt64(insert &- Int(Brotli.insertBases[insertCode])), bitCount: Int(Brotli.insertExtraBits[insertCode]))
-            writer.flush()
+            unsafe writer.unsafeFlush()
             let copyValue = copy == 0 ? 0 : copy &- Int(Brotli.copyBases[copyCode])
             writer.add(UInt64(copyValue), bitCount: Int(Brotli.copyExtraBits[copyCode]))
-            writer.flush()
+            unsafe writer.unsafeFlush()
             var remaining = insert
             while remaining >= 3 {
                 for offset in 0..<3 {
                     let literal = Int(DeflateCompressor.byte(buffer, position &+ offset))
                     writer.add(UInt64(literalCodewords[literal]), bitCount: Int(literalLengths[literal]))
                 }
-                writer.flush()
+                unsafe writer.unsafeFlush()
                 position &+= 3
                 remaining &-= 3
             }
@@ -980,13 +1057,13 @@ extension BrotliEngine {
                 position &+= 1
                 remaining &-= 1
             }
-            writer.flush()
+            unsafe writer.unsafeFlush()
             guard copy > 0 else { break }
             if symbol >= 128 {
                 let (distanceSymbol, extraBits, extra) = distanceSymbol(Int(command.distanceCode))
                 writer.add(UInt64(distanceCodewords[distanceSymbol]), bitCount: Int(distanceLengths[distanceSymbol]))
                 writer.add(UInt64(extra), bitCount: extraBits)
-                writer.flush()
+                unsafe writer.unsafeFlush()
             }
             position &+= copy
         }
@@ -1038,7 +1115,7 @@ struct BrotliCode<let size: Int> {
         return bits
     }
 
-    func store(to writer: inout DeflateBitWriter) {
+    func store(to writer: inout BitWriter) {
         if symbolCount <= 4 {
             storeSimple(to: &writer)
         } else {
@@ -1046,22 +1123,22 @@ struct BrotliCode<let size: Int> {
         }
     }
 
-    private func storeSimple(to writer: inout DeflateBitWriter) {
+    private func storeSimple(to writer: inout BitWriter) {
         let count = max(symbolCount, 1)
         writer.add(1 | UInt64(count &- 1) &<< 2, bitCount: 4) // HSKIP 1, NSYM - 1
         for index in 0..<count {
             writer.add(UInt64(symbols[index]), bitCount: Self.symbolBits)
-            writer.flush()
+            unsafe writer.unsafeFlush()
         }
         if count == 4 {
             writer.add(lengths[symbols[0]] == 1 ? 1 : 0, bitCount: 1) // Tree select: 1, 2, 3, 3 or all 2.
         }
-        writer.flush()
+        unsafe writer.unsafeFlush()
     }
 
     /// Google's `BrotliStoreHuffmanTree`: the lengths run-length coded with repeat codes 16 and 17, those
     /// symbols' own code (at most 5 bits), and its lengths with a fixed code.
-    private func storeComplex(to writer: inout DeflateBitWriter) {
+    private func storeComplex(to writer: inout BitWriter) {
         let lengths = lengths.span
         var items = InlineArray<720, UInt8>(repeating: 0)
         var extras = InlineArray<720, UInt8>(repeating: 0)
@@ -1184,16 +1261,16 @@ struct BrotliCode<let size: Int> {
         for position in skip..<stored {
             let length = Int(codeLengths[Int(order[position])])
             writer.add(UInt64(fixedCodes[length]), bitCount: Int(fixedLengths[length]))
-            if position % 8 == 7 { writer.flush() }
+            if position % 8 == 7 { unsafe writer.unsafeFlush() }
         }
-        writer.flush()
+        unsafe writer.unsafeFlush()
         if used == 1 { codeLengths[only] = 0 }
         for item in 0..<itemCount {
             let symbol = Int(items[item])
             writer.add(UInt64(codeCodewords[symbol]), bitCount: Int(codeLengths[symbol]))
             if symbol == 16 { writer.add(UInt64(extras[item]), bitCount: 2) }
             if symbol == 17 { writer.add(UInt64(extras[item]), bitCount: 3) }
-            writer.flush()
+            unsafe writer.unsafeFlush()
         }
     }
 }

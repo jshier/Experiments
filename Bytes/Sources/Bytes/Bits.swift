@@ -384,6 +384,26 @@ public extension FixedWidthInteger {
         (self & ((1 &<< high) &- 1)) &>> low
     }
 
+    /// The `count` bits from `low`, shifted down: a shift, then a mask, with no checks. The form to use when
+    /// the field's width is known rather than its end, as a Huffman subtable's index bits after the root's.
+    ///
+    /// ```swift
+    /// let index = window.bits(from: rootBits, count: entry.codeLength)
+    /// ```
+    ///
+    /// Two instructions where ``bits(from:upTo:)`` needs the sum `low + count` first (DEFLATE's subtable
+    /// lookup: 5 more instructions in its decode loop). Meaningful for `0 <= low < bitWidth` and
+    /// `0 <= count < bitWidth`; shift amounts outside that wrap as `&<<` does.
+    ///
+    /// - Parameters:
+    ///   - low: The first bit of the field, counting from the least significant bit.
+    ///   - count: The field's width in bits.
+    /// - Returns: The field, shifted down to bit 0.
+    @inlinable @inline(__always)
+    func bits(from low: Int, count: Int) -> Self {
+        (self &>> low) & ((1 &<< count) &- 1)
+    }
+
     /// The value with only its low `count` bits kept: `self & ((1 << count) - 1)`, including for `count ==
     /// bitWidth`, where that expression's shift would overflow. Counts above `bitWidth` keep every bit.
     ///

@@ -90,7 +90,7 @@ public enum Fixtures {
     }
 
     /// Message expiry 60 s and a user property, encoded once.
-    static let propertyBytes: [UInt8] = try! [UInt8](byteCapacity: 64) { writer in
+    static let propertyBytes: [UInt8] = try! [UInt8](alignedByteCapacity: 64) { writer in
         try writer.write(MQTTProperty.messageExpiryInterval(60))
         try writer.write(MQTTProperty.userProperty(name: "unit".utf8Span, value: "celsius".utf8Span))
     }

@@ -6,7 +6,7 @@
 
 // MARK: - BytesReader
 
-extension BytesReader: Iterable {
+extension GenericBytesReader: Iterable {
     public typealias Element = UInt8
     public typealias BorrowingIterator = Span<UInt8>.BorrowingIterator
 
@@ -34,7 +34,7 @@ extension BytesReader: Iterable {
 
 // MARK: - Typed views
 
-public extension BytesReader {
+public extension GenericBytesReader {
     /// The remaining whole `T` groups, as integers in `byteOrder`, for `for`-`in` loops.
     ///
     /// ```swift
@@ -57,7 +57,9 @@ public extension BytesReader {
     func values<T: ByteGroup>(of type: T.Type, _ byteOrder: ByteOrder) -> ByteGroupValues<T> {
         ByteGroupValues(span: span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder, byteOrder: byteOrder)
     }
+}
 
+public extension BytesReader {
     /// The remaining whole `Bits<width>` values, in ``bitOrder``, for `for`-`in` loops.
     ///
     /// ```swift
@@ -75,24 +77,9 @@ public extension BytesReader {
     func values<let width: Int>(of type: Bits<width>.Type) -> BitsValues<width> {
         BitsValues(span: span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
     }
-
-    /// A cursor at the given position, for iterators.
-    ///
-    /// - Parameters:
-    ///   - span: The bytes to read.
-    ///   - byteOffset: The byte the next read starts in.
-    ///   - bitOffset: Bits already consumed from that byte, 0 through 7.
-    ///   - bitOrder: The order of bits within each byte.
-    @inlinable
-    @_lifetime(copy span)
-    internal init(_ span: RawSpan, byteOffset: Int, bitOffset: Int, bitOrder: BitOrder) {
-        self.init(span, bitOrder: bitOrder)
-        _byteOffset = byteOffset
-        _bitOffset = bitOffset
-    }
 }
 
-/// The whole `T` groups from a position in a span, as integers in a byte order. See ``BytesReader/values(of:_:)``.
+/// The whole `T` groups from a position in a span, as integers in a byte order. See ``GenericBytesReader/values(of:_:)``.
 public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
     public typealias Element = T.Integer
 
@@ -160,7 +147,7 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
     }
 }
 
-/// The whole `Bits<width>` values from a position in a span. See ``BytesReader/values(of:)``.
+/// The whole `Bits<width>` values from a position in a span. See ``GenericBytesReader/values(of:)``.
 public struct BitsValues<let width: Int>: Iterable, ~Escapable {
     public typealias Element = Bits<width>
 

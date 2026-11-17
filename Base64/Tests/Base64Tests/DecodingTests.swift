@@ -8,8 +8,8 @@ func decoded(_ text: String, alphabet: Base64.Alphabet = .standard, padding: Boo
     let characters = Array(text.utf8)
     var output = [UInt8](repeating: 0xEE, count: Base64.maximumDecodedByteCount(of: characters.count) + 8)
     var span = output.mutableSpan
-    var writer = BytesWriter(&span)
-    var reader = BytesReader(characters.span)
+    var writer = AlignedBytesWriter(&span)
+    var reader = AlignedBytesReader(characters.span)
     try Base64.decode(&reader, into: &writer, alphabet: alphabet, padding: padding)
     let written = writer.byteCount
     precondition(reader.isAtEnd)
@@ -127,9 +127,9 @@ func decodingError(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, paddi
         let text = Array(("QUJD" + String(repeating: "QUJD", count: 40) + "QU*D").utf8)
         var output = [UInt8](repeating: 0, count: 200)
         var span = output.mutableSpan
-        var writer = BytesWriter(&span)
+        var writer = AlignedBytesWriter(&span)
         try writer.write(0x01_02 as Byte2)
-        var reader = BytesReader(text.span)
+        var reader = AlignedBytesReader(text.span)
         try reader.skip(byteCount: 4)
         #expect(throws: LocatedBytesError(.invalidValue, byteOffset: 4 + 160 + 2)) {
             try Base64.decode(&reader, into: &writer)
@@ -165,7 +165,7 @@ func decodingError(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, paddi
         let text = Array("Zm9vYmFy".utf8)
         var output = [UInt8](repeating: 0, count: 5)
         var span = output.mutableSpan
-        var writer = BytesWriter(&span)
+        var writer = AlignedBytesWriter(&span)
         #expect(throws: LocatedBytesError(.insufficientCapacity, byteOffset: 0)) {
             try Base64.decode(text.span.bytes, into: &writer)
         }
@@ -173,7 +173,7 @@ func decodingError(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, paddi
         // Padded text needs room only for the bytes it decodes to.
         var exact = [UInt8](repeating: 0, count: 4)
         var exactSpan = exact.mutableSpan
-        var exactWriter = BytesWriter(&exactSpan)
+        var exactWriter = AlignedBytesWriter(&exactSpan)
         try Base64.decode(Array("Zm9vYg==".utf8).span.bytes, into: &exactWriter)
         #expect(exactWriter.byteCount == 4)
     }
@@ -194,7 +194,7 @@ func decodingError(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, paddi
     /// and padding, and its errors.
     @Test func portablePath() throws {
         func decodePortably(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, padding: Bool = true) throws(LocatedBytesError) -> [UInt8] {
-            try [UInt8](byteCapacity: Base64.maximumDecodedByteCount(of: text.count)) { (writer) throws(LocatedBytesError) in
+            try [UInt8](alignedByteCapacity: Base64.maximumDecodedByteCount(of: text.count)) { (writer) throws(LocatedBytesError) in
                 try Base64._decodeGroups(text.span.bytes, padding: padding, into: &writer, alphabet: alphabet, at: 0)
             }
         }
@@ -223,11 +223,11 @@ func decodingError(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, paddi
         for alphabet in [Base64.Alphabet.standard, .urlSafe] {
             let bytes = (0..<(3 * 100)).map { _ in UInt8.random(in: .min ... .max, using: &generator) }
             let text = Array(Base64.encodedString(bytes.span.bytes, alphabet: alphabet).utf8)
-            var reader = BytesReader(text.span)
+            var reader = AlignedBytesReader(text.span)
             let groups = try reader.read(InlineArray<4, UInt8>.self, count: 100)
             var output = [UInt8](repeating: 0, count: 300)
             var span = output.mutableSpan
-            var writer = BytesWriter(&span)
+            var writer = AlignedBytesWriter(&span)
             let valid = try writer.write(InlineArray<3, UInt8>.self, count: 100, filling: { decodedGroups in
                 Base64.decode(groups, into: &decodedGroups, alphabet: alphabet)
             })
@@ -236,10 +236,10 @@ func decodingError(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, paddi
 
             var bad = text
             bad[123] = 0x80
-            var badReader = BytesReader(bad.span)
+            var badReader = AlignedBytesReader(bad.span)
             let badGroups = try badReader.read(InlineArray<4, UInt8>.self, count: 100)
             var badSpan = output.mutableSpan
-            var badWriter = BytesWriter(&badSpan)
+            var badWriter = AlignedBytesWriter(&badSpan)
             let badValid = try badWriter.write(InlineArray<3, UInt8>.self, count: 100, filling: { decodedGroups in
                 Base64.decode(badGroups, into: &decodedGroups, alphabet: alphabet)
             })

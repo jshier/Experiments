@@ -7,6 +7,115 @@ Bandwidth counts every byte on the wire, MQTT headers included; the timing runs 
 the last receiver's end of stream. Every packet is checked on arrival. The package now also measures
 compressed and TLS-encrypted streams through Bytes pipelines (2026-11-15 below).
 
+## 2026-11-16: byte-aligned cursors (baseline `p4-aligned`)
+
+The packet encoder and checker use Bytes' `AlignedBytesWriter` and `AlignedBytesReader`, as MQTT now does.
+
+| Benchmark (in memory) | Change against `ss-new-2` |
+|---|---|
+| Encode 64 B packets | −1.2% (4,751 K → 4,694 K, below its earlier 4,735 K) |
+| Check 64 B packets | −1.3% |
+| Protect and unprotect | unchanged |
+
+`ss-new-2` also predates Bytes' matching, bit-writing, and search changes (the 2026-11-16 section of that file). Details: `../Bytes/Benchmarks/RESULTS.md`.
+
+## 2026-11-16: receive buffers are Bytes' `ByteBuffer` (baselines `ss-old-1`, `ss-new-1`, `ss-old-2`, `ss-new-2`)
+
+`ReceiveBuffer` (a raw allocation with `copyMemory` compaction) and `PlainBuffer` (an array compacted a byte
+at a time) are now `ByteBuffer`, from Bytes. So is the in-memory benchmark's third copy.
+- **Socket reads** go through `ByteBuffer.receive`, which can suspend with its output span in place. The
+  `read(from:)` extension in `ReceiveBuffer.swift` keeps the "packet larger than the buffer" precondition.
+- **Pipeline output** into a reused array goes through `[UInt8].withOutputRawSpan`.
+
+Unsafe code in `Sources` went from 9 sites to 1: copying a CryptoKit secret out.
+
+Interleaved old/new runs, two rounds each:
+
+| Benchmark | Instructions | Change |
+|---|---|---|
+| Unprotect 64 B packets, Brotli + TLS | 27 M → 26 M | −3.7% |
+| Encode 64 B packets | 4,735 K → 4,751 K | +0.3% |
+| Other in-memory rows | unchanged | |
+
+- **Unprotect** is faster because the buffer moves a partial packet to the front only below half free; the
+  old code moved it after every piece.
+- **Encode** is code I didn't change; it compiled differently (291 instructions instead of 301 in its
+  specialization). MQTT's own encode is identical with the new Bytes.
+- **Allocations:** 0 throughout.
+- **Transfers:** 1 KB plain, TLS, and deflate + TLS are within their run-to-run variation.
+
+## 2026-11-15: where protected transfers spend their time
+
+Why protected transfers run at 0.45–1 GB/s when plain ones reach the socket's ceiling. Measured with the
+CLI (1 connection unless noted), `Tools/profile` per thread, and a scratch harness that times each stage
+alone on the transfer's own stream (64 MB of batches, the same packets and telemetry payloads, built with the
+same toolchain; best of 5).
+
+Each stage alone, one core, GB/s of MQTT bytes:
+
+| Stage | 64 B payloads | 1 KB | 16 KB |
+|---|---|---|---|
+| MQTT encode | 7.07 | 33.0 | 87.6 |
+| DEFLATE level 1, Bytes (flushed per batch) | 0.55 | 0.69 | 1.19 |
+| DEFLATE level 1, libdeflate (per batch) | 0.62 | 0.80 | 1.32 |
+| Brotli quality 1, Bytes | 0.41 | 0.53 | 1.72 |
+| Inflate, Bytes / libdeflate | 2.22 / 2.39 | 2.62 / 2.93 | 7.13 / 7.67 |
+| TLS seal / open (ChaCha20-Poly1305) | 1.41 / 1.39 | 1.39 / 1.39 | 1.39 / 1.37 |
+| memcpy | 61.5 | 59.2 | 60.2 |
+
+- **The stages, not the pipeline, set the rate.** MQTT encoding (0.14 ns per byte at 64 B) and parsing cost
+  less than the kernel's socket copy, so plain transfers reach the socket's ceiling. Sealing costs 0.71
+  ns per byte, 5x the encoder, and DEFLATE level 1 costs 1.8 ns, 13x. Adding the stage costs per end
+  predicts what the transfers measure. TLS at 64 B: sender encode 0.14 + seal 0.71 + `sendto` about 0.17
+  ns/B, receiver about 0.37 + open 0.72, so about 0.9 GB/s predicted against 0.84–0.89 measured. DEFLATE +
+  TLS at 64 B: sender 0.14 + 1.82 + 0.16 × 0.71 for sealing a sixth of the bytes, so 0.48 predicted
+  against 0.45.
+- **Profiles agree.** TLS, 16 KB: the sender thread is busy for the whole transfer: ChaCha20 47%, Poly1305
+  29%, `sendto` 19%, `memmove` 3%. The receiver is about 90% busy: ChaCha20 51%, Poly1305 35%, `recvfrom`
+  8%. DEFLATE + TLS, 64 B: the sender is fully busy, about 80% of it in the DEFLATE compressor (`parseFastest`
+  34%, its inlined loads 17%, `extend` 13%, `writeSequences` 9%) and 3% in ChaCha20-Poly1305. The receiver
+  is about 40% busy. Pipeline glue, executor work (`kevent` about 1%), and extra copies (`memmove` 1.7–3.2%)
+  are small.
+- **One connection is one core per end, and the stages run one after another on it.** Each sender encodes,
+  compresses, seals, and writes on its own thread, so its rate is one over the sum of the stage costs.
+  Across connections (64 B, `--packets 3000000`, one run each), GB/s:
+
+  | Connections | plain | TLS | deflate + TLS |
+  |---|---|---|---|
+  | 1 | 2.81 | 0.89 | 0.46 |
+  | 4 | 3.61 | 3.18 | 1.69 |
+  | 8 | 3.20 | 4.57 | 3.17 |
+  | 16 | 3.18 | 2.82 | 6.27 |
+
+  DEFLATE + TLS scales almost linearly (13.6x at 16). Plain and TLS stop at the loopback ceiling for this
+  write pattern, about 3–4.5 GB/s on the wire. With 16 connections, compressed transfers deliver twice the
+  MQTT bytes of plain ones, because only a sixth of the bytes cross the socket.
+- **ChaCha20-Poly1305 is two passes, each leaving half the core idle.** ChaCha20's 8-block double round is
+  261 instructions (64 `add`, 64 `eor`, 48 `shl` + 48 `usra` for rotations by 12, 8, and 7, 16 `rev32`,
+  and 18 spills: SIMD8 state fills all 32 registers). That is about 5.7 instructions per byte with the
+  transposes, about 1.4 cycles per byte on four vector pipes, which is roughly what it measures. Poly1305
+  then runs over the same bytes on the scalar multiplier, about 1 cycle per byte, while the vector pipes
+  sit idle. Interleaving the two in one loop (as OpenSSL does) could approach the longer of the two, not
+  their sum: perhaps 1.8–2.5 GB/s per core (estimate). Smaller wins: rotating by 8 with one `tbl` instead of
+  `shl` + `usra` (16 instructions per double round), and fewer spills. AES-128-GCM, TLS 1.3's other
+  required suite, runs at about 10 GB/s with the CPU's AES and PMULL instructions (CryptoKit, 1 MB). It would
+  need those instructions through the C target, with ChaCha20 kept for the portable builds.
+- **DEFLATE level 1 is near its algorithm's speed.** Bytes produces byte-identical output sizes to
+  libdeflate and is 10–15% slower. Even libdeflate manages only 0.62 GB/s on this stream, so matching it would
+  gain about 12%. Larger gains need DEFLATE split across cores, pigz-style: chunks compressed in parallel,
+  each with the previous 32 KB as a preset dictionary, then joined with sync flushes into one standard
+  stream. Otherwise a faster format between our own endpoints, which gives up web compatibility.
+  Decompression is 4x faster than compression, so receivers idle.
+- **The 16 KB payloads overstate compression.** Their 977-byte-stride telemetry windows overlap about 94%
+  from one packet to the next, which is why DEFLATE reaches 3.5% and Brotli 1.1% there. The 64 B and 1 KB
+  streams are the realistic ones.
+- **What the design could change.** The pipeline runs synchronously on the connection's I/O task.
+  Throughput per connection is therefore one core's rate for all stages together. TLS records are
+  independent given their sequence numbers, and DEFLATE can be split as above. A pipeline stage that hands
+  work to other cores, sealing records or compressing chunks in parallel and keeping their order, could lift
+  one connection past one core's rate. Moving the `sendto` copy (19% of a TLS sender) off the sealing
+  thread would save about that much.
+
 ## 2026-11-15: compressed and encrypted transfers (baseline `protected-1`)
 
 The package was renamed from MQTTSocketStream to SocketStream (targets `SocketStream`, `socket-stream`;
@@ -57,7 +166,8 @@ Unprotecting deflate + TLS is cheaper than TLS alone because the opener has 16% 
   setup allocates 325 times, the same for 100,000 and 1,000,000 packets.
 - Payload change: plain transfers keep the fixed payload (a 256-byte cycle). With it, the compressors reduced
   the stream to about 1%, which measured nothing useful. Protected transfers take 977-byte-stride windows
-  of about 1 MB of generated JSON telemetry (`Payloads.telemetry`).- Receiver fix: the TLS opener alone never reports `.finished` (TLS records have no end of stream). The
+  of about 1 MB of generated JSON telemetry (`Payloads.telemetry`).
+- Receiver fix: the TLS opener alone never reports `.finished` (TLS records have no end of stream). The
   receiver treated `needsInput` at the end of the stream as "ended early" and threw; then the executors
   crashed with "A TCPConnection was destroyed without being closed". Now `needsInput` after the end means
   done (the decoders throw themselves if their input is incomplete), and both ends close their connection on

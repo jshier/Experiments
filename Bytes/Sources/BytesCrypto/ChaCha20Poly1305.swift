@@ -25,7 +25,7 @@ public struct ChaCha20Poly1305: Sendable {
     public init(key: RawSpan) {
         precondition(key.byteCount == 32, "ChaCha20-Poly1305 keys are 32 bytes")
         var words = InlineArray<8, UInt32>(repeating: 0)
-        var reader = BytesReader(key)
+        var reader = AlignedBytesReader(key)
         for index in 0..<8 {
             words[index] = try! reader.read(Byte4.self, .littleEndian) // Can't throw: 32 bytes, checked above.
         }
@@ -38,7 +38,7 @@ public struct ChaCha20Poly1305: Sendable {
     @inline(__always)
     static func nonceWords(_ nonce: RawSpan) -> (UInt32, UInt32, UInt32) {
         precondition(nonce.byteCount == 12, "ChaCha20-Poly1305 nonces are 12 bytes")
-        var reader = BytesReader(nonce)
+        var reader = AlignedBytesReader(nonce)
         // Can't throw: 12 bytes, checked above.
         return (try! reader.read(Byte4.self, .littleEndian), try! reader.read(Byte4.self, .littleEndian), try! reader.read(Byte4.self, .littleEndian))
     }

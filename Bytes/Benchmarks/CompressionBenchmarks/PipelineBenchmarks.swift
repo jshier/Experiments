@@ -123,8 +123,7 @@ func pipelineSend<P: ResettableByteTransform & ~Copyable>(
 ) -> Int where P.Failure == BytesError {
     pipeline.reset()
     let total = count ?? input.count
-    return output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    return output.withOutputRawSpan { span in
         var offset = 0
         repeat {
             let end = min(offset + 16_384, total)
@@ -136,7 +135,7 @@ func pipelineSend<P: ResettableByteTransform & ~Copyable>(
                 if progress.status == .finished || (progress.status == .needsInput && offset == end) { break }
             }
         } while offset < total
-        return span.finalize(for: buffer)
+        return span.byteCount
     }
 }
 
@@ -148,8 +147,7 @@ func pipelineReceive<P: ResettableByteTransform & ~Copyable>(
 ) -> Int where P.Failure == BytesError {
     pipeline.reset()
     let total = count ?? input.count
-    return output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    return output.withOutputRawSpan { span in
         var offset = 0
         while true {
             let end = min(offset + (64 << 10), total)
@@ -160,6 +158,6 @@ func pipelineReceive<P: ResettableByteTransform & ~Copyable>(
             // A decoder finishes; an opener at the input's end has nothing more to do.
             if progress.status == .finished || (finishing && offset == total) { break }
         }
-        return span.finalize(for: buffer)
+        return span.byteCount
     }
 }

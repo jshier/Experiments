@@ -17,7 +17,7 @@ public import Bytes
 /// yourself, and parsing only the types you expect, without `MQTTPacket`.
 ///
 /// ```swift
-/// var reader = BytesReader(received.span)
+/// var reader = AlignedBytesReader(received.span)
 /// while let frame = try MQTTFrame.read(from: &reader) {
 ///     switch frame.type {
 ///     case .publish:
@@ -35,11 +35,11 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
     /// The fixed header's flags: checked for every type but PUBLISH, which parses its own.
     public let flags: Nibble
     /// The rest of the packet, its remaining length: every read in it is bounded to the packet.
-    public var body: BytesReader
+    public var body: AlignedBytesReader
 
     @inlinable
     @_lifetime(copy body)
-    init(type: MQTTPacketType, flags: Nibble, body: consuming BytesReader) {
+    init(type: MQTTPacketType, flags: Nibble, body: consuming AlignedBytesReader) {
         self.type = type
         self.flags = flags
         self.body = body
@@ -61,7 +61,7 @@ public struct MQTTFrame: ~Copyable, ~Escapable {
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    public static func read(from reader: inout BytesReader, maximumPacketSize: Int = .max) throws(MQTTError) -> MQTTFrame? {
+    public static func read(from reader: inout AlignedBytesReader, maximumPacketSize: Int = .max) throws(MQTTError) -> MQTTFrame? {
         let start = reader.position
         // Type and flags (the high and low nibbles of a byte), then the remaining length.
         let header: Byte
@@ -117,7 +117,7 @@ extension MQTTPacketType {
 
 // MARK: - Writing packets
 
-extension BytesWriter {
+extension AlignedBytesWriter {
     /// Writes a packet: checks it and its size first, so nothing is written if it throws, then writes the
     /// fixed header and the body.
     ///
@@ -133,7 +133,7 @@ extension BytesWriter {
     @_lifetime(self: copy self)
     mutating func writeMQTTPacket(
         _ type: MQTTPacketType, flags: Nibble, bodyByteCount: Int,
-        validate: () throws(MQTTError) -> Void, body: (inout BytesWriter) throws(BytesError) -> Void
+        validate: () throws(MQTTError) -> Void, body: (inout AlignedBytesWriter) throws(BytesError) -> Void
     ) throws(BytesError) {
         do throws(MQTTError) { try validate() } catch { throw .invalidValue }
         guard bodyByteCount <= MQTTPacket.maximumRemainingLength else { throw .invalidValue }
@@ -176,7 +176,7 @@ public extension MQTTConnect {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
     ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.connect, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
                                    body: { writer throws(BytesError) in try writeBody(to: &writer) })
@@ -205,7 +205,7 @@ public extension MQTTConnectAcknowledgement {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
     ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.connectAcknowledgement, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
                                    body: { writer throws(BytesError) in try writeBody(to: &writer) })
@@ -236,7 +236,7 @@ public extension MQTTPublish {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
     ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.publish, flags: flags, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
                                    body: { writer throws(BytesError) in try writeBody(to: &writer) })
@@ -271,7 +271,7 @@ public extension MQTTPublishResponse {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` (including a
     ///   reason code `type` doesn't allow); `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter, as type: MQTTPacketType) throws(BytesError) {
         let reasonCodes = Self.reasonCodes(for: type)
         try writer.writeMQTTPacket(type, flags: type.requiredFlags, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate(reasonCodes: reasonCodes) },
@@ -311,7 +311,7 @@ public extension MQTTSubscribe {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
     ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.subscribe, flags: 0b0010, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
                                    body: { writer throws(BytesError) in try writeBody(to: &writer) })
@@ -340,7 +340,7 @@ public extension MQTTUnsubscribe {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
     ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.unsubscribe, flags: 0b0010, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
                                    body: { writer throws(BytesError) in try writeBody(to: &writer) })
@@ -375,7 +375,7 @@ public extension MQTTSubscribeAcknowledgement {
     ///   reason code `type` doesn't allow) or its body is too long for MQTT;
     ///   `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter, as type: MQTTPacketType) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter, as type: MQTTPacketType) throws(BytesError) {
         let allowed = Self.reasonCodes(for: type)
         try writer.writeMQTTPacket(type, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate(reasonCodes: allowed) },
@@ -415,7 +415,7 @@ public extension MQTTDisconnect {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
     ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.disconnect, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
                                    body: { writer throws(BytesError) in try writeBody(to: &writer) })
@@ -445,7 +445,7 @@ public extension MQTTAuthenticate {
     /// - Throws: `BytesError.invalidValue` if it breaks a rule of ``MQTTPacket/validate()`` or its body is
     ///   too long for MQTT; `BytesError.insufficientCapacity` if it doesn't fit.
     @inlinable
-    func write(to writer: inout BytesWriter) throws(BytesError) {
+    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.writeMQTTPacket(.authenticate, flags: 0, bodyByteCount: bodyByteCount,
                                    validate: { () throws(MQTTError) in try validate() },
                                    body: { writer throws(BytesError) in try writeBody(to: &writer) })

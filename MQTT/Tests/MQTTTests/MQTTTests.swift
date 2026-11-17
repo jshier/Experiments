@@ -6,12 +6,12 @@ import Testing
 
 /// Encodes `packet` into a new array.
 func encoded(_ packet: borrowing MQTTPacket) throws -> [UInt8] {
-    try [UInt8](byteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
+    try [UInt8](alignedByteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
 }
 
 /// Builds encoded fields (a property list, a subscription list) in a new array.
-func fieldBytes(_ body: (inout BytesWriter) throws(BytesError) -> Void) throws -> [UInt8] {
-    try [UInt8](byteCapacity: 512, writing: body)
+func fieldBytes(_ body: (inout AlignedBytesWriter) throws(BytesError) -> Void) throws -> [UInt8] {
+    try [UInt8](alignedByteCapacity: 512, writing: body)
 }
 
 func string(_ text: UTF8Span) -> String { String(copying: text) }
@@ -42,14 +42,14 @@ struct NoPacket: Error {}
 
 /// Parses exactly one packet from `bytes`, checking it consumes them all, and passes it to `body`.
 func parseOne(_ bytes: [UInt8], _ body: (borrowing MQTTPacket) throws -> Void) throws {
-    var reader = BytesReader(bytes.span)
+    var reader = AlignedBytesReader(bytes.span)
     guard let packet = try MQTTPacket.read(from: &reader) else { throw NoPacket() }
     #expect(reader.byteOffset == bytes.count)
     try body(packet)
 }
 
 func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: SourceLocation = #_sourceLocation) {
-    var reader = BytesReader(bytes.span)
+    var reader = AlignedBytesReader(bytes.span)
     do {
         _ = try MQTTPacket.read(from: &reader)
         Issue.record("Expected \(kind), parsed a packet", sourceLocation: sourceLocation)
@@ -306,7 +306,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         var consumed = 0
         for available in 1...stream.count {
             let received = Array(stream[consumed..<available])
-            var reader = BytesReader(received.span)
+            var reader = AlignedBytesReader(received.span)
             while let packet = try MQTTPacket.read(from: &reader) {
                 types.append(packet.type)
             }
@@ -377,7 +377,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         let v311: [UInt8] = [0x10, 0x0D, 0x00, 0x04, 0x4D, 0x51, 0x54, 0x54, 0x04, 0x02, 0x00, 0x3C, 0x00, 0x00, 0x00]
         expectError(.unsupportedProtocolVersion, v311)
         let tooLarge: [UInt8] = [0x30, 0x7F]
-        var reader = BytesReader(tooLarge.span)
+        var reader = AlignedBytesReader(tooLarge.span)
         #expect(throws: MQTTError(.packetTooLarge, "packet larger than the maximum packet size")) {
             _ = try MQTTPacket.read(from: &reader, maximumPacketSize: 100)
         }
@@ -398,7 +398,7 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         func expectRejected(_ packet: borrowing MQTTPacket, sourceLocation: SourceLocation = #_sourceLocation) {
             var buffer = [UInt8](repeating: 0xEE, count: 128)
             var span = buffer.mutableSpan
-            var writer = BytesWriter(&span)
+            var writer = AlignedBytesWriter(&span)
             #expect(throws: BytesError.invalidValue, sourceLocation: sourceLocation) { try packet.write(to: &writer) }
             #expect(writer.byteCount == 0, sourceLocation: sourceLocation)
             #expect(throws: MQTTError.self, sourceLocation: sourceLocation) { try packet.validate() }
@@ -440,11 +440,11 @@ func expectError(_ kind: MQTTError.Kind, _ bytes: [UInt8], sourceLocation: Sourc
         let packet = MQTTPacket.publish(MQTTPublish(
             qos: .atLeastOnce, topic: "sensors/kitchen".utf8Span, packetIdentifier: 7, payload: reading.span.bytes
         ))
-        let bytes = try [UInt8](byteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
+        let bytes = try [UInt8](alignedByteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
 
         var received = bytes + [0x30] // and the first byte of the next packet
         var delivered: [(String, [UInt8])] = []
-        var reader = BytesReader(received.span)
+        var reader = AlignedBytesReader(received.span)
         while let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: 1 << 20) {
             switch packet {
             case let .publish(publish):

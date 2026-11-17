@@ -219,7 +219,7 @@ struct Inflater: ~Copyable {
             case let .stored(remaining):
                 let count = min(remaining, output.byteCount &- position)
                 var reader = try BytesReader(input, atBitPosition: bitPosition)
-                var writer = try BytesWriter(&output, atByteOffset: position)
+                var writer = try AlignedBytesWriter(&output, atByteOffset: position)
                 try writer.write(reader.read(byteCount: count))
                 bitPosition = reader.bitPosition
                 position = writer.byteCount
@@ -303,7 +303,7 @@ struct Inflater: ~Copyable {
     ) throws(BytesError) -> (bitPosition: Int, end: Int, endOfBlock: Bool) {
         precondition(literals.count == tableSize && distances.count == distanceTableSize)
         var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
-        var writer = try BytesWriter(&output, atByteOffset: end)
+        var writer = try AlignedBytesWriter(&output, atByteOffset: end)
         var endOfBlock = false
 
         // The next symbol's entry is looked up ahead of time (as libdeflate does): at the top of each
@@ -312,7 +312,7 @@ struct Inflater: ~Copyable {
         bits.refill()
         var entry = lookup(literals, bits.bits, rootBits: literalRootBits)
         // Room for three literals, a match, and its copy's overrun.
-        symbols: while writer.remainingByteCount >= 3 &+ maximumMatch &+ BytesWriter.copyOverrun {
+        symbols: while writer.remainingByteCount >= 3 &+ maximumMatch &+ AlignedBytesWriter.copyOverrun {
             if entry.kind == .literal {
                 // Literals come in runs: up to three per refill (15 bits each of the 56 or more buffered).
                 // Each lookup after a literal reads valid bits (41, then 26 or more left), and a refill only
@@ -418,9 +418,9 @@ struct Inflater: ~Copyable {
         _ entry: HuffmanEntry, _ table: Span<UInt32>, _ bits: UInt64, rootBits: Int
     ) -> HuffmanEntry {
         guard entry.kind == .subtable else { return entry }
-        // Shift, then mask, by hand: `bits.bits(from: rootBits, upTo: rootBits &+ entry.codeLength)` masks
-        // first, which needs the sum, and grew `decodeSymbols` by 5 instructions.
-        let index = Int(truncatingIfNeeded: bits &>> UInt64(rootBits)) & ((1 &<< entry.codeLength) &- 1)
+        // Shift, then mask: `bits(from:upTo:)` masks first, which needs the sum, and grew `decodeSymbols` by 5
+        // instructions.
+        let index = Int(truncatingIfNeeded: bits.bits(from: rootBits, count: entry.codeLength))
         return HuffmanEntry(raw: table[entry.value &+ index])
     }
 

@@ -97,7 +97,10 @@ import zlib
             var decoder = DeflateDecoder(format: format)
             var output = [UInt8](repeating: 0, count: 100)
             let input = compressed + [1, 2, 3]
-            let consumed = try output.withUnsafeMutableBytes { buffer throws(BytesError) in
+            // The span's closure keeps the error type. Swift 6.4.2 miscompiles a typed-throws closure passed to the
+            // array's (which rethrows `any Error`): an error thrown through it arrives as garbage.
+            var outputSpan = output.mutableSpan
+            let consumed = try outputSpan.withUnsafeMutableBytes { buffer throws(BytesError) in
                 var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
                 return try decoder.decompressAll(input.span.bytes, into: &span)
             }
@@ -146,5 +149,25 @@ import zlib
         #expect(decodeAll([0x78, 0x9C], format: .zlib) == .failed) // Header only.
         #expect(decodeAll([0x78, 0x9D, 0x03, 0x00], format: .zlib) == .failed) // Bad header check.
         #expect(decodeAll([0x1F, 0x8C, 0x08, 0, 0, 0, 0, 0, 0, 3, 0x03, 0x00], format: .gzip) == .failed) // Bad magic.
+    }
+}
+
+extension DeflateDecoderTests {
+    /// A dynamic block's header cut after 8 bytes, from a 16-lane parallel stream: the zeros read past the end
+    /// decode as code 16 (repeat the previous length) with no previous length. That's a truncated header, so
+    /// more input is needed; it threw `invalidValue` (a socket stream's receiver failed whenever a read ended
+    /// there). Block headers don't depend on history, so the block alone is a stream from its start.
+    @Test func headerCutWhereZerosReadAsARepeatNeedsInput() throws {
+        let header: [UInt8] = [0xA4, 0x7D, 0x39, 0xD2, 0x35, 0x3B, 0x6C, 0xDD]
+        var decoder = DeflateDecoder(format: .raw)
+        var output = [UInt8](repeating: 0, count: 1024)
+        let progress: TransformProgress? = output.withUnsafeMutableBytes { buffer in
+            var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+            let progress = try? decoder.decompress(header.span.bytes, into: &span)
+            _ = span.finalize(for: buffer)
+            return progress
+        }
+        let unwrapped = try #require(progress, "a truncated header threw")
+        #expect(unwrapped.status == .needsInput && unwrapped.consumed == 0 && unwrapped.produced == 0)
     }
 }

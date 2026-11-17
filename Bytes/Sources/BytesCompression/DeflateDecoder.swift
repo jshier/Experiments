@@ -27,7 +27,7 @@ public struct DeflateDecoder: ~Copyable {
     private var stream: InflateStream
 
     /// Room the fast loop needs before each symbol: three literals, a longest match, and the copy's overrun.
-    static var fastRoom: Int { 3 + Deflate.maximumMatch + BytesWriter.copyOverrun }
+    static var fastRoom: Int { 3 + Deflate.maximumMatch + AlignedBytesWriter.copyOverrun }
     /// The window: 32 KB of history, then room to decode into, until it slides.
     static var windowCapacity: Int { 160 << 10 }
 
@@ -70,19 +70,14 @@ public struct DeflateDecoder: ~Copyable {
     ///   if the output doesn't fit; ``BytesError/invalidValue`` for corrupt data; ``BytesError/mismatch`` for
     ///   a wrong checksum or length, or a stored block's bad length complement.
     public mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
-        // Unsafe: a span over the output's uninitialized capacity, which no safe API exposes. Safe: the span
-        // covers exactly that capacity and ends with the closure; only the bytes decoded are counted as
-        // initialized.
-        try unsafe output.withUnsafeMutableBytes { buffer, initializedCount throws(BytesError) -> Int in
-            let free = unsafe UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount...])
-            var span = unsafe MutableRawSpan(_unsafeBytes: free)
+        try output.withFreeCapacity { span, written throws(BytesError) -> Int in
             let result = try stream.run(input, from: 0, into: &span, at: 0)
             switch result.stop {
             case .finished: break
             case .needsInput: throw .insufficientData
             case .outputFull: throw .insufficientCapacity
             }
-            initializedCount &+= result.end
+            written = result.end
             return result.position &>> 3
         }
     }
@@ -140,16 +135,7 @@ public struct DeflateDecoder: ~Copyable {
     private mutating func deliver(into output: inout OutputRawSpan) -> Int {
         let count = min(windowEnd &- windowDelivered, output.freeCapacity)
         guard count > 0 else { return 0 }
-        let start = windowDelivered
-        // Unsafe: a raw copy from the window into the output's free capacity. Safe: `count` bytes are
-        // decoded from `start` and fit the free capacity, and only they are counted as initialized.
-        window.span.withUnsafeBytes { source in
-            unsafe output.withUnsafeMutableBytes { buffer, initializedCount in
-                unsafe buffer.baseAddress!.advanced(by: initializedCount)
-                    .copyMemory(from: source.baseAddress!.advanced(by: start), byteCount: count)
-                initializedCount &+= count
-            }
-        }
+        output.append(copying: window.span.bytes.extracting(windowDelivered..<(windowDelivered &+ count)))
         windowDelivered &+= count
         return count
     }
@@ -160,11 +146,7 @@ public struct DeflateDecoder: ~Copyable {
         let kept = min(windowEnd, Deflate.windowSize)
         let start = windowEnd &- kept
         var span = window.mutableSpan
-        // Unsafe: a raw copy within the window. Safe: both ranges are inside it (`start + kept` is
-        // `windowEnd`), and `copyMemory` allows them to overlap.
-        span.withUnsafeMutableBytes { buffer in
-            unsafe buffer.baseAddress!.copyMemory(from: buffer.baseAddress!.advanced(by: start), byteCount: kept)
-        }
+        span.copyBytes(within: start..<windowEnd, toByteOffset: 0)
         windowEnd = kept
         windowDelivered = kept
     }
@@ -257,6 +239,13 @@ struct InflateStream: ~Copyable {
     }
 
     /// Prepares to decode a new stream. Keeps the tables.
+    /// Whether the stream is between two blocks, the last not final: where a parallel decoder's segment may
+    /// end.
+    var isBetweenBlocks: Bool {
+        if case .blockHeader = stage { return !isFinalBlock }
+        return false
+    }
+
     mutating func reset() {
         stage = Self.initialStage(format)
         isFinalBlock = false
@@ -312,7 +301,7 @@ struct InflateStream: ~Copyable {
                 let byteOffset = position &>> 3 // Stored data starts on a byte boundary.
                 // Pairwise `min`: with three or more arguments it's variadic, which can allocate an array.
                 let count = min(min(remaining, input.byteCount &- byteOffset), output.byteCount &- end)
-                var writer = try BytesWriter(&output, atByteOffset: end)
+                var writer = try AlignedBytesWriter(&output, atByteOffset: end)
                 try writer.write(input.extracting(byteOffset..<(byteOffset &+ count)))
                 updateChecksum(writer.writtenBytes.extracting(end...))
                 position &+= count &<< 3
@@ -391,7 +380,7 @@ struct InflateStream: ~Copyable {
                 stage = .blockHeader
             case .gzipHeader:
                 let fixed = try reader.read(byteCount: 10)
-                var header = BytesReader(fixed)
+                var header = AlignedBytesReader(fixed)
                 try header.expect(0x1F_8B_08 as Byte3) // ID1, ID2, CM (8, DEFLATE)
                 gzipFlags = try header.read(Byte.self).rawValue
                 guard gzipFlags & 0xE0 == 0 else { throw BytesError.invalidValue } // Reserved flags.
@@ -401,7 +390,7 @@ struct InflateStream: ~Copyable {
                 if gzipFlags & 0x04 != 0 { // FEXTRA
                     let lengthBytes = try reader.read(byteCount: 2)
                     headerCRC.update(lengthBytes)
-                    var lengthReader = BytesReader(lengthBytes)
+                    var lengthReader = AlignedBytesReader(lengthBytes)
                     stage = try .gzipExtra(remaining: Int(lengthReader.read(Byte2.self, .littleEndian)))
                 } else {
                     stage = .gzipName
@@ -463,7 +452,7 @@ struct InflateStream: ~Copyable {
                 guard try reader.read(Byte4.self, .bigEndian) == checksum else { throw BytesError.mismatch }
             case .gzip:
                 let trailer = try reader.read(byteCount: 8)
-                var fields = BytesReader(trailer)
+                var fields = AlignedBytesReader(trailer)
                 guard try fields.read(Byte4.self, .littleEndian) == checksum,
                       try fields.read(Byte4.self, .littleEndian) == length else { throw BytesError.mismatch }
             }
@@ -559,7 +548,12 @@ struct InflateStream: ~Copyable {
                 index &+= 1
                 continue
             case 16: // The previous length, 3 to 6 times.
-                guard index > 0 else { throw .invalidValue }
+                guard index > 0 else {
+                    // Zeros past the end of a truncated header can decode as code 16 here: that's more input
+                    // needed, not an invalid stream (a socket stream's reads ended 8 bytes into a header).
+                    if bits.isOverrun { return false }
+                    throw .invalidValue
+                }
                 repeated = lengths[index &- 1]
                 count = 3 &+ Int(bits.read(Crumb.self))
             case 17: // Zero, 3 to 10 times.
@@ -653,7 +647,7 @@ struct InflateStream: ~Copyable {
     ) throws(BytesError) -> (bitPosition: Int, end: Int, stop: SymbolStop) {
         precondition(literals.count == tableSize && distances.count == distanceTableSize)
         var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
-        var writer = try BytesWriter(&output, atByteOffset: end)
+        var writer = try AlignedBytesWriter(&output, atByteOffset: end)
         let inputBits = input.byteCount &<< 3
 
         // The fast loop. The next symbol's entry is looked up ahead of time (as libdeflate does): at the top
@@ -741,7 +735,7 @@ struct InflateStream: ~Copyable {
     ) throws(BytesError) -> (bitPosition: Int, end: Int, stop: SymbolStop) {
         precondition(literals.count == tableSize && distances.count == distanceTableSize)
         var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
-        var writer = try BytesWriter(&output, atByteOffset: end)
+        var writer = try AlignedBytesWriter(&output, atByteOffset: end)
         let inputBits = input.byteCount &<< 3
         while true {
             let start = bits.bitPosition
@@ -772,7 +766,7 @@ struct InflateStream: ~Copyable {
                 bits.consume(bitCount: distanceEntry.totalBits)
                 guard bits.bitPosition <= inputBits else { return (start, writer.byteCount, .needsInput) }
                 guard writer.remainingByteCount >= length else { return (start, writer.byteCount, .outputFull) }
-                if writer.remainingByteCount >= length &+ BytesWriter.copyOverrun {
+                if writer.remainingByteCount >= length &+ AlignedBytesWriter.copyOverrun {
                     try writer.copy(fromDistance: distance, count: length, allowingOverrun: true)
                 } else {
                     try writer.copy(fromDistance: distance, count: length)
@@ -821,9 +815,9 @@ struct InflateStream: ~Copyable {
         _ entry: HuffmanEntry, _ table: Span<UInt32>, _ bits: UInt64, rootBits: Int
     ) -> HuffmanEntry {
         guard entry.kind == .subtable else { return entry }
-        // Shift, then mask, by hand: `bits.bits(from: rootBits, upTo: rootBits &+ entry.codeLength)` masks
-        // first, which needs the sum, and grew `decodeSymbols` by 5 instructions.
-        let index = Int(truncatingIfNeeded: bits &>> UInt64(rootBits)) & ((1 &<< entry.codeLength) &- 1)
+        // Shift, then mask: `bits(from:upTo:)` masks first, which needs the sum, and grew `decodeSymbols` by 5
+        // instructions.
+        let index = Int(truncatingIfNeeded: bits.bits(from: rootBits, count: entry.codeLength))
         return HuffmanEntry(raw: table[entry.value &+ index])
     }
 }

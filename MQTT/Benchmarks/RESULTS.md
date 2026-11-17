@@ -10,6 +10,22 @@ cores), macOS 27.2, Swift 6.4.2. Single-core times vary about ±10% from run to 
 One core parses the same 1.25 MB again and again, from cache. All 32 cores each parse their own copies
 (4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput.
 
+## 2026-11-16: byte-aligned cursors (baselines `p4-generic` → `p4-aligned`)
+
+MQTT now parses with `AlignedBytesReader` and writes with `AlignedBytesWriter`: the same API as before, with no
+bit state, since every MQTT field is whole bytes. Its flag bits are read from a `Byte`, not from the stream.
+
+| Benchmark | Change (instructions) |
+|---|---|
+| Encode PUBLISH | −6.1% (5,464 K → 5,132 K) |
+| Parse PUBLISH, views | −0.9% |
+| Parse PUBLISH, properties not iterated | −1.2% |
+| Parse PUBLISH, frames | −1.0% |
+| Parse PUBLISH, copying strings | −2.9% |
+| Parse mixed stream | −1.8% |
+
+Details: `../../Bytes/Benchmarks/RESULTS.md`, 2026-11-16 (byte-aligned cursors).
+
 ## 2026-11-10: Bytes' conveniences adopted (baselines `conv-old-*` → `conv-new-*`, then `conv-fix`, `conv-qos`)
 
 - `readRemainingBytes()` for the payload, subscription list, topic filters, and reason codes (four

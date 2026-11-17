@@ -11,7 +11,8 @@
 /// ```
 ///
 /// Writes are packed like reads: after a bit-level write, multi-byte writes continue mid-byte, each byte
-/// made of the next 8 bits in ``bitOrder``; ``alignToByte()`` pads to the next byte with zeros. A bit-level
+/// made of the next 8 bits in ``GenericBytesWriter/bitOrder``; ``GenericBytesWriter/alignToByte()`` pads to
+/// the next byte with zeros. A bit-level
 /// write zeroes the rest of the byte it ends in, which is what appending wants.
 ///
 /// Every write stays within the bytes it writes (odd widths use two overlapping stores, never a wider
@@ -22,23 +23,69 @@
 /// A single value too large for the field it's written as (`write(0x0100_0000, as: Byte3.self,
 /// .bigEndian)`) is a programming error: debug builds trap, and release builds write the low bytes. Bulk
 /// and generating writes always write the low bytes, unchecked, so their loops vectorize, and so does
-/// ``write(_:bitCount:)``, by design, like `init(truncatingIfNeeded:)`.
+/// ``GenericBytesWriter/write(_:bitCount:)``, by design, like `init(truncatingIfNeeded:)`.
 ///
 /// A write that throws (``BytesError/insufficientCapacity``, or ``BytesError/invalidValue`` and
 /// ``BytesError/misaligned`` where documented) writes nothing and doesn't move the cursor.
+///
+/// For output with no sub-byte fields, ``AlignedBytesWriter`` has the same byte-level API with no bit state:
+/// see ``BytesCursorMode``.
+public typealias BytesWriter = GenericBytesWriter<BitAddressable>
+
+/// A ``BytesWriter`` for whole bytes only: the same byte-level API, with a bit offset that is the constant 0,
+/// so writes carry no alignment tests or partial-byte bookkeeping (MQTT's packet encoding: −6% instructions).
+///
+/// ```swift
+/// var output = buffer.mutableSpan
+/// var writer = AlignedBytesWriter(&output)
+/// try writer.write(0x30 as Byte)
+/// try writer.write(topic, prefixedBy: Byte2.self, .bigEndian)
+/// ```
+///
+/// Sub-byte fields within a byte still work through ``Byte``'s bit fields (`flags[Crumb.self, at: 6] = …`).
+public typealias AlignedBytesWriter = GenericBytesWriter<ByteAligned>
+
+/// The writer behind ``BytesWriter`` and ``AlignedBytesWriter``: see those, and ``BytesCursorMode``.
 @safe
-public struct BytesWriter: ~Copyable, ~Escapable {
+public struct GenericBytesWriter<Mode: BytesCursorMode>: ~Copyable, ~Escapable {
     @usableFromInline var _bytes: MutableRawSpan
-    /// The order of bits within each byte, for ``Bits`` and ``write(_:bitCount:)``.
+    /// The order of bits within each byte, for ``Bits`` and ``write(_:bitCount:)``. Unused by
+    /// ``AlignedBytesWriter``.
     public let bitOrder: BitOrder
     @usableFromInline var _byteOffset: Int
-    /// Bits already written into the byte at `_byteOffset`: always 0 through 7.
-    @usableFromInline var _bitOffset: Int
+    @usableFromInline var _bitOffsetStorage: Int
+    @usableFromInline var _partialStorage: UInt64
+
+    /// Bits already written into the byte at `_byteOffset`: always 0 through 7, and the constant 0 for a
+    /// byte-aligned writer.
+    @inlinable
+    var _bitOffset: Int {
+        @inline(__always) get { Mode.addressesBits ? _bitOffsetStorage : 0 }
+        @inline(__always) set { if Mode.addressesBits { _bitOffsetStorage = newValue } }
+    }
+
     /// The byte at `_byteOffset` as written so far (zero when `_bitOffset` is 0). Kept here so a bit write
     /// doesn't reload the byte the previous one stored: that reload made consecutive bit writes wait on
     /// store-to-load forwarding.
-    @usableFromInline var _partial: UInt64
+    @inlinable
+    var _partial: UInt64 {
+        @inline(__always) get { Mode.addressesBits ? _partialStorage : 0 }
+        @inline(__always) set { if Mode.addressesBits { _partialStorage = newValue } }
+    }
 
+    /// Creates a writer at the start of `bytes`, overwriting them.
+    @inlinable @inline(__always)
+    @_lifetime(copy bytes)
+    init(_writing bytes: consuming MutableRawSpan, bitOrder: BitOrder) {
+        _bytes = bytes
+        self.bitOrder = bitOrder
+        _byteOffset = 0
+        _bitOffsetStorage = 0
+        _partialStorage = 0
+    }
+}
+
+public extension GenericBytesWriter where Mode == BitAddressable {
     /// Creates a writer at the start of `bytes`, overwriting them.
     ///
     /// - Parameters:
@@ -46,12 +93,8 @@ public struct BytesWriter: ~Copyable, ~Escapable {
     ///   - bitOrder: The order of bits within each byte, for bit-level writes.
     @inlinable
     @_lifetime(copy bytes)
-    public init(_ bytes: consuming MutableRawSpan, bitOrder: BitOrder = .mostSignificantFirst) {
-        _bytes = bytes
-        self.bitOrder = bitOrder
-        _byteOffset = 0
-        _bitOffset = 0
-        _partial = 0
+    init(_ bytes: consuming MutableRawSpan, bitOrder: BitOrder = .mostSignificantFirst) {
+        self.init(_writing: bytes, bitOrder: bitOrder)
     }
 
     /// Creates a writer at the start of `bytes`, overwriting them.
@@ -61,7 +104,7 @@ public struct BytesWriter: ~Copyable, ~Escapable {
     ///   - bitOrder: The order of bits within each byte, for bit-level writes.
     @inlinable
     @_lifetime(&bytes)
-    public init(_ bytes: inout MutableSpan<UInt8>, bitOrder: BitOrder = .mostSignificantFirst) {
+    init(_ bytes: inout MutableSpan<UInt8>, bitOrder: BitOrder = .mostSignificantFirst) {
         self.init(MutableRawSpan(mutating: &bytes), bitOrder: bitOrder)
     }
 
@@ -84,17 +127,94 @@ public struct BytesWriter: ~Copyable, ~Escapable {
     ///   ``BytesError/insufficientCapacity`` if it's past the end of `bytes`.
     @inlinable @inline(__always)
     @_lifetime(&bytes)
-    public init(_ bytes: inout MutableRawSpan, atByteOffset offset: Int, bitOrder: BitOrder = .mostSignificantFirst) throws(BytesError) {
+    init(_ bytes: inout MutableRawSpan, atByteOffset offset: Int, bitOrder: BitOrder = .mostSignificantFirst) throws(BytesError) {
         guard offset >= 0 else { throw .invalidValue }
         guard offset <= bytes.byteCount else { throw .insufficientCapacity }
         self.init(bytes._mutatingExtracting(...), bitOrder: bitOrder)
+        _byteOffset = offset
+    }
+
+    /// Creates a writer over `bytes` whose first `offset` bytes are already written, as
+    /// ``init(_:atByteOffset:bitOrder:)-(MutableRawSpan,_,_)`` does, for a typed span such as an array's or a
+    /// `UniqueArray`'s `mutableSpan`.
+    ///
+    /// ```swift
+    /// var span = window.mutableSpan
+    /// var writer = try BytesWriter(&span, atByteOffset: windowEnd)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - bytes: The memory to write into, borrowed for the writer's lifetime.
+    ///   - offset: The number of bytes already written, 0 through `bytes.count`.
+    ///   - bitOrder: The order of bits within each byte, for bit-level writes.
+    /// - Throws: ``BytesError/invalidValue`` if `offset` is negative,
+    ///   ``BytesError/insufficientCapacity`` if it's past the end of `bytes`.
+    @inlinable @inline(__always)
+    @_lifetime(&bytes)
+    init(_ bytes: inout MutableSpan<UInt8>, atByteOffset offset: Int, bitOrder: BitOrder = .mostSignificantFirst) throws(BytesError) {
+        guard offset >= 0 else { throw .invalidValue }
+        guard offset <= bytes.count else { throw .insufficientCapacity }
+        self.init(MutableRawSpan(mutating: &bytes), bitOrder: bitOrder)
+        _byteOffset = offset
+    }
+}
+
+public extension GenericBytesWriter where Mode == ByteAligned {
+    /// Creates a writer at the start of `bytes`, overwriting them.
+    ///
+    /// - Parameter bytes: The memory to write into; the writer's capacity is its length.
+    @inlinable
+    @_lifetime(copy bytes)
+    init(_ bytes: consuming MutableRawSpan) {
+        self.init(_writing: bytes, bitOrder: .mostSignificantFirst)
+    }
+
+    /// Creates a writer at the start of `bytes`, overwriting them.
+    ///
+    /// - Parameter bytes: The memory to write into; the writer's capacity is its length.
+    @inlinable
+    @_lifetime(&bytes)
+    init(_ bytes: inout MutableSpan<UInt8>) {
+        self.init(MutableRawSpan(mutating: &bytes))
+    }
+
+    /// Creates a writer over `bytes` whose first `offset` bytes are already written, as
+    /// ``GenericBytesWriter/init(_:atByteOffset:bitOrder:)-(MutableRawSpan,_,_)`` does.
+    ///
+    /// - Parameters:
+    ///   - bytes: The memory to write into, borrowed for the writer's lifetime.
+    ///   - offset: The number of bytes already written, 0 through `bytes.byteCount`.
+    /// - Throws: ``BytesError/invalidValue`` if `offset` is negative,
+    ///   ``BytesError/insufficientCapacity`` if it's past the end of `bytes`.
+    @inlinable @inline(__always)
+    @_lifetime(&bytes)
+    init(_ bytes: inout MutableRawSpan, atByteOffset offset: Int) throws(BytesError) {
+        guard offset >= 0 else { throw .invalidValue }
+        guard offset <= bytes.byteCount else { throw .insufficientCapacity }
+        self.init(bytes._mutatingExtracting(...))
+        _byteOffset = offset
+    }
+
+    /// Creates a writer over `bytes` whose first `offset` bytes are already written, for a typed span.
+    ///
+    /// - Parameters:
+    ///   - bytes: The memory to write into, borrowed for the writer's lifetime.
+    ///   - offset: The number of bytes already written, 0 through `bytes.count`.
+    /// - Throws: ``BytesError/invalidValue`` if `offset` is negative,
+    ///   ``BytesError/insufficientCapacity`` if it's past the end of `bytes`.
+    @inlinable @inline(__always)
+    @_lifetime(&bytes)
+    init(_ bytes: inout MutableSpan<UInt8>, atByteOffset offset: Int) throws(BytesError) {
+        guard offset >= 0 else { throw .invalidValue }
+        guard offset <= bytes.count else { throw .insufficientCapacity }
+        self.init(MutableRawSpan(mutating: &bytes))
         _byteOffset = offset
     }
 }
 
 // MARK: - Position
 
-public extension BytesWriter {
+public extension GenericBytesWriter {
     /// The number of bytes written so far, including a partly written last byte.
     @inlinable
     var byteCount: Int { _byteOffset &+ (_bitOffset == 0 ? 0 : 1) }
@@ -201,7 +321,7 @@ public extension BytesWriter {
         }
     }
 
-    /// See ``BytesReader/_assumeInvariant()``; the same reasoning applies.
+    /// See ``GenericBytesReader/_assumeInvariant()``; the same reasoning applies.
     @inlinable @inline(__always)
     internal func _assumeInvariant() {
         unsafe assume(_byteOffset <= _bytes.byteCount)
@@ -212,7 +332,7 @@ public extension BytesWriter {
 
 // MARK: - Byte groups
 
-public extension BytesWriter {
+public extension GenericBytesWriter {
     /// Writes `value`'s `T.byteCount` bytes, in memory order. Works mid-byte after a bit-level write.
     ///
     /// - Parameter value: The byte group to write.
@@ -229,7 +349,7 @@ public extension BytesWriter {
             return
         }
         guard remainingByteCount >= T.byteCount else { throw .insufficientCapacity }
-        (_byteOffset, _bitOffset, _partial) = Self._writeUnalignedBytes(
+        (_byteOffset, _bitOffset, _partial) = BytesWriter._writeUnalignedBytes(
             UInt128(value.littleEndian), count: T.byteCount, to: &_bytes,
             at: (_byteOffset, _bitOffset, _partial), bitOrder: bitOrder
         )
@@ -255,6 +375,43 @@ public extension BytesWriter {
         try write(T(value, byteOrder))
     }
 
+    /// Writes `value`: a whole byte, the one ``Bits`` width both kinds of writer write (an
+    /// ``AlignedBytesWriter`` has no other). Bit-addressable writers partway through a byte write the next 8
+    /// bits.
+    ///
+    /// - Parameter value: The byte to write.
+    /// - Throws: ``BytesError/insufficientCapacity`` if no whole byte remains. Nothing is written.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write(_ value: Byte) throws(BytesError) {
+        _assumeInvariant()
+        if likely(_bitOffset == 0) {
+            guard likely(_byteOffset < _bytes.byteCount) else { throw .insufficientCapacity }
+            unsafe _bytes.storeBytes(of: value.rawValue, toUncheckedByteOffset: _byteOffset, as: UInt8.self)
+            _byteOffset &+= 1
+            return
+        }
+        guard likely(remainingBitCount >= 8) else { throw .insufficientCapacity }
+        _writeBits(UInt64(value.rawValue), count: 8)
+    }
+
+    /// Writes `count` bits of `value` at the cursor. See the static version.
+    ///
+    /// - Parameters:
+    ///   - value: The bits, already masked to `count` bits.
+    ///   - count: The number of bits, 1 through 57.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    internal mutating func _writeBits(_ value: UInt64, count: Int) {
+        (_byteOffset, _bitOffset, _partial) = BytesWriter._writeBits(
+            value, count: count, to: &_bytes, at: (_byteOffset, _bitOffset, _partial), bitOrder: bitOrder
+        )
+    }
+}
+
+// Out-of-line helpers, in the bit-addressable writer's own extension so that they're not generic: called from
+// either mode's specialized code, they take no type metadata.
+extension BytesWriter {
     /// Writes `count` bytes of `bytes` (little-endian: first byte lowest) when not byte-aligned, each as the
     /// next 8 bits. Capacity already checked.
     ///
@@ -359,19 +516,6 @@ extension BytesWriter {
         }
     }
 
-    /// Writes `count` bits of `value` at the cursor. See the static version.
-    ///
-    /// - Parameters:
-    ///   - value: The bits, already masked to `count` bits.
-    ///   - count: The number of bits, 1 through 57.
-    @inlinable @inline(__always)
-    @_lifetime(self: copy self)
-    mutating func _writeBits(_ value: UInt64, count: Int) {
-        (_byteOffset, _bitOffset, _partial) = Self._writeBits(
-            value, count: count, to: &_bytes, at: (_byteOffset, _bitOffset, _partial), bitOrder: bitOrder
-        )
-    }
-
     /// A writer's position: byte offset, bit offset, and the partly written byte (see `_partial`).
     @usableFromInline typealias _Position = (byteOffset: Int, bitOffset: Int, partial: UInt64)
 
@@ -412,7 +556,7 @@ extension BytesWriter {
 
 // MARK: - Custom types, standard library types, and spans
 
-public extension BytesWriter {
+public extension GenericBytesWriter {
     /// Writes `value`'s raw bytes, in memory order. See ``ByteRepresentable``.
     ///
     /// - Parameter value: The value to write.
@@ -425,7 +569,7 @@ public extension BytesWriter {
     }
 
     /// Writes `value`'s `MemoryLayout<T>.size` bytes in native byte order (little-endian on Apple
-    /// platforms): the counterpart of ``BytesReader/load(_:)``.
+    /// platforms): the counterpart of ``GenericBytesReader/load(_:)``.
     ///
     /// - Parameter value: The value to write.
     /// - Throws: ``BytesError/insufficientCapacity`` if fewer than `MemoryLayout<T>.size` whole bytes
@@ -464,40 +608,59 @@ public extension BytesWriter {
         precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
         _assumeInvariant()
         guard likely(_bytes.byteCount &- _byteOffset >= bytes.byteCount) else { throw .insufficientCapacity }
-        let count = bytes.byteCount
-        let offset = _byteOffset
-        // Short spans (strings, small payloads, a block kernel's last block) are copied inline with
-        // overlapping loads and stores, as `memcpy` does internally: a call would cost more than the copy
-        // (Base64's 47-byte inputs took 43% longer with `memmove` for their 33-to-64-byte copies). Longer
-        // ones call `memmove`, out of line.
+        unsafe Self._copyBytes(bytes, to: &_bytes, at: _byteOffset)
+        _byteOffset &+= bytes.byteCount
+    }
+
+    /// Copies all of `source` to `offset` in `destination`. Capacity already checked; the two don't overlap.
+    ///
+    /// Short spans (strings, small payloads, a block kernel's last block) are copied inline with overlapping
+    /// loads and stores, as `memcpy` does internally: a call would cost more than the copy (Base64's 47-byte
+    /// inputs took 43% longer with `memmove` for their 33-to-64-byte copies). Longer ones call `memmove`, out
+    /// of line. Shared by ``write(_:)-(RawSpan)``, `MutableRawSpan.copyBytes(from:toByteOffset:)`, and
+    /// `OutputRawSpan.append(copying:)`.
+    ///
+    /// Unsafe: unchecked stores. Safe: the caller has checked that `offset + source.byteCount` is within
+    /// `destination`.
+    ///
+    /// - Parameters:
+    ///   - source: The bytes to copy.
+    ///   - destination: The memory written to.
+    ///   - offset: Where in `destination` the copy starts.
+    @unsafe @inlinable @inline(__always)
+    internal static func _copyBytes(_ source: RawSpan, to destination: inout MutableRawSpan, at offset: Int) {
+        let count = source.byteCount
         switch count {
         case 0:
             // An empty span may have no memory behind it (`Data().span`): nothing to copy, nothing to unwrap.
             return
         case 1...3:
-            unsafe Self._copy(UInt8.self, from: bytes, 0, to: &_bytes, offset)
-            unsafe Self._copy(UInt8.self, from: bytes, count &>> 1, to: &_bytes, offset)
-            unsafe Self._copy(UInt8.self, from: bytes, count &- 1, to: &_bytes, offset)
+            unsafe _copy(UInt8.self, from: source, 0, to: &destination, offset)
+            unsafe _copy(UInt8.self, from: source, count &>> 1, to: &destination, offset)
+            unsafe _copy(UInt8.self, from: source, count &- 1, to: &destination, offset)
         case 4...7:
-            unsafe Self._copy(UInt32.self, from: bytes, 0, to: &_bytes, offset)
-            unsafe Self._copy(UInt32.self, from: bytes, count &- 4, to: &_bytes, offset)
+            unsafe _copy(UInt32.self, from: source, 0, to: &destination, offset)
+            unsafe _copy(UInt32.self, from: source, count &- 4, to: &destination, offset)
         case 8...16:
-            unsafe Self._copy(UInt64.self, from: bytes, 0, to: &_bytes, offset)
-            unsafe Self._copy(UInt64.self, from: bytes, count &- 8, to: &_bytes, offset)
+            unsafe _copy(UInt64.self, from: source, 0, to: &destination, offset)
+            unsafe _copy(UInt64.self, from: source, count &- 8, to: &destination, offset)
         case 17...32:
-            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, 0, to: &_bytes, offset)
-            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, count &- 16, to: &_bytes, offset)
+            unsafe _copy(SIMD16<UInt8>.self, from: source, 0, to: &destination, offset)
+            unsafe _copy(SIMD16<UInt8>.self, from: source, count &- 16, to: &destination, offset)
         case 33...64:
-            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, 0, to: &_bytes, offset)
-            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, 16, to: &_bytes, offset)
-            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, count &- 32, to: &_bytes, offset)
-            unsafe Self._copy(SIMD16<UInt8>.self, from: bytes, count &- 16, to: &_bytes, offset)
+            unsafe _copy(SIMD16<UInt8>.self, from: source, 0, to: &destination, offset)
+            unsafe _copy(SIMD16<UInt8>.self, from: source, 16, to: &destination, offset)
+            unsafe _copy(SIMD16<UInt8>.self, from: source, count &- 32, to: &destination, offset)
+            unsafe _copy(SIMD16<UInt8>.self, from: source, count &- 16, to: &destination, offset)
         default:
-            unsafe Self._copyLong(bytes, to: &_bytes, at: offset)
+            unsafe BytesWriter._copyLong(source, to: &destination, at: offset)
         }
-        _byteOffset &+= count
     }
 
+}
+
+// Not generic: see `_writeUnalignedBytes`.
+extension BytesWriter {
     /// Copies all of `source` to `offset` in `destination` with `memmove`. Capacity already checked.
     ///
     /// Unsafe: `memmove`. Safe: the caller's capacity check covers the destination, and the source is the
@@ -519,6 +682,9 @@ public extension BytesWriter {
         }
     }
 
+}
+
+public extension GenericBytesWriter {
     /// Copies the `T` at `sourceOffset` in `source` to the same offset after `offset` in `destination`.
     /// Bounds already checked.
     ///
@@ -551,7 +717,7 @@ public extension BytesWriter {
 
 // MARK: - Skipping and back-references
 
-public extension BytesWriter {
+public extension GenericBytesWriter {
     /// Moves the cursor forward over `byteCount` bytes, leaving them as they are: for writing after a prefix
     /// that's already in place, such as a decompressor's history window. Requires byte alignment.
     ///
@@ -724,7 +890,7 @@ public extension BytesWriter {
             var run = bytes._mutatingExtracting(offset..<(offset &+ count))
             run.storeBytes(repeating: byte, count: count, as: UInt8.self) // `memset`
         } else if distance < 8, count > 0 {
-            unsafe _copyRepeating(distance: distance, count: count, in: &bytes, at: offset)
+            unsafe BytesWriter._copyRepeating(distance: distance, count: count, in: &bytes, at: offset)
         } else {
             // At least 8 back but fewer than 4 bytes: byte by byte.
             for index in 0..<count {
@@ -732,7 +898,10 @@ public extension BytesWriter {
             }
         }
     }
+}
 
+// Not generic: see `_writeUnalignedBytes`.
+extension BytesWriter {
     /// A back-reference 2 to 7 bytes back: it repeats the last `distance` bytes, so it's a run of them, as
     /// `write(repeating:)` writes: load them once and store 16 bytes at a time. (Copied a byte at a time,
     /// each byte depended on one just written.) Bounds already checked.
@@ -753,7 +922,9 @@ public extension BytesWriter {
         let element = unsafe Load.block(distance, from: bytes.bytes, at: offset &- distance)
         unsafe _fill(UInt128(element), period: distance, byteCount: count, in: &bytes, at: offset)
     }
+}
 
+public extension GenericBytesWriter {
     @unsafe @inlinable @inline(always)
     internal static func _move<T: ConvertibleFromBytes & ConvertibleToBytes & BitwiseCopyable>(_: T.Type, from source: Int, to destination: Int, in bytes: inout MutableRawSpan) {
         let value = unsafe bytes.bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: source, as: T.self)
@@ -763,7 +934,7 @@ public extension BytesWriter {
 
 // MARK: - Runs and copies from a reader
 
-public extension BytesWriter {
+public extension GenericBytesWriter {
     /// Writes `byte` `count` times: padding, filler, a run of a run-length encoding. Requires byte alignment.
     ///
     /// ```swift
@@ -956,7 +1127,9 @@ public extension BytesWriter {
     @inlinable @inline(always)
     @_lifetime(self: copy self)
     @_lifetime(reader: copy reader)
-    mutating func write(from reader: inout BytesReader, byteCount: Int, allowingOverrun: Bool) throws(BytesError) {
+    mutating func write<ReaderMode: BytesCursorMode>(
+        from reader: inout GenericBytesReader<ReaderMode>, byteCount: Int, allowingOverrun: Bool
+    ) throws(BytesError) {
         precondition(byteCount >= 0, "Negative byte count")
         precondition(_bitOffset == 0, "Copying requires byte alignment: call alignToByte() first")
         precondition(reader._bitOffset == 0, "Copying requires byte alignment: call alignToByte() on the reader first")
@@ -996,7 +1169,7 @@ public extension BytesWriter {
 // Values too large for `T` are truncated without a check here, unlike single writes in debug builds: a
 // check in the loop would stop it vectorizing.
 
-public extension BytesWriter {
+public extension GenericBytesWriter {
     /// Writes `count` values as `T` in `byteOrder`, each produced by `value` from its index, in order.
     /// Values too large for `T` are truncated to its low bytes, unchecked.
     ///
@@ -1091,6 +1264,9 @@ public extension BytesWriter {
         try write(T.self, byteOrder, count: values.count) { unsafe values[unchecked: $0] }
     }
 
+}
+
+public extension BytesWriter {
     /// Writes `count` values of `width` bits, packed in ``bitOrder``, each produced by `value` from its
     /// index, in order.
     ///
@@ -1166,6 +1342,9 @@ public extension BytesWriter {
         try write(Bits<width>.self, count: values.count) { unsafe values[unchecked: $0] }
     }
 
+}
+
+public extension GenericBytesWriter {
     /// Writes `count` values' raw bytes, each produced by `value` from its index, in order.
     ///
     /// - Parameters:
@@ -1210,7 +1389,7 @@ public extension BytesWriter {
     }
 
     /// Writes `count` values of `T` in place: `body` fills a typed view of the next `count` values' bytes,
-    /// then the writer moves past them. The counterpart of ``BytesReader/read(_:count:)``: together they
+    /// then the writer moves past them. The counterpart of ``GenericBytesReader/read(_:count:)``: together they
     /// let a loop go from one typed span to another, which is the shape the compiler vectorizes best.
     ///
     /// ```swift
@@ -1395,15 +1574,107 @@ extension OutputSpan where Element == UInt8 {
     /// - Throws: What `body` throws.
     @inlinable @inline(always)
     @_lifetime(self: copy self)
-    mutating func _withBytesWriter<E: Error>(
-        bitOrder: BitOrder, _ body: (inout BytesWriter) throws(E) -> Void
+    mutating func _withBytesWriter<Mode: BytesCursorMode, E: Error>(
+        bitOrder: BitOrder, _ body: (inout GenericBytesWriter<Mode>) throws(E) -> Void
     ) throws(E) {
         // Unsafe and safe as for `withBytesWriter`.
         try unsafe withUnsafeMutableBufferPointer { buffer, initializedCount throws(E) in
             let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
-            var writer = unsafe BytesWriter(MutableRawSpan(_unsafeBytes: free), bitOrder: bitOrder)
+            var writer = unsafe GenericBytesWriter<Mode>(_writing: MutableRawSpan(_unsafeBytes: free), bitOrder: bitOrder)
             try body(&writer)
             initializedCount &+= writer.byteCount
+        }
+    }
+}
+
+// MARK: - Byte-aligned writers in the builders
+
+// The builders above with an ``AlignedBytesWriter``. Named apart (`withAlignedBytesWriter`,
+// `alignedByteCapacity:`) rather than overloaded: an overload on the closure's parameter type made every
+// closure that works with either writer (`{ writer in try writer.write(x) }`) ambiguous, or, generic over the
+// mode, uninferrable.
+
+public extension OutputSpan where Element == UInt8 {
+    /// ``withBytesWriter(bitOrder:_:)`` with an ``AlignedBytesWriter``.
+    ///
+    /// - Parameter body: Receives a writer over the free capacity. If it throws, nothing is added.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws.
+    @inlinable
+    @_lifetime(self: copy self)
+    mutating func withAlignedBytesWriter<R: ~Copyable, E: Error>(
+        _ body: (inout AlignedBytesWriter) throws(E) -> R
+    ) throws(E) -> R {
+        // Unsafe and safe as for the plain form.
+        try unsafe withUnsafeMutableBufferPointer { buffer, initializedCount throws(E) -> R in
+            let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
+            var writer = unsafe AlignedBytesWriter(MutableRawSpan(_unsafeBytes: free))
+            let result = try body(&writer)
+            initializedCount &+= writer.byteCount
+            return result
+        }
+    }
+}
+
+public extension OutputRawSpan {
+    /// ``withBytesWriter(bitOrder:_:)`` with an ``AlignedBytesWriter``.
+    ///
+    /// - Parameter body: Receives a writer over the free capacity. If it throws, nothing is added.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws.
+    @inlinable
+    @_lifetime(self: copy self)
+    mutating func withAlignedBytesWriter<R: ~Copyable, E: Error>(
+        _ body: (inout AlignedBytesWriter) throws(E) -> R
+    ) throws(E) -> R {
+        // Unsafe and safe as for the plain form.
+        try unsafe withUnsafeMutableBytes { buffer, initializedCount throws(E) -> R in
+            let free = unsafe UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount...])
+            var writer = unsafe AlignedBytesWriter(MutableRawSpan(_unsafeBytes: free))
+            let result = try body(&writer)
+            initializedCount &+= writer.byteCount
+            return result
+        }
+    }
+}
+
+public extension [UInt8] {
+    /// ``init(byteCapacity:bitOrder:writing:)`` with an ``AlignedBytesWriter``.
+    ///
+    /// ```swift
+    /// let bytes = try [UInt8](alignedByteCapacity: packet.encodedByteCount) { writer in
+    ///     try packet.write(to: &writer)
+    /// }
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - alignedByteCapacity: The most bytes `body` can write; also the array's reserved capacity.
+    ///   - body: Receives a writer over that many bytes.
+    /// - Throws: What `body` throws.
+    @inlinable @inline(always)
+    init<E: Error>(
+        alignedByteCapacity byteCapacity: Int, writing body: (inout AlignedBytesWriter) throws(E) -> Void
+    ) throws(E) {
+        var array: [UInt8] = []
+        array.reserveCapacity(byteCapacity)
+        try array.append(addingCapacity: byteCapacity) { (output: inout OutputSpan<UInt8>) throws(E) in
+            try output._withBytesWriter(bitOrder: .mostSignificantFirst, body)
+        }
+        self = array
+    }
+
+    /// ``append(byteCapacity:bitOrder:writing:)`` with an ``AlignedBytesWriter``.
+    ///
+    /// - Parameters:
+    ///   - alignedByteCapacity: The most bytes `body` can write.
+    ///   - body: Receives a writer over that many bytes.
+    /// - Throws: What `body` throws.
+    @inlinable @inline(always)
+    mutating func append<E: Error>(
+        alignedByteCapacity byteCapacity: Int, writing body: (inout AlignedBytesWriter) throws(E) -> Void
+    ) throws(E) {
+        try append(addingCapacity: byteCapacity) { (output: inout OutputSpan<UInt8>) throws(E) in
+            try output._withBytesWriter(bitOrder: .mostSignificantFirst, body)
         }
     }
 }
@@ -1416,7 +1687,7 @@ extension OutputSpan where Element == UInt8 {
 /// Unsafe for the same reason as ``Load``, with the same guarantee: each caller has checked the capacity
 /// for everything it stores. `MutableRawSpan`'s checked `storeBytes` measured 42–144% more instructions
 /// writing odd widths (`Byte3`, `Byte5`–`Byte15`), 28–47% more for packed bit fields, because its checks
-/// aren't folded into the writer's. The copies below (``BytesWriter/_copy(_:from:_:to:_:)``, `_move`) are
+/// aren't folded into the writer's. The copies below (``GenericBytesWriter/_copy(_:from:_:to:_:)``, `_move`) are
 /// unchecked for the same reason; the match copies they make are DEFLATE's hottest loop.
 @usableFromInline @unsafe
 enum Store {

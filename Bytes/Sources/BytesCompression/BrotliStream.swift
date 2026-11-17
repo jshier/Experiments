@@ -9,10 +9,18 @@ internal import Bytes
 struct BrotliPrefixCodes: ~Copyable {
     private var arena: UniqueArray<UInt32>
     private var used = 0
+    /// Scratch for reading a code, kept so nothing is zeroed per code: the used symbols in value order, their
+    /// lengths, and the symbols in canonical order.
+    private var readSymbols: UniqueArray<UInt16>
+    private var readLengths: UniqueArray<UInt8>
+    private var sortedSymbols: UniqueArray<UInt16>
     static var rootBits: Int { 8 }
 
     init() {
         arena = UniqueArray(repeating: 0, count: 64 << 10)
+        readSymbols = UniqueArray(repeating: 0, count: 704)
+        readLengths = UniqueArray(repeating: 0, count: 704)
+        sortedSymbols = UniqueArray(repeating: 0, count: 704)
     }
 
     /// Forgets the codes, for the next meta-block.
@@ -50,7 +58,8 @@ struct BrotliPrefixCodes: ~Copyable {
     /// - Throws: ``BytesError/invalidValue`` for an invalid code. Past the end of the input, zeros are read and
     ///   the caller checks for the overrun.
     mutating func read(_ bits: inout BitBuffer, alphabetSize: Int) throws(BytesError) -> Int32 {
-        var lengths = InlineArray<704, UInt8>(repeating: 0)
+        var counts = InlineArray<17, Int>(repeating: 0)
+        var symbolCount = 0
         bits.refill()
         let skip = Int(bits.read(bitCount: 2))
         var singleSymbol = -1
@@ -60,9 +69,9 @@ struct BrotliPrefixCodes: ~Copyable {
             while (1 &<< alphabetBits) < alphabetSize {
                 alphabetBits &+= 1
             }
-            let symbolCount = Int(bits.read(bitCount: 2)) &+ 1
+            let count = Int(bits.read(bitCount: 2)) &+ 1
             var symbols = InlineArray<4, Int>(repeating: 0)
-            for index in 0..<symbolCount {
+            for index in 0..<count {
                 bits.refill()
                 let symbol = Int(bits.read(bitCount: alphabetBits))
                 guard symbol < alphabetSize || bits.isOverrun else { throw .invalidValue }
@@ -71,30 +80,55 @@ struct BrotliPrefixCodes: ~Copyable {
                     throw .invalidValue
                 }
             }
-            switch symbolCount {
+            var lengths = InlineArray<4, Int>(repeating: 0)
+            switch count {
             case 1:
                 singleSymbol = symbols[0]
             case 2:
-                lengths[symbols[0]] = 1
-                lengths[symbols[1]] = 1
+                lengths = [1, 1, 0, 0]
             case 3:
-                lengths[symbols[0]] = 1
-                lengths[symbols[1]] = 2
-                lengths[symbols[2]] = 2
+                lengths = [1, 2, 2, 0]
             default:
-                if bits.read(bitCount: 1) == 0 {
-                    for index in 0..<4 {
-                        lengths[symbols[index]] = 2
+                lengths = bits.read(bitCount: 1) == 0 ? [2, 2, 2, 2] : [1, 2, 3, 3]
+            }
+            if count > 1 {
+                // Canonical order, by length then value: an insertion sort of at most four keys.
+                var keys = InlineArray<4, Int>(repeating: 0)
+                for index in 0..<count {
+                    var slot = index
+                    let key = lengths[index] &<< 16 | symbols[index]
+                    while slot > 0 && keys[slot &- 1] > key {
+                        keys[slot] = keys[slot &- 1]
+                        slot &-= 1
                     }
-                } else {
-                    lengths[symbols[0]] = 1
-                    lengths[symbols[1]] = 2
-                    lengths[symbols[2]] = 3
-                    lengths[symbols[3]] = 3
+                    keys[slot] = key
                 }
+                var sorted = sortedSymbols.mutableSpan
+                for index in 0..<count {
+                    sorted[index] = UInt16(truncatingIfNeeded: keys[index])
+                    counts[keys[index] &>> 16] &+= 1
+                }
+                symbolCount = count
             }
         } else {
-            try Self.readComplexCodeLengths(&bits, skip: skip, alphabetSize: alphabetSize, into: &lengths)
+            var symbols = readSymbols.mutableSpan
+            var lengths = readLengths.mutableSpan
+            symbolCount = try Self.readComplexCodeLengths(
+                &bits, skip: skip, alphabetSize: alphabetSize, symbols: &symbols, lengths: &lengths, counts: &counts
+            )
+            // A counting sort of the used symbols, read in value order, into canonical order.
+            var offsets = InlineArray<17, Int>(repeating: 0)
+            for length in 1..<16 {
+                offsets[length &+ 1] = offsets[length] &+ counts[length]
+            }
+            let readSymbols = readSymbols.span
+            let readLengths = readLengths.span
+            var sorted = sortedSymbols.mutableSpan
+            for index in 0..<symbolCount {
+                let length = Int(readLengths[index]) & 0xF
+                sorted[offsets[length]] = readSymbols[index]
+                offsets[length] &+= 1
+            }
         }
         if bits.isOverrun {
             // Truncated: the lengths may not be a valid code, and the caller starts over. A trivial table keeps
@@ -125,9 +159,9 @@ struct BrotliPrefixCodes: ~Copyable {
             used &+= 1 << Self.rootBits
         } else {
             used &+= try HuffmanTable.build(
-                codeLengths: lengths.span.extracting(0..<alphabetSize), bitOrder: .leastSignificantFirst,
-                rootBits: Self.rootBits, maximumCodeLength: 15, allowingIncomplete: false, into: &table,
-                invalid: 2 &<< 5,
+                sortedSymbols: sortedSymbols.span.extracting(0..<symbolCount), counts: counts,
+                bitOrder: .leastSignificantFirst, rootBits: Self.rootBits, maximumCodeLength: 15,
+                allowingIncomplete: false, into: &table, invalid: 2 &<< 5,
                 symbol: { symbol, length in UInt32(truncatingIfNeeded: length | symbol &<< 8) },
                 subtable: { offset, bits in UInt32(truncatingIfNeeded: bits | offset &<< 8) | 1 &<< 5 }
             )
@@ -136,10 +170,14 @@ struct BrotliPrefixCodes: ~Copyable {
     }
 
     /// Reads a complex prefix code's code lengths: the code-length code's lengths in a fixed order, then the
-    /// symbols' lengths with repeat codes 16 (the last nonzero length) and 17 (zeros).
+    /// symbols' lengths with repeat codes 16 (the last nonzero length) and 17 (zeros). Collects only the
+    /// used symbols, in value order, with their lengths, and counts each length; runs of zeros cost nothing.
+    ///
+    /// - Returns: The number of used symbols.
     private static func readComplexCodeLengths(
-        _ bits: inout BitBuffer, skip: Int, alphabetSize: Int, into lengths: inout InlineArray<704, UInt8>
-    ) throws(BytesError) {
+        _ bits: inout BitBuffer, skip: Int, alphabetSize: Int,
+        symbols: inout MutableSpan<UInt16>, lengths: inout MutableSpan<UInt8>, counts: inout InlineArray<17, Int>
+    ) throws(BytesError) -> Int {
         var codeLengthLengths = InlineArray<18, UInt8>(repeating: 0)
         var space = 32
         var codes = 0
@@ -155,7 +193,7 @@ struct BrotliPrefixCodes: ~Copyable {
                 if space <= 0 { break }
             }
         }
-        if bits.isOverrun { return }
+        if bits.isOverrun { return 0 }
         guard codes == 1 || space == 0 else { throw .invalidValue }
         // The code-length code: codes of at most 5 bits, decoded with a direct 32-entry table.
         var table = InlineArray<32, UInt16>(repeating: 0) // symbol << 8 | length
@@ -168,14 +206,34 @@ struct BrotliPrefixCodes: ~Copyable {
                 table[index] = UInt16(symbol) &<< 8
             }
         } else {
+            // Canonical order for 18 symbols on the stack (the code-length form zeroes room for 320).
+            var counts = InlineArray<17, Int>(repeating: 0)
+            for index in 0..<18 {
+                counts[Int(codeLengthLengths[index]) & 7] &+= 1
+            }
+            counts[0] = 0
+            var offsets = InlineArray<8, Int>(repeating: 0)
+            for length in 1..<7 {
+                offsets[length &+ 1] = offsets[length] &+ counts[length]
+            }
+            var sorted = InlineArray<18, UInt16>(repeating: 0)
+            for index in 0..<18 {
+                let length = Int(codeLengthLengths[index]) & 7
+                if length != 0 {
+                    sorted[offsets[length]] = UInt16(truncatingIfNeeded: index)
+                    offsets[length] &+= 1
+                }
+            }
             var span = table.mutableSpan
             _ = try HuffmanTable.build(
-                codeLengths: codeLengthLengths.span, bitOrder: .leastSignificantFirst, rootBits: 5, maximumCodeLength: 5,
-                allowingIncomplete: false, into: &span, invalid: 0,
+                sortedSymbols: sorted.span.extracting(0..<codes), counts: counts, bitOrder: .leastSignificantFirst,
+                rootBits: 5, maximumCodeLength: 5, allowingIncomplete: false, into: &span, invalid: 0,
                 symbol: { symbol, length in UInt16(truncatingIfNeeded: symbol &<< 8 | length) },
                 subtable: { _, _ in 0 }
             )
         }
+        precondition(symbols.count >= alphabetSize && lengths.count >= alphabetSize)
+        var used = 0
         var symbol = 0
         var previous: UInt8 = 8
         var repeatCount = 0
@@ -188,9 +246,12 @@ struct BrotliPrefixCodes: ~Copyable {
             let code = Int(entry &>> 8)
             if code < 16 {
                 repeatCount = 0
-                lengths[symbol] = UInt8(code)
                 if code != 0 {
-                    previous = UInt8(code)
+                    symbols[used] = UInt16(truncatingIfNeeded: symbol)
+                    lengths[used] = UInt8(truncatingIfNeeded: code)
+                    used &+= 1
+                    counts[code] &+= 1
+                    previous = UInt8(truncatingIfNeeded: code)
                     remaining &-= 32768 &>> code
                 }
                 symbol &+= 1
@@ -208,20 +269,24 @@ struct BrotliPrefixCodes: ~Copyable {
                 repeatCount &+= Int(bits.read(bitCount: extraBits)) &+ 3
                 let delta = repeatCount &- old
                 guard symbol &+ delta <= alphabetSize else {
-                    if bits.isOverrun { return }
+                    if bits.isOverrun { return used }
                     throw .invalidValue
                 }
-                for index in symbol..<(symbol &+ delta) {
-                    lengths[index] = length
-                }
                 if length != 0 {
+                    for offset in 0..<delta {
+                        symbols[used &+ offset] = UInt16(truncatingIfNeeded: symbol &+ offset)
+                        lengths[used &+ offset] = length
+                    }
+                    used &+= delta
+                    counts[Int(length)] &+= delta
                     remaining &-= delta &<< (15 &- Int(length))
                 }
                 symbol &+= delta
             }
-            if bits.isOverrun { return }
+            if bits.isOverrun { return used }
         }
         guard remaining == 0 else { throw .invalidValue }
+        return used
     }
 
     /// Reads a block count with the tree at `tree`: up to 15 + 24 bits.
@@ -243,10 +308,18 @@ struct BrotliBlocks {
     var countTrees = InlineArray<3, Int32>(repeating: 0)
 
     /// Switches `category` to its next block type: a block-type code and a block count, up to 15 + 15 + 24
-    /// bits. Out of line: rare, and inlined three times it pushed the command loop past the inliner's budget.
+    /// bits, read from `window` (the bit buffer's bits after a refill: 56 or more).
+    ///
+    /// Out of line: rare, and inlined three times it pushed the command loop past the inliner's budget. It
+    /// takes the bits by value and returns how many it used, so the caller's bit buffer never has its
+    /// address taken: passed `inout` to a call, it lived in memory for the whole loop (stored and reloaded
+    /// around every literal, with its bit order tested at run time).
+    ///
+    /// - Returns: The bits used.
     @inline(never)
-    mutating func switchBlock(_ bits: inout BitBuffer, category: Int, codes: borrowing BrotliPrefixCodes) {
-        let code = codes.decode(&bits, tree: Int(typeTrees[category]))
+    mutating func switchBlock(_ window: UInt64, category: Int, table: Span<UInt32>) -> Int {
+        var used = 0
+        let code = Self.decode(window, table: table, tree: Int(UInt32(bitPattern: typeTrees[category])), used: &used)
         var type: Int
         switch code {
         case 0: type = previousTypes[category]
@@ -256,8 +329,23 @@ struct BrotliBlocks {
         if type >= typeCounts[category] { type &-= typeCounts[category] }
         previousTypes[category] = types[category]
         types[category] = type
-        bits.refill()
-        lengths[category] = codes.readBlockCount(&bits, tree: Int(countTrees[category]))
+        let countCode = Self.decode(window &>> UInt64(used), table: table, tree: Int(UInt32(bitPattern: countTrees[category])), used: &used)
+        let extraBits = Int(Brotli.blockCountExtraBits[countCode])
+        let extra = Int(truncatingIfNeeded: (window &>> UInt64(used)) & ((1 &<< UInt64(extraBits)) &- 1))
+        lengths[category] = Int(Brotli.blockCountBases[countCode]) &+ extra
+        return used &+ extraBits
+    }
+
+    /// Decodes a symbol from the low bits of `window` with the tree at `tree`, adding its length to `used`.
+    @inline(__always)
+    static func decode(_ window: UInt64, table: Span<UInt32>, tree: Int, used: inout Int) -> Int {
+        var entry = table[tree &+ Int(truncatingIfNeeded: window & 0xFF)]
+        if entry & 0x60 == 0x20 {
+            let index = Int(truncatingIfNeeded: window &>> 8) & ((1 &<< Int(entry & 0x1F)) &- 1)
+            entry = table[tree &+ Int(entry &>> 8) &+ index]
+        }
+        used &+= Int(entry & 0x1F)
+        return Int(entry &>> 8)
     }
 }
 
@@ -269,6 +357,8 @@ struct BrotliStream: ~Copyable {
     private var literalTrees: UniqueArray<Int32>
     private var commandTrees: UniqueArray<Int32>
     private var distanceTrees: UniqueArray<Int32>
+    /// For each literal block type whose 64 contexts all map to one tree, that tree's offset; -1 otherwise.
+    private var trivialLiteralTrees: UniqueArray<Int32>
     private var blocks = BrotliBlocks()
 
     /// The literal context map (64 entries per block type) and the distance context map (4 per block type).
@@ -345,6 +435,7 @@ struct BrotliStream: ~Copyable {
         literalTrees = UniqueArray(repeating: 0, count: 256)
         commandTrees = UniqueArray(repeating: 0, count: 256)
         distanceTrees = UniqueArray(repeating: 0, count: 256)
+        trivialLiteralTrees = UniqueArray(repeating: -1, count: 256)
         literalContextMap = UniqueArray(repeating: 0, count: 64 &* 256)
         distanceContextMap = UniqueArray(repeating: 0, count: 4 &* 256)
         contextModes = UniqueArray(repeating: 0, count: 256)
@@ -377,7 +468,12 @@ struct BrotliStream: ~Copyable {
     }
 
     /// The fast loop runs while this much input remains at a command's start, and this much output room.
-    static var fastInput: Int { 128 }
+    ///
+    /// A command's lengths take at most 117 bits (a block switch, 15 + 15 + 24; the insert-and-copy code, 15;
+    /// its extra bits, 24 + 24), leaving 267 of these 384 for its literals, which stop with 128 left (a
+    /// literal block switch, 54, comes first): the distance takes at most 93 (a block switch, the code, 15,
+    /// and 24 extra bits). 128 bytes kept small streams in the careful loop: most of a 269-byte stream.
+    static var fastInput: Int { 48 }
     static var fastRoom: Int { 64 }
 
     /// Input within which units are checked for overrunning the end: more than any unit needs.
@@ -429,7 +525,7 @@ struct BrotliStream: ~Copyable {
             case let .uncompressed(remaining):
                 let byteOffset = bitPosition &>> 3
                 let count = min(min(remaining, input.byteCount &- byteOffset), output.byteCount &- end)
-                var writer = try BytesWriter(&output, atByteOffset: end)
+                var writer = try AlignedBytesWriter(&output, atByteOffset: end)
                 try writer.write(input.extracting(byteOffset..<(byteOffset &+ count)))
                 bitPosition &+= count &<< 3
                 end &+= count
@@ -598,6 +694,19 @@ struct BrotliStream: ~Copyable {
             trees[tree] = offset
             guard !bits.isOverrun else { return false }
         }
+        do {
+            let map = literalContextMap.span
+            let trees = literalTrees.span
+            var trivial = trivialLiteralTrees.mutableSpan
+            for type in 0..<blocks.typeCounts[0] {
+                let first = map[type &<< 6]
+                var same = true
+                for context in 1..<64 where map[type &<< 6 | context] != first {
+                    same = false
+                }
+                trivial[type] = same ? trees[Int(first)] : -1
+            }
+        }
         for tree in 0..<blocks.typeCounts[1] {
             let offset = try codes.read(&bits, alphabetSize: 704)
             var trees = commandTrees.mutableSpan
@@ -693,7 +802,7 @@ struct BrotliStream: ~Copyable {
         _ input: RawSpan, from start: Int, into output: inout MutableRawSpan, at outputStart: Int
     ) throws(BytesError) -> (position: Int, end: Int, metablockDone: Bool, stop: Stop) {
         var bits = try BitBuffer(input, atBitPosition: start, bitOrder: .leastSignificantFirst)
-        var writer = try BytesWriter(&output, atByteOffset: outputStart)
+        var writer = try AlignedBytesWriter(&output, atByteOffset: outputStart)
         let inputBits = input.byteCount &<< 3
         let safeBits = Self.safeInput &<< 3
         /// The stream position of `output[0]`.
@@ -734,7 +843,8 @@ struct BrotliStream: ~Copyable {
                 if blocks.lengths[1] == 0 {
                     // A block switch is a unit of its own.
                     let saved = blocks
-                    blocks.switchBlock(&bits, category: 1, codes: codes)
+                    let used = blocks.switchBlock(bits.bits, category: 1, table: codes.table)
+                    bits.consume(bitCount: used)
                     if checked && bits.bitPosition > inputBits {
                         blocks = saved
                         bits = try BitBuffer(input, atBitPosition: unitStart, bitOrder: .leastSignificantFirst)
@@ -778,7 +888,8 @@ struct BrotliStream: ~Copyable {
                 bits.refill()
                 if blocks.lengths[0] == 0 {
                     let saved = blocks
-                    blocks.switchBlock(&bits, category: 0, codes: codes)
+                    let used = blocks.switchBlock(bits.bits, category: 0, table: codes.table)
+                    bits.consume(bitCount: used)
                     if checked && bits.bitPosition > inputBits {
                         blocks = saved
                         bits = try BitBuffer(input, atBitPosition: unitStart, bitOrder: .leastSignificantFirst)
@@ -821,7 +932,8 @@ struct BrotliStream: ~Copyable {
                     bits.refill()
                     if blocks.lengths[2] == 0 {
                         let saved = blocks
-                        blocks.switchBlock(&bits, category: 2, codes: codes)
+                        let used = blocks.switchBlock(bits.bits, category: 2, table: codes.table)
+                        bits.consume(bitCount: used)
                         if checked && bits.bitPosition > inputBits {
                             blocks = saved
                             bits = try BitBuffer(input, atBitPosition: unitStart, bitOrder: .leastSignificantFirst)
@@ -883,7 +995,7 @@ struct BrotliStream: ~Copyable {
                     break units
                 }
                 let count = min(copyRemaining, room)
-                if room >= count &+ BytesWriter.copyOverrun {
+                if room >= count &+ AlignedBytesWriter.copyOverrun {
                     try writer.copy(fromDistance: copyDistance, count: count, allowingOverrun: true)
                 } else {
                     try writer.copy(fromDistance: copyDistance, count: count)
@@ -906,12 +1018,18 @@ struct BrotliStream: ~Copyable {
     /// distance); copies only with room for them and the copy's overrun. Otherwise it saves the command's
     /// state and returns, for the careful loop to finish.
     ///
+    /// Written for the register allocator: the bit buffer, output position, block state, and last distances
+    /// are locals, written back once at the end, and neither the bit buffer nor the output is passed to a
+    /// call (a call taking either `inout` keeps it in memory for the whole loop). Table indices are masked
+    /// to their tables' sizes, which the preconditions state, so their bounds checks fold away. The literal
+    /// context's last two bytes are loaded from the output at each literal run's start rather than tracked
+    /// through copies and dictionary words.
+    ///
     /// - Returns: The bit position, the output end, and whether the meta-block is complete.
     private mutating func decodeCommandsFast(
         _ input: RawSpan, from start: Int, into output: inout MutableRawSpan, at outputStart: Int
     ) throws(BytesError) -> (position: Int, end: Int, metablockDone: Bool) {
         var bits = try BitBuffer(input, atBitPosition: start, bitOrder: .leastSignificantFirst)
-        var writer = try BytesWriter(&output, atByteOffset: outputStart)
         let inputBits = input.byteCount &<< 3
         let origin = position &- outputStart
         let lookupTable = brotliContextLookup // A local to borrow from: a global's span can't outlive the access.
@@ -920,25 +1038,33 @@ struct BrotliStream: ~Copyable {
         let distanceMap = distanceContextMap.span
         let modes = contextModes.span
         let literalTrees = literalTrees.span
+        let trivialTrees = trivialLiteralTrees.span
         let commandTrees = commandTrees.span
         let distanceTrees = distanceTrees.span
         let commands = commandTable.span
         let table = codes.table
-        precondition(commands.count == 704 && lookup.count == 2048)
-        var p1: UInt8 = 0
-        var p2: UInt8 = 0
-        let written = writer.byteCount
-        if written >= 1 { p1 = writer.writtenBytes.load(fromByteOffset: written &- 1, as: UInt8.self) }
-        if written >= 2 { p2 = writer.writtenBytes.load(fromByteOffset: written &- 2, as: UInt8.self) }
+        precondition(commands.count == 704 && lookup.count == 2048 && literalMap.count == 64 &* 256
+            && distanceMap.count == 4 &* 256 && modes.count == 256 && literalTrees.count == 256
+            && trivialTrees.count == 256 && commandTrees.count == 256 && distanceTrees.count == 256)
+        var blocks = self.blocks
+        var left = metablockRemaining
+        var distances = self.distances
+        var distanceIndex = self.distanceIndex
+        let windowSize = self.windowSize
+        let directCodes = self.directCodes
+        let postfixBits = self.postfixBits
+        var end = outputStart
+        var suspended = false
 
-        while metablockRemaining > 0 {
-            guard inputBits &- bits.bitPosition >= Self.fastInput &* 8, writer.remainingByteCount >= Self.fastRoom else { break }
+        commands: while left > 0 {
+            guard inputBits &- bits.bitPosition >= Self.fastInput &* 8, output.byteCount &- end >= Self.fastRoom else { break }
             bits.refill()
             if blocks.lengths[1] == 0 {
-                blocks.switchBlock(&bits, category: 1, codes: codes)
+                let used = blocks.switchBlock(bits.bits, category: 1, table: table)
+                bits.consume(bitCount: used)
                 bits.refill()
             }
-            let symbol = BrotliPrefixCodes.decode(&bits, table: table, tree: Int(commandTrees[blocks.types[1]]))
+            let symbol = BrotliPrefixCodes.decode(&bits, table: table, tree: Int(UInt32(bitPattern: commandTrees[blocks.types[1] & 0xFF])))
             let entry = commands[symbol]
             bits.refill()
             let insertBits = Int(truncatingIfNeeded: entry &>> 32 & 0xFF)
@@ -950,44 +1076,89 @@ struct BrotliStream: ~Copyable {
             bits.consume(bitCount: copyBits)
             blocks.lengths[1] &-= 1
             let implicit = entry &>> 48 != 0
-            guard insert <= metablockRemaining else { throw .invalidValue } // Literals past the meta-block's end.
+            guard insert <= left else { throw .invalidValue } // Literals past the meta-block's end.
 
             // Literals, a block's run at a time.
             var remaining = insert
             while remaining > 0 {
                 bits.refill()
                 if blocks.lengths[0] == 0 {
-                    blocks.switchBlock(&bits, category: 0, codes: codes)
+                    let used = blocks.switchBlock(bits.bits, category: 0, table: table)
+                    bits.consume(bitCount: used)
                     bits.refill()
                 }
                 let safe = (inputBits &- bits.bitPosition &- 128) / 15
-                let count = min(min(remaining, blocks.lengths[0]), min(writer.remainingByteCount, safe))
+                let count = min(min(remaining, blocks.lengths[0]), min(output.byteCount &- end, safe))
                 guard count > 0 else {
                     // Near an end: the careful loop finishes the command.
                     insertRemaining = remaining
                     copyLength = copy
                     implicitDistance = implicit
                     phase = .literals
-                    position = origin &+ writer.byteCount
-                    return (bits.bitPosition, writer.byteCount, false)
+                    suspended = true
+                    break commands
                 }
-                let type = blocks.types[0]
-                let mode = Int(modes[type])
-                let mapBase = type &<< 6
-                for _ in 0..<count {
-                    bits.refill()
-                    let context = Int(lookup[mode | Int(p1)] | lookup[mode | 256 | Int(p2)])
-                    let tree = Int(literalTrees[Int(literalMap[mapBase | context])])
-                    let literal = UInt8(truncatingIfNeeded: BrotliPrefixCodes.decode(&bits, table: table, tree: tree))
-                    try writer.write(Byte(truncatingIfNeeded: literal))
-                    p2 = p1
-                    p1 = literal
+                let type = blocks.types[0] & 0xFF
+                let trivial = trivialTrees[type]
+                var index = 0
+                if trivial >= 0 {
+                    // The block type uses one tree whatever the context (Google's "trivial literal context"):
+                    // no context to compute, so successive literals don't wait on each other.
+                    // Three literals per refill: 15 bits each of the 56 or more buffered.
+                    let tree = Int(trivial)
+                    while index &+ 3 <= count {
+                        bits.refill()
+                        let first = UInt8(truncatingIfNeeded: BrotliPrefixCodes.decode(&bits, table: table, tree: tree))
+                        let second = UInt8(truncatingIfNeeded: BrotliPrefixCodes.decode(&bits, table: table, tree: tree))
+                        let third = UInt8(truncatingIfNeeded: BrotliPrefixCodes.decode(&bits, table: table, tree: tree))
+                        // Unsafe: stores without bounds checks. Safe: `count` is at most the room after `end`,
+                        // checked above, and `index + 3 <= count`.
+                        unsafe output.storeBytes(of: first, toUncheckedByteOffset: end &+ index, as: UInt8.self)
+                        unsafe output.storeBytes(of: second, toUncheckedByteOffset: end &+ index &+ 1, as: UInt8.self)
+                        unsafe output.storeBytes(of: third, toUncheckedByteOffset: end &+ index &+ 2, as: UInt8.self)
+                        index &+= 3
+                    }
+                    while index < count {
+                        bits.refill()
+                        let literal = UInt8(truncatingIfNeeded: BrotliPrefixCodes.decode(&bits, table: table, tree: tree))
+                        output.storeBytes(of: literal, toByteOffset: end &+ index, as: UInt8.self)
+                        index &+= 1
+                    }
+                } else {
+                    let mode = Int(modes[type]) & 0x600
+                    let mapBase = type &<< 6
+                    var p1: UInt8 = 0
+                    var p2: UInt8 = 0
+                    do {
+                        let history = output.bytes
+                        if end >= 1 { p1 = history.load(fromByteOffset: end &- 1, as: UInt8.self) }
+                        if end >= 2 { p2 = history.load(fromByteOffset: end &- 2, as: UInt8.self) }
+                    }
+                    // Up to three literals per refill: 15 bits each of the 56 or more buffered.
+                    while index < count {
+                        bits.refill()
+                        let group = min(count &- index, 3)
+                        var step = 0
+                        repeat {
+                            let context = Int(lookup[mode | Int(p1)] | lookup[mode | 256 | Int(p2)]) & 0x3F
+                            let tree = Int(UInt32(bitPattern: literalTrees[Int(literalMap[mapBase | context])]))
+                            let literal = UInt8(truncatingIfNeeded: BrotliPrefixCodes.decode(&bits, table: table, tree: tree))
+                            // Unsafe: a store without a bounds check. Safe: `count` is at most the room after
+                            // `end`, checked above, and `index + step < count`.
+                            unsafe output.storeBytes(of: literal, toUncheckedByteOffset: end &+ index &+ step, as: UInt8.self)
+                            p2 = p1
+                            p1 = literal
+                            step &+= 1
+                        } while step < group
+                        index &+= group
+                    }
                 }
+                end &+= count
                 remaining &-= count
-                metablockRemaining &-= count
+                left &-= count
                 blocks.lengths[0] &-= count
             }
-            if metablockRemaining == 0 { break } // The copy is ignored at the meta-block's end.
+            if left == 0 { break } // The copy is ignored at the meta-block's end.
 
             // The distance.
             let distance: Int
@@ -996,15 +1167,16 @@ struct BrotliStream: ~Copyable {
             } else {
                 bits.refill()
                 if blocks.lengths[2] == 0 {
-                    blocks.switchBlock(&bits, category: 2, codes: codes)
+                    let used = blocks.switchBlock(bits.bits, category: 2, table: table)
+                    bits.consume(bitCount: used)
                     bits.refill()
                 }
                 let context = min(copy, 5) &- 2
-                let tree = Int(distanceTrees[Int(distanceMap[blocks.types[2] &<< 2 | context])])
+                let tree = Int(UInt32(bitPattern: distanceTrees[Int(distanceMap[(blocks.types[2] & 0xFF) &<< 2 | context & 3])]))
                 let code = BrotliPrefixCodes.decode(&bits, table: table, tree: tree)
                 bits.refill()
                 if code < 16 {
-                    distance = specialDistance(code)
+                    distance = Self.specialDistance(code, distances, distanceIndex)
                 } else if code < 16 &+ directCodes {
                     distance = code &- 15
                 } else {
@@ -1017,69 +1189,90 @@ struct BrotliStream: ~Copyable {
                 }
                 guard distance > 0 else { throw .invalidValue }
                 blocks.lengths[2] &-= 1
-                if code != 0 && distance <= min(windowSize, origin &+ writer.byteCount) {
+                if code != 0 && distance <= min(windowSize, origin &+ end) {
                     distances[distanceIndex & 3] = distance
                     distanceIndex &+= 1
                 }
             }
 
             // The copy.
-            let maximum = min(windowSize, origin &+ writer.byteCount)
+            let maximum = min(windowSize, origin &+ end)
             if distance > maximum {
-                guard let count = try Self.writeDictionaryWord(
-                    length: copy, id: distance &- maximum &- 1, limit: metablockRemaining, to: &writer, p1: &p1, p2: &p2
-                ) else {
+                var word = InlineArray<48, UInt8>(repeating: 0)
+                let count = try Self.dictionaryWord(length: copy, id: distance &- maximum &- 1, into: &word)
+                guard count <= left else { throw .invalidValue }
+                guard output.byteCount &- end >= count else {
                     copyLength = copy
                     copyDistance = distance
                     copyRemaining = copy
                     phase = .copy
-                    position = origin &+ writer.byteCount
-                    return (bits.bitPosition, writer.byteCount, false)
+                    suspended = true
+                    break commands
                 }
-                metablockRemaining &-= count
+                var index = 0
+                while index < count {
+                    output.storeBytes(of: word[index], toByteOffset: end &+ index, as: UInt8.self)
+                    index &+= 1
+                }
+                end &+= count
+                left &-= count
                 continue
             }
-            guard copy <= metablockRemaining else { throw .invalidValue }
-            guard writer.remainingByteCount >= copy &+ BytesWriter.copyOverrun else {
+            guard copy <= left else { throw .invalidValue }
+            guard output.byteCount &- end >= copy &+ AlignedBytesWriter.copyOverrun else {
                 copyLength = copy
                 copyDistance = distance
                 copyRemaining = copy
                 phase = .copy
-                position = origin &+ writer.byteCount
-                return (bits.bitPosition, writer.byteCount, false)
+                suspended = true
+                break commands
             }
-            try writer.copy(fromDistance: distance, count: copy, allowingOverrun: true)
-            metablockRemaining &-= copy
-            let output = writer.writtenBytes
-            p1 = output.load(fromByteOffset: output.byteCount &- 1, as: UInt8.self)
-            p2 = output.load(fromByteOffset: output.byteCount &- 2, as: UInt8.self)
+            do {
+                var writer = try AlignedBytesWriter(&output, atByteOffset: end)
+                try writer.copy(fromDistance: distance, count: copy, allowingOverrun: true)
+                end = writer.byteCount
+            }
+            left &-= copy
         }
-        phase = .start
-        position = origin &+ writer.byteCount
-        return (bits.bitPosition, writer.byteCount, metablockRemaining == 0)
+        if !suspended { phase = .start }
+        self.blocks = blocks
+        metablockRemaining = left
+        self.distances = distances
+        self.distanceIndex = distanceIndex
+        position = origin &+ end
+        return (bits.bitPosition, end, !suspended && left == 0)
     }
 
-    /// Writes static dictionary word `id` of `length` bytes, transformed, updating the literal context's last
-    /// two bytes. Out of line: rare on most data, and large.
+    /// Static dictionary word `id` of `length` bytes, transformed, into `word`. Out of line: rare on most
+    /// data, and large.
     ///
-    /// - Returns: The transformed word's length, or `nil` if the output doesn't have room for it.
-    /// - Throws: ``BytesError/invalidValue`` for a length without words, a transform past the last, or a word
-    ///   longer than the meta-block's remaining length `limit`.
+    /// - Returns: The transformed word's length.
+    /// - Throws: ``BytesError/invalidValue`` for a length without words or a transform past the last.
     @inline(never)
-    private static func writeDictionaryWord(
-        length: Int, id: Int, limit: Int, to writer: inout BytesWriter, p1: inout UInt8, p2: inout UInt8
-    ) throws(BytesError) -> Int? {
+    private static func dictionaryWord(length: Int, id: Int, into word: inout InlineArray<48, UInt8>) throws(BytesError) -> Int {
         guard length >= 4 && length <= 24 else { throw .invalidValue }
         let sizeBits = Int(Brotli.dictionarySizeBits[length])
         let index = id & ((1 &<< sizeBits) &- 1)
         let transform = id &>> sizeBits
         guard transform < Brotli.transformCount else { throw .invalidValue }
-        var word = InlineArray<48, UInt8>(repeating: 0)
         let words = brotliDictionaryWords // A local to borrow from: a global's span can't outlive the access.
-        let count = Brotli.transform(
+        return Brotli.transform(
             words.span.bytes, word: Int(Brotli.dictionaryOffsets[length]) &+ index &* length, length: length,
             transform: transform, into: &word
         )
+    }
+
+    /// Writes static dictionary word `id` of `length` bytes, transformed, updating the literal context's last
+    /// two bytes: the careful loop's form of ``dictionaryWord(length:id:into:)``.
+    ///
+    /// - Returns: The transformed word's length, or `nil` if the output doesn't have room for it.
+    /// - Throws: ``BytesError/invalidValue`` for a length without words, a transform past the last, or a word
+    ///   longer than the meta-block's remaining length `limit`.
+    private static func writeDictionaryWord(
+        length: Int, id: Int, limit: Int, to writer: inout AlignedBytesWriter, p1: inout UInt8, p2: inout UInt8
+    ) throws(BytesError) -> Int? {
+        var word = InlineArray<48, UInt8>(repeating: 0)
+        let count = try dictionaryWord(length: length, id: id, into: &word)
         guard count <= limit else { throw .invalidValue }
         guard writer.remainingByteCount >= count else { return nil }
         for offset in 0..<count {
@@ -1098,25 +1291,18 @@ struct BrotliStream: ~Copyable {
     /// Distance codes 0–15: the last distances, and the last two plus or minus 1 to 3.
     @inline(__always)
     private func specialDistance(_ code: Int) -> Int {
-        let last = distances[(distanceIndex &- 1) & 3]
-        let second = distances[(distanceIndex &- 2) & 3]
-        switch code {
-        case 0: return last
-        case 1: return second
-        case 2: return distances[(distanceIndex &- 3) & 3]
-        case 3: return distances[(distanceIndex &- 4) & 3]
-        case 4: return last &- 1
-        case 5: return last &+ 1
-        case 6: return last &- 2
-        case 7: return last &+ 2
-        case 8: return last &- 3
-        case 9: return last &+ 3
-        case 10: return second &- 1
-        case 11: return second &+ 1
-        case 12: return second &- 2
-        case 13: return second &+ 2
-        case 14: return second &- 3
-        default: return second &+ 3
-        }
+        Self.specialDistance(code, distances, distanceIndex)
+    }
+
+    /// Branchless, as Google's decoder does it with two tables: which of the last four distances (1 the
+    /// latest, through 4), and what to add (-3 through 3). Both are nibble tables in constants, indexed by the
+    /// code: codes 0–3 are the last four as they are, 4–9 the latest -1, +1, -2, +2, -3, +3, and 10–15 the
+    /// second latest the same way. (A 16-way `switch` was a jump table, mispredicted on copy-heavy data.)
+    @inline(__always)
+    private static func specialDistance(_ code: Int, _ distances: InlineArray<4, Int>, _ distanceIndex: Int) -> Int {
+        let shift = UInt64(truncatingIfNeeded: code &<< 2) & 63
+        let back = Int(truncatingIfNeeded: (0x2222_2211_1111_4321 as UInt64) &>> shift & 0xF)
+        let delta = Int(truncatingIfNeeded: (0x6051_4260_5142_3333 as UInt64) &>> shift & 0xF) &- 3
+        return distances[(distanceIndex &- back) & 3] &+ delta
     }
 }

@@ -12,7 +12,7 @@ public enum BytesError: Error, Hashable, Sendable {
     case insufficientData
     /// An `expect` found a different value.
     case mismatch
-    /// ``BytesReader/read(_:count:)`` was asked to view memory that isn't aligned for its element type.
+    /// ``GenericBytesReader/read(_:count:)`` was asked to view memory that isn't aligned for its element type.
     case misaligned
     /// A ``BytesWriter`` has less room left than the write needs.
     case insufficientCapacity
@@ -20,11 +20,11 @@ public enum BytesError: Error, Hashable, Sendable {
     /// LEB128 integer longer than allowed, a negative seek offset, or a length too large for its prefix when
     /// writing.
     case invalidValue
-    /// ``BytesReader/expectEnd()`` found unread bytes in a section that should have been fully consumed.
+    /// ``GenericBytesReader/expectEnd()`` found unread bytes in a section that should have been fully consumed.
     case trailingData
 }
 
-/// A ``BytesError`` with the byte offset of the read that threw it, from ``BytesReader/located(_:)``.
+/// A ``BytesError`` with the byte offset of the read that threw it, from ``GenericBytesReader/located(_:)``.
 public struct LocatedBytesError: Error, Hashable, Sendable {
     /// What went wrong.
     public var error: BytesError
@@ -58,23 +58,62 @@ public struct LocatedBytesError: Error, Hashable, Sendable {
 /// ```
 ///
 /// Fields are packed with no implicit padding: after a bit-level read, multi-byte reads continue mid-byte,
-/// each byte made of the next 8 bits in ``bitOrder``. Call ``alignToByte()`` to skip to the next byte.
+/// each byte made of the next 8 bits in ``GenericBytesReader/bitOrder``. Call ``GenericBytesReader/alignToByte()``
+/// to skip to the next byte.
 /// Byte-aligned reads take a fast path: one bounds check and one or two unaligned loads.
 ///
 /// `BytesReader` is `~Escapable`, so it can't outlive the memory it reads, and every span it returns borrows that
 /// same memory without copying. It's `~Copyable`, so a cursor position can't be duplicated by accident:
 /// pass it `inout` to helper functions.
+///
+/// For data with no sub-byte fields, ``AlignedBytesReader`` has the same byte-level API with no bit state: see
+/// ``BytesCursorMode``.
+public typealias BytesReader = GenericBytesReader<BitAddressable>
+
+/// A ``BytesReader`` for whole bytes only: the same byte-level API, with a bit offset that is the constant 0,
+/// so reads carry no alignment tests and ``GenericBytesReader/remainingByteCount`` no partial-byte term (MQTT's
+/// packet parsing: −1 to −3% instructions; a QOI decoder's per-pixel loop −22%).
+///
+/// ```swift
+/// var reader = AlignedBytesReader(packet)
+/// let type = try reader.read(Byte.self)
+/// let topic = try reader.read(utf8PrefixedBy: Byte2.self, .bigEndian)
+/// ```
+///
+/// Sub-byte fields within a byte still work through ``Byte``'s bit fields (`flags[Crumb.self, at: 6]`).
+public typealias AlignedBytesReader = GenericBytesReader<ByteAligned>
+
+/// The reader behind ``BytesReader`` and ``AlignedBytesReader``: see those, and ``BytesCursorMode``.
 @safe
-public struct BytesReader: ~Copyable, ~Escapable {
+public struct GenericBytesReader<Mode: BytesCursorMode>: ~Copyable, ~Escapable {
     /// All the bytes being read, including those already consumed.
     public let span: RawSpan
-    /// The order of bits within each byte: for ``Bits``, ``read(bitCount:)``, and multi-byte reads that start
-    /// mid-byte.
+    /// The order of bits within each byte: for ``Bits``, ``GenericBytesReader/read(bitCount:)``, and multi-byte reads
+    /// that start mid-byte. Unused by ``AlignedBytesReader``.
     public let bitOrder: BitOrder
     @usableFromInline var _byteOffset: Int
-    /// Bits already consumed from the byte at `_byteOffset`: always 0 through 7.
-    @usableFromInline var _bitOffset: Int
+    @usableFromInline var _bitOffsetStorage: Int
 
+    /// Bits already consumed from the byte at `_byteOffset`: always 0 through 7, and the constant 0 for a
+    /// byte-aligned reader.
+    @inlinable
+    var _bitOffset: Int {
+        @inline(__always) get { Mode.addressesBits ? _bitOffsetStorage : 0 }
+        @inline(__always) set { if Mode.addressesBits { _bitOffsetStorage = newValue } }
+    }
+
+    /// Creates a cursor at `byteOffset` and `bitOffset` in `span`, unchecked: callers pass a valid position.
+    @inlinable @inline(__always)
+    @_lifetime(copy span)
+    init(_ span: RawSpan, byteOffset: Int, bitOffset: Int, bitOrder: BitOrder) {
+        self.span = span
+        self.bitOrder = bitOrder
+        _byteOffset = byteOffset
+        _bitOffsetStorage = Mode.addressesBits ? bitOffset : 0
+    }
+}
+
+public extension GenericBytesReader where Mode == BitAddressable {
     /// Creates a cursor at the start of `span`.
     ///
     /// - Parameters:
@@ -82,11 +121,8 @@ public struct BytesReader: ~Copyable, ~Escapable {
     ///   - bitOrder: The order of bits within each byte for sub-byte reads.
     @inlinable
     @_lifetime(copy span)
-    public init(_ span: RawSpan, bitOrder: BitOrder = .mostSignificantFirst) {
-        self.span = span
-        self.bitOrder = bitOrder
-        _byteOffset = 0
-        _bitOffset = 0
+    init(_ span: RawSpan, bitOrder: BitOrder = .mostSignificantFirst) {
+        self.init(span, byteOffset: 0, bitOffset: 0, bitOrder: bitOrder)
     }
 
     /// Creates a cursor at the start of `span`.
@@ -96,7 +132,7 @@ public struct BytesReader: ~Copyable, ~Escapable {
     ///   - bitOrder: The order of bits within each byte for sub-byte reads.
     @inlinable
     @_lifetime(copy span)
-    public init(_ span: Span<UInt8>, bitOrder: BitOrder = .mostSignificantFirst) {
+    init(_ span: Span<UInt8>, bitOrder: BitOrder = .mostSignificantFirst) {
         self.init(span.bytes, bitOrder: bitOrder)
     }
 
@@ -117,7 +153,7 @@ public struct BytesReader: ~Copyable, ~Escapable {
     ///   ``BytesError/invalidValue`` if it's negative, as ``seek(toByteOffset:)`` does.
     @inlinable @inline(__always)
     @_lifetime(copy span)
-    public init(_ span: RawSpan, atByteOffset offset: some BinaryInteger, bitOrder: BitOrder = .mostSignificantFirst) throws(BytesError) {
+    init(_ span: RawSpan, atByteOffset offset: some BinaryInteger, bitOrder: BitOrder = .mostSignificantFirst) throws(BytesError) {
         self.init(span, bitOrder: bitOrder)
         guard let offset = Int(exactly: offset) else { throw offset < 0 ? .invalidValue : .insufficientData }
         try seek(toByteOffset: offset)
@@ -134,20 +170,81 @@ public struct BytesReader: ~Copyable, ~Escapable {
     ///   it's negative, as ``seek(toBitPosition:)`` does.
     @inlinable @inline(__always)
     @_lifetime(copy span)
-    public init(_ span: RawSpan, atBitPosition position: Int, bitOrder: BitOrder = .mostSignificantFirst) throws(BytesError) {
+    init(_ span: RawSpan, atBitPosition position: Int, bitOrder: BitOrder = .mostSignificantFirst) throws(BytesError) {
         self.init(span, bitOrder: bitOrder)
         try seek(toBitPosition: position)
+    }
+
+    /// A bit-addressable cursor at an aligned cursor's position, over the same data: to read sub-byte fields
+    /// in a format that is otherwise whole bytes.
+    ///
+    /// - Parameters:
+    ///   - reader: The byte-aligned cursor, consumed.
+    ///   - bitOrder: The order of bits within each byte for sub-byte reads.
+    @inlinable @inline(__always)
+    @_lifetime(copy reader)
+    init(_ reader: consuming AlignedBytesReader, bitOrder: BitOrder = .mostSignificantFirst) {
+        self.init(reader.span, byteOffset: reader._byteOffset, bitOffset: 0, bitOrder: bitOrder)
+    }
+}
+
+public extension GenericBytesReader where Mode == ByteAligned {
+    /// Creates a cursor at the start of `span`.
+    ///
+    /// - Parameter span: The bytes to read. The cursor borrows them.
+    @inlinable
+    @_lifetime(copy span)
+    init(_ span: RawSpan) {
+        self.init(span, byteOffset: 0, bitOffset: 0, bitOrder: .mostSignificantFirst)
+    }
+
+    /// Creates a cursor at the start of `span`.
+    ///
+    /// - Parameter span: The bytes to read. The cursor borrows them.
+    @inlinable
+    @_lifetime(copy span)
+    init(_ span: Span<UInt8>) {
+        self.init(span.bytes)
+    }
+
+    /// Creates a cursor at the byte at `offset` in `span`, which may be its end, as
+    /// ``GenericBytesReader/init(_:atByteOffset:bitOrder:)`` does.
+    ///
+    /// - Parameters:
+    ///   - span: The bytes to read. The cursor borrows them.
+    ///   - offset: The byte offset to start at, 0 through `span.byteCount`.
+    /// - Throws: ``BytesError/insufficientData`` if `offset` is past the end (or beyond `Int`);
+    ///   ``BytesError/invalidValue`` if it's negative.
+    @inlinable @inline(__always)
+    @_lifetime(copy span)
+    init(_ span: RawSpan, atByteOffset offset: some BinaryInteger) throws(BytesError) {
+        self.init(span)
+        guard let offset = Int(exactly: offset) else { throw offset < 0 ? .invalidValue : .insufficientData }
+        try seek(toByteOffset: offset)
+    }
+
+    /// A byte-aligned cursor at a bit-addressable cursor's position, over the same data: for the
+    /// byte-aligned part of a format after its sub-byte fields.
+    ///
+    /// - Parameter reader: The bit-addressable cursor, consumed. It must be at a byte boundary.
+    /// - Throws: ``BytesError/misaligned`` if `reader` is partway through a byte.
+    @inlinable @inline(__always)
+    @_lifetime(copy reader)
+    init(_ reader: consuming BytesReader) throws(BytesError) {
+        guard reader._bitOffset == 0 else { throw .misaligned }
+        self.init(reader.span, byteOffset: reader._byteOffset, bitOffset: 0, bitOrder: reader.bitOrder)
     }
 }
 
 // MARK: - Position
 
-public extension BytesReader {
+public extension GenericBytesReader {
     /// The offset in ``span`` of the byte the next read starts in.
     @inlinable
     var byteOffset: Int { _byteOffset }
 
-    /// The number of bits already consumed from the byte at ``byteOffset``, from 0 through 7.
+    /// The number of bits already consumed from the byte at ``byteOffset``, from 0 through 7 (always 0 for an
+    /// ``AlignedBytesReader``).
     @inlinable
     var bitOffset: Int { _bitOffset }
 
@@ -196,28 +293,13 @@ public extension BytesReader {
     /// - Parameter offset: The byte offset, 0 through `span.byteCount`.
     /// - Throws: ``BytesError/insufficientData`` if `offset` is past the end; ``BytesError/invalidValue`` if it's
     ///   negative.
-    @inlinable
+    @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func seek(toByteOffset offset: Int) throws(BytesError) {
         guard offset >= 0 else { throw .invalidValue }
         guard offset <= span.byteCount else { throw .insufficientData }
         _byteOffset = offset
         _bitOffset = 0
-    }
-
-    /// Moves to bit `position` in ``span`` (see ``bitPosition``), which may be the end. A bad position throws,
-    /// leaving the cursor where it was.
-    ///
-    /// - Parameter position: The bit position, 0 through `8 × span.byteCount`.
-    /// - Throws: ``BytesError/insufficientData`` if `position` is past the end; ``BytesError/invalidValue`` if it's
-    ///   negative.
-    @inlinable
-    @_lifetime(self: copy self)
-    mutating func seek(toBitPosition position: Int) throws(BytesError) {
-        guard position >= 0 else { throw .invalidValue }
-        guard position <= span.byteCount &<< 3 else { throw .insufficientData }
-        _byteOffset = position &>> 3
-        _bitOffset = position & 7
     }
 
     /// A place in the data this cursor was at: see ``position`` and ``rewind(to:)``.
@@ -298,8 +380,8 @@ public extension BytesReader {
     /// - Throws: Whatever `body` throws, leaving this cursor where it was.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func atomically<R: ~Copyable, E: Error>(_ body: (inout BytesReader) throws(E) -> R) throws(E) -> R {
-        var copy = BytesReader(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
+    mutating func atomically<R: ~Copyable, E: Error>(_ body: (inout Self) throws(E) -> R) throws(E) -> R {
+        var copy = Self(span, byteOffset: _byteOffset, bitOffset: _bitOffset, bitOrder: bitOrder)
         let result = try body(&copy)
         _byteOffset = copy._byteOffset
         _bitOffset = copy._bitOffset
@@ -318,20 +400,6 @@ public extension BytesReader {
         _assumeInvariant()
         guard likely(remainingByteCount >= byteCount) else { throw .insufficientData }
         _byteOffset &+= byteCount
-    }
-
-    /// Skips the next `bitCount` bits.
-    ///
-    /// - Parameter bitCount: The number of bits to skip.
-    /// - Throws: ``BytesError/insufficientData`` if fewer bits remain, consuming nothing.
-    /// - Precondition: `bitCount` isn't negative.
-    @inlinable @inline(__always)
-    @_lifetime(self: copy self)
-    mutating func skip(bitCount: Int) throws(BytesError) {
-        precondition(bitCount >= 0, "Negative bit count")
-        _assumeInvariant()
-        guard likely(remainingBitCount >= bitCount) else { throw .insufficientData }
-        _advance(bitCount: bitCount)
     }
 
     /// States the cursor's invariant to the optimizer. With it, LLVM knows `span.byteCount - _byteOffset`
@@ -357,9 +425,40 @@ public extension BytesReader {
     }
 }
 
+public extension BytesReader {
+    /// Moves to bit `position` in ``span`` (see ``bitPosition``), which may be the end. A bad position throws,
+    /// leaving the cursor where it was.
+    ///
+    /// - Parameter position: The bit position, 0 through `8 × span.byteCount`.
+    /// - Throws: ``BytesError/insufficientData`` if `position` is past the end; ``BytesError/invalidValue`` if it's
+    ///   negative.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func seek(toBitPosition position: Int) throws(BytesError) {
+        guard position >= 0 else { throw .invalidValue }
+        guard position <= span.byteCount &<< 3 else { throw .insufficientData }
+        _byteOffset = position &>> 3
+        _bitOffset = position & 7
+    }
+
+    /// Skips the next `bitCount` bits.
+    ///
+    /// - Parameter bitCount: The number of bits to skip.
+    /// - Throws: ``BytesError/insufficientData`` if fewer bits remain, consuming nothing.
+    /// - Precondition: `bitCount` isn't negative.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func skip(bitCount: Int) throws(BytesError) {
+        precondition(bitCount >= 0, "Negative bit count")
+        _assumeInvariant()
+        guard likely(remainingBitCount >= bitCount) else { throw .insufficientData }
+        _advance(bitCount: bitCount)
+    }
+}
+
 // MARK: - Byte groups
 
-public extension BytesReader {
+public extension GenericBytesReader {
     /// Returns the next `T.byteCount` bytes without consuming them. Not byte-aligned, each byte is made of
     /// the next 8 bits in ``bitOrder``.
     ///
@@ -374,7 +473,7 @@ public extension BytesReader {
             return unsafe Load.group(T.self, from: span, at: _byteOffset)
         }
         guard remainingByteCount >= T.byteCount else { throw .insufficientData }
-        let bytes = Self._unalignedBytes(T.byteCount, in: span, atByte: _byteOffset, bit: _bitOffset, bitOrder: bitOrder)
+        let bytes = BytesReader._unalignedBytes(T.byteCount, in: span, atByte: _byteOffset, bit: _bitOffset, bitOrder: bitOrder)
         return T(littleEndian: T.Integer(truncatingIfNeeded: bytes))
     }
 
@@ -500,6 +599,67 @@ public extension BytesReader {
         LocatedBytesError(error, byteOffset: _byteOffset)
     }
 
+    /// Returns the next ``Byte`` without consuming it: a whole byte, the one ``Bits`` width both kinds of
+    /// cursor read (an ``AlignedBytesReader`` has no other). Bit-addressable cursors partway through a byte
+    /// read the next 8 bits.
+    ///
+    /// - Parameter type: `Byte.self`.
+    /// - Returns: The byte.
+    /// - Throws: ``BytesError/insufficientData`` if no whole byte remains.
+    @inlinable @inline(__always)
+    func peek(_ type: Byte.Type) throws(BytesError) -> Byte {
+        _assumeInvariant()
+        if likely(_bitOffset == 0) {
+            guard likely(_byteOffset < span.byteCount) else { throw .insufficientData }
+            return Byte(_unchecked: unsafe Load.native(UInt8.self, from: span, at: _byteOffset))
+        }
+        guard likely(remainingBitCount >= 8) else { throw .insufficientData }
+        return Byte(_unchecked: BytesReader._bits(8, in: span, atByte: _byteOffset, bit: _bitOffset, bitOrder: bitOrder))
+    }
+
+    /// Reads the next ``Byte``.
+    ///
+    /// - Parameter type: `Byte.self`.
+    /// - Returns: The byte.
+    /// - Throws: ``BytesError/insufficientData`` if no whole byte remains, consuming nothing.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read(_ type: Byte.Type) throws(BytesError) -> Byte {
+        let value = try peek(Byte.self)
+        _advance(bitCount: 8)
+        return value
+    }
+
+    /// Consumes `expected` if it's the next byte.
+    ///
+    /// - Parameter expected: The byte that must come next.
+    /// - Throws: ``BytesError/insufficientData`` if no whole byte remains; ``BytesError/mismatch`` if the next
+    ///   byte differs. Nothing is consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func expect(_ expected: Byte) throws(BytesError) {
+        guard try peek(Byte.self) == expected else { throw .mismatch }
+        _advance(bitCount: 8)
+    }
+
+    /// Consumes the next byte if its bits selected by `mask` equal `expected`.
+    ///
+    /// - Parameters:
+    ///   - expected: The bits that must come next, where `mask` is set.
+    ///   - mask: The bits to compare.
+    /// - Throws: ``BytesError/insufficientData`` if no whole byte remains; ``BytesError/mismatch`` if the
+    ///   selected bits differ. Nothing is consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func expect(_ expected: Byte, mask: Byte) throws(BytesError) {
+        guard try peek(Byte.self).matches(expected, mask: mask) else { throw .mismatch }
+        _advance(bitCount: 8)
+    }
+}
+
+// Out-of-line helpers, in the bit-addressable reader's own extension so that they're not generic: called from
+// either mode's specialized code, they take no type metadata.
+extension BytesReader {
     /// The next `count` bytes (1 through 16) when not byte-aligned, as a little-endian integer. Bounds already
     /// checked.
     ///
@@ -776,7 +936,7 @@ public extension BytesReader {
 
 // MARK: - Spans
 
-public extension BytesReader {
+public extension GenericBytesReader {
     /// Reads the next `byteCount` bytes as a span borrowing the same memory.
     ///
     /// - Parameter byteCount: The number of bytes to read.
@@ -820,7 +980,7 @@ public extension BytesReader {
 
 // MARK: - Bulk operations
 
-public extension BytesReader {
+public extension GenericBytesReader {
     /// Reads consecutive `T` groups as integers in `byteOrder` until `output` is full.
     ///
     /// For example, to decode a table of big-endian 32-bit offsets:
@@ -973,7 +1133,7 @@ public extension BytesReader {
         let count = Swift.min(limit, remainingByteCount / T.byteCount)
         guard likely(_bitOffset == 0) else {
             for _ in 0..<count {
-                let bytes = Self._unalignedBytes(T.byteCount, in: span, atByte: _byteOffset, bit: _bitOffset, bitOrder: bitOrder)
+                let bytes = BytesReader._unalignedBytes(T.byteCount, in: span, atByte: _byteOffset, bit: _bitOffset, bitOrder: bitOrder)
                 _byteOffset &+= T.byteCount
                 try body(T(littleEndian: T.Integer(truncatingIfNeeded: bytes)))
             }
@@ -1047,6 +1207,9 @@ public extension BytesReader {
         _byteOffset = start &+ count &* T.byteCount
     }
 
+}
+
+public extension BytesReader {
     /// Reads every remaining whole `Bits<width>` value, in ``bitOrder``, calling `body` with each.
     ///
     /// When byte-aligned, this loads whole blocks that hold a fixed number of values and extracts them with
@@ -1192,6 +1355,9 @@ public extension BytesReader {
         _byteOffset = start &+ blocks &* byteCount
     }
 
+}
+
+public extension GenericBytesReader {
     /// The offset in ``span`` of the first occurrence of `pattern` in ``remainingBytes``, or `nil`.
     ///
     /// Scans 16 positions at a time with SIMD, comparing the pattern's first and last bytes, and checks
@@ -1442,11 +1608,106 @@ public extension RawSpan {
         guard byteCount >= T.byteCount else { return false }
         return unsafe Load.group(T.self, from: self, at: 0) == prefix
     }
+
+    /// Whether the span ends with `suffix`'s bytes: one load and a compare, and `false` if the span is
+    /// shorter.
+    ///
+    /// ```swift
+    /// let padded = text.hasSuffix(0x3D_3D as Byte2)   // "=="
+    /// ```
+    ///
+    /// - Parameter suffix: The bytes to compare with the end of the span.
+    /// - Returns: `true` if the span ends with `suffix`.
+    @inlinable @inline(__always)
+    func hasSuffix<T: ByteGroup>(_ suffix: T) -> Bool {
+        // Unsafe: an unchecked load. Safe: the span has at least `T.byteCount` bytes (checked first).
+        guard byteCount >= T.byteCount else { return false }
+        return unsafe Load.group(T.self, from: self, at: byteCount &- T.byteCount) == suffix
+    }
+
+    /// How far the bytes at `first` and at `second` agree, counting from `start` (bytes before it are taken
+    /// as agreeing) up to `maxLength`: the length of a match, in an LZ77 compressor.
+    ///
+    /// ```swift
+    /// // A candidate whose first 4 bytes matched through a hash: extend it.
+    /// let length = window.commonPrefixLength(at: position, and: candidate, from: 4, maxLength: 258)
+    /// ```
+    ///
+    /// Checks its bounds once, then compares 8 bytes at a time with unchecked loads (the first difference is
+    /// the XOR's trailing zeros over 8), then byte by byte. The check is a single sign test of the bounds
+    /// ORed together, about eight instructions per call: as much as a short match's comparison, so a match
+    /// finder calling it per candidate ran 3–18% more instructions. Hot loops whose bounds are proven once
+    /// use ``unsafeCommonPrefixLength(at:and:from:maxLength:)``.
+    ///
+    /// - Parameters:
+    ///   - first: The offset of one run of bytes.
+    ///   - second: The offset of the other. The two may overlap (a run of repeated bytes).
+    ///   - start: How many bytes are already known to agree, 0 through `maxLength`.
+    ///   - maxLength: The longest match to report; both runs must have this many bytes in the span.
+    /// - Returns: The number of leading bytes that agree, `start` through `maxLength`.
+    /// - Precondition: The offsets are 0 or more, `start` is between 0 and `maxLength`, and `maxLength` bytes
+    ///   fit in the span from both offsets.
+    @inlinable @inline(__always)
+    func commonPrefixLength(at first: Int, and second: Int, from start: Int = 0, maxLength: Int) -> Int {
+        // Every bound non-negative at once: the OR of non-negative numbers is non-negative.
+        let room = byteCount &- (first > second ? first : second) &- maxLength
+        precondition(first | second | start | (maxLength &- start) | room >= 0, "Comparing bytes outside a span")
+        // Unsafe: unchecked loads. Safe: the precondition is the unchecked form's requirement.
+        return unsafe unsafeCommonPrefixLength(at: first, and: second, from: start, maxLength: maxLength)
+    }
+
+    /// ``commonPrefixLength(at:and:from:maxLength:)`` without its bounds check, for match finders that prove
+    /// the bounds once (a window that ends at least `maxLength` bytes past every position searched).
+    ///
+    /// - Parameters:
+    ///   - first: The offset of one run of bytes.
+    ///   - second: The offset of the other.
+    ///   - start: How many bytes are already known to agree, 0 through `maxLength`.
+    ///   - maxLength: The longest match to report.
+    /// - Returns: The number of leading bytes that agree, `start` through `maxLength`.
+    ///
+    /// Unsafe: reads `first ..< first + maxLength` and `second ..< second + maxLength` unchecked. The caller
+    /// must keep both within the span, the offsets 0 or more, and `start` between 0 and `maxLength`.
+    @unsafe @inlinable @inline(__always)
+    func unsafeCommonPrefixLength(at first: Int, and second: Int, from start: Int = 0, maxLength: Int) -> Int {
+        var length = start
+        while length &+ 8 <= maxLength {
+            let difference = unsafe Load.little(UInt64.self, from: self, at: first &+ length)
+                ^ Load.little(UInt64.self, from: self, at: second &+ length)
+            if difference != 0 { return length &+ difference.trailingZeroBitCount &>> 3 }
+            length &+= 8
+        }
+        while length < maxLength {
+            let same = unsafe Load.native(UInt8.self, from: self, at: first &+ length) == Load.native(UInt8.self, from: self, at: second &+ length)
+            guard same else { break }
+            length &+= 1
+        }
+        return length
+    }
+
+    /// The offset of the first occurrence of `pattern` at or after `start`, or `nil`: as
+    /// ``GenericBytesReader/firstByteOffset(of:)``, 16 positions at a time.
+    ///
+    /// ```swift
+    /// let marker = input.firstByteOffset(of: [0x00, 0x00, 0xFF, 0xFF] as Byte4, from: position)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - pattern: The bytes to find.
+    ///   - start: Where to start looking, 0 through `byteCount`.
+    /// - Returns: The offset of the first match, or `nil` if there is none.
+    @inlinable
+    func firstByteOffset<T: ByteGroup>(of pattern: T, from start: Int = 0) -> Int? {
+        precondition(start >= 0 && start <= byteCount, "A search starting outside the span")
+        var reader = BytesReader(self)
+        reader._byteOffset = start
+        return reader.firstByteOffset(of: pattern)
+    }
 }
 
 public extension String {
-    /// A string of the UTF-8 that `body` writes with a ``BytesWriter`` over `utf8Capacity` bytes: one
-    /// allocation (none for 15 bytes or fewer).
+    /// A string of the UTF-8 that `body` writes with an ``AlignedBytesWriter`` over `utf8Capacity` bytes: one
+    /// allocation (none for 15 bytes or fewer). UTF-8 is whole bytes, so the writer has no bit state.
     ///
     /// ```swift
     /// let text = try String(utf8Capacity: Base64.encodedByteCount(of: bytes.byteCount)) { (writer) throws(BytesError) in
@@ -1463,7 +1724,7 @@ public extension String {
     /// - Throws: Whatever `body` throws, such as ``BytesError/insufficientCapacity`` if it writes more than
     ///   `utf8Capacity` bytes.
     @inlinable @inline(always)
-    init<E: Error>(utf8Capacity: Int, writing body: (inout BytesWriter) throws(E) -> Void) throws(E) {
+    init<E: Error>(utf8Capacity: Int, writing body: (inout AlignedBytesWriter) throws(E) -> Void) throws(E) {
         // Unsafe: the string's uninitialized storage, which only this initializer exposes (no `OutputSpan`
         // initializer is public). Safe: the writer covers exactly the `utf8Capacity` bytes the initializer
         // allocated, and the initializer gets back the count written, which the writer keeps within them.
@@ -1471,7 +1732,7 @@ public extension String {
         // it after, cost more on the success path: Base64's `encodedString`, +1.2% at 40 bytes.)
         do {
             self = try String(unsafeUninitializedCapacity: utf8Capacity) { buffer throws(E) in
-                var writer = unsafe BytesWriter(MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(buffer)))
+                var writer = unsafe AlignedBytesWriter(MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(buffer)))
                 try body(&writer)
                 return writer.byteCount
             }
@@ -1494,10 +1755,10 @@ public extension String {
     ///   - utf8Capacity: The most bytes `body` can write.
     ///   - body: Writes the UTF-8; the string is as long as what it wrote.
     @inlinable @inline(always)
-    init(utf8Capacity: Int, writing body: (inout BytesWriter) -> Void) {
+    init(utf8Capacity: Int, writing body: (inout AlignedBytesWriter) -> Void) {
         // Unsafe and safe as for the throwing form.
         self = String(unsafeUninitializedCapacity: utf8Capacity) { buffer in
-            var writer = unsafe BytesWriter(MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(buffer)))
+            var writer = unsafe AlignedBytesWriter(MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(buffer)))
             body(&writer)
             return writer.byteCount
         }

@@ -34,7 +34,7 @@ public struct PacketChecker {
     /// - Returns: The bytes the complete packets took, for the caller to consume.
     /// - Throws: `TransferError` if a packet is malformed or isn't the one expected.
     public mutating func check(_ bytes: RawSpan) throws(TransferError) -> Int {
-        var reader = BytesReader(bytes)
+        var reader = AlignedBytesReader(bytes)
         var isExpected = true
         do throws(MQTTError) {
             // Frames, not `MQTTPacket.read(from:)`: dispatching on the type and parsing the PUBLISH directly

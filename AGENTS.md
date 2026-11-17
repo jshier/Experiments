@@ -10,7 +10,7 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 
 | Project | What | Record |
 |---|---|---|
-| `Bytes` | Span-based binary reading/writing (`BytesReader`, `BytesWriter`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC, byte pipelines (`ByteTransform`); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions); `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records) | `Benchmarks/RESULTS.md` |
+| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC, byte pipelines (`ByteTransform`); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions); `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records) | `Benchmarks/RESULTS.md` |
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
 | `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
 | `Base64` | Vectorized Base64 encoder on Bytes (`tbl` kernel, auto-vectorized `ld3`/`st4` kernel) | `Benchmarks/RESULTS.md` |
@@ -35,8 +35,17 @@ reproducers live outside the repo, in `~/Downloads/swift-bugs/` (numbered `NN-sw
   warning is the point of an experiment or compiler investigation. Check with `swift build --build-tests`
   after touching the files (an incremental build doesn't repeat warnings for files it doesn't recompile).
   In tests, `#expect(throws:) { _ = try … }` for calls whose result is only there to throw.
+- After renaming or moving public API, check Bytes' DocC links: `swift build --target Bytes -Xswiftc
+  -emit-symbol-graph -Xswiftc -emit-symbol-graph-dir -Xswiftc /abs/sg`, then `xcrun docc convert
+  Sources/Bytes/Bytes.docc --additional-symbol-graph-dir /abs/sg --output-path /abs/out --analyze` and look for
+  "doesn't exist". Members of `BytesReader`/`BytesWriter` are documented on `GenericBytesReader`/
+  `GenericBytesWriter` (the short names are typealiases), so link them as ``GenericBytesReader/read(_:)``.
 - Swift style here: public API `@inlinable` (but measure: it can change codegen), `sending` over
   `@Sendable` where it fits, every `unsafe` expression with a comment saying why it's safe.
+- New Xcode projects (and targets added to them) turn off the MainActor default: Xcode's templates set
+  `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`; set it to `nonisolated` right after creating the project.
+  Xcode 27 projects are JSON (`X.xcodeproj/project.xcproj`), so check the file for any target still set to
+  `MainActor`.
 - Executables that take options use [swift-argument-parser](https://github.com/apple/swift-argument-parser)
   (`@main struct …: ParsableCommand`/`AsyncParsableCommand`, so not in a `main.swift`), never hand-parsed
   `CommandLine.arguments`: `--help`, typed values, and validation for free. Make option enums
@@ -396,11 +405,77 @@ Compression and crypto (details: `Bytes/Benchmarks/RESULTS.md`, `SocketStream/RE
   products per block) against 2^44 (9), +12%.
 - **`a.f(g(&a))` reads `a` before `g` mutates it:** `Array(wire.prefix(send(into: &wire)))` copied the old,
   empty array (the inout access made a copy-on-write). Take the result into a local first.
-- **Typed throws through `Array.withUnsafeMutableBytes` don't compile** (it rethrows `any Error`): use
-  `array.mutableSpan.withUnsafeMutableBytes`, which keeps the error type. A span of a class instance's
-  stored array lasts only for that property access: bind the array to a local `let` (a retain, no copy).
+- **Never pass a `throws(E)` closure to an untyped generic `rethrows` API** (`Array.withUnsafeMutableBytes`,
+  `withUnsafeBytes`, `func f<R>(_: () throws -> R) rethrows -> R`). Swift 6.4.2 throws the wrong error,
+  silently: the closure throws an `any Error` box as an `E`, and the caller catches the box's address as the
+  enum (a `BytesError` printed `()`). With a `Void` or tuple result the compiler crashes instead.
+  `~/Downloads/swift-bugs/25-…`, swiftlang/swift#90291. Use Bytes' `array.withOutputRawSpan { … }` (or
+  `array.mutableSpan.withUnsafeMutableBytes`), which are generic over the error type and keep it. A span of
+  a class instance's stored array lasts only for that property access: bind the array to a local `let` (a
+  retain, no copy). A `~Copyable` stored property (a `ByteBuffer`) can't be bound that way: pass it `inout`
+  to a function that does the work.
+- **Move bytes with Bytes' helpers, not `withUnsafeMutableBytes` and `copyMemory`** (`Bytes/Sources/Bytes/
+  Buffers.swift`): `OutputRawSpan.append(copying:)` and `withFreeCapacity { span, written in … }` (a
+  `MutableRawSpan` over the free capacity, counting what the closure reports); `copyBytes(from:toByteOffset:)`
+  and `copyBytes(within:toByteOffset:)` (overlapping) on `MutableRawSpan` and `MutableSpan<UInt8>`;
+  `[UInt8].withOutputRawSpan(overwritingFrom:)`; and `ByteBuffer`, a buffer filled at the end
+  (`fill`, or `receive` from an async source such as a socket) and drained from the front, compacting below a
+  threshold. Moving the codecs, TLS records, `Pipeline`, and SocketStream onto them changed no instruction
+  count beyond the reported resolution (`Bytes/Benchmarks/RESULTS.md`, 2026-11-16). Two traps: `[1, 2, 3].span.bytes` is an `[Int]`'s 24 bytes (type the literal `[UInt8]`), and a sync
+  method and an `async` overload of one name taking a `throws(E)` closure are ambiguous from async code
+  (hence `fill` and `receive`).
 - **Nonce reuse hides in `reset()`.** A TLS sealer reset with the same keys must not restart its record
   sequence; the opener gets `reset(sequence:)` to replay records in tests and benchmarks.
+- **`@inline(__always)` is a hint; `@inline(always)` is a guarantee.** The SIL inliner declined Brotli's
+  `@inline(__always)` match search into the parse loop ("Not profitable to inline … cost = 785" in
+  `Tools/remarks --passes sil-inliner`) once the loop grew, and LLVM then found it "too costly": quality 5
+  ran 2–8% more instructions. `@inline(always)` (Swift 6.4) inlined it. After growing a hot loop, check its
+  callees with `Tools/calls`.
+- **Byte-only formats use `AlignedBytesReader` and `AlignedBytesWriter`.** These are `GenericBytesReader` and
+  `GenericBytesWriter` in the `ByteAligned` mode: the same byte-level API, with a bit offset that's the constant
+  0.
+  - Measured: MQTT encode −6%, parse −1 to −3%, Base64 encode −2 to −8% on short inputs, DEFLATE decode −2
+    to −4%.
+  - Builders: `[UInt8](alignedByteCapacity:)`, `withAlignedBytesWriter`. `String(utf8Capacity:)` gives an aligned
+    writer.
+  - Keep `BytesReader`/`BytesWriter` for sub-byte fields in the stream. `Byte` and its bit fields work in both.
+  - Out-of-line helpers on the cursors belong in the `BitAddressable`-constrained extensions, so they aren't
+    generic. Check new ones with `Tools/calls … --callee metadata`.
+  - One exception measured: QOI's run-filling decoder ran 54% more instructions with the aligned reader. LLVM
+    nested its fill loops inside the pixel loop, so it keeps `BytesReader`. Measure when switching a hot loop.
+- **A safe helper's one check per call can cost more than the work in a hot loop.** Measure before moving
+  a hot loop onto a checked core API.
+  - Bytes' `commonPrefixLength` checks its bounds once per call (one sign test of the bounds ORed together,
+    about eight instructions). Called per match candidate, it cost the compressors 3–18%.
+  - `BitWriter.flush()`'s capacity check cost the encoders 0.2–1.7%.
+  - Both have `@unsafe` forms (`unsafeCommonPrefixLength`, `unsafeFlush`) for loops that prove their bounds
+    once per block. The safety argument goes in a comment at the call site.
+  - Fixing `BitBuffer`'s bit order at compile time saved nothing: the run-time `let` folds wherever the buffer
+    is inlined. (Brotli's decoder ran 1–2 K more instructions on 1.6 KB streams with `BitBuffer.rewind(to:)`
+    than with a new buffer, inlined or not, cause unknown: it keeps the new buffer.)
+- **Hot decode loops keep their state in locals.** Brotli's bit buffer passed `inout` to a function that
+  wasn't inlined lived in memory for the whole loop (and its bit order was tested at run time): copy it into
+  a local, pass values, and store it back after. Masked indices (`types & 0xFF`, `context & 0x3F`) let span
+  checks fold; Huffman tables built from only the used symbols, sorted, cost in proportion to them. Together
+  20–42% faster across the corpus, 1.6 KB streams the most.
+- **Truncated input looks like data.** A bit reader's zeros past the end can decode as a valid but wrong
+  symbol (DEFLATE's code-length code 16 at index 0, "repeat the previous length", threw `invalidValue` when
+  the input ended 8 bytes into a dynamic header): when a decoder rejects a value, check `isOverrun` and ask
+  for more input instead. Find such bugs by recording a stream's calls and replaying them cut at every point.
+- **Copies stop at the data's end, not the buffer's.** A parse whose lazy step reused `maxLength - 1` from
+  the first position let a second delay's copy run a byte past `dataEnd`. Sequentially that read past the
+  input (unchecked loads); in a parallel chunk, the next chunk's bytes matched and the stream decoded a byte
+  long. Random test inputs never triggered it: build inputs that force the path (Bytes'
+  `copiesStopAtChunkEnds`), and check parallel outputs with an independent decoder on real corpora.
+- **Parallel compression: avoid rounds.** Rounds of one chunk per lane with a barrier after each lost
+  0.1–0.7 ms per round to thread wake-ups and cores still at low clocks, plus the serial copy of the round's
+  output. One `concurrentPerform` (or task group) per call, workers taking the next chunk, output handed to
+  slots by swapping buffers and copied in order by whichever worker finishes the next chunk
+  (`ChunkScheduler`): 8–22% faster with two rounds, 22–41% with four, even with one (interleaved; across
+  benchmark runs these rows swing 10–30%, so A/B parallel changes in one process). Keep chunks a whole
+  number per lane (39 chunks on 24 lanes take as long as 48). State reused across calls must be reset per call: a slot still naming chunk 0 from the last call
+  looked ready. Task groups beat `concurrentPerform` by up to 10% here; async APIs that take `inout`
+  storage are `nonisolated(nonsending)` (otherwise `@concurrent`, and callers must send `self`).
 
 ## Benchmarks (ordo-one/package-benchmark)
 

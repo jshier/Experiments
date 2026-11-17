@@ -157,9 +157,7 @@ public struct DeflateEncoder: ~Copyable {
                     let bytes = input.extracting(consumed..<(consumed &+ count))
                     updateChecksum(bytes)
                     var span = window.mutableSpan
-                    var raw = MutableRawSpan(mutating: &span)
-                    var writer = try BytesWriter(&raw, atByteOffset: windowEnd)
-                    try writer.write(bytes) // Can't throw: `count` fits the room left.
+                    span.copyBytes(from: bytes, toByteOffset: windowEnd)
                     windowEnd &+= count
                     consumed &+= count
                     flushed = false
@@ -210,13 +208,8 @@ public struct DeflateEncoder: ~Copyable {
     private mutating func slide() {
         let start = max(0, position &- Self.historySize)
         guard start > 0 else { return }
-        let count = windowEnd &- start
         var span = window.mutableSpan
-        // Unsafe: a raw copy within the window. Safe: both ranges are inside it, and `copyMemory` allows them
-        // to overlap.
-        span.withUnsafeMutableBytes { buffer in
-            unsafe buffer.baseAddress!.copyMemory(from: buffer.baseAddress!.advanced(by: start), byteCount: count)
-        }
+        span.copyBytes(within: start..<windowEnd, toByteOffset: 0)
         position &-= start
         windowEnd &-= start
         compressor.base &-= start
@@ -226,14 +219,7 @@ public struct DeflateEncoder: ~Copyable {
     private mutating func deliver(into output: inout OutputRawSpan) -> Int {
         let count = min(compressor.stagedBytes.byteCount, output.freeCapacity)
         guard count > 0 else { return 0 }
-        // Unsafe: a raw copy into the output's free capacity. Safe: `count` bytes are staged and fit, and only
-        // they are counted as initialized.
-        compressor.stagedBytes.withUnsafeBytes { source in
-            unsafe output.withUnsafeMutableBytes { buffer, initializedCount in
-                unsafe buffer.baseAddress!.advanced(by: initializedCount).copyMemory(from: source.baseAddress!, byteCount: count)
-                initializedCount &+= count
-            }
-        }
+        output.append(copying: compressor.stagedBytes.extracting(0..<count))
         compressor.consumeStaged(count)
         return count
     }

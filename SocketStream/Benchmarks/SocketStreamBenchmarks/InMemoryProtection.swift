@@ -48,7 +48,8 @@ final class Pipelines<Sender: ResettableByteTransform & ~Copyable, Receiver: Res
     let payloadSize: Int
     var batch = [UInt8](repeating: 0, count: 256 << 10)
     var wire = [UInt8](repeating: 0, count: 512 << 10)
-    var plain = [UInt8](repeating: 0, count: 256 << 10)
+    /// The receiver's decoded bytes, as `receiveProtected` keeps them.
+    var plain = ByteBuffer(capacity: 256 << 10)
     /// The protected stream, made once by `protect()`, for `unprotect()`.
     var stream: [UInt8] = []
 
@@ -104,30 +105,25 @@ final class Pipelines<Sender: ResettableByteTransform & ~Copyable, Receiver: Res
     override func unprotect() -> Int {
         receiver.reset()
         rewind(&receiver)
+        plain.removeAll()
+        // The array as a local (a retain, not a copy), and the buffer passed `inout`: a span of a class's stored
+        // property lasts only for that access.
+        let stream = stream
+        return Self.unprotect(stream.span.bytes, through: &receiver, into: &plain, payloadSize: payloadSize)
+    }
+
+    /// Opens, decompresses, and checks `stream` in 64 KB pieces, as a receiver's reads would deliver it.
+    private static func unprotect(_ stream: RawSpan, through receiver: inout Receiver, into plain: inout ByteBuffer, payloadSize: Int) -> Int {
         var checker = PacketChecker(payloadSize: payloadSize)
         var start = 0
-        var plainStart = 0
-        var plainEnd = 0
         while true {
-            let finishing = start == stream.count
-            // Room for the pipeline: carry a partial packet to the front.
-            if plainStart > 0 {
-                for index in 0..<(plainEnd - plainStart) { plain[index] = plain[plainStart + index] }
-                (plainStart, plainEnd) = (0, plainEnd - plainStart)
-            }
-            let end = plainEnd
-            let stream = stream
-            let progress = plain.withUnsafeMutableBytes { buffer in
-                let free = UnsafeMutableRawBufferPointer(rebasing: buffer[end...])
-                var output = OutputRawSpan(buffer: free, initializedCount: 0)
-                let progress = try! receiver.transform(stream.span.bytes.extracting(start..<min(start + (64 << 10), stream.count)), into: &output, flush: finishing ? .finish : .none)
-                _ = output.finalize(for: free)
-                return progress
+            let finishing = start == stream.byteCount
+            // The buffer carries a partial packet to the front once less than half of it is free.
+            let progress = plain.fill { output in
+                try! receiver.transform(stream.extracting(start..<min(start + (64 << 10), stream.byteCount)), into: &output, flush: finishing ? .finish : .none)
             }
             start += progress.consumed
-            plainEnd += progress.produced
-            let plain = plain
-            plainStart += try! checker.check(plain.span.bytes.extracting(plainStart..<plainEnd))
+            plain.consume(try! checker.check(plain.unread))
             if progress.status == .finished || (finishing && progress.status == .needsInput) { break }
         }
         return checker.packets
@@ -138,12 +134,7 @@ final class Pipelines<Sender: ResettableByteTransform & ~Copyable, Receiver: Res
 func transform<Stages: ByteTransform & ~Copyable>(
     _ pipeline: inout Stages, _ input: RawSpan, into output: inout [UInt8], flush: TransformFlush
 ) throws(BytesError) -> TransformProgress where Stages.Failure == BytesError {
-    var bytes = output.mutableSpan
-    // The span's closure keeps the error type (the array's would make it `any Error`).
-    return try bytes.withUnsafeMutableBytes { buffer throws(BytesError) in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-        let progress = try pipeline.transform(input, into: &span, flush: flush)
-        _ = span.finalize(for: buffer)
-        return progress
+    try output.withOutputRawSpan { span throws(BytesError) in
+        try pipeline.transform(input, into: &span, flush: flush)
     }
 }

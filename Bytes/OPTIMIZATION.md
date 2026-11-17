@@ -7,8 +7,8 @@ codec, a DEFLATE decoder that beats zlib, and a Base64 encoder and decoder at 93
 C. It builds three ways (with NEON, with portable C fallbacks, and in Swift alone), and the portable
 builds average within about 2% of the NEON one. Then it grew compression (DEFLATE, zlib, gzip, and Brotli,
 both directions: DEFLATE 6–19% slower than libdeflate on large inputs and up to a third on small ones,
-encoding 2x faster than zlib; Brotli decoding still 17–67% behind Google's), ChaCha20-Poly1305 and TLS 1.3 records (1.8x
-CryptoKit's ChaChaPoly), and pipelines that compose them with no allocation and no measurable cost, carrying
+encoding 2x faster than zlib, and 14–19x faster on 24 cores than on one; Brotli decoding level with Google's
+on large inputs), ChaCha20-Poly1305 and TLS 1.3 records (1.8x CryptoKit's ChaChaPoly), and pipelines that compose them with no allocation and no measurable cost, carrying
 MQTT over a socket compressed and encrypted.
 
 This document covers the design and optimization techniques that got it there, with before-and-after code
@@ -139,6 +139,7 @@ The design decisions that matter for speed:
   contend for the allocator.
 - **A small struct of plain values.** A `RawSpan` (pointer and count), a byte offset, a bit offset, and a
   bit order: 40 bytes that fit in registers. No class, no buffer, no existential.
+  For formats with no sub-byte fields the bit offset is the constant 0 (`AlignedBytesReader`/`AlignedBytesWriter`, section 4).
 - **Typed throws (`throws(BytesError)`).** No `any Error` boxing on the error path.
 - **All-or-nothing reads.** A read that throws consumes nothing, so a streaming parser can retry when more
   data arrives.
@@ -159,6 +160,11 @@ Each type exists to give the compiler something it can turn into a few instructi
   uninitialized capacity (`output.withBytesWriter { … }`), so new buffers aren't zero-filled first and
   exactly what's written is committed. Odd widths use two overlapping stores within the bytes being
   written. A partly written byte stays in a register instead of being reloaded before each bit write.
+- **`AlignedBytesReader` and `AlignedBytesWriter`**: the same cursors in the `ByteAligned` mode. `BytesReader` and
+  `BytesWriter` are `GenericBytesReader<BitAddressable>` and `GenericBytesWriter<BitAddressable>`; the byte-level
+  API is written once, generic over the mode, and the aligned forms read the bit offset (and the writer's partial
+  byte) as the constant 0, so every test of them folds away. MQTT, Base64, the codecs' outputs, and TLS records
+  use them (instructions: MQTT encode −6%, parse −1 to −3%, Base64 short inputs −2 to −8%).
 - **`Bits<let width: Int>`** (1–8 bits; aliases `Bit`, `Crumb` (2), `Nibble` (4), `Byte` (8)): one `UInt8`.
   The width is an integer generic parameter (SE-0452), a compile-time constant, so masks and shifts fold
   into immediates and the range checks of `value[bit: 3]` fold away. Setting a nibble is an `and`
@@ -671,7 +677,7 @@ explains the folding math.
 
 ### DEFLATE: from 2x slower than zlib to faster
 
-The zip decoder's DEFLATE implementation, built on Bytes' `BitBuffer`, `HuffmanTable`, and `BytesWriter`,
+The zip decoder's DEFLATE implementation, built on Bytes' `BitBuffer`, `HuffmanTable`, and `AlignedBytesWriter`,
 decodes 32 MB of text in 13 ms against zlib's 14, with zero allocations. In order of payoff:
 
 1. **Inlining** (section 5): the guaranteed `@inline(always)`, and small functions with their own local
@@ -741,7 +747,8 @@ streaming (zlib's model: input span, output span, consumed and produced counts, 
 `~Copyable`, allocated once, and reset per stream; nothing allocates after that, in any of the three
 builds. The encoder follows [libdeflate](https://github.com/ebiggers/libdeflate)'s levels (a 2-entry hash
 table at level 1, hash chains above, lazy parsing from 5, block splitting from statistics) and the Brotli
-encoder Google's scoring and distance coding. Times in µs (`final-1`):
+encoder Google's scoring and distance coding. Times in µs (`final-1`; the Brotli decode and quality 1
+rows from `p2-optimized`, a later run, against `final-1`'s Google):
 
 | | Bytes | libdeflate | zlib | Google brotli |
 |---|---|---|---|---|
@@ -749,9 +756,11 @@ encoder Google's scoring and distance coding. Times in µs (`final-1`):
 | DEFLATE level 6, dickens (9.7 MB) | 119,000 | **105,000** | 315,000 | |
 | DEFLATE level 9, Main.js | **56,000** | 59,000 | 82,000 | |
 | Inflate, Main.js | 1,894 | **1,673** | 2,092 | |
+| Brotli quality 1, x-ray (8.1 MB) | **21,000** | | | 27,000 |
 | Brotli quality 5, Main.js | 34,000 | | | **33,000** |
 | Brotli quality 9, dickens | **318,000** | | | 522,000 |
-| Brotli decode (quality 11), Main.js | 4,841 | | | **3,666** |
+| Brotli decode (quality 11), Main.js | 3,826 | | | **3,666** |
+| Brotli decode (quality 11), dickens | **14,000** | | | 15,000 |
 
 Level 1's output is the same size as libdeflate's; Brotli's is within 3–6% of Google's at quality 5 (7% at
 9, without context modeling). What made the difference, in order of payoff:
@@ -782,6 +791,26 @@ Level 1's output is the same size as libdeflate's; Brotli's is within 3–6% of 
    by moving a position base) left short streams checking 16 dead entries per search. Checking only the
    newest first (if it's out, all are): a 1.6 KB stream 24 → 18 µs. Breaking out of the loop at the first
    dead entry cost large inputs 3–5%: a second exit changes how the loop compiles.
+7. **Decoder state in locals.** Brotli's bit buffer was passed `inout` to a function that wasn't inlined,
+   so it lived in memory for the whole decode loop (and its bit order was tested at run time). Copied
+   into locals, passed by value, and stored back once, with masked indices (`context & 0x3F`) so span
+   checks fold and Huffman tables built from only the symbols in use: 20–42% faster on every input, now
+   level with Google's on large ones.
+8. **Do less of what the format doesn't reward.** Quality 1 inserted every position of every copy into
+   its table; inserting only each copy's last 5 cost at most 4% in size and saved 10–22% of the time. A
+   6-byte hash and minimum match instead of 4 took x-ray from 55 to 21 ms (faster than Google's) and made
+   every file smaller.
+9. **`@inline(always)` when the inliner says no.** Splitting the match search per path made quality 5
+   slower: the SIL inliner judged the bucket search "not profitable" (cost 785) at both call sites, and
+   `@inline(__always)` is only a hint. `@inline(always)` (Swift 6.4) is a guarantee and restored it.
+
+Parallel compression cuts the input into 256 KB chunks, each compressed on its own lane (a `~Copyable`
+encoder and staging buffer). In rounds (one chunk per lane, a barrier, copy the round out) each round lost
+0.1–0.7 ms waking threads whose cores had dropped their clocks. One `concurrentPerform` or task group per
+call, workers claiming chunks with an atomic counter and handing output to slots by swapping buffers, and
+whichever worker finishes the next chunk in order copying it out: 8–22% faster with two rounds, 22–41% with
+four (samba on 24 lanes), even with one; 14–19x one core at 24 lanes. The thread pools allocate a few dozen
+small blocks per call; the compression itself allocates nothing.
 
 A bug that shows only as size: DEFLATE's tables hold 16-bit positions relative to a base, moved forward
 when a position reaches 32 KB past it. The check was `==`. Positions that are never inserted (a flush's last
@@ -789,6 +818,14 @@ few bytes) can step over the boundary, and from then on no position equals it: e
 found, and output stays correct (matches are verified), only bigger. A socket stream went from 14% to 62%
 of its size after 26 MB. Boundary checks are `>=`, and the tests compare long streams with flushes
 against one-shot output size.
+
+A bug that showed only in parallel: Brotli's lazy matching computed the longest allowed copy once, at the
+first position, and each delayed search took one less. After two delays a copy could run a byte past the
+data. Alone, the comparison read a byte past the input (an unchecked load, so an
+out-of-bounds read that happened not to fault or match in any test); in a parallel chunk, it was the next
+chunk's first byte, it matched, and the stream decoded one byte long. Each search now computes its
+own limit, and a test builds the input that forces two delays at a chunk's end: random and text inputs
+never reached it.
 
 ### ChaCha20-Poly1305: 1.0 → 1.52 GB/s
 
@@ -957,7 +994,7 @@ have reports with reproducers written but not yet filed.
 | **`min(a, b, c, …)` with three or more arguments** is the variadic overload: an array per call | An allocation in Brotli's literal loop | Nested two-argument `min` |
 | **A `~Copyable` initializer reading a stored `let` before its `UniqueArray` fields are set**: the optimized build frees those uninitialized fields as if reassigning them | Crash, release builds only | Compute into locals first |
 | **Default cross-module optimization inlined a public type's `deinit` into clients**, referencing an internal type's metadata | Link error in clients | `@usableFromInline` on the internal type |
-| **A typed-throws closure returning a tuple, passed to `Array.withUnsafeMutableBytes`**, crashes SILGen ("unsupported collection upcast kind"); and typed errors don't pass through it at all (it rethrows `any Error`) | Compiler crash; doesn't compile | `array.mutableSpan.withUnsafeMutableBytes`, which keeps the error type |
+| **A typed-throws closure returning a tuple, passed to `Array.withUnsafeMutableBytes`**, crashes SILGen ("unsupported collection upcast kind"); and typed errors don't pass through it at all (it rethrows `any Error`) | Compiler crash; doesn't compile | Bytes' `array.withOutputRawSpan { … }` or `array.mutableSpan.withUnsafeMutableBytes`, which keep the error type |
 | **`SIMD16<UInt16>(truncatingIfNeeded:)`** isn't inlined | A call per vector | Bit casts, masks, and shifts |
 | **package-benchmark's thresholds** for names with spaces or `/` are written under one name and looked up under another ([ordo-one/benchmark#301](https://github.com/ordo-one/benchmark/issues/301), [#373](https://github.com/ordo-one/benchmark/issues/373)) | A check that silently doesn't run | Names without spaces |
 

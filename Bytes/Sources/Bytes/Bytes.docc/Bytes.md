@@ -33,6 +33,12 @@ The cursors are `~Copyable` and `~Escapable`: they can't outlive the memory they
 can't be duplicated by accident. A read or write that throws consumes or writes nothing and leaves the
 cursor where it was (section writers may leave bytes ahead of it).
 
+``BytesReader`` and ``BytesWriter`` are bit-addressable: sub-byte fields can sit anywhere in the stream. For
+formats whose stream is whole bytes, ``AlignedBytesReader`` and ``AlignedBytesWriter`` have the same byte-level
+API without the bit state (and so compile to less); see ``BytesCursorMode``. `[UInt8](alignedByteCapacity:writing:)`
+and `withAlignedBytesWriter` give the aligned writer, `[UInt8](byteCapacity:writing:)` and `withBytesWriter` the
+bit-addressable one.
+
 Every operation is `@inlinable` and compiles to what you'd write by hand: a byte-aligned `Byte4` read is
 one bounds check and one load, and loops over values (`forEach`, generating writes, and loops of single
 reads) are vectorized. On an M3 Ultra, power-of-two widths and `InlineArray`-backed custom types read and
@@ -40,23 +46,32 @@ write at a single core's memory bandwidth; with all cores, nearly every width re
 ceiling. `Benchmarks/RESULTS.md` has the measurements.
 
 Beyond the types below, `Bytes` extends the standard library (DocC can't link these extension members):
-`[UInt8](byteCapacity:writing:)`, `append(byteCapacity:writing:)`, `[UInt8](copying:)`, and
-`append(copying:)` on `Array`; `String(utf8Capacity:writing:)`; `withBytesWriter` on `OutputSpan` and
-`OutputRawSpan`; `hasPrefix`, `bytesEqual`, and `containsByte(where:)` on `RawSpan`; `UTF8Span(validating:excluding:)`;
-and bit helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bits(from:upTo:)`,
-`keepingLowBits(_:)`, `lowBitMask(_:)`, `signedBits(_:as:)`, and `matches(_:mask:)`.
+`[UInt8](byteCapacity:writing:)`, `[UInt8](alignedByteCapacity:writing:)`, `append(byteCapacity:writing:)`,
+`append(alignedByteCapacity:writing:)`, `[UInt8](copying:)`, `append(copying:)`, and
+`withOutputRawSpan(overwritingFrom:_:)` on `Array` (the last also on `MutableSpan<UInt8>` and
+`MutableRawSpan`); `String(utf8Capacity:writing:)`, which passes an ``AlignedBytesWriter``;
+`withBytesWriter` and `withAlignedBytesWriter` on `OutputSpan` and `OutputRawSpan`; `append(copying:)` and
+`withFreeCapacity(byteCount:_:)` on `OutputRawSpan`; `copyBytes(from:toByteOffset:)` and
+`copyBytes(within:toByteOffset:)` on `MutableRawSpan` and `MutableSpan<UInt8>`; `hasPrefix`, `hasSuffix`,
+`bytesEqual`, `containsByte(where:)`, `firstByteOffset(of:from:)`, `commonPrefixLength(at:and:from:maxLength:)`,
+and its unchecked form `unsafeCommonPrefixLength` on `RawSpan`; `UTF8Span(validating:excluding:)`; and bit
+helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bits(from:upTo:)`,
+`bits(from:count:)`, `keepingLowBits(_:)`, `lowBitMask(_:)`, `signedBits(_:as:)`, and `matches(_:mask:)`.
 
 ## Topics
 
 ### Essentials
 
+- <doc:UnderstandingTheTypes>
 - <doc:WritingParsers>
 - ``BytesReader``
 - ``BytesWriter``
+- ``AlignedBytesReader``
+- ``AlignedBytesWriter``
 - ``BytesError``
 - ``LocatedBytesError``
-- ``BytesReader/located(_:)``
-- ``BytesReader/atomically(_:)``
+- ``GenericBytesReader/located(_:)``
+- ``GenericBytesReader/atomically(_:)``
 
 ### Field types
 
@@ -86,10 +101,10 @@ and bit helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:
 ### Variable-size data
 
 - ``LEB128``
-- ``BytesReader/read(sectionPrefixedBy:_:)``
-- ``BytesReader/read(utf8PrefixedBy:_:)``
-- ``BytesReader/forEachRecord(tag:length:_:_:)``
-- ``BytesWriter/write(sectionPrefixedBy:_:_:)``
+- ``GenericBytesReader/read(sectionPrefixedBy:_:)``
+- ``GenericBytesReader/read(utf8PrefixedBy:_:)``
+- ``GenericBytesReader/forEachRecord(tag:length:_:_:)``
+- ``GenericBytesWriter/write(sectionPrefixedBy:_:_:)``
 
 ### Scanning and shuffling 16 bytes at once
 
@@ -99,15 +114,25 @@ and bit helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:
 - ``ByteLanes/deinterleave(_:_:_:)``
 - ``ByteLanes/interleave(_:_:_:)``
 
-### Decoders and checksums
+### Buffers and copies
+
+- ``ByteBuffer``
+
+### Decoders, encoders, and checksums
 
 - ``BitBuffer``
+- ``BitWriter``
 - ``HuffmanTable``
 - ``CRC32``
 
-### Order
+### Order and cursor modes
 
 - ``BitOrder``
+- ``BytesCursorMode``
+- ``BitAddressable``
+- ``ByteAligned``
+- ``GenericBytesReader``
+- ``GenericBytesWriter``
 
 ### Iteration
 

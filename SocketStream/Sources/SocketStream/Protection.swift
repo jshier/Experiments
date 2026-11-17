@@ -22,15 +22,21 @@ public struct Protection: Sendable, Hashable, CustomStringConvertible {
     public var compression: StreamCompression
     /// Whether the stream goes in TLS 1.3 records (ChaCha20-Poly1305), with keys from an X25519 exchange.
     public var encrypted: Bool
+    /// How many cores compress each sender's stream: above 1, DEFLATE runs as a `ParallelDeflateEncoder`
+    /// with this many lanes, each batch cut into that many chunks (at least 32 KB each). Brotli stays
+    /// sequential.
+    public var compressionLanes: Int
 
     /// Creates a protection.
     ///
     /// - Parameters:
     ///   - compression: The compression to apply.
     ///   - encrypted: Whether to seal the stream in TLS records.
-    public init(compression: StreamCompression = .none, encrypted: Bool = false) {
+    ///   - compressionLanes: How many cores compress DEFLATE (1: sequentially).
+    public init(compression: StreamCompression = .none, encrypted: Bool = false, compressionLanes: Int = 1) {
         self.compression = compression
         self.encrypted = encrypted
+        self.compressionLanes = max(compressionLanes, 1)
     }
 
     /// Plain MQTT on the socket.
@@ -44,9 +50,13 @@ public struct Protection: Sendable, Hashable, CustomStringConvertible {
         switch (compression, encrypted) {
         case (.none, false): "plain"
         case (.none, true): "TLS records"
-        case (let compression, false): "\(compression)"
-        case (let compression, true): "\(compression) + TLS records"
+        case (let compression, false): "\(compression)\(lanesDescription)"
+        case (let compression, true): "\(compression)\(lanesDescription) + TLS records"
         }
+    }
+
+    private var lanesDescription: String {
+        compression == .deflate && compressionLanes > 1 ? " on \(compressionLanes) lanes" : ""
     }
 
     /// Traffic keys for one connection: an X25519 exchange between its two ends (both here, in place of a
@@ -71,6 +81,13 @@ extension Transfer {
         switch (protection.compression, protection.encrypted) {
         case (.none, _):
             return try await sendProtected(workload, to: address, through: TLSRecordSealer(keys: keys))
+        case (.deflate, false) where protection.compressionLanes > 1:
+            return try await sendProtected(workload, to: address, through: parallelDeflate(protection.compressionLanes))
+        case (.deflate, true) where protection.compressionLanes > 1:
+            return try await sendProtected(
+                workload, to: address,
+                through: parallelDeflate(protection.compressionLanes).then(TLSRecordSealer(keys: keys), bufferCapacity: workload.batchSize &+ (64 << 10))
+            )
         case (.deflate, false):
             return try await sendProtected(workload, to: address, through: DeflateEncoder(format: .raw, level: 1))
         case (.deflate, true):
@@ -155,13 +172,13 @@ extension Transfer {
     ) async throws -> (wire: Int, plain: Int, packets: Int) where Stages.Failure == BytesError {
         var pipeline = stages
         var connection = connection
-        var received = ReceiveBuffer(capacity: workload.receiveCapacity)
-        var plain = PlainBuffer(capacity: workload.receiveCapacity)
+        var received = ByteBuffer(capacity: workload.receiveCapacity)
+        var plain = ByteBuffer(capacity: workload.receiveCapacity)
         var checker = PacketChecker(payloadSize: workload.payloadSize)
         var wireBytes = 0
         var plainBytes = 0
         var ended = false
-        do {
+        do throws(any Error) {
             while !ended {
                 let count = try await received.read(from: &connection)
                 wireBytes += count
@@ -170,12 +187,21 @@ extension Transfer {
                 // finishes (or throws, if its stream ended early); a TLS opener alone has no end of stream, and
                 // throws if a partial record is left.
                 while true {
-                    let progress = try plain.fill { output throws(BytesError) in
-                        try pipeline.transform(received.unread, into: &output, flush: ended ? .finish : .none)
+                    let progress: TransformProgress
+                    do throws(BytesError) {
+                        progress = try plain.fill { output throws(BytesError) in
+                            try pipeline.transform(received.unread, into: &output, flush: ended ? .finish : .none)
+                        }
+                    } catch {
+                        throw TransferError(description: "Decoding failed (\(error)) after \(wireBytes) bytes from the socket, \(plainBytes) decoded")
                     }
                     received.consume(progress.consumed)
                     plainBytes += progress.produced
-                    plain.consume(try checker.check(plain.unread))
+                    do throws(any Error) {
+                        plain.consume(try checker.check(plain.unread))
+                    } catch {
+                        throw TransferError(description: "Packet \(checker.packets) failed (\(error)) after \(plainBytes) bytes decoded")
+                    }
                     if progress.status != .needsOutput { break }
                 }
             }
@@ -192,62 +218,16 @@ extension Transfer {
     static func transform<Stages: ByteTransform & ~Copyable>(
         _ pipeline: inout Stages, _ input: RawSpan, into output: inout [UInt8], flush: TransformFlush
     ) throws(BytesError) -> TransformProgress where Stages.Failure == BytesError {
-        var bytes = output.mutableSpan
-        // Unsafe: an output span over the buffer. Safe: it covers the buffer and ends with the closure; the
-        // produced count comes from the pipeline's report. (The span's closure keeps the error type; the
-        // array's would make it `any Error`.)
-        return try bytes.withUnsafeMutableBytes { buffer throws(BytesError) in
-            var span = unsafe OutputRawSpan(buffer: buffer, initializedCount: 0)
-            let progress = try pipeline.transform(input, into: &span, flush: flush)
-            _ = unsafe span.finalize(for: buffer)
-            return progress
+        try output.withOutputRawSpan { span throws(BytesError) in
+            try pipeline.transform(input, into: &span, flush: flush)
         }
     }
 }
 
-/// The receiver's buffer of decoded MQTT bytes: a pipeline appends, the checker consumes from the front, and
-/// a partial packet moves to the front before the buffer fills. Allocated once.
-struct PlainBuffer: ~Copyable {
-    private var storage: [UInt8]
-    private var start = 0
-    private var end = 0
-
-    init(capacity: Int) {
-        storage = [UInt8](repeating: 0, count: capacity)
-    }
-
-    var unread: RawSpan {
-        @_lifetime(borrow self)
-        get { storage.span.bytes.extracting(start..<end) }
-    }
-
-    var isEmpty: Bool { start == end }
-
-    mutating func consume(_ count: Int) {
-        start += count
-        if start == end { (start, end) = (0, 0) }
-    }
-
-    /// Appends what `body` writes to the free space, after moving a partial packet to the front if less than
-    /// half the buffer is free.
-    mutating func fill(_ body: (inout OutputRawSpan) throws(BytesError) -> TransformProgress) throws(BytesError) -> TransformProgress {
-        if storage.count - end < storage.count / 2, start > 0 {
-            let count = end - start
-            for index in 0..<count { storage[index] = storage[start + index] }
-            (start, end) = (0, count)
-        }
-        let end = end
-        var bytes = storage.mutableSpan
-        // Unsafe: an output span over the free tail. Safe: it covers exactly `storage[end...]` and ends with the
-        // closure; only the produced bytes are counted.
-        let progress = try bytes.withUnsafeMutableBytes { buffer throws(BytesError) in
-            let free = unsafe UnsafeMutableRawBufferPointer(rebasing: buffer[end...])
-            var output = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
-            let progress = try body(&output)
-            _ = unsafe output.finalize(for: free)
-            return progress
-        }
-        self.end += progress.produced
-        return progress
+extension Transfer {
+    /// DEFLATE level 1 on `lanes` cores, raw, chunks of up to 64 KB: a 256 KB batch is cut into `lanes` chunks
+    /// of at least 32 KB, each primed with the 32 KB before it.
+    static func parallelDeflate(_ lanes: Int) -> ParallelDeflateEncoder {
+        ParallelDeflateEncoder(format: .raw, level: 1, chunkSize: 64 << 10, lanes: lanes)
     }
 }

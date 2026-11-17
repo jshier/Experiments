@@ -81,6 +81,37 @@ public struct ByteMatches: Sendable {
         let words = bitCast(highBits & 0x80, to: SIMD2<UInt64>.self)
         return words[0] | words[1] != 0
     }
+
+    /// The matching lanes, one bit each: lane i in bit i.
+    ///
+    /// ```swift
+    /// var lanes = block.matching(0).bitmask
+    /// while lanes != 0 {
+    ///     check(offset + lanes.trailingZeroBitCount)
+    ///     lanes &= lanes &- 1
+    /// }
+    /// ```
+    ///
+    /// Each half's high bits shifted to bit 0 of their bytes, then gathered into one byte by a multiply
+    /// (byte i's bit lands in bit 56 + i): portable, about a dozen instructions, no branches.
+    @inlinable @inline(__always)
+    public var bitmask: UInt16 {
+        let halves = bitCast(highBits, to: SIMD2<UInt64>.self)
+        // Lane i is byte i of the halves on a little-endian CPU; a big-endian one swaps them back.
+        let first = UInt64(littleEndian: halves[0])
+        let second = UInt64(littleEndian: halves[1])
+        // Parenthesized: Swift's shifts bind tighter than multiplication.
+        let low = (((first &>> 7) & 0x0101_0101_0101_0101) &* 0x0102_0408_1020_4080) &>> 56
+        let high = (((second &>> 7) & 0x0101_0101_0101_0101) &* 0x0102_0408_1020_4080) &>> 56
+        return UInt16(truncatingIfNeeded: low | high &<< 8)
+    }
+
+    /// The first matching lane, or `nil` if none matches.
+    @inlinable @inline(__always)
+    public var firstIndex: Int? {
+        let lanes = bitmask
+        return lanes == 0 ? nil : lanes.trailingZeroBitCount
+    }
 }
 
 public extension RawSpan {

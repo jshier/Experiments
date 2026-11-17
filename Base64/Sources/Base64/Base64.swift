@@ -1,18 +1,18 @@
 public import Bytes
 
-/// Base64 encoding and decoding (RFC 4648), from a `BytesReader` into a `BytesWriter`: no allocation, and
-/// vectorized. Decoding is in `Decoding.swift`: ``decode(_:into:alphabet:padding:)-(BytesReader,_,_,_)``.
+/// Base64 encoding and decoding (RFC 4648), from an `AlignedBytesReader` into an `AlignedBytesWriter`: no allocation, and
+/// vectorized. Decoding is in `Decoding.swift`: ``decode(_:into:alphabet:padding:)-(AlignedBytesReader,_,_,_)``.
 ///
 /// ```swift
-/// var reader = BytesReader(bytes.span)
+/// var reader = AlignedBytesReader(bytes.span)
 /// var output = [UInt8](repeating: 0, count: Base64.encodedByteCount(of: bytes.count))
 /// var span = output.mutableSpan
-/// var writer = BytesWriter(&span)
+/// var writer = AlignedBytesWriter(&span)
 /// try Base64.encode(&reader, into: &writer)
 /// ```
 ///
-/// Input is read as typed spans of fixed-size blocks (`BytesReader.read(_:count:)`) and output written the same
-/// way (`BytesWriter.write(_:count:filling:)`), so each kernel is a loop from one span to another, with its
+/// Input is read as typed spans of fixed-size blocks (`AlignedBytesReader.read(_:count:)`) and output written the same
+/// way (`AlignedBytesWriter.write(_:count:filling:)`), so each kernel is a loop from one span to another, with its
 /// bounds checks folded out of the loop. Two kernels:
 /// - **ARM64** (`ByteLanes.isLookupVectorized`): 48-byte blocks, 29–32 instructions each, with Bytes' NEON
 ///   helpers. `deinterleave` splits a block into its groups' first, second, and third bytes (3 `tbl`), as
@@ -103,7 +103,7 @@ public enum Base64 {
     ///   ``encodedByteCount(of:padding:)`` bytes; nothing has been read or written then.
     @inlinable
     public static func encode(
-        _ reader: inout BytesReader, into writer: inout BytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
+        _ reader: inout AlignedBytesReader, into writer: inout AlignedBytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
     ) throws(BytesError) {
         let byteCount = reader.remainingByteCount
         guard writer.remainingByteCount >= encodedByteCount(of: byteCount, padding: padding) else {
@@ -124,17 +124,15 @@ public enum Base64 {
             if blocks.isEmpty {
                 var bytes = InlineArray<48, UInt8>(repeating: 0)
                 var blockBytes = bytes.mutableSpan
-                var blockWriter = BytesWriter(&blockBytes)
+                var blockWriter = AlignedBytesWriter(&blockBytes)
                 try blockWriter.write(reader.read(byteCount: rest))
                 block = bytes
             } else {
                 // After a block, the last 48 bytes overlap it: load them, and move the last `rest` to the
                 // front with zeros after, in registers, with no copy through memory (1,000 bytes: 6% faster).
-                // A new reader at that offset rather than `seek`: its bit offset is known to be 0, so the
-                // unaligned path of `load` folds away (and `seek` wasn't inlined).
-                var overlap = try BytesReader(reader.span, atByteOffset: reader.byteOffset &- (48 &- rest))
-                let last = try overlap.load(InlineArray<3, SIMD16<UInt8>>.self)
-                _ = reader.readRemainingBytes()
+                // `seek` is inlined and clears the bit offset, so the unaligned path of `load` folds away.
+                try reader.seek(toByteOffset: reader.byteOffset &- (48 &- rest))
+                let last = try reader.load(InlineArray<3, SIMD16<UInt8>>.self)
                 block = bitCast(shiftedDown(last, by: 48 &- rest), to: InlineArray<48, UInt8>.self)
             }
             let characters = encodeBlock(block, table: table)
@@ -180,9 +178,9 @@ public enum Base64 {
     ///   ``encodedByteCount(of:padding:)`` bytes; nothing has been written then.
     @inlinable
     public static func encode(
-        _ bytes: RawSpan, into writer: inout BytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
+        _ bytes: RawSpan, into writer: inout AlignedBytesWriter, alphabet: Alphabet = .standard, padding: Bool = true
     ) throws(BytesError) {
-        var reader = BytesReader(bytes)
+        var reader = AlignedBytesReader(bytes)
         try encode(&reader, into: &writer, alphabet: alphabet, padding: padding)
     }
 

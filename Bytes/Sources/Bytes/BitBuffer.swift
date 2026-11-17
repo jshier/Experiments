@@ -69,7 +69,7 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     ///
     /// - Parameters:
     ///   - span: The data to decode.
-    ///   - position: The bit to start at, counted from the start of `span` (see ``BytesReader/bitPosition``),
+    ///   - position: The bit to start at, counted from the start of `span` (see ``GenericBytesReader/bitPosition``),
     ///     0 through `span.byteCount * 8`.
     ///   - bitOrder: The order of bits within each byte.
     /// - Throws: ``BytesError/invalidValue`` if `position` is negative, ``BytesError/insufficientData`` if it
@@ -97,6 +97,56 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     /// Whether more bits have been consumed than the data has: a decoder read the zero padding.
     @inlinable
     public var isOverrun: Bool { bitPosition > span.byteCount &<< 3 }
+
+    /// A position to come back to with ``rewind(to:)``: where a unit (a code and its extra bits) started, to
+    /// undo it if the input ran out partway.
+    @frozen
+    public struct Position: Hashable, Sendable {
+        /// The position's bit offset from the start of the data, as ``BitBuffer/bitPosition``.
+        public let bitPosition: Int
+
+        @inlinable @inline(__always)
+        init(bitPosition: Int) {
+            self.bitPosition = bitPosition
+        }
+    }
+
+    /// The current position, for ``rewind(to:)``. Just the bit position: taking it costs nothing in a decode
+    /// loop beyond keeping one integer.
+    @inlinable
+    public var position: Position { Position(bitPosition: bitPosition) }
+
+    /// Moves back to `position`, discarding what was read since: the buffered bits are reloaded from the data
+    /// there, as a new buffer at that bit position would be.
+    ///
+    /// ```swift
+    /// let unit = bits.position
+    /// let symbol = table.decode(&bits)
+    /// if bits.isOverrun {   // The input ended inside the code: undo it, and ask for more.
+    ///     bits.rewind(to: unit)
+    ///     return .needsInput
+    /// }
+    /// ```
+    ///
+    /// Brotli's decoder doesn't use it: in its command loop, rewinding at its six "input ran out" sites in
+    /// place of making a new buffer at the unit's bit position ran 2–3% more instructions on 1.6 KB streams
+    /// (decoded entirely near the input's end, where those sites are), inlined or not.
+    ///
+    /// - Parameter position: A position this buffer reported.
+    /// - Precondition: `position` is within the data.
+    @inlinable
+    public mutating func rewind(to position: Position) {
+        let target = position.bitPosition
+        precondition(target >= 0 && target <= span.byteCount &<< 3, "Rewinding to a position outside the data")
+        _nextByte = target &>> 3
+        _bits = 0
+        _count = 0
+        let bitOffset = target & 7
+        if bitOffset > 0 {
+            refill()
+            consume(bitCount: bitOffset)
+        }
+    }
 
     /// Fills the buffer to at least ``minimumRefill`` bits, adding zeros past the end of the data.
     ///
@@ -213,7 +263,7 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     }
 
     /// Reads the next bits as a two's-complement signed integer, refilling first if needed. See
-    /// ``BytesReader/readSigned(bitCount:)``.
+    /// ``GenericBytesReader/readSigned(bitCount:)``.
     ///
     /// - Parameter count: The number of bits, 1 through 56.
     /// - Returns: The sign-extended value.

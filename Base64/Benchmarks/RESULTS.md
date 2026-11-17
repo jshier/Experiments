@@ -4,6 +4,18 @@ Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 
 one core. Random input; each measured iteration encodes at least 4 MB, repeating short inputs. Throughput
 counts input bytes; output is 4/3 as many.
 
+## 2026-11-16: byte-aligned cursors (baselines `p4-generic` → `p4-aligned`)
+
+The API now takes `AlignedBytesReader` and `AlignedBytesWriter` (Base64 is whole bytes), and
+`String(utf8Capacity:)` gives an aligned writer.
+- **Encode** through the cursors: −6.5% at 40 B, −7.7% at 47 B, −4.5% at 64 B, −6.7% at 95 B, −1.5% at 1 KB.
+- **`encodedString`:** −0.9% to −1.4%.
+- **Decode:** −3.7% at 47 B; `decodedBytes` −0.6% to −1.5%.
+- **"Portable groups" decode**, which doesn't use the cursors in its loop: +1.6% and +2.2% at 95 and 64 B.
+
+The benchmark names still say `BytesReader → BytesWriter`, to keep comparisons with earlier baselines. Details:
+`../../Bytes/Benchmarks/RESULTS.md`, 2026-11-16.
+
 ## Current (baseline `final`)
 
 | Input | Bytes encoder | Allocations | `encodedString` | Foundation `base64EncodedData()` | Scalar table |

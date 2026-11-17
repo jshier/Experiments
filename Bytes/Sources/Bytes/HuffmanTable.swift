@@ -237,6 +237,79 @@ extension HuffmanTable {
     /// rather than a nested one: capturing the entry closures kept them from being inlined (5% more
     /// instructions decoding small DEFLATE files).
     ///
+    /// Builds a decoding table from the used symbols, already in canonical order (by code length, then by
+    /// value), and the number of codes of each length: what ``build(codeLengths:bitOrder:rootBits:maximumCodeLength:allowingIncomplete:into:invalid:symbol:subtable:)``
+    /// computes from a full list of code lengths before it fills the table.
+    ///
+    /// For decoders that read code lengths as runs and can collect the used symbols as they go (Brotli's
+    /// repeat codes): the work is then proportional to the symbols used, not to the alphabet. A Brotli
+    /// insert-and-copy alphabet has 704 symbols, of which a small stream uses a few dozen.
+    ///
+    /// - Parameters:
+    ///   - sortedSymbols: The used symbols, by code length, then value.
+    ///   - counts: How many symbols have each code length, indexed by length (index 0 is ignored). They
+    ///     must add up to `sortedSymbols.count`.
+    ///   - Other parameters: As for the code-length form.
+    /// - Returns: The number of entries of `table` used.
+    /// - Throws: As the code-length form.
+    /// - Precondition: As the code-length form, and the counts add up to `sortedSymbols.count`.
+    @inlinable
+    public static func build<Entry: BitwiseCopyable>(
+        sortedSymbols sorted: Span<UInt16>,
+        counts: InlineArray<17, Int>,
+        bitOrder: BitOrder,
+        rootBits: Int,
+        maximumCodeLength: Int = 16,
+        allowingIncomplete: Bool = true,
+        into table: inout MutableSpan<Entry>,
+        invalid: Entry,
+        symbol makeSymbol: (_ symbol: Int, _ codeLength: Int) -> Entry,
+        subtable makeLink: (_ offset: Int, _ indexBits: Int) -> Entry
+    ) throws(BytesError) -> Int {
+        precondition(rootBits >= 1 && rootBits <= 16 && maximumCodeLength <= 16, "Invalid table shape")
+        precondition(table.count >= 1 << rootBits, "Table smaller than its root")
+        var total = 0
+        var longest = 0
+        var unused = 1 // Codes still available at the current length.
+        for length in 1...16 {
+            let count = counts[length]
+            total &+= count
+            unused = unused &<< 1 &- count
+            guard unused >= 0 else { throw .invalidValue } // Over-subscribed.
+            if count > 0 { longest = length }
+        }
+        precondition(total == sorted.count, "Counts don't match the symbols")
+        guard longest <= maximumCodeLength else { throw .invalidValue }
+        let rootSize = 1 &<< rootBits
+        if unused > 0 {
+            // Incomplete: no codes, or a single 1-bit code. Everything else decodes as invalid.
+            guard allowingIncomplete, longest <= 1 else { throw .invalidValue }
+            for index in 0..<rootSize {
+                table[index] = invalid
+            }
+            if total == 1 {
+                let entry = makeSymbol(Int(sorted[0]), 1)
+                switch bitOrder {
+                case .leastSignificantFirst:
+                    for index in stride(from: 0, to: rootSize, by: 2) {
+                        table[index] = entry
+                    }
+                case .mostSignificantFirst:
+                    for index in 0..<(rootSize &>> 1) {
+                        table[index] = entry
+                    }
+                }
+            }
+            return rootSize
+        }
+        switch bitOrder {
+        case .leastSignificantFirst:
+            return try _buildReversed(&table, sorted, counts, rootBits: rootBits, makeSymbol, makeLink)
+        case .mostSignificantFirst:
+            return try _buildForward(&table, sorted, counts, rootBits: rootBits, makeSymbol, makeLink)
+        }
+    }
+
     /// - Parameters:
     ///   - lengths: The code length of each symbol, 0 if unused.
     ///   - sorted: Zeroed scratch, at least as long as `lengths`.

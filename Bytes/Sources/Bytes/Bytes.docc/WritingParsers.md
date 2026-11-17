@@ -60,6 +60,11 @@ Create a ``BytesReader`` cursor over the input and read the fields in order. A f
 a message takes the cursor `inout`; since it's `~Escapable`, say how the result's lifetime relates with
 `@_lifetime` (this needs the `Lifetimes` experimental feature in your target).
 
+This format has sub-byte fields, so it uses the bit-addressable ``BytesReader``. A format with none in its
+stream (MQTT, Base64, ZIP) should use ``AlignedBytesReader`` and ``AlignedBytesWriter``: the same byte-level calls,
+less code. Bit-level API (``Bits`` reads and writes, `seek(toBitPosition:)`, `skip(bitCount:)`, `withBitBuffer`)
+is only on the bit-addressable cursors.
+
 ```swift
 enum ReadingError: Error { case truncated, malformed }
 
@@ -103,7 +108,7 @@ same position.
 ### Serialize
 
 Write a new array with `[UInt8](byteCapacity:writing:)` (or append to one with `append(byteCapacity:writing:)`),
-which keeps exactly the bytes written; `withBytesWriter` does the same for any `OutputSpan<UInt8>`. Annotate the
+which keeps exactly the bytes written; `withBytesWriter` does the same for any `OutputSpan<UInt8>`. (`[UInt8](alignedByteCapacity:writing:)` and `withAlignedBytesWriter` hand out an ``AlignedBytesWriter`` instead.) Annotate the
 closure's error type, as below: unannotated, it throws `any Error`. Lengths that prefix their data are
 usually known before writing; compute them first.
 

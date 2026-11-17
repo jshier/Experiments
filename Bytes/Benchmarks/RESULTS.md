@@ -5,6 +5,430 @@ Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (r
 other benchmarks running); the 2026-11-12 sections have newer full runs. Compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
+## 2026-11-16, byte-aligned cursors: `AlignedBytesReader` and `AlignedBytesWriter` (baselines `exp10-*`, `p4-generic`, `p4-aligned`)
+
+**The cost.** `BytesReader` and `BytesWriter` can read and write at any bit position, and they carry that state
+everywhere:
+- a bit offset (and, in the writer, the partly written byte), tested on every byte-level operation;
+- a partial-byte term in `remainingByteCount`.
+
+The optimizer can't prove the bit offset stays 0 through a loop, because the unaligned path, never taken by
+byte-only formats, can change it.
+
+**The ceiling.** To measure the most a byte-only cursor could save, scratch copies of the tree were built
+(`exp10-base`, and `exp10-byte` with the bit offset and partial byte made the constant 0):
+
+| Client | Change (instructions) |
+|---|---|
+| MQTT encode | −6.1% (writer alone: −6.1%) |
+| MQTT parse | −0.9% to −2.9% (reader) |
+| Base64 encode, short inputs | −1.5% to −7.7% |
+| QOI, runs written a pixel at a time (BinaryParsingComparison) | −22% (reader) |
+| QOI, runs filled at once | +54% (antelope.qoi) and +9% (tricolor.qoi), also from the reader |
+
+**The design.** One implementation, two modes:
+- `GenericBytesReader<Mode>` and `GenericBytesWriter<Mode>`, with `Mode` either `BitAddressable` or
+  `ByteAligned` (`Sources/Bytes/CursorMode.swift`).
+- `BytesReader` and `BytesWriter` are the bit-addressable forms; `AlignedBytesReader` and
+  `AlignedBytesWriter` the byte-aligned ones.
+- The bit offset and partial byte are accessors over stored fields: `Mode.addressesBits ? stored : 0`. For a
+  byte-aligned cursor, every test of them folds after specialization.
+- The byte-level API is written once, in unconstrained extensions. Bit reads and writes, `seek(toBitPosition:)`,
+  `skip(bitCount:)`, and `Bits` iteration are in extensions constrained to `BitAddressable`.
+- `Byte` (`Bits<8>`) reads, writes, `expect`, and raw-value forms are in both. An aligned reader converts to and
+  from a bit-addressable one at a byte boundary.
+- Out-of-line helpers (`_copyLong`, `_copyRepeating`, `_writeUnalignedBytes`, `_unalignedBytes`,
+  `_readLEB128`) moved to the `BitAddressable`-constrained extensions. There they're not generic, so
+  specialized code of either mode calls them without passing type metadata (checked: `Tools/calls` finds no
+  metadata accessors).
+- **Builders are named apart:** `[UInt8](alignedByteCapacity:)`, `append(alignedByteCapacity:)`, and
+  `withAlignedBytesWriter`. Overloads on the closure's writer type made every closure that works with either
+  writer ambiguous; generic over the mode, they couldn't infer it.
+- `String(utf8Capacity:)` now takes an `AlignedBytesWriter`, since UTF-8 is whole bytes.
+
+**The refactor alone changes nothing** (`p4-generic` against `p3-after` and `exp10-base`, clients unchanged).
+Every row of Bytes' two benchmark targets, MQTT, BinaryParsingComparison, and Base64 is within the reporting
+resolution.
+
+**Adopted:**
+- MQTT, entirely;
+- SocketStream's packet encoder and checker;
+- Base64 (its API now takes the aligned cursors);
+- BinaryParsingComparison's Bytes parsers;
+- NativeZip's archive parsing and its inflater's output;
+- BytesCompression's decoder outputs and gzip/zlib header and trailer readers;
+- BytesCrypto's TLS records and ChaCha20 key and nonce readers.
+
+The bit readers (DEFLATE and Brotli headers, `BitBuffer` users) stay bit-addressable.
+
+Results (`p4-generic` → `p4-aligned`, instructions):
+
+| Rows | Change |
+|---|---|
+| MQTT encode | −6.1% (5,464 K → 5,132 K) |
+| MQTT parse | −0.9% to −2.9% |
+| Base64 encode, 40–95 B | −4.5% to −7.7% |
+| Base64 encode, 1 KB | −1.5% |
+| Base64 encodedString | −0.9% to −1.4% |
+| Base64 decode, 47 B | −3.7% |
+| Base64 decodedBytes | −0.6% to −1.5% |
+| DEFLATE decode (one-shot and streaming, every corpus file) | −1.7% to −4% |
+| Brotli decode, 1.6 KB streams | −1.5% to −2.9% |
+| Brotli decode, large streams | 0 to −0.4% |
+| TLS + inflate receive pipelines | −1.5% to −2% |
+| TLS + Brotli receive, 1.6 KB | −3.4% |
+| SocketStream in-memory encode and check (vs `ss-new-2`, which also predates the section above) | −1.2% and −1.3% |
+| SocketStream protect and unprotect | unchanged |
+| NativeZip inflate and parse | unchanged (its "extract small files" row moves ±13% between runs: file-system calls) |
+| QOI pixel-at-a-time (BinaryParsingComparison) | −22% |
+
+Base64's "portable groups" decode rows, which don't use either cursor in their hot path, moved +1.6% and +2.2%.
+
+**QOI's run-filling decoder keeps `BytesReader`.** With the aligned reader, LLVM nested the run fills' loops
+(the vectorized `write(repeating:)`) inside the per-pixel loop, where before they sat beside it: an 88-instruction
+innermost loop became a 287-instruction outer one, with spills. That cost 54% more instructions on
+antelope.qoi (22.2 G → 34.3 G for 200 decodes, a scratch driver). Two attempts didn't change it:
+- a `_slowPath` hint on runs: 33.5 G;
+- the fill moved out of line: 35.4 G.
+
+So that variant uses `BytesReader` and the aligned writer, and the pixel-at-a-time variant the aligned reader.
+The decoder is generic over the reader's mode.
+
+With that (BinaryParsingComparison `p4-aligned2`):
+- the run-filling decoder is back to 111 M and 1,318 K;
+- the pixel-at-a-time one stays at −22%;
+- the zip-directory, LZ4, and integer workloads didn't change with the aligned reader: their loops were already
+  as tight as the `exp10` ceiling allowed.
+
+## 2026-11-16, matching, bit writing, and searching in core (baselines `p3-before`, `p3-after`, and probes)
+
+`p3-before` was built from a copy of the tree before these changes, and `p3-after` after them, in Bytes'
+CompressionBenchmarks (every Bytes row) and BytesBenchmarks (everything but allocations), Base64 (Bytes rows)
+and NativeZipArchive (Bytes rows). Where a row moved by one reported unit, exact percentiles were exported from
+both builds (`--format histogramPercentiles`). Timings weren't compared.
+
+**What was added and moved:**
+- **`RawSpan.commonPrefixLength(at:and:from:maxLength:)`**, checked once per call, and
+  **`unsafeCommonPrefixLength`**. The compressors' match extension is now the unchecked form (it was a private
+  copy).
+- **`BitWriter`**, from BytesCompression's private `DeflateBitWriter`. It writes least significant bit first,
+  flushes 8 bytes at a time, and has a checked `flush()` and an `@unsafe` `unsafeFlush()`.
+- **`BitBuffer.position` and `rewind(to:)`.**
+- **`bits(from:count:)`**, a shift then a mask, used by the DEFLATE and NativeZip subtable lookups.
+- **`seek(toByteOffset:)` and `seek(toBitPosition:)`** are now always inlined. Base64's encoder seeks instead
+  of making a new reader.
+- **`RawSpan.hasSuffix(_:)`.** Base64's padding test uses it, and a checked load, where it had an unchecked
+  one.
+- **`ByteMatches.bitmask` and `firstIndex`.** Brotli's private lane mask is gone.
+- **`RawSpan.firstByteOffset(of:from:)`.** It replaced the parallel inflater's hand-written search for
+  `00 00 FF FF`.
+
+**Results** (instructions, `p3-before` → `p3-after`):
+
+| Rows | Change |
+|---|---|
+| Brotli quality 1 encode | −1.8% to −2.5% (Main.js 143 M → 140 M, xml 122 M → 119 M) |
+| Brotli q5/q9, DEFLATE 1/6/9 encode | 0 to −0.6% |
+| Parallel inflate | −1.7% to −3.1% |
+| Parallel Brotli | −1.1% to −1.3% |
+| Base64 decode, 40 and 64 bytes | about −3% to −4% (exact: 37 → 36 and 24 → 23 in the benchmark's scaled units) |
+| Base64 encode, 1 KB and 1000 B | +0.2% |
+| NativeZip inflate | identical |
+| Everything else | within ±1% |
+
+- **Parallel inflate** is probably faster because of the new search, which compares a vector's first and last
+  bytes, where the old one compared four offset vectors. Parallel rows include the threads' variation.
+- **NativeZip's "extract 2,000 small files"** moved +2% in one run and −4% in another: it's file-system calls.
+- **Brotli's small-stream decode** is unchanged once `rewind` was reverted (see below).
+
+**Probes that changed the design:**
+- **A checked match extension costs too much in a match finder.** `commonPrefixLength`'s one bounds check (an
+  OR of the bounds, one sign test) adds about eight instructions per call. The match finders call it per
+  candidate: 3–18% more instructions (DEFLATE 6 dickens 1,311 M → 1,401 M, Brotli q9 dickens 4,664 M →
+  5,515 M; `p3-prefix`). The unchecked form restored every row exactly (`p3-prefix2`). Both forms stay. The
+  compressors' safety argument (`maxLength` never passes the data's end) is now a comment at their one call
+  site.
+- **`BitWriter.flush()`'s capacity check costs 0.2–1.7%** (`p3-bitwriter`). It's two instructions and a branch
+  against about five for the flush. The encoders use `unsafeFlush()`, because their staging buffers are
+  reserved per block or meta-block. With that, the core writer is slightly ahead of the private one
+  (`p3-bitwriter2`): Brotli q1 −1.8% to −2.5%, the rest 0 to −0.6%.
+- **A compile-time bit order isn't worth it** (`exp7-lsb`, built in a scratch copy). With `BitBuffer`'s
+  `switch bitOrder` hard-coded to least significant first, DEFLATE decode ran 0.5–3.6% *more* instructions and
+  Brotli ±0.3%. The run-time `let` already folds wherever the buffer is inlined. So `BitBuffer` stays
+  non-generic, and `BitWriter` is least-significant-first only (DEFLATE, Brotli and zstd's order).
+- **Brotli's decoder still builds a new `BitBuffer` to undo a unit.** Rewinding at its six "input ran out" sites
+  ran 1–2 K more instructions on 1.6 KB streams (q5 56 K → 57–58 K, q11 68–69 K → 70 K, TLS + Brotli receive
+  59 K → 60 K). Those streams decode entirely in that near-the-end path.
+  - Bisected in scratch copies: reverting the rewinds restored the counts; un-inlining `seek` didn't change them.
+    Keeping `rewind` out of line cost the same.
+  - The cause wasn't found. The API stays, with this measurement in its documentation.
+
+**Not done:**
+- `withBitBuffer` generic over the error type. A body's error and the overrun error would need one type.
+- A public `Load`/`Store` namespace.
+- Byte-only cursors (suggestion 10): done separately, in the section above.
+
+## 2026-11-16, buffer and copy API: no change in instructions (baselines `s1-before`, `s1-lib`, `s1-after`)
+
+New in `Sources/Bytes/Buffers.swift`, for the copies every client wrote with `withUnsafeMutableBytes` and
+`copyMemory`, since the standard library (Swift 6.4) has no safe copy into a `MutableRawSpan` or an
+`OutputRawSpan`:
+
+- `OutputRawSpan.append(copying:)`;
+- `OutputRawSpan.withFreeCapacity(byteCount:_:)`, which hands the closure a `MutableRawSpan` over the free
+  capacity and counts the bytes the closure reports writing;
+- `copyBytes(from:toByteOffset:)` and `copyBytes(within:toByteOffset:)` (the ranges may overlap) on
+  `MutableRawSpan` and `MutableSpan<UInt8>`;
+- `withOutputRawSpan(overwritingFrom:_:)` on `[UInt8]`, `MutableSpan<UInt8>` and `MutableRawSpan`. It keeps the
+  closure's error type, so it also avoids swiftlang/swift#90291.
+- `ByteBuffer`, which fills at its end and drains from its front:
+  - one allocation that never moves, so `receive(_:)` can suspend (a socket read) with its output span in place;
+  - `fill(_:)` compacts first when less free space is left at the end than a threshold (half by default);
+  - `consume(_:)` and `compact()`.
+- `BytesWriter(&mutableSpan, atByteOffset:)`, a writer that continues after bytes already written.
+
+The new copies share `write(_: RawSpan)`'s inline copy for spans up to 64 bytes (now `BytesWriter._copyBytes`).
+
+Moved onto them:
+- `Pipeline`'s buffer, now a `ByteBuffer` that compacts below a quarter free, as before;
+- the DEFLATE and Brotli decoders' one-shot output, delivery and window slides;
+- the encoders' window fills, slides and delivery;
+- the parallel DEFLATE encoder's window and delivery, and the parallel decoder's buffer growth;
+- the TLS sealer's and opener's copies and in-place sealing and opening;
+- SocketStream's two receive buffers, which were three hand-written copies of `ByteBuffer`;
+- the compression benchmarks' output buffers.
+
+Counts of `withUnsafe*Bytes`, `copyMemory`, `OutputRawSpan(buffer:)` and `MutableRawSpan(mutating:)` before
+and after:
+
+| Where | Before | After |
+|---|---|---|
+| BytesCompression | 66 | 26 |
+| BytesCrypto | 10 | 2 |
+| `Pipeline` | 5 | 0 |
+| SocketStream sources | 9 | 1 |
+| SocketStream benchmarks | 4 | 0 |
+| compression benchmarks | 34 | 10 |
+
+What remains in BytesCompression is mostly the parallel codecs handing pointers to worker threads.
+
+Instruction counts, on the inflate, Brotli decode and encode, streaming deflate, pipeline, two-pass and
+parallel rows, and BytesBenchmarks' span copies, literals, fields and sections:
+- **`s1-before`** was built from a copy of the old tree.
+- **`s1-lib`** is the library change only, with the benchmarks unchanged.
+- **`s1-after`** also has the converted benchmark harnesses.
+
+Every row is unchanged within the reported resolution, three significant figures (1 K on 30 K). Allocations
+are unchanged; pipelines still allocate nothing per stream.
+
+The largest apparent change, Inflate JSON 1.6 KB at 29 K → 30 K (+3.4%), read 30 K → 30 K when the exact
+percentiles were exported from both builds. The others are within 0.7%, and the reference rows (Google, Apple)
+move as much. MQTT's encode and parse (5,464 K and 9,888 K) are identical with the old and new Bytes.
+Timings weren't compared, since the instruction counts didn't move.
+
+SocketStream (`SocketStream/.benchmarkBaselines`, `ss-old-1`, `ss-new-1`, `ss-old-2`, `ss-new-2`,
+interleaved):
+- **Unprotect, Brotli + TLS: 27 M → 26 M instructions (−3.7%), in both rounds.** This is the benchmark's
+  receive buffer, now a `ByteBuffer`. It moves a partial packet to the front only when less than half is free,
+  where the old code moved it after every piece.
+- **The other in-memory rows are flat**, with no allocations either way.
+- **Encode 64 B packets: +0.3% (4,735 K → 4,751 K), in both rounds.** The encode code is unchanged, but its
+  specialization compiled to 291 instructions instead of 301, and its wrapper went from 1 to 16; not
+  investigated further.
+- **Socket transfers** are within their usual run-to-run variation.
+
+A 4 KB receive buffer with TLS records (16 KB) traps, in the old code as in the new: a record must fit the
+buffer.
+
+Ergonomics, met while doing it:
+- **`[1, 2, 3].span.bytes` is 24 bytes.** The literal is an `[Int]`. `copyBytes`' precondition caught it in
+  the tests.
+- **An async overload doesn't work here.** An `async` overload of `fill` taking a `throws(E)` closure made
+  calls from async code ambiguous, even with a closure that doesn't suspend. Hence the separate name,
+  `receive`.
+- **A class's `ByteBuffer` property can't lend `unread` for long.** The access ends at once. The in-memory
+  benchmark passes the buffer `inout` to a static function instead.
+
+## 2026-11-15, second pass: Brotli decode and quality 1, a chunk scheduler for parallel compression (baselines `ab-old-1`, `ab-new-1`, `ab-old-2`, `ab-new-2`, `parallel-1`, `p2-optimized`, `p2-portable`, `p2-portable-no-c`)
+
+All in `.benchmarkBaselines/CompressionBenchmarks/`, on an idle machine. `ab-*` is an interleaved A/B (old =
+`git archive fd46f8f`, built in the scratchpad; old, new, old, new): the timing claims below come from it.
+`p2-*` are the three builds after everything, Bytes rows only; their reference columns (Google, libdeflate)
+come from `final-1`, an earlier run, so read those comparisons as ±10%. `parallel-1` is the parallel rows
+with the old round-based scheduler.
+
+### Brotli decode: −17 to −45% (A/B: −20 to −42%)
+
+| Input | q5 `final-1` | q5 `p2` | q5 Google | q11 `final-1` | q11 `p2` | q11 Google |
+|---|---|---|---|---|---|---|
+| JSON 1.6 KB | 7.38 | **4.04** | 3.08 | 8.17 | **4.88** | 3.79 |
+| JSON 119 KB | 112 | **79** | 72 | 125 | **89** | 75 |
+| Main.css 376 KB | 425 | **280** | 261 | 387 | **296** | 268 |
+| Main.js 3.8 MB | 4,727 | **3,439** | 3,742 | 4,841 | **3,826** | 3,666 |
+| dickens 9.7 MB | 22,000 | **17,000** | 17,000 | 18,000 | **14,000** | 15,000 |
+| x-ray 8.1 MB | 43,000 | **29,000** | 26,000 | 41,000 | **34,000** | 35,000 |
+| xml 5.1 MB | 4,207 | **3,310** | 3,443 | 4,317 | **3,187** | 3,224 |
+
+- In the A/B, every decode row is 20–42% faster (q5 Main.js 4,878 → 3,314 µs, q5 x-ray 42,000 → 28,000,
+  the 1.6 KB streams the most). The decoder now runs with Google's on the large inputs (Main.js, dickens,
+  x-ray, xml within 12%, either side) and is 7–33% behind on the short ones, where per-stream setup
+  dominates; it was 17–67% behind.
+- What did it (AGENTS.md, "hot decode loops keep their state in locals"): the bit buffer had been passed
+  `inout` to a function that wasn't inlined, so it lived in memory for the whole loop, and its bit order was
+  tested at run time; now it's copied into locals, passed by value, and stored back after. Masked indices
+  (`types & 0xFF`, `context & 0x3F`) let span checks fold. Huffman tables are built from only the symbols
+  in use, sorted, so setup costs scale with them (the 1.6 KB rows).
+- The TLS + Brotli receive pipeline follows: −30 to −39% in the A/B (Main.js 6,840 → 4,981 µs from `final-1`
+  to `p2`).
+
+### Brotli quality 1: 6-byte hash, sparse insertion
+
+| Input | `final-1` µs | `p2` µs | Google µs | Bytes size | Google size |
+|---|---|---|---|---|---|
+| JSON 1.6 KB | 11 | 11 | **5.92** | | |
+| JSON 119 KB | 239 | 186 | **157** | | |
+| Main.css 376 KB | 996 | 799 | **610** | **71.1 KB** | 74.0 KB |
+| Main.js 3.8 MB | 13,000 | 11,000 | **9,101** | **842 KB** | 893 KB |
+| dickens 9.7 MB | 54,000 | 52,000 | **43,000** | **3.82 MB** | 4.04 MB |
+| x-ray 8.1 MB | 53,000 | **21,000** | 27,000 | **6.64 MB** | 6.69 MB |
+| xml 5.1 MB | 14,000 | 9,437 | **7,447** | **730 KB** | 764 KB |
+
+A/B: x-ray −62%, xml −32%, JSON 119 KB −24%, Main.css −21%, Main.js −15%, samba −14%, dickens −4.5%.
+Quality 1 now beats Google's speed on x-ray and its size on the five files measured (1–6% smaller), and is 18–31%
+slower on text (2x on 1.6 KB).
+
+- **Insert only a copy's last positions.** Every position of every copy went into the table. Sweep (harness,
+  best of 5×5, inserting the last N positions of each copy):
+
+  | File | all: ms / size | N = 2 | N = 5 | N = 8 | N = 16 |
+  |---|---|---|---|---|---|
+  | dickens | 59.7 / 4,202,139 | 45.8 / 4,382,566 | 54.0 / 4,234,474 | 55.7 / 4,213,092 | 56.9 / 4,206,645 |
+  | xml | 13.9 / 961,308 | 9.6 / 851,127 | 10.9 / 861,800 | 11.7 / 884,191 | 12.4 / 906,945 |
+  | samba | 65.2 / 5,532,481 | 53.0 / 5,768,088 | 58.1 / 5,626,394 | 60.4 / 5,595,362 | 62.0 / 5,565,821 |
+  | Main.js | 13.2 / 872,559 | 10.6 / 935,789 | 11.6 / 901,584 | 12.3 / 889,099 | 12.7 / 879,604 |
+
+  N = 5 keeps sizes within 4% of inserting everything (xml gets smaller: fewer recent entries crowd out
+  older, longer matches) for 10–22% less time. N = 2 is faster still but 4–7% bigger on dickens and Main.js.
+- **A 6-byte hash and a 6-byte minimum match** (Google's `kHashMul64`, 2^17 one-entry buckets): a 4-byte
+  hash with a 4-byte minimum: 55 → 21 ms on x-ray (an image) and smaller output on every file, presumably
+  from fewer, longer matches (not measured per match). The longer
+  load needs an 8-byte margin at the end of the data (4 for the bucket path).
+- Tried and dropped: Snappy-style skipping (step grows with misses): x-ray 55.2 → 58.8 ms, others flat.
+- The text gap is not analyzed yet. Google's quality 1 is a separate compressor
+  (`compress_fragment_two_pass.c`), not its general parse at a lower setting, so the two loops differ in shape.
+
+### Quality 5 and 9: `@inline(always)`, and a lazy-matching bug
+
+- Splitting the match search into `findSingleMatch` and `findBucketMatch` (so each path's loop has only its
+  own code) made q5 run 2–8% more instructions: the SIL inliner declined the bucket search
+  (`Tools/remarks --passes sil-inliner`: "Not profitable to inline … cost = 785", at both call sites), and
+  LLVM then found it too costly. `@inline(__always)` is a hint; `@inline(always)` (Swift 6.4) forced it,
+  and q5 is back at the old code's numbers (harness, two runs each: x-ray 148.8 / 151.5 ms against 150.5 /
+  150.9; xml slightly faster). Instructions against `final-1`: q5 −0.4% (dickens) to −2.0% (xml).
+- **Its cost at quality 9: +3.8% (Main.js) and +5.0% (dickens) instructions** against `final-1`; the time
+  in the harness, alternating, is within 0–2.5%. `@inline(always)` puts a second whole copy of the bucket
+  search in the lazy step. Two fixes tried (harness, instructions, identical output):
+
+  | Variant | q3 | q5 | q7 | q9 | q11 |
+  |---|---|---|---|---|---|
+  | lazy step's search out of line (`@inline(never)` wrapper) | +7.7% | +1.0 to +2.6% | −0.1% | −2.9 to −4.4% | −2.9% |
+  | a third loop copy, out of line only for buckets of 64+ (q8 and up) | +3.7% | +5.4 to +5.6% | +6.0% | −1.3 to −2.7% | −1.3% |
+
+  The third copy changed the existing bucket loop's code, not its source (outer loop 1,302 → 1,381
+  instructions, 87 → 77 loops in `Tools/loops`). Neither is better at both qualities, and q5 is the one
+  used: both reverted.
+- **Bug: a lazy step's copy could run past the data.** The lazy loop computed `maxLength` once, at the first
+  position, as `dataEnd - position`, and each delay searched with `maxLength - 1`. A second delay was then
+  allowed one byte too many. Sequentially that compared a byte past the input with an unchecked load (an
+  out-of-bounds read; no test faulted or matched on it); in a parallel chunk, the next chunk's bytes are there, they matched,
+  and the stream decoded one byte long (found on samba at q5 and up). Each lazy search now takes
+  `min(dataEnd - position - 1, maximumCopy)` for its own position. Random and text inputs never hit it
+  (skipping stepped over the position); `copiesStopAtChunkEnds` builds an input that forces two delays
+  ending at a chunk's last bytes, and fails without the fix.
+
+### Parallel compression: a chunk scheduler instead of rounds
+
+`ParallelDeflate` and `ParallelBrotli` cut the input into chunks (256 KB; DEFLATE chunks carry 32 KB of
+history for matches, Brotli's none) and compress them on lanes, each lane a `~Copyable` encoder with its own
+staging buffer. They had run in rounds: one chunk per lane, a barrier, the round's output copied in order,
+repeat. Measured with a thread experiment (`cpexp` in the scratchpad), each round's last thread started
+124–722 µs after the first: waking 24 threads and their cores ramping clock again, every round, plus the
+serial copy between rounds.
+
+`ChunkScheduler` (`ParallelScheduler.swift`) does one `concurrentPerform` (or one discarding task group)
+per call. Workers take the next chunk index with an atomic fetch-add, compress it, and hand the output to a
+slot by swapping their staging `UniqueArray` with the slot's (no copy). Whoever finishes the next chunk in
+order copies it to the output (under a `Mutex`: delivered count, running checksum combined with
+`Adler32/CRC32.combine`, failure); a worker more than a slot ring ahead waits, delivering what's ready.
+Slots: lanes + max(2, lanes / 2). The output doesn't depend on which worker took which chunk.
+
+Rounds against the scheduler, interleaved in one process (harness, gzip, 24 lanes, sync, same output bytes,
+best of 5 × 20; the round-based schedule rebuilt as a temporary method for the comparison, since removed):
+
+| Input (chunks on 24 lanes) | L1 rounds | L1 scheduler | L6 rounds | L6 scheduler |
+|---|---|---|---|---|
+| samba 20.6 MB (96, 4 rounds) | 5,198 | **3,090** (−41%) | 9,202 | **7,197** (−22%) |
+| dickens 9.7 MB (48, 2 rounds) | 2,859 | **2,229** (−22%) | 6,458 | **5,929** (−8%) |
+| xml 5.1 MB (24, 1 round) | 972 | 941 | 2,255 | 2,288 |
+| Main.js 3.8 MB (24, 1 round) | 690–741 | 683–730 | 1,540–1,858 | 1,507–1,885 |
+
+(Chunks are a whole number per lane, at most 256 KB: Main.js gets 24 of 164 KB.) The gain is the rounds
+saved: none with one round (Main.js, three repeats each: ratios 0.94–1.02), 8–22% with two, 22–41% with
+four. In the benchmarks (`parallel-1` → `p2-optimized`, then two re-runs `p2-par-1`, `p2-par-2`, µs):
+
+| Row, 24 lanes | rounds | scheduler (three runs) | sequential |
+|---|---|---|---|
+| deflate 1 samba, sync | 5,124 | 3,090–3,203 | 55,000 |
+| deflate 1 samba, task group | 4,780 | 3,074–3,111 | |
+| deflate 6 samba, sync | 9,110 | 7,279–7,385 | 135,000 |
+| deflate 6 dickens, sync | 7,479 | 6,300–6,324 | 124,000 |
+| deflate 1 dickens, sync | 2,685 | 2,451–2,697 | 39,000 |
+| deflate 1 Main.js, sync | 677 | 804–820 | 9,257 |
+| deflate 1 Main.js, task group | 753 | 599–726 | |
+
+- Samba and dickens agree with the harness. Main.js sync reads 19–21% slower in all three benchmark runs but
+  not interleaved in the harness, so it is a difference between benchmark runs (`parallel-1` was a separate
+  build and process), not the schedule: these rows swing 10–30% between runs (dickens L6 task group:
+  5,861 and 8,069 µs in the two re-runs). At 8 lanes, where every input takes several rounds, samba and xml
+  were 13–18% faster in `p2`.
+- Speed-up over one core at 24 lanes: DEFLATE 14–19x (level 6 samba 135 → 7.2 ms), Brotli q1 15x (dickens
+  52 → 3.6 ms), q5 15–17x (dickens 170 → 10 ms, 1.10% bigger than one stream). Parallel inflate (of a stream
+  made of independent chunks) 5–10x.
+- A task group was up to 10% faster than `concurrentPerform` in the harness (dickens L1 2.01 against 2.19
+  ms), 0–7% in the benchmarks, with more spread. All three forms are offered: sync (the caller's thread
+  plus Dispatch's pool), `async` on a Dispatch queue, and `async` on the cooperative pool.
+- Chunks stay a whole number per lane: equal chunks, 39 on 24 lanes, take as long as 48.
+- Allocation: the sequential paths allocate nothing. The parallel ones allocate the thread pool's
+  bookkeeping, now once per call instead of once per round: `concurrentPerform` 11 (8 lanes) and 27 (24
+  lanes) mallocs per call, one more through a Dispatch queue, a task group 34 and 98 (about 4 per task).
+- Bug found on the way: slots keep their chunk index across calls, so a slot still naming chunk 0 from the
+  previous call looked ready (corrupt output, or `insufficientCapacity`); `start()` resets them.
+  `laneAndChunkEdges` caught it.
+
+### The three builds (`p2-optimized`, `p2-portable`, `p2-portable-no-c`, µs)
+
+| Row | optimized | portable | portable-no-c |
+|---|---|---|---|
+| Brotli decode q11 Main.js | 3,826 | 3,686 | 3,787 |
+| Brotli decode q5 x-ray | 29,000 | 28,000 | 27,000 |
+| Brotli encode q1 x-ray | 21,000 | 21,000 | 21,000 |
+| Brotli encode q5 dickens | 170,000 | 168,000 | 174,000 |
+| Deflate 6 dickens | 124,000 | 120,000 | 120,000 |
+| Inflate Main.js | 1,911 | 1,927 | 1,879 |
+| TLS + Brotli receive Main.js | 4,981 | 4,801 | 4,788 |
+
+The Brotli changes are pure Swift and land the same in every build (decode −17 to −42%, q1 x-ray −65%
+against `c3-*`). The builds stay within run-to-run noise of each other, apart from gzip inflate's CRC-32
+(above, unchanged).
+
+### DEFLATE: unchanged, and where its gap is
+
+DEFLATE encode and inflate run instruction for instruction what they did (`ab-old-1` and
+`ab-new-1`: Main.js L1 135 M, dickens L6 1,311 M both). Level 1 is 5.5–12% behind libdeflate with
+identical output; level 6, 11–18%. Reading the level 1 loop: about 45 instructions per literal byte, with
+separate checks for the data's end, the position rebase, and the sequence buffer's count, and the maximum
+length's `min` computed twice. That's the next thing to fold, not done in this pass.
+
 ## 2026-11-15: BytesCompression, BytesCrypto, and pipelines (baselines `dec-1`, `enc-1`, `all-1`, `c3-optimized`, `c3-portable`, `c3-portable-no-c`, `pipe-1`, `pipe-2`, `final-1`)
 
 All baselines are in `.benchmarkBaselines/CompressionBenchmarks/`. M3 Ultra, macOS 27, Swift 6.4. Corpus:
@@ -235,7 +659,8 @@ Other pipeline rows: brotli 5 + TLS send 16 µs (1.6 KB), 840 (119 KB), 37,000 (
   before the argument mutates it, so `prefix` saw the old, empty array (the copy-on-write made by the
   `inout` access).
 - **Swift 6.4 issues met:** (1) SILGen crash on a typed-throws closure returning a tuple passed to
-  `Array.withUnsafeMutableBytes` ("unsupported collection upcast kind"); (2) a `~Copyable` struct `init`
+  `Array.withUnsafeMutableBytes` ("unsupported collection upcast kind"; with other result types the same
+  code compiles and throws the wrong error: report 25 in `~/Downloads/swift-bugs`); (2) a `~Copyable` struct `init`
   that reads a `let` before `UniqueArray` fields are initialized: `-O` emits deallocs of uninitialized fields
   (release-only crash; not reduced); (3) `SIMD16<UInt16>(truncatingIfNeeded:)` is not inlined; (4) indexing
   an `InlineArray` field of a struct value copies the whole array per access (take `.span` once: DEFLATE L1

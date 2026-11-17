@@ -14,6 +14,9 @@ internal import Bytes
 // Hot loops load from the input with unchecked loads, each justified by the parse's invariants: positions
 // in the tables are positions already seen (so inside the buffer), and lengths never exceed `maxLength`,
 // which is at most the bytes left in the buffer.
+//
+// Block writing flushes its `BitWriter` unchecked (`unsafeFlush`): each block starts only once `hasRoom`
+// confirms the staging buffer holds the block's worst case plus `BitWriter.slack`.
 
 /// How a level parses: libdeflate's strategies.
 enum DeflateStrategy {
@@ -272,6 +275,61 @@ struct DeflateCompressor: ~Copyable {
         pendingBitCount = 0
     }
 
+    /// Inserts `buffer[start..<end]` into the matchfinder without emitting anything: history for a stream
+    /// that begins at `end`, which matches may then reach back into (zlib's `deflateSetDictionary`). A
+    /// parallel encoder primes each chunk's compressor with the 32 KB before the chunk, so the chunks join
+    /// into one stream that compresses almost as well as a sequential one.
+    ///
+    /// - Parameters:
+    ///   - buffer: The data: the history, then the stream from `end`.
+    ///   - start: Where the history starts.
+    ///   - end: Where it ends and the stream begins.
+    /// - Precondition: The compressor is new or reset, and the history is at most 32 KB.
+    mutating func prime(_ buffer: RawSpan, from start: Int, to end: Int) {
+        precondition(base == 0 && end &- start <= Self.windowSize && start >= 0 && end <= buffer.byteCount)
+        base = start
+        // Each inserted position's hash needs 4 bytes from it.
+        let last = min(end, buffer.byteCount &- 4)
+        switch parameters.strategy {
+        case .stored:
+            return
+        case .fastest:
+            var table = hash4.mutableSpan
+            precondition(table.count == 1 << 16)
+            var position = start
+            while position < last {
+                let bucket = (Self.hash(Self.load32(buffer, position), bits: 15) & ((1 << 15) &- 1)) &<< 1
+                table[bucket | 1] = table[bucket]
+                table[bucket] = Int16(truncatingIfNeeded: position &- start)
+                position &+= 1
+            }
+            if end &+ 4 <= buffer.byteCount {
+                nextHash4 = Self.hash(Self.load32(buffer, end), bits: 15)
+            }
+        case .greedy, .lazy, .lazy2:
+            var hash3 = hash3.mutableSpan
+            var hash4 = hash4.mutableSpan
+            var chains = chains.mutableSpan
+            precondition(hash3.count == 1 << Self.hash3Bits && hash4.count == 1 << Self.hash4Bits && chains.count == Self.windowSize)
+            var position = start
+            while position < last {
+                let current = position &- start
+                let sequence = Self.load32(buffer, position)
+                let h3 = Self.hash(sequence & 0xFF_FFFF, bits: Self.hash3Bits)
+                let h4 = Self.hash(sequence, bits: Self.hash4Bits)
+                hash3[h3 & ((1 << Self.hash3Bits) &- 1)] = Int16(truncatingIfNeeded: current)
+                chains[current & (Self.windowSize &- 1)] = hash4[h4 & ((1 << Self.hash4Bits) &- 1)]
+                hash4[h4 & ((1 << Self.hash4Bits) &- 1)] = Int16(truncatingIfNeeded: current)
+                position &+= 1
+            }
+            if end &+ 4 <= buffer.byteCount {
+                let sequence = Self.load32(buffer, end)
+                nextHash3 = Self.hash(sequence & 0xFF_FFFF, bits: Self.hash3Bits)
+                nextHash4 = Self.hash(sequence, bits: Self.hash4Bits)
+            }
+        }
+    }
+
     /// Empties a table, 16 bytes per store. A loop of element stores (and `MutableSpan.update(repeating:)`)
     /// compiled to one 2-byte store per entry: 59% of compressing a 2.7 KB file.
     static func clear(_ table: inout UniqueArray<Int16>) {
@@ -305,9 +363,22 @@ struct DeflateCompressor: ~Copyable {
         }
     }
 
+    /// Hands the staged bytes over without copying them: swaps the staging buffer with `buffer`, an empty one
+    /// of ``stagingCapacity`` bytes, and returns where in it the staged bytes are.
+    ///
+    /// - Precondition: The output is byte-aligned (after a sync flush or the final block's alignment).
+    mutating func takeStaged(swapping buffer: inout UniqueArray<UInt8>) -> Range<Int> {
+        precondition(pendingBitCount == 0 && buffer.count == Self.stagingCapacity)
+        swap(&staging, &buffer)
+        let range = stagingStart..<stagingEnd
+        stagingStart = 0
+        stagingEnd = 0
+        return range
+    }
+
     /// Whether `byteCount` more bytes (plus the writer's slack) fit in the staging buffer.
     func hasRoom(_ byteCount: Int) -> Bool {
-        Self.stagingCapacity &- stagingEnd >= byteCount &+ DeflateBitWriter.slack &+ 16
+        Self.stagingCapacity &- stagingEnd >= byteCount &+ BitWriter.slack &+ 16
     }
 
     /// The most bytes a block of `length` input bytes can take, any type, plus a dynamic header.
@@ -319,21 +390,19 @@ struct DeflateCompressor: ~Copyable {
     mutating func stage(_ bytes: RawSpan) {
         precondition(pendingBitCount == 0 && hasRoom(bytes.byteCount))
         var span = staging.mutableSpan
-        var raw = MutableRawSpan(mutating: &span)
-        var writer = try! BytesWriter(&raw, atByteOffset: stagingEnd) // Can't throw: room checked above.
-        try! writer.write(bytes)
-        stagingEnd = writer.byteCount
+        span.copyBytes(from: bytes, toByteOffset: stagingEnd)
+        stagingEnd &+= bytes.byteCount
     }
 
     /// Runs `body` with a bit writer at the end of the staged output, then keeps what it wrote.
     @inline(__always)
-    private mutating func withWriter<R>(_ body: (inout DeflateBitWriter) -> R) -> R {
+    private mutating func withWriter<R>(_ body: (inout BitWriter) -> R) -> R {
         var span = staging.mutableSpan
-        var writer = DeflateBitWriter(MutableRawSpan(mutating: &span), offset: stagingEnd, bits: pendingBits, count: pendingBitCount)
+        var writer = BitWriter(MutableRawSpan(mutating: &span), byteOffset: stagingEnd, bits: pendingBits, bitCount: pendingBitCount)
         let result = body(&writer)
-        stagingEnd = writer.offset
-        pendingBits = writer.bits
-        pendingBitCount = writer.count
+        stagingEnd = writer.byteOffset
+        pendingBits = writer.pendingBits
+        pendingBitCount = writer.pendingBitCount
         return result
     }
 
@@ -348,7 +417,7 @@ struct DeflateCompressor: ~Copyable {
             writer.add(0, bitCount: 3) // Not final, stored.
             writer.alignToByte()
             writer.add(0xFFFF_0000, bitCount: 32) // LEN 0, NLEN 0xFFFF.
-            writer.flush()
+            unsafe writer.unsafeFlush()
         }
     }
 
@@ -400,7 +469,7 @@ struct DeflateCompressor: ~Copyable {
         withWriter { writer in
             writer.add(0b011, bitCount: 3) // Final, fixed Huffman.
             writer.add(UInt64(fixed.literalLengthCodewords[256]), bitCount: Int(fixed.literalLengthLengths[256]))
-            writer.flush()
+            unsafe writer.unsafeFlush()
         }
     }
 
@@ -479,20 +548,15 @@ struct DeflateCompressor: ~Copyable {
         unsafe buffer.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt8.self)
     }
 
-    /// How far the strings at `position` and `candidate` agree, from `start` up to `maxLength`, 8 bytes at a
-    /// time (the first differing byte is the XOR's trailing zeros over 8).
+    /// How far the strings at `position` and `candidate` agree, from `start` up to `maxLength`.
+    ///
+    /// Bytes' unchecked form: the checked `commonPrefixLength` cost 1–8% more instructions in DEFLATE and
+    /// 3–18% in Brotli, called per candidate. Unsafe: unchecked loads. Safe: every caller passes `candidate <
+    /// position` and `maxLength <= dataEnd - position`, with `dataEnd` within the buffer (see the file's
+    /// comment).
     @inline(__always)
     static func extend(_ buffer: RawSpan, _ position: Int, _ candidate: Int, from start: Int, maxLength: Int) -> Int {
-        var length = start
-        while length &+ 8 <= maxLength {
-            let difference = load64(buffer, position &+ length) ^ load64(buffer, candidate &+ length)
-            if difference != 0 { return length &+ difference.trailingZeroBitCount &>> 3 }
-            length &+= 8
-        }
-        while length < maxLength && byte(buffer, position &+ length) == byte(buffer, candidate &+ length) {
-            length &+= 1
-        }
-        return length
+        unsafe buffer.unsafeCommonPrefixLength(at: position, and: candidate, from: start, maxLength: maxLength)
     }
 
     /// Moves the window's base 32 KB forward: every entry drops by 32,768, and those that fall out of the
@@ -915,7 +979,7 @@ struct DeflateCompressor: ~Copyable {
                 writer.add(isFinal && last ? 1 : 0, bitCount: 3) // BFINAL, BTYPE 00
                 writer.alignToByte()
                 writer.add(UInt64(count) | UInt64(~count & 0xFFFF) &<< 16, bitCount: 32)
-                writer.flush()
+                unsafe writer.unsafeFlush()
                 writer.write(buffer.extracting(offset..<(offset &+ count)))
                 offset &+= count
             } while offset < end
@@ -1005,7 +1069,7 @@ struct DeflateCompressor: ~Copyable {
         // The writer over `staging` while `sequences` is read: two stored properties, so both can be borrowed
         // (`withWriter` would claim all of `self`).
         var span = staging.mutableSpan
-        var writer = DeflateBitWriter(MutableRawSpan(mutating: &span), offset: stagingEnd, bits: pendingBits, count: pendingBitCount)
+        var writer = BitWriter(MutableRawSpan(mutating: &span), byteOffset: stagingEnd, bits: pendingBits, bitCount: pendingBitCount)
         writer.add((isFinal ? 1 : 0) | (useDynamic ? 0b100 : 0b010), bitCount: 3)
         if useDynamic {
             header.write(to: &writer)
@@ -1016,9 +1080,9 @@ struct DeflateCompressor: ~Copyable {
             distanceCodewords: blockCodes.distanceCodewords.span, distanceLengths: blockCodes.distanceLengths.span,
             lengthCodes: lengthCodes.span, lengthBits: lengthBits.span, &writer
         )
-        stagingEnd = writer.offset
-        pendingBits = writer.bits
-        pendingBitCount = writer.count
+        stagingEnd = writer.byteOffset
+        pendingBits = writer.pendingBits
+        pendingBitCount = writer.pendingBitCount
     }
 
     /// Writes a block's sequences and its end-of-block code.
@@ -1030,7 +1094,7 @@ struct DeflateCompressor: ~Copyable {
         _ buffer: RawSpan, from start: Int, _ sequences: Span<UInt64>,
         literalCodewords: Span<UInt32>, literalLengths: Span<UInt8>,
         distanceCodewords: Span<UInt32>, distanceLengths: Span<UInt8>,
-        lengthCodes: Span<UInt32>, lengthBits: Span<UInt8>, _ writer: inout DeflateBitWriter
+        lengthCodes: Span<UInt32>, lengthBits: Span<UInt8>, _ writer: inout BitWriter
     ) {
         precondition(literalCodewords.count == 288 && literalLengths.count == 288 && distanceCodewords.count == 32
             && distanceLengths.count == 32 && lengthCodes.count == 259 && lengthBits.count == 259)
@@ -1046,7 +1110,7 @@ struct DeflateCompressor: ~Copyable {
                     let literal = Int(byte(buffer, position &+ offset))
                     writer.add(UInt64(literalCodewords[literal]), bitCount: Int(literalLengths[literal]))
                 }
-                writer.flush()
+                unsafe writer.unsafeFlush()
                 position &+= 4
                 run &-= 4
             }
@@ -1056,7 +1120,7 @@ struct DeflateCompressor: ~Copyable {
                 position &+= 1
                 run &-= 1
             }
-            writer.flush()
+            unsafe writer.unsafeFlush()
             guard length != 0 else { continue }
             // A match: the length's code and extra bits from the table, then the distance's, at most 48 bits.
             writer.add(UInt64(lengthCodes[length]), bitCount: Int(lengthBits[length]))
@@ -1065,11 +1129,11 @@ struct DeflateCompressor: ~Copyable {
             let base = slot < 4 ? slot &+ 1 : ((2 | slot & 1) &<< extraBits) &+ 1
             writer.add(UInt64(distanceCodewords[slot]) | UInt64(distance &- base) &<< UInt64(distanceLengths[slot]),
                        bitCount: Int(distanceLengths[slot]) &+ extraBits)
-            writer.flush()
+            unsafe writer.unsafeFlush()
             position &+= length
         }
         writer.add(UInt64(literalCodewords[256]), bitCount: Int(literalLengths[256]))
-        writer.flush()
+        unsafe writer.unsafeFlush()
     }
 }
 
@@ -1179,18 +1243,18 @@ struct DynamicHeader {
     }
 
     /// Writes the header after the block type.
-    func write(to writer: inout DeflateBitWriter) {
+    func write(to writer: inout BitWriter) {
         writer.add(UInt64(literalCount &- 257) | UInt64(distanceCount &- 1) &<< 5 | UInt64(codeLengthCount &- 4) &<< 10, bitCount: 14)
-        writer.flush()
+        unsafe writer.unsafeFlush()
         let order = Deflate.codeLengthOrder
         let lengths = codeLengthLengths.span
         let codewords = codeLengthCodewords.span
         let items = items.span
         for index in 0..<codeLengthCount {
             writer.add(UInt64(lengths[Int(order[index])]), bitCount: 3)
-            if index % 16 == 15 { writer.flush() }
+            if index % 16 == 15 { unsafe writer.unsafeFlush() }
         }
-        writer.flush()
+        unsafe writer.unsafeFlush()
         for index in 0..<itemCount {
             let item = Int(items[index])
             let symbol = item & 0x1F
@@ -1201,7 +1265,7 @@ struct DynamicHeader {
             case 18: writer.add(UInt64(item &>> 5), bitCount: 7)
             default: break
             }
-            writer.flush()
+            unsafe writer.unsafeFlush()
         }
     }
 }

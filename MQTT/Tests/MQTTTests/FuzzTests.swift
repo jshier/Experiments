@@ -20,7 +20,7 @@ enum Outcome: Equatable, CustomStringConvertible {
 }
 
 func outcome(_ bytes: [UInt8], maximumPacketSize: Int = .max) -> Outcome {
-    var reader = BytesReader(bytes.span)
+    var reader = AlignedBytesReader(bytes.span)
     do {
         guard let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: maximumPacketSize) else {
             #expect(reader.byteOffset == 0)
@@ -161,7 +161,7 @@ struct SplitMix64: RandomNumberGenerator {
             }
             // Keep the remaining length consistent sometimes, so bodies get parsed.
             if Bool.random(using: &rng), bytes.count >= 2, bytes.count - 2 < 0x80 { bytes[1] = UInt8(bytes.count - 2) }
-            var reader = BytesReader(bytes.span)
+            var reader = AlignedBytesReader(bytes.span)
             do {
                 if let packet = try MQTTPacket.read(from: &reader) {
                     accepted += 1

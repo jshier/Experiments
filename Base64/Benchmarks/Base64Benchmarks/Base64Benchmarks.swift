@@ -57,12 +57,12 @@ let fixtures: [Int: Fixture] = Dictionary(uniqueKeysWithValues: sizes.map { ($0.
 
 // MARK: - Encoders
 
-/// Bytes: `BytesReader` → `Base64.encode` → `BytesWriter`, into a preallocated buffer.
+/// Bytes: `AlignedBytesReader` → `Base64.encode` → `AlignedBytesWriter`, into a preallocated buffer.
 func encodeWithBytes(_ fixture: Fixture) {
     for _ in 0..<fixture.repetitions {
         var span = unsafe MutableSpan(_unsafeElements: fixture.encoded)
-        var writer = BytesWriter(&span)
-        var reader = BytesReader(fixture.input.span)
+        var writer = AlignedBytesWriter(&span)
+        var reader = AlignedBytesReader(fixture.input.span)
         try! Base64.encode(&reader, into: &writer)
     }
 }
@@ -125,12 +125,12 @@ func encodeToString(_ fixture: Fixture) {
 
 // MARK: - Decoders
 
-/// Bytes: `BytesReader` → `Base64.decode` → `BytesWriter`, into a preallocated buffer.
+/// Bytes: `AlignedBytesReader` → `Base64.decode` → `AlignedBytesWriter`, into a preallocated buffer.
 func decodeWithBytes(_ fixture: Fixture) {
     for _ in 0..<fixture.repetitions {
         var span = unsafe MutableSpan(_unsafeElements: fixture.decoded)
-        var writer = BytesWriter(&span)
-        var reader = BytesReader(fixture.text.span)
+        var writer = AlignedBytesWriter(&span)
+        var reader = AlignedBytesReader(fixture.text.span)
         try! Base64.decode(&reader, into: &writer)
     }
 }
@@ -140,8 +140,8 @@ func decodeWithBytes(_ fixture: Fixture) {
 func decodeWithGroups(_ fixture: Fixture) {
     for _ in 0..<fixture.repetitions {
         var span = unsafe MutableSpan(_unsafeElements: fixture.decoded)
-        var writer = BytesWriter(&span)
-        var reader = BytesReader(fixture.text.span)
+        var writer = AlignedBytesWriter(&span)
+        var reader = AlignedBytesReader(fixture.text.span)
         let groups = try! reader.read(InlineArray<4, UInt8>.self, count: fixture.count / 3)
         let valid = try! writer.write(InlineArray<3, UInt8>.self, count: groups.count, filling: { bytes in
             Base64.decode(groups, into: &bytes, alphabet: .standard)

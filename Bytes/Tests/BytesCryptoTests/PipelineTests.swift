@@ -180,3 +180,77 @@ struct CopyStage: ByteTransform {
         #expect(progress.consumed == input.count && Array(output.prefix(input.count)) == input)
     }
 }
+
+/// Emits its input in units of `unit` bytes, only when a whole unit fits the output (as a TLS opener
+/// writes a record's body).
+struct UnitStage: ByteTransform {
+    typealias Failure = Never
+    let unit: Int
+
+    mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) -> TransformProgress {
+        var consumed = 0
+        while input.byteCount - consumed >= unit {
+            guard output.freeCapacity >= unit else {
+                return TransformProgress(consumed: consumed, produced: consumed, status: .needsOutput)
+            }
+            output.withBytesWriter { (writer) throws(Never) in try? writer.write(input.extracting(consumed..<(consumed + unit))) }
+            consumed += unit
+        }
+        return TransformProgress(consumed: consumed, produced: consumed, status: .needsInput)
+    }
+}
+
+/// Copies all but the last byte of its input until the input ends (as a decoder keeps a partial byte).
+struct HoldBackStage: ByteTransform {
+    typealias Failure = Never
+
+    mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) -> TransformProgress {
+        let take = min(flush == .none ? max(input.byteCount - 1, 0) : input.byteCount, output.freeCapacity)
+        output.withBytesWriter { (writer) throws(Never) in try? writer.write(input.extracting(0..<take)) }
+        return TransformProgress(consumed: take, produced: take, status: take < input.byteCount && output.freeCapacity == 0 ? .needsOutput : .needsInput)
+    }
+}
+
+extension PipelineTests {
+    /// A unit that doesn't fit the free end of the buffer, with too much free to compact, while the second
+    /// stage keeps a byte: the pipeline compacts instead of stopping ("buffer smaller than its second stage's
+    /// unit"), which a socket stream with 1 MB batches hit.
+    @Test func compactsWhenAUnitDoesNotFitTheFreeEnd() {
+        var pipeline = UnitStage(unit: 22_000).then(HoldBackStage(), bufferCapacity: 65_536)
+        let input = (0..<(22_000 * 6)).map { UInt8(truncatingIfNeeded: $0 &* 31) }
+        var output = [UInt8](repeating: 0, count: input.count)
+        let produced = output.withUnsafeMutableBytes { buffer in
+            var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+            let progress = pipeline.transform(input.span.bytes, into: &span, flush: .finish)
+            #expect(progress.consumed == input.count)
+            return span.finalize(for: buffer)
+        }
+        #expect(produced == input.count && output == input)
+    }
+}
+
+extension PipelineTests {
+    /// A socket stream's two pipelines, without the socket: parallel DEFLATE then TLS records in 1 MB
+    /// flushed batches, then TLS records then inflate, the wire cut into reads of many sizes.
+    @Test(arguments: [8, 16])
+    func parallelCompressionThroughTLSRoundTrips(lanes: Int) throws {
+        var state: UInt64 = 0x1234_5678
+        let words = ["sensor", "temp", "building", "floor", "\"value\":", "21.5", ",", "{", "}", "\n"]
+        var data: [UInt8] = []
+        while data.count < 6 << 20 {
+            state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
+            data += Array(words[Int(state >> 33) % words.count].utf8)
+        }
+        let secret = [UInt8](repeating: 9, count: 32)
+        let keys = TLSTrafficKeys(trafficSecret: secret.span.bytes)
+        let batch = 1 << 20
+        var send = ParallelDeflateEncoder(format: .raw, level: 1, chunkSize: 64 << 10, lanes: lanes)
+            .then(TLSRecordSealer(keys: keys), bufferCapacity: batch + (64 << 10))
+        let wire = try run(&send, data, chunk: batch, outputChunk: batch + batch / 8 + (64 << 10), flush: .flush)
+        for (read, room) in [(wire.count, 1 << 20), (1000, 1_114_112), (65_543, 7777), (300_001, 1_114_112), (16_389, 600_000)] {
+            var receive = TLSRecordOpener(keys: keys).then(DeflateDecoder(format: .raw))
+            let decoded = try run(&receive, wire, chunk: read, outputChunk: room)
+            #expect(decoded == data, "reads of \(read), output room \(room)")
+        }
+    }
+}

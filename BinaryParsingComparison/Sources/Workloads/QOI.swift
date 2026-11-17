@@ -4,7 +4,7 @@ import Bytes
 // QOI decoding (https://qoiformat.org), the same algorithm as swift-binary-parsing's example (including its
 // loop condition, so all three produce the same pixels), written two ways:
 //
-// - `decodeWithBytes`: `Bytes` reading, `BytesWriter` writing into the output array, each QOI_OP_RUN as one
+// - `decodeWithBytes`: `Bytes` reading, `AlignedBytesWriter` writing into the output array, each QOI_OP_RUN as one
 //   `write(repeating:byteCount:count:)`.
 // - `decodeWithBytesPixelRuns`: the same, but writing runs a pixel per loop iteration, as the example does
 //   (and as `decodeWithBytes` did before Bytes had run fills).
@@ -38,7 +38,7 @@ public enum QOI {
     }
 
     @inline(__always)
-    static func store(_ pixel: SIMD4<UInt8>, channels: Int, to writer: inout BytesWriter) throws(BytesError) {
+    static func store(_ pixel: SIMD4<UInt8>, channels: Int, to writer: inout AlignedBytesWriter) throws(BytesError) {
         try writer.write(UInt64(bitCast(pixel, to: UInt32.self)), byteCount: channels, allowingOverrun: true)
     }
 
@@ -56,7 +56,11 @@ public enum QOI {
     ///   count overflows or reaches 400 million; `BytesError.mismatch` if the magic isn't `qoif`;
     ///   `BytesError.insufficientData` if the header is cut short.
     public static func decodeWithBytes(_ data: RawSpan) throws -> DecodedImage {
-        try decodeWithBytes(data, fillingRuns: true)
+        // The bit-addressable reader, though the format is whole bytes: with `AlignedBytesReader`, LLVM nested
+        // the run fills' loops inside the per-pixel loop instead of beside it, and the decoder ran 54% more
+        // instructions (antelope.qoi; tricolor.qoi +9%). A slow-path hint on runs and an out-of-line fill didn't
+        // change that. See Bytes' RESULTS.md, 2026-11-16 (byte-aligned cursors).
+        try decodeWithBytes(BytesReader(data), fillingRuns: true)
     }
 
     /// Decodes a QOI image with `Bytes`, writing runs a pixel per loop iteration, as the example does.
@@ -65,20 +69,23 @@ public enum QOI {
     /// - Returns: The image, as ``decodeWithBytes(_:)`` returns it.
     /// - Throws: As ``decodeWithBytes(_:)``.
     public static func decodeWithBytesPixelRuns(_ data: RawSpan) throws -> DecodedImage {
-        try decodeWithBytes(data, fillingRuns: false)
+        // The byte-aligned reader: 22% fewer instructions here (tricolor.qoi).
+        try decodeWithBytes(AlignedBytesReader(data), fillingRuns: false)
     }
 
     /// The decoder behind the two above, inlined into each with `fillingRuns` a constant: the other path
     /// folds away.
     ///
     /// - Parameters:
-    ///   - data: The QOI file.
+    ///   - reader: A cursor at the start of the QOI file, either kind.
     ///   - fillingRuns: Whether to write each run at once, or a pixel per iteration.
     /// - Returns: The image.
     /// - Throws: As ``decodeWithBytes(_:)``.
     @inline(always)
-    static func decodeWithBytes(_ data: RawSpan, fillingRuns: Bool) throws -> DecodedImage {
-        var reader = BytesReader(data)
+    static func decodeWithBytes<Mode: BytesCursorMode>(
+        _ reader: consuming GenericBytesReader<Mode>, fillingRuns: Bool
+    ) throws -> DecodedImage {
+        var reader = reader
         try reader.expect(0x71_6F_69_66 as Byte4) // "qoif"
         let width = try reader.read(Int.self, as: Byte4.self, .bigEndian)
         let height = try reader.read(Int.self, as: Byte4.self, .bigEndian)
@@ -90,10 +97,10 @@ public enum QOI {
         let total = pixelCount &* channels
 
         // Both cursors are locals of this function, so they stay in registers. (Captured by the closures
-        // of `[UInt8](capacity:)` and `withBytesWriter`, they lived in memory: see RESULTS.md.)
+        // of `[UInt8](capacity:)` and `withAlignedBytesWriter`, they lived in memory: see RESULTS.md.)
         var pixels = [UInt8](repeating: 0, count: total)
         var output = pixels.mutableSpan
-        var writer = BytesWriter(&output)
+        var writer = AlignedBytesWriter(&output)
         do {
             var cache = InlineArray<64, SIMD4<UInt8>>(repeating: .zero)
             var previous = SIMD4<UInt8>(0, 0, 0, 255)
@@ -179,10 +186,10 @@ public enum QOI {
         let total = pixelCount &* channels
 
         // Both cursors are locals of this function, so they stay in registers. (Captured by the closures
-        // of `[UInt8](capacity:)` and `withBytesWriter`, they lived in memory: see RESULTS.md.)
+        // of `[UInt8](capacity:)` and `withAlignedBytesWriter`, they lived in memory: see RESULTS.md.)
         var pixels = [UInt8](repeating: 0, count: total)
         var output = pixels.mutableSpan
-        var writer = BytesWriter(&output)
+        var writer = AlignedBytesWriter(&output)
         do {
             var cache = InlineArray<64, SIMD4<UInt8>>(repeating: .zero)
             var previous = SIMD4<UInt8>(0, 0, 0, 255)

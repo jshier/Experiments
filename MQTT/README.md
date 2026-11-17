@@ -10,7 +10,7 @@ import Bytes
 import MQTT
 
 // Parse packets as bytes arrive; a partial packet is left for later.
-var reader = BytesReader(received.span)
+var reader = AlignedBytesReader(received.span)
 while let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: 1 << 20) {
     switch packet {
     case .publish(let publish):
@@ -38,8 +38,8 @@ while let frame = try MQTTFrame.read(from: &reader, maximumPacketSize: 1 << 20) 
 let packet = MQTTPacket.publish(MQTTPublish(
     qos: .atLeastOnce, topic: "sensors/kitchen".utf8Span, packetIdentifier: 7, payload: reading.span.bytes
 ))
-let bytes = try [UInt8](capacity: packet.encodedByteCount) { output in
-    try output.withBytesWriter { (writer) throws(BytesError) in try packet.write(to: &writer) }
+let bytes = try [UInt8](alignedByteCapacity: packet.encodedByteCount) { (writer) throws(BytesError) in
+    try packet.write(to: &writer)
 }
 ```
 
@@ -75,7 +75,7 @@ PUBLISH packets. Writing through it costs nothing extra: it tests its case once.
 
 Every type is `~Escapable`. `UTF8Span` strings and `RawSpan` payloads borrow the input or, when encoding,
 your values. Lists (`MQTTProperties`, `MQTTSubscriptions`, `MQTTTopicFilters`) are checked once and decoded
-on each `forEach`, without allocating. Build one for encoding by writing its entries with a `BytesWriter`,
+on each `forEach`, without allocating. Build one for encoding by writing its entries with an `AlignedBytesWriter`,
 then view it with `init(validating:)`.
 
 ## Caveats

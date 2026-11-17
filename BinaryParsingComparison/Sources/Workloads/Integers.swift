@@ -13,7 +13,7 @@ public enum Integers {
     /// - Returns: The sum, wrapping.
     /// - Throws: Never in practice: each read is of bytes known to remain.
     public static func sum32Bytes(_ span: RawSpan) throws -> UInt64 {
-        var reader = BytesReader(span)
+        var reader = AlignedBytesReader(span)
         var sum: UInt64 = 0
         while reader.remainingByteCount >= 4 {
             try sum &+= UInt64(reader.read(Byte4.self, .bigEndian))
@@ -26,7 +26,7 @@ public enum Integers {
     /// - Parameter span: The bytes.
     /// - Returns: The sum, wrapping.
     public static func sum32BytesForEach(_ span: RawSpan) -> UInt64 {
-        var reader = BytesReader(span)
+        var reader = AlignedBytesReader(span)
         var sum: UInt64 = 0
         reader.forEach(Byte4.self, .bigEndian) { sum &+= UInt64($0) }
         return sum
@@ -55,7 +55,7 @@ public enum Integers {
     /// - Returns: The sum.
     /// - Throws: Never in practice: each read is of bytes known to remain.
     public static func sum24Bytes(_ span: RawSpan) throws -> UInt64 {
-        var reader = BytesReader(span)
+        var reader = AlignedBytesReader(span)
         var sum: UInt64 = 0
         while reader.remainingByteCount >= 3 {
             try sum &+= UInt64(reader.read(Byte3.self, .bigEndian))
@@ -68,7 +68,7 @@ public enum Integers {
     /// - Parameter span: The bytes.
     /// - Returns: The sum.
     public static func sum24BytesForEach(_ span: RawSpan) -> UInt64 {
-        var reader = BytesReader(span)
+        var reader = AlignedBytesReader(span)
         var sum: UInt64 = 0
         reader.forEach(Byte3.self, .bigEndian) { sum &+= UInt64($0) }
         return sum

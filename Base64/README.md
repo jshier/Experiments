@@ -1,7 +1,7 @@
 # Base64
 
 A Base64 encoder (RFC 4648, standard and URL-safe alphabets, with or without padding) built on
-[`Bytes`](../Bytes): it reads with `BytesReader`, writes with `BytesWriter`, allocates nothing, and is
+[`Bytes`](../Bytes): it reads with `AlignedBytesReader`, writes with `AlignedBytesWriter`, allocates nothing, and is
 vectorized. On an M3 Ultra one core encodes 21 GB/s, 6–7x Foundation's `base64EncodedData()` and 25x a scalar
 table encoder; see `Benchmarks/RESULTS.md`.
 
@@ -12,8 +12,8 @@ import Bytes
 // Into memory you provide: no allocation.
 var output = [UInt8](repeating: 0, count: Base64.encodedByteCount(of: bytes.count))
 var span = output.mutableSpan
-var writer = BytesWriter(&span)
-var reader = BytesReader(bytes.span)
+var writer = AlignedBytesWriter(&span)
+var reader = AlignedBytesReader(bytes.span)
 try Base64.encode(&reader, into: &writer)                        // the rest of the reader, at the writer
 
 try Base64.encode(bytes.span.bytes, into: &writer, alphabet: .urlSafe, padding: false)
