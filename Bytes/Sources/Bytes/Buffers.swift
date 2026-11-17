@@ -266,8 +266,8 @@ public extension [UInt8] {
 /// A buffer that fills at its end and drains from its front: a socket's received bytes waiting to be
 /// parsed, a pipeline's bytes between two stages, a decoder's output waiting for room.
 ///
-/// Fill it through an output span over the free space at the end with ``fill(_:)`` (or ``receive(_:)``, from
-/// an asynchronous source); read what's there with ``unread``, and ``consume(_:)`` what was used. A partial
+/// Fill it through an output span over the free space at the end with ``fill(_:)`` (or `receive(_:)`, in
+/// `BytesAsync`, from an asynchronous source); read what's there with ``unread``, and ``consume(_:)`` what was used. A partial
 /// unit at the end (a packet, a record, a code) stays unread until more arrives; before the space at the end
 /// runs low, a fill moves the unread bytes to the front (``compact()``), so fills stay large without moving
 /// bytes every time.
@@ -285,14 +285,14 @@ public extension [UInt8] {
 /// `Sendable`: it owns its memory, and being `~Copyable`, only one owner can use it.
 @safe @frozen
 public struct ByteBuffer: ~Copyable, @unchecked Sendable {
-    @usableFromInline let _storage: UnsafeMutableRawBufferPointer
+    @usableFromInline package let _storage: UnsafeMutableRawBufferPointer
     /// The buffer's size in bytes. It never grows.
     public let capacity: Int
     /// ``fill(_:)`` compacts first when fewer bytes than this are free at the end.
     public let compactionThreshold: Int
     /// The unread bytes are `_start ..< _end`.
     @usableFromInline var _start = 0
-    @usableFromInline var _end = 0
+    @usableFromInline package var _end = 0
 
     /// Creates an empty buffer.
     ///
@@ -414,40 +414,4 @@ public struct ByteBuffer: ~Copyable, @unchecked Sendable {
         return result
     }
 
-    /// Appends what an asynchronous source writes to an output span over the free space at the end: a socket
-    /// read, which suspends. As ``fill(_:)`` does, on the caller's executor.
-    ///
-    /// ```swift
-    /// let count = try await received.receive { output throws(IOError) in try await connection.read(into: &output) }
-    /// ```
-    ///
-    /// Not an `async` overload of ``fill(_:)``: with a closure that names its error type, Swift 6.4 finds such
-    /// a call ambiguous, from async code even when the closure doesn't suspend.
-    ///
-    /// - Parameter body: Receives an output span over the free space, which may be empty if the buffer is
-    ///   full. What it appends is added to the unread bytes, even if it throws.
-    /// - Returns: What `body` returns.
-    /// - Throws: What `body` throws.
-    /// - Precondition: `body` leaves the output span it was given in place.
-    @inlinable
-    public nonisolated(nonsending) mutating func receive<R, E: Error>(
-        _ body: nonisolated(nonsending) (inout OutputRawSpan) async throws(E) -> R
-    ) async throws(E) -> R {
-        if capacity &- _end < compactionThreshold {
-            compact()
-        }
-        // Unsafe and safe as in the synchronous form. The allocation never moves, so the span stays valid while
-        // `body` is suspended.
-        let free = unsafe UnsafeMutableRawBufferPointer(rebasing: _storage[_end...])
-        var output = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
-        let result: R
-        do {
-            result = try await body(&output)
-        } catch {
-            _end &+= unsafe output.finalize(for: free)
-            throw error
-        }
-        _end &+= unsafe output.finalize(for: free)
-        return result
-    }
 }

@@ -46,6 +46,25 @@ public extension BytesReader {
         _advance(bitCount: width)
         return value
     }
+
+    /// Reads a byte as an `R`, through its raw value: the bit-addressable form of the one width both kinds of
+    /// cursor read (without it, `read(_:as: Byte.self)` would match both general forms).
+    ///
+    /// - Parameters:
+    ///   - type: The type to read.
+    ///   - fieldType: `Byte.self`.
+    /// - Returns: The value.
+    /// - Throws: ``BytesError/insufficientData`` if fewer than 8 bits remain; ``BytesError/invalidValue`` if
+    ///   the byte isn't a valid raw value. Nothing is consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<R: RawRepresentable>(_ type: R.Type, as fieldType: Byte.Type) throws(BytesError) -> R
+        where R.RawValue: BinaryInteger {
+        let bits = try peek(Byte.self)
+        guard let raw = R.RawValue(exactly: bits.rawValue), let value = R(rawValue: raw) else { throw .invalidValue }
+        _advance(bitCount: 8)
+        return value
+    }
 }
 
 public extension GenericBytesReader {
@@ -132,6 +151,21 @@ public extension BytesWriter {
     ) throws(BytesError) where R.RawValue: BinaryInteger {
         assert(Bits<width>(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in \(width) bits")
         try write(Bits<width>(truncatingIfNeeded: value.rawValue))
+    }
+
+    /// Writes `value`'s raw value as a byte: the bit-addressable form of the one width both kinds of writer
+    /// write (without it, `write(_:as: Byte.self)` would match both general forms).
+    ///
+    /// - Parameters:
+    ///   - value: The value whose raw value to write.
+    ///   - fieldType: `Byte.self`.
+    /// - Throws: ``BytesError/insufficientCapacity`` if there isn't room.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write<R: RawRepresentable>(_ value: R, as fieldType: Byte.Type) throws(BytesError)
+        where R.RawValue: BinaryInteger {
+        assert(Byte(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in 8 bits")
+        try write(Byte(truncatingIfNeeded: value.rawValue))
     }
 }
 

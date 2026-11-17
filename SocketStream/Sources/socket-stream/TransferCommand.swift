@@ -8,8 +8,8 @@ struct TransferCommand: AsyncParsableCommand {
         commandName: "socket-stream",
         abstract: "Send MQTT PUBLISH packets through local TCP sockets, optionally compressed and encrypted, and print the throughput.",
         discussion: """
-        Each connection pair is a sender encoding packets with AlignedBytesWriter and a receiver parsing them with \
-        AlignedBytesReader, with Bytes pipelines between them and the socket for --compression and --encrypted. Run \
+        Each connection pair is a sender encoding packets with BigEndianBytesWriter and a receiver parsing them with \
+        BigEndianBytesReader, with Bytes pipelines between them and the socket for --compression and --encrypted. Run \
         it with the toolchain in .swift-toolchain (../Tools/toolchain . -- swift run …).
         """
     )

@@ -7,6 +7,22 @@ Bandwidth counts every byte on the wire, MQTT headers included; the timing runs 
 the last receiver's end of stream. Every packet is checked on arrival. The package now also measures
 compressed and TLS-encrypted streams through Bytes pipelines (2026-11-15 below).
 
+## 2026-11-17: stitched ChaCha20-Poly1305 (baselines `trk-t0` → `trk-final`, Swift 6.4.4)
+
+Bytes' ChaCha20-Poly1305 now interleaves Poly1305 with ChaCha20's rounds (`../Bytes/Benchmarks/RESULTS.md`,
+2026-11-17). In-memory transfers, 64-byte payloads, µs:
+
+| Workload | t0 | final | Change |
+|---|---|---|---|
+| Protect, TLS records | 1,162 | 715 | −38% |
+| Unprotect, TLS records | 1,230 | 758 | −38% |
+| Protect, brotli + TLS / deflate + TLS | 3,074 / 2,613 | 2,648 / 2,265 | −14 / −13% |
+| Unprotect, brotli + TLS / deflate + TLS | 1,551 / 947 | 1,349 / 840 | −13 / −11% |
+
+The packet code moved to `BigEndianBytesReader`/`BigEndianBytesWriter` and `ByteBuffer.receive` to Bytes' new
+`BytesAsync` module, both unchanged in instructions. Check and encode times moved −9 and −10% between these runs
+with unchanged instructions: drift.
+
 ## 2026-11-16: byte-aligned cursors (baseline `p4-aligned`)
 
 The packet encoder and checker use Bytes' `AlignedBytesWriter` and `AlignedBytesReader`, as MQTT now does.

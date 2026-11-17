@@ -3,14 +3,64 @@
 `Bytes` (../Bytes) against Apple's [swift-binary-parsing](https://github.com/apple/swift-binary-parsing)
 0.0.4 (`BinaryParsing`, `ParserSpan`) on the same work. Two directions:
 
-- Our parsers ported to `ParserSpan`: the zip central directory and integer runs.
-- Two of its example parsers, QOI and LZ4, ported to `Bytes`.
+- Our parsers ported to `ParserSpan`: the zip central directory, integer runs, and an MQTT PUBLISH stream.
+- All six of its example parsers ported to `Bytes`: QOI, LZ4, ELF, PNG, PCAPNG, and BPList.
 
 The example parsers are also measured as published (`Sources/Workloads/Example*.swift`, copied with only
 their types renamed). Every variant of a workload produces identical output (`swift test`): the LZ4
 decoders reproduce the original files, and the QOI decoders match the example's pixels.
 
 Medians from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
+
+## 2026-11-17: every example, MQTT both ways, macro records (baseline `trk-final`, Swift 6.4.4)
+
+The four examples not yet ported (ELF, PNG, PCAPNG, BPList) now have `Bytes` versions
+(`Sources/Workloads/ELF.swift`, …; the examples themselves as `Example*.swift`). Each port builds the example's own
+result types, so both sides allocate the same arrays and strings and only the parsing differs; tests compare every
+value (`ExamplePortTests`). Instructions, p50:
+
+| Workload | Example (ParserSpan) | Bytes | Ratio | Mallocs (example / Bytes) |
+|---|---|---|---|---|
+| ELF helloworld | 7,667 | 3,869 | 1.98 | 2 / 2 |
+| ELF swift-help | 28 K | 9,097 | **3.08** | 2 / 2 |
+| ELF swift-help, 56 section names | 35 K | 25 K | 1.40 | 7 / 7 |
+| PNG tiny.png | 26 K | 18 K | 1.44 | 12 / 9 |
+| PNG tricolor.png | 32 K | 23 K | 1.39 | 13 / 10 |
+| PNG antelope.png | 1,410 K | 1,389 K | 1.02 | 298 / 295 |
+| PCAPNG sample.pcap | 14 K | 12 K | 1.17 | 8 / 8 |
+| PCAPNG 1,000 packets (synthetic) | 4,846 K | 4,084 K | 1.19 | 2,786 / 2,786 |
+| BPList sample.plist | 113 K | 94 K | 1.20 | 35 / 35 |
+| BPList 1,000 records (synthetic) | 30 M | 25 M | 1.20 | 8,985 / 8,985 |
+| MQTT PUBLISH, 10,000 packets (`ParserSpan` port / Bytes) | 4,198 K | 3,265 K | 1.29 | 0 / 0 |
+| Zip directory, 2,000 entries: ParserSpan fields / records | 461 / 325 K | 285 / 199 K | 1.62 / 1.63 | 0 / 0 |
+| Zip directory, `@BinaryRecord` (BytesMacros) | | 199 K | | 0 |
+
+**What made the difference** (`Tools/calls`, function sizes):
+
+- **Byte order at run time.** ELF and PCAPNG pass an `Endianness` to every read: each field is an out-of-line
+  `MultiByteInteger.init(parsing:endianness:)` (52 instructions) with its own throw path. The ports choose the order
+  once and call a parser generic over the cursor's order, compiled for each; a 64-bit ELF section header is one
+  bounds check.
+- **PNG:** the example tracks chunk order in a `Set` (3 allocations); on antelope.png both copy 281 16 KB chunks.
+- **BPList:** every variable-width integer is a generic, out-of-line byte loop in the example; one 8-byte load and a
+  shift in the port.
+- **MQTT:** `sliceSpan`/`sliceUTF8Span` are out-of-line calls (5 sites) and variable-byte integers a loop of checked
+  reads; Bytes reads `read(sectionPrefixedBy: LEB128.self, maxByteCount: 4)` and `read(utf8PrefixedBy:)` inline.
+- **Macro records** match the hand-written fixed-record parser instruction for instruction (`@BinaryRecord`'s
+  generated code is forced inline; without that, 297 K).
+
+**Bugs in the examples** (reproduced in the ports, so results match): BPList sign-extends 1-, 2-, and 4-byte
+integers (sample.plist's `score_m = 240` parses as −16), reads dates as a `Double`'s bits in an `Int64`, and returns
+UIDs as data; PCAPNG reads the 6-byte MAC address option as 8 bytes (a well-formed one throws) and traps on an
+interface block shorter than 20 bytes. One difference kept: the port decodes BPList's UTF-16 strings big-endian, as
+stored (no test file has one).
+
+**Bytes API the ports wanted** (proposed, not added): `@BinaryRecord` in the cursor's byte order (ELF, PCAPNG choose
+it at run time); single-byte and reserved fields in records (PNG's IHDR, BPList's trailer, ELF's identification);
+integers of a run-time width (`read(UInt64.self, byteCount:)`, signed too); NUL-terminated UTF-8; alignment in
+`forEachRecord` (PCAPNG's padded options); a throwing `readSection` for negative computed lengths.
+
+Times aren't reported: the ports were measured while the machine was shared.
 
 ## 2026-11-16: byte-aligned cursors (baselines `p4-generic` → `p4-aligned` → `p4-aligned2`)
 

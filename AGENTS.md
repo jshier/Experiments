@@ -10,7 +10,7 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 
 | Project | What | Record |
 |---|---|---|
-| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC, byte pipelines (`ByteTransform`); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions); `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records) | `Benchmarks/RESULTS.md` |
+| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work; `BytesAsync` (async buffers, pipelines, parallel codecs); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions); `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records) | `Benchmarks/RESULTS.md` |
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
 | `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
 | `Base64` | Vectorized Base64 encoder on Bytes (`tbl` kernel, auto-vectorized `ld3`/`st4` kernel) | `Benchmarks/RESULTS.md` |
@@ -476,6 +476,40 @@ Compression and crypto (details: `Bytes/Benchmarks/RESULTS.md`, `SocketStream/RE
   number per lane (39 chunks on 24 lanes take as long as 48). State reused across calls must be reset per call: a slot still naming chunk 0 from the last call
   looked ready. Task groups beat `concurrentPerform` by up to 10% here; async APIs that take `inout`
   storage are `nonisolated(nonsending)` (otherwise `@concurrent`, and callers must send `self`).
+
+API design and code generation (the 2026-11-17 proposals pass; numbers in `Bytes/Benchmarks/RESULTS.md`):
+
+- **Check a new API's codegen from another module** (a throwaway package depending on the dev tree, `@inline(never)`
+  probes beside hand-written equivalents, `objdump`): LLVM merges identical functions, which is the proof. Named bit
+  fields (`flags[ConnectFlags.userName]`) matched hand shifts; a `BitPattern` literal folded to its two masks only
+  with `@inline(__always)` on both initializers (otherwise a run-time parse per call).
+- **The standard library's `ByteOrder.==` is a call** (derived `==` of any other module's `@frozen` enum is:
+  `~/Downloads/swift-bugs/26`). `switch` over the order instead; a byte-ordered writer went 71 → 53 instructions.
+- **Store a checked value unmasked.** An enum field setter with `assert` + mask cost MQTT's PUBLISH encoding 0.8%;
+  `precondition(raw <= mask)` then an unmasked store folds both away when the enum's raw values are visible.
+- **An empty default closure isn't free, and compilers disagree about it.** MQTT's properties validation with a
+  `visit: { _ in }` parameter cost 2% under Xcode's compiler; forced inline, it gained 1% there and cost SocketStream
+  (PR toolchain) 10%. Give the plain path its own body; force-inline only the variant that needs it.
+- **Generated code needs `@inline(__always)`.** `@BinaryRecord`'s `init(parsing:)` stayed a call (the 17-field record
+  returned through memory): 297 K against 199 K instructions for the same hand-written parser. Forced inline, equal.
+- **Moving code to another module can cost instructions even when it's inlined.** `HuffmanCodeBuilder` in Bytes
+  instead of BytesCompression: +2 K per 1.6 KB Brotli stream with `@inlinable`, `@inline(__always)`, and
+  `@inline(always)` alike; it went back. Benchmark every move.
+- **Stitch scalar work into vector loops.** Poly1305 (integer multiplies) between ChaCha20's eight-block rounds
+  (vector, all 32 registers): sealing 1 MB −40% time, 1.52 → 2.50 GB/s, instructions barely changed.
+- **A cheaper mask isn't a cheaper loop.** `ByteMatches.nibbleMask` (one `shrn`, from plain Swift) beats `bitmask`
+  for finding the first lane, but Brotli's tag filter walking 4-bit slots ran 2.7% more instructions than with the
+  one-bit gather.
+- **Spans can't be captured through two closures** ("lifetime-dependent variable escapes its scope"), nor borrowed
+  from a property while another property is mutated in a closure: pass both as parameters to a static function
+  (TLS sealer's `ByteBuffer`s).
+- **Overloads and literals:** a generic `write(_: some FixedWidthInteger, as:)` beside `write(_: T.Integer, as: T)`
+  takes integer literals (they default to `Int`) unless `@_disfavoredOverload`; a bare `writer.write(7)` is ambiguous
+  between `Byte`, `UInt8`, and `Int8`, which is right: state the width.
+- **`.macro` targets need `import CompilerPluginSupport`**; without it the manifest fails as a type-check timeout
+  (`~/Downloads/swift-bugs/27`).
+- **Cross-toolchain checks:** SocketStream builds with a PR toolchain whose inliner differs; a change that helps MQTT
+  under Xcode's compiler can hurt SocketStream. Track both.
 
 ## Benchmarks (ordo-one/package-benchmark)
 

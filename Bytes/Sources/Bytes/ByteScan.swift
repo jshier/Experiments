@@ -106,11 +106,41 @@ public struct ByteMatches: Sendable {
         return UInt16(truncatingIfNeeded: low | high &<< 8)
     }
 
-    /// The first matching lane, or `nil` if none matches.
+    /// The matching lanes, four bits each: lane i's match in bit 4i + 3, the other bits 0.
+    ///
+    /// ```swift
+    /// var lanes = block.matching(0).nibbleMask
+    /// while lanes != 0 {
+    ///     check(offset + lanes.trailingZeroBitCount / 4)
+    ///     lanes &= lanes &- 1
+    /// }
+    /// ```
+    ///
+    /// Three instructions on ARM64 (`shrn`, `fmov`, `and`: each 16-bit pair of lanes shifted right by 4 and
+    /// narrowed to a byte), against ``bitmask``'s dozen: the form to use when lanes are found by counting
+    /// zero bits, as ``firstIndex`` does.
+    @inlinable @inline(__always)
+    public var nibbleMask: UInt64 {
+        #if _endian(little)
+        let pairs = bitCast(highBits, to: SIMD8<UInt16>.self)
+        let narrowed = SIMD8<UInt8>(truncatingIfNeeded: pairs &>> 4)
+        return bitCast(narrowed, to: UInt64.self) & 0x8888_8888_8888_8888
+        #else
+        // Lane i in bit i, spread to bit 4i + 3.
+        var lanes = UInt64(bitmask)
+        lanes = (lanes | lanes &<< 24) & 0x0000_00FF_0000_00FF
+        lanes = (lanes | lanes &<< 12) & 0x000F_000F_000F_000F
+        lanes = (lanes | lanes &<< 6) & 0x0303_0303_0303_0303
+        lanes = (lanes | lanes &<< 3) & 0x1111_1111_1111_1111
+        return lanes &<< 3
+        #endif
+    }
+
+    /// The first matching lane, or `nil` if none matches: from ``nibbleMask``, four instructions and a test.
     @inlinable @inline(__always)
     public var firstIndex: Int? {
-        let lanes = bitmask
-        return lanes == 0 ? nil : lanes.trailingZeroBitCount
+        let lanes = nibbleMask
+        return lanes == 0 ? nil : lanes.trailingZeroBitCount &>> 2
     }
 }
 

@@ -1,8 +1,8 @@
-import BytesCompression
+import Bytes
 import Testing
 import zlib
 
-@Suite struct ChecksumTests {
+@Suite struct AdlerTests {
     /// Deterministic bytes, varied enough that column sums differ.
     static func bytes(_ count: Int, seed: UInt64 = 1) -> [UInt8] {
         var state = seed
@@ -13,7 +13,8 @@ import zlib
     }
 
     static func zlibAdler(_ bytes: [UInt8], continuing value: UInt32 = 1) -> UInt32 {
-        bytes.withUnsafeBufferPointer { UInt32(adler32(UInt(value), $0.baseAddress, UInt32($0.count))) }
+        // unsafe: zlib reads exactly `count` bytes from the buffer, which is valid for the closure.
+        bytes.withUnsafeBufferPointer { unsafe UInt32(adler32(UInt(value), $0.baseAddress, UInt32($0.count))) }
     }
 
     @Test(arguments: Array(0...70) + [127, 128, 4095, 4096, 4097, 4127, 4128, 4129, 8192, 100_000, 1 << 20])
@@ -41,5 +42,24 @@ import zlib
         }
         adler.update(data.span.bytes.extracting(start...))
         #expect(adler.value == Self.zlibAdler(data))
+    }
+
+    /// Both checksums through `RunningChecksum`: incremental updates and combining match one pass.
+    func runningChecksumAgrees<C: RunningChecksum>(_: C.Type) {
+        let data = Self.bytes(10_000)
+        let whole = C.checksum(data.span.bytes)
+        var incremental = C()
+        incremental.update(data.span.bytes.extracting(0..<3_000))
+        incremental.update(data.span.bytes.extracting(3_000...))
+        #expect(incremental.value == whole)
+        let first = C.checksum(data.span.bytes.extracting(0..<3_000))
+        let second = C.checksum(data.span.bytes.extracting(3_000...))
+        #expect(C.combine(first, second, secondLength: 7_000) == whole)
+        #expect(C.checksum(RawSpan()) == C.initialValue)
+    }
+
+    @Test func runningChecksums() {
+        runningChecksumAgrees(CRC32.self)
+        runningChecksumAgrees(Adler32.self)
     }
 }

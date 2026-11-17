@@ -58,6 +58,19 @@ import Testing
         #expect(ByteLanes(lanes).matching(0).firstIndex == 5)
     }
 
+    /// The nibble mask has lane i's match in bit 4i + 3, for every single lane and for all of them.
+    @Test func nibbleMasks() {
+        for lane in 0..<16 {
+            var lanes = SIMD16<UInt8>(repeating: 7)
+            lanes[lane] = 0
+            let matches = ByteLanes(lanes).matching(0)
+            #expect(matches.nibbleMask == 1 << (4 * lane + 3))
+            #expect(matches.firstIndex == lane)
+        }
+        #expect(ByteLanes(.zero).matching(0).nibbleMask == 0x8888_8888_8888_8888)
+        #expect(ByteLanes(.zero).matching(0).nibbleMask.nonzeroBitCount == 16)
+    }
+
     @Test func bitFieldsByWidth() {
         let value: UInt64 = 0b1011_0110_1100
         for low in 0..<12 {

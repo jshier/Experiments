@@ -1,5 +1,6 @@
 import Benchmark
 import Bytes
+import BytesAsync
 import BytesCompression
 import Darwin
 import Dispatch

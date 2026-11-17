@@ -45,7 +45,7 @@ import Testing
     /// reproduce them, as `MQTTPacket(parsing:)` does.
     @Test func everyTypeRoundTripsWithoutTheEnum() throws {
         for bytes in try corpus() {
-            var reader = AlignedBytesReader(bytes.span)
+            var reader = BigEndianBytesReader(bytes.span)
             guard let frame = try MQTTFrame.read(from: &reader) else {
                 Issue.record("No frame in \(bytes)")
                 continue
@@ -53,7 +53,7 @@ import Testing
             #expect(reader.byteOffset == bytes.count)
             #expect(try reencodedByType(frame) == bytes)
 
-            var again = AlignedBytesReader(bytes.span)
+            var again = BigEndianBytesReader(bytes.span)
             guard let enumFrame = try MQTTFrame.read(from: &again) else { continue }
             #expect(try encoded(MQTTPacket(parsing: enumFrame)) == bytes)
         }
@@ -63,7 +63,7 @@ import Testing
     /// throw, also consuming nothing: before the body arrives.
     @Test func headersAreCheckedBeforeTheBodyArrives() throws {
         func read(_ bytes: [UInt8]) throws(MQTTError) -> (MQTTPacketType?, Int) {
-            var reader = AlignedBytesReader(bytes.span)
+            var reader = BigEndianBytesReader(bytes.span)
             defer { #expect(reader.byteOffset == 0 || reader.byteOffset == bytes.count) }
             let type = try MQTTFrame.read(from: &reader)?.type
             return (type, reader.byteOffset)
@@ -76,7 +76,7 @@ import Testing
         #expect(throws: MQTTError.self) { try read([0x60, 0x02, 0x00]) }
         #expect(throws: MQTTError.self) { try read([0x00, 0x05]) }
         // Too large for the maximum: as soon as the remaining length arrives.
-        var reader = AlignedBytesReader([0x30, 0x7F].span)
+        var reader = BigEndianBytesReader([0x30, 0x7F].span)
         #expect(throws: MQTTError(.packetTooLarge, "packet larger than the maximum packet size")) {
             _ = try MQTTFrame.read(from: &reader, maximumPacketSize: 100)
         }

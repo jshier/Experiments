@@ -1,4 +1,5 @@
 internal import Bytes
+internal import BytesFoundation
 import Foundation
 import System
 
@@ -43,6 +44,18 @@ public struct ZipEntry: Sendable {
     // can't use it.)
     /// Whether the entry is encrypted (flag bit 0). Encrypted entries can't be read.
     @inlinable public var isEncrypted: Bool { flags & 0x1 != 0 }
+}
+
+// MARK: - Packed fields
+
+/// A central directory entry's packed fields, by name.
+enum ZipAttributes {
+    /// The high byte of "version made by": the host OS (3 is Unix).
+    static var host: BitField<Int> { BitField(bits: 8...15) }
+    /// Unix hosts' `st_mode`: the external attributes' high 16 bits.
+    static var unixMode: BitField<Int> { BitField(bits: 16...31) }
+    /// The MS-DOS directory attribute, in the external attributes' low byte.
+    static var dosDirectory: BitFlag { BitFlag(bit: 4) }
 }
 
 // MARK: - Archive
@@ -110,8 +123,8 @@ extension ZipArchive {
         var entries: [ZipEntry] = []
         entries.reserveCapacity(Int(min(location.entryCount, 1 << 20)))
         do throws(BytesError) {
-            var reader = try AlignedBytesReader(archive, atByteOffset: location.offset)
-            var directory = try reader.readSection(byteCount: Int(clamping: location.size))
+            var reader = try LittleEndianBytesReader(archive, atByteOffset: location.offset)
+            var directory = try reader.readSection(byteCount: location.size)
             for _ in 0..<location.entryCount {
                 try entries.append(readCentralDirectoryEntry(&directory))
             }
@@ -126,30 +139,30 @@ extension ZipArchive {
         var location: CentralDirectoryLocation
         var spansDisks = false
         do throws(BytesError) {
-            var eocd = try AlignedBytesReader(archive, atByteOffset: eocdOffset)
+            var eocd = try LittleEndianBytesReader(archive, atByteOffset: eocdOffset)
             var record = try eocd.readSection(byteCount: 22)
             try record.expect(Signature.endOfCentralDirectory)
-            let diskNumber = try record.read(Byte2.self, .littleEndian)
-            let directoryDisk = try record.read(Byte2.self, .littleEndian)
+            let diskNumber = try record.read(UInt16.self)
+            let directoryDisk = try record.read(UInt16.self)
             try record.skip(byteCount: 2) // entries on this disk
             location = try CentralDirectoryLocation(
-                entryCount: UInt64(record.read(Byte2.self, .littleEndian)),
-                size: UInt64(record.read(Byte4.self, .littleEndian)),
-                offset: UInt64(record.read(Byte4.self, .littleEndian))
+                entryCount: UInt64(record.read(UInt16.self)),
+                size: UInt64(record.read(UInt32.self)),
+                offset: UInt64(record.read(UInt32.self))
             )
 
             // ZIP64: saturated fields mean the real values live in the ZIP64 EOCD record, which a
             // fixed-size locator immediately before the classic EOCD points to.
             if location.isSaturated, eocdOffset >= 20 {
-                var locator = try AlignedBytesReader(archive, atByteOffset: eocdOffset - 20)
+                var locator = try LittleEndianBytesReader(archive, atByteOffset: eocdOffset - 20)
                 if try locator.read(Byte4.self) == Signature.zip64Locator {
                     try locator.skip(byteCount: 4) // disk containing the ZIP64 EOCD
-                    var zip64 = try AlignedBytesReader(archive, atByteOffset: locator.read(Byte8.self, .littleEndian))
+                    var zip64 = try LittleEndianBytesReader(archive, atByteOffset: locator.read(UInt64.self))
                     try zip64.expect(Signature.zip64EndOfCentralDirectory)
                     try zip64.skip(byteCount: 8 + 2 + 2 + 4 + 4 + 8) // record size, versions, disks, entries on disk
-                    location.entryCount = try zip64.read(Byte8.self, .littleEndian)
-                    location.size = try zip64.read(Byte8.self, .littleEndian)
-                    location.offset = try zip64.read(Byte8.self, .littleEndian)
+                    location.entryCount = try zip64.read(UInt64.self)
+                    location.size = try zip64.read(UInt64.self)
+                    location.offset = try zip64.read(UInt64.self)
                     return location
                 }
             }
@@ -168,49 +181,36 @@ extension ZipArchive {
         guard archive.byteCount >= minimum else { throw .notAZipArchive }
         let last = archive.byteCount - minimum
         let first = max(0, last - 0xFFFF)
-        let window = AlignedBytesReader(archive.extracting(first..<last + 4))
+        let window = LittleEndianBytesReader(archive.extracting(first..<last + 4))
         guard let offset = window.lastByteOffset(of: Signature.endOfCentralDirectory) else { throw .notAZipArchive }
         return first + offset
     }
 
     @_lifetime(directory: copy directory)
-    private static func readCentralDirectoryEntry(_ directory: inout AlignedBytesReader) throws(BytesError) -> ZipEntry {
-        // The fixed part as its own cursor: its length is a constant, so every field read is proven in bounds.
-        var header = try directory.readSection(byteCount: 46)
-        try header.expect(Signature.centralDirectory)
-        let versionMadeBy = try header.read(Byte2.self, .littleEndian)
-        try header.skip(byteCount: 2) // version needed to extract
-        let flags = try header.read(Byte2.self, .littleEndian)
-        let method = try header.read(Byte2.self, .littleEndian)
-        let dosTime = try header.read(Byte2.self, .littleEndian)
-        let dosDate = try header.read(Byte2.self, .littleEndian)
-        let crc = try header.read(Byte4.self, .littleEndian)
-        var compressedSize = try UInt64(header.read(Byte4.self, .littleEndian))
-        var uncompressedSize = try UInt64(header.read(Byte4.self, .littleEndian))
-        let nameLength = try Int(header.read(Byte2.self, .littleEndian))
-        let extraLength = try Int(header.read(Byte2.self, .littleEndian))
-        let commentLength = try Int(header.read(Byte2.self, .littleEndian))
-        try header.skip(byteCount: 2 + 2) // disk number start, internal attributes
-        let externalAttributes = try header.read(Byte4.self, .littleEndian)
-        var localHeaderOffset = try UInt64(header.read(Byte4.self, .littleEndian))
+    private static func readCentralDirectoryEntry(_ directory: inout LittleEndianBytesReader) throws(BytesError) -> ZipEntry {
+        // The fixed part in one read (`CentralDirectoryHeader`): one bounds check, each field read once.
+        let header = try directory.read(CentralDirectoryHeader.self)
+        var compressedSize = UInt64(header.compressedSize)
+        var uncompressedSize = UInt64(header.uncompressedSize)
+        var localHeaderOffset = UInt64(header.localHeaderOffset)
 
-        let name = try decodeName(Span(viewing: directory.read(byteCount: nameLength)))
-        var extra = try directory.readSection(byteCount: extraLength)
-        try directory.skip(byteCount: commentLength)
+        let name = try decodeName(Span(viewing: directory.read(byteCount: header.nameLength)))
+        var extra = try directory.readSection(byteCount: header.extraLength)
+        try directory.skip(byteCount: header.commentLength)
 
         var unixModificationTime: Date?
         while extra.remainingByteCount >= 4 {
-            let id = try extra.read(Byte2.self, .littleEndian)
+            let id = try extra.read(UInt16.self)
             // Tolerate malformed trailing padding: a field that isn't all there ends the list.
-            guard var field = extra.readSectionIfComplete(prefixedBy: Byte2.self, .littleEndian) else { break }
+            guard var field = extra.readSectionIfComplete(prefixedBy: Byte2.self) else { break }
             switch id {
             case 0x0001: // ZIP64 extended information: only the saturated fields are present, in this order.
-                if uncompressedSize == UInt32.max { uncompressedSize = try field.read(Byte8.self, .littleEndian) }
-                if compressedSize == UInt32.max { compressedSize = try field.read(Byte8.self, .littleEndian) }
-                if localHeaderOffset == UInt32.max { localHeaderOffset = try field.read(Byte8.self, .littleEndian) }
+                if uncompressedSize == UInt32.max { uncompressedSize = try field.read(UInt64.self) }
+                if compressedSize == UInt32.max { compressedSize = try field.read(UInt64.self) }
+                if localHeaderOffset == UInt32.max { localHeaderOffset = try field.read(UInt64.self) }
             case 0x5455: // Extended timestamp: a flags byte, then a UTC mtime if bit 0 is set.
-                if field.remainingByteCount >= 5, try field.read(Byte.self)[bit: 0] {
-                    let seconds = try field.readSigned(Byte4.self, .littleEndian, as: Int32.self)
+                if field.remainingByteCount >= 5, try field.read(ExtendedTimestampFlags.self).modification {
+                    let seconds = try field.read(Int32.self, asSigned: Byte4.self)
                     unixModificationTime = Date(timeIntervalSince1970: TimeInterval(seconds))
                 }
             default:
@@ -220,15 +220,15 @@ extension ZipArchive {
 
         return makeEntry(
             name: name,
-            versionMadeBy: versionMadeBy,
-            flags: flags,
-            method: method,
-            crc: crc,
+            versionMadeBy: header.versionMadeBy,
+            flags: header.flags,
+            method: header.method,
+            crc: header.crc32,
             compressedSize: compressedSize,
             uncompressedSize: uncompressedSize,
-            externalAttributes: externalAttributes,
+            externalAttributes: header.externalAttributes,
             localHeaderOffset: localHeaderOffset,
-            modificationDate: unixModificationTime ?? date(dosDate: dosDate, dosTime: dosTime)
+            modificationDate: unixModificationTime ?? date(header.date, header.time)
         )
     }
 
@@ -263,10 +263,9 @@ extension ZipArchive {
         modificationDate: Date?
     ) -> ZipEntry {
         // The high byte of "version made by" is the host OS; 3 is Unix, whose st_mode is the high 16 bits.
-        let mode = versionMadeBy[Byte.self, at: 8] == 3 ? Int(externalAttributes[bits: 16..<32]) : 0
+        let mode = versionMadeBy[ZipAttributes.host] == 3 ? externalAttributes[ZipAttributes.unixMode] : 0
         let fileType = mode & Int(S_IFMT)
-        // Bit 4 of the low (MS-DOS) attributes: a directory.
-        let kind: ZipEntry.Kind = if name.hasSuffix("/") || fileType == Int(S_IFDIR) || externalAttributes[bit: 4] {
+        let kind: ZipEntry.Kind = if name.hasSuffix("/") || fileType == Int(S_IFDIR) || externalAttributes[ZipAttributes.dosDirectory] {
             .directory
         } else if fileType == Int(S_IFLNK) {
             .symlink
@@ -317,14 +316,20 @@ extension ZipArchive {
         }
     }()
 
+    /// ``date(_:_:)`` from the raw fields (the `ByteReader` parser's form).
     static func date(dosDate: UInt16, dosTime: UInt16) -> Date? {
+        // Can't throw: neither has reserved bits or enum fields.
+        date(try! DOSDate(rawValue: dosDate), try! DOSTime(rawValue: dosTime))
+    }
+
+    static func date(_ date: DOSDate, _ time: DOSTime) -> Date? {
         var components = DateComponents()
-        components.year = 1980 + Int(dosDate[Bits<7>.self, at: 9])
-        components.month = Int(dosDate[Nibble.self, at: 5])
-        components.day = Int(dosDate[Bits<5>.self, at: 0])
-        components.hour = Int(dosTime[Bits<5>.self, at: 11])
-        components.minute = Int(dosTime[Bits<6>.self, at: 5])
-        components.second = Int(dosTime[Bits<5>.self, at: 0]) * 2
+        components.year = 1980 + date.yearsSince1980
+        components.month = date.month
+        components.day = date.day
+        components.hour = time.hour
+        components.minute = time.minute
+        components.second = time.halfSeconds * 2
         // DOS timestamps have no time zone; by convention they're local time.
         return Calendar.current.date(from: components)
     }
@@ -457,8 +462,7 @@ public extension ZipArchive {
     func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes) throws -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
         try contents(of: entry, backend: backend) { chunk in
-            // Unsafe: `Data` has no `RawSpan` append. Safe: the buffer is only read, within the closure.
-            chunk.withUnsafeBytes { unsafe result.append(contentsOf: $0) }
+            result.append(chunk)
         }
         return result
     }
@@ -475,15 +479,15 @@ public extension ZipArchive {
     @_lifetime(copy archive)
     internal static func payload(of entry: ZipEntry, in archive: RawSpan) throws(ZipError) -> RawSpan {
         do throws(BytesError) {
-            var reader = try AlignedBytesReader(archive, atByteOffset: entry.localHeaderOffset)
+            var reader = try LittleEndianBytesReader(archive, atByteOffset: entry.localHeaderOffset)
             var header = try reader.readSection(byteCount: 30)
             try header.expect(Signature.localFile)
             try header.skip(byteCount: 2 + 2 + 2 + 2 + 2 + 4 + 4 + 4) // version, flags, method, time, date, CRC, sizes
             // The local name/extra lengths can differ from the central directory's, so use these.
-            let nameLength = try Int(header.read(Byte2.self, .littleEndian))
-            let extraLength = try Int(header.read(Byte2.self, .littleEndian))
+            let nameLength = try Int(header.read(UInt16.self))
+            let extraLength = try Int(header.read(UInt16.self))
             try reader.skip(byteCount: nameLength + extraLength)
-            return try reader.read(byteCount: Int(clamping: entry.compressedSize))
+            return try reader.read(byteCount: entry.compressedSize)
         } catch {
             throw error.zipError("local file header for '\(entry.path)'")
         }

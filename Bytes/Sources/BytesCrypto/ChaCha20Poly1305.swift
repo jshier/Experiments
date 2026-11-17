@@ -6,7 +6,7 @@ public import Bytes
 /// ```swift
 /// let aead = ChaCha20Poly1305(key: key)                       // 32 bytes
 /// let tag = aead.seal(&message, nonce: nonce, authenticating: header)   // encrypts `message` in place
-/// try aead.open(&message, nonce: nonce, authenticating: header, tag: tag)  // throws `.mismatch` if forged
+/// try aead.open(&message, nonce: nonce, authenticating: header, tag: tag.span.bytes)  // throws `.mismatch` if forged
 /// ```
 ///
 /// ChaCha20 runs eight blocks (512 bytes) at a time, then four, one block per lane of 16 state words
@@ -53,9 +53,17 @@ public struct ChaCha20Poly1305: Sendable {
     public func seal(_ message: inout MutableRawSpan, nonce: RawSpan, authenticating aad: RawSpan) -> InlineArray<16, UInt8> {
         let (n0, n1, n2) = Self.nonceWords(nonce)
         let polyKey = ChaCha20.block(key: key, counter: 0, nonce: (n0, n1, n2))
-        ChaCha20.xor(&message, key: key, counter: 1, nonce: (n0, n1, n2))
         var mac = Poly1305(key: polyKey)
-        mac.authenticate(aad: aad, ciphertext: message.bytes)
+        mac.blocks(aad)
+        // Stitched from one eight-block batch on; shorter messages in two passes (the stitched path's split
+        // tail cost 180 instructions more per 64-byte seal).
+        if message.byteCount >= 512 {
+            ChaCha20.seal(&message, key: key, counter: 1, nonce: (n0, n1, n2), mac: &mac)
+        } else {
+            ChaCha20.xor(&message, key: key, counter: 1, nonce: (n0, n1, n2))
+            mac.blocks(message.bytes)
+        }
+        mac.lengths(aad: aad.byteCount, ciphertext: message.byteCount)
         return mac.tag()
     }
 
@@ -74,15 +82,28 @@ public struct ChaCha20Poly1305: Sendable {
         let (n0, n1, n2) = Self.nonceWords(nonce)
         let polyKey = ChaCha20.block(key: key, counter: 0, nonce: (n0, n1, n2))
         var mac = Poly1305(key: polyKey)
-        mac.authenticate(aad: aad, ciphertext: message.bytes)
+        mac.blocks(aad)
+        // From one eight-block batch on, decrypted while authenticated (stitched), and re-encrypted below if
+        // the tag doesn't match; shorter messages authenticated first.
+        let stitched = message.byteCount >= 512
+        if stitched {
+            ChaCha20.open(&message, key: key, counter: 1, nonce: (n0, n1, n2), mac: &mac)
+        } else {
+            mac.blocks(message.bytes)
+        }
+        mac.lengths(aad: aad.byteCount, ciphertext: message.byteCount)
         let expected = mac.tag()
         // Compared without an early exit.
         var difference: UInt8 = 0
         for index in 0..<16 {
             difference |= expected[index] ^ tag.load(fromByteOffset: index, as: UInt8.self)
         }
-        guard difference == 0 else { throw .mismatch }
-        ChaCha20.xor(&message, key: key, counter: 1, nonce: (n0, n1, n2))
+        guard difference == 0 else {
+            // XOR again with the same keystream: the ciphertext, as it was.
+            if stitched { ChaCha20.xor(&message, key: key, counter: 1, nonce: (n0, n1, n2)) }
+            throw .mismatch
+        }
+        if !stitched { ChaCha20.xor(&message, key: key, counter: 1, nonce: (n0, n1, n2)) }
     }
 }
 
@@ -236,6 +257,121 @@ enum ChaCha20 {
         }
     }
 
+    /// Encrypts `message` in place, adding the ciphertext to `mac`: ``xor(_:key:counter:nonce:)`` stitched
+    /// with Poly1305.
+    @inline(never)
+    static func seal(_ message: inout MutableRawSpan, key: InlineArray<8, UInt32>, counter: UInt32, nonce: (UInt32, UInt32, UInt32), mac: inout Poly1305) {
+        xor(&message, key: key, counter: counter, nonce: nonce, authenticating: &mac, sealing: true)
+    }
+
+    /// Decrypts `message` in place, adding the ciphertext to `mac` first: ``xor(_:key:counter:nonce:)`` stitched
+    /// with Poly1305.
+    @inline(never)
+    static func open(_ message: inout MutableRawSpan, key: InlineArray<8, UInt32>, counter: UInt32, nonce: (UInt32, UInt32, UInt32), mac: inout Poly1305) {
+        xor(&message, key: key, counter: counter, nonce: nonce, authenticating: &mac, sealing: false)
+    }
+
+    /// The ChaCha20 XOR with Poly1305 over the ciphertext stitched into it: Poly1305's multiplies are scalar
+    /// and ChaCha20's rounds are vector, so interleaved they run on different units at once (OpenSSL's
+    /// stitched ChaCha20-Poly1305). Each eight-block batch takes 32 Poly1305 blocks, three after each double
+    /// round and two at the end.
+    ///
+    /// Sealing authenticates ciphertext, which exists only once its batch is XORed: each batch authenticates
+    /// the batch before it. Opening authenticates the batch it decrypts, read during its rounds and written
+    /// after them.
+    ///
+    /// - Parameter sealing: A constant at each call (the two wrappers above): each is its own specialization.
+    @inline(__always)
+    static func xor(
+        _ message: inout MutableRawSpan, key: InlineArray<8, UInt32>, counter: UInt32, nonce: (UInt32, UInt32, UInt32),
+        authenticating mac: inout Poly1305, sealing: Bool
+    ) {
+        let c = constants
+        let count = message.byteCount
+        var offset = 0
+        var blockCounter = counter
+        // The accumulator in locals, so it stays in registers through the rounds.
+        var h0 = mac.h0, h1 = mac.h1, h2 = mac.h2
+        let r0 = mac.r0, r1 = mac.r1, s1 = mac.s1
+        @inline(__always)
+        func absorb(_ data: RawSpan, at offset: Int) {
+            // Unsafe: unchecked loads. Safe: within the 512-byte batch.
+            let t0 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt64.self))
+            let t1 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 8, as: UInt64.self))
+            Poly1305.absorb(t0, t1, into: &h0, &h1, &h2, r0: r0, r1: r1, s1: s1)
+        }
+        // Bytes of `message` added to the MAC so far.
+        var authenticated = 0
+        let eightLanes = SIMD8<UInt32>(0, 1, 2, 3, 4, 5, 6, 7)
+        while count &- offset >= 512 {
+            // The batch to authenticate during this one's rounds: the previous one when sealing (none before
+            // the first), this one when opening.
+            let polyStart = sealing ? offset &- 512 : offset
+            let stitched = polyStart >= 0
+            var p = polyStart
+            let counters = SIMD8(repeating: blockCounter) &+ eightLanes
+            var x0 = SIMD8(repeating: c.0), x1 = SIMD8(repeating: c.1), x2 = SIMD8(repeating: c.2), x3 = SIMD8(repeating: c.3)
+            var x4 = SIMD8(repeating: key[0]), x5 = SIMD8(repeating: key[1]), x6 = SIMD8(repeating: key[2]), x7 = SIMD8(repeating: key[3])
+            var x8 = SIMD8(repeating: key[4]), x9 = SIMD8(repeating: key[5]), x10 = SIMD8(repeating: key[6]), x11 = SIMD8(repeating: key[7])
+            var x12 = counters, x13 = SIMD8(repeating: nonce.0), x14 = SIMD8(repeating: nonce.1), x15 = SIMD8(repeating: nonce.2)
+            for _ in 0..<10 {
+                x0 &+= x4; x12 ^= x0; x12 = rotate(x12, 16); x8 &+= x12; x4 ^= x8; x4 = rotate(x4, 12)
+                x0 &+= x4; x12 ^= x0; x12 = rotate(x12, 8); x8 &+= x12; x4 ^= x8; x4 = rotate(x4, 7)
+                x1 &+= x5; x13 ^= x1; x13 = rotate(x13, 16); x9 &+= x13; x5 ^= x9; x5 = rotate(x5, 12)
+                x1 &+= x5; x13 ^= x1; x13 = rotate(x13, 8); x9 &+= x13; x5 ^= x9; x5 = rotate(x5, 7)
+                x2 &+= x6; x14 ^= x2; x14 = rotate(x14, 16); x10 &+= x14; x6 ^= x10; x6 = rotate(x6, 12)
+                x2 &+= x6; x14 ^= x2; x14 = rotate(x14, 8); x10 &+= x14; x6 ^= x10; x6 = rotate(x6, 7)
+                x3 &+= x7; x15 ^= x3; x15 = rotate(x15, 16); x11 &+= x15; x7 ^= x11; x7 = rotate(x7, 12)
+                x3 &+= x7; x15 ^= x3; x15 = rotate(x15, 8); x11 &+= x15; x7 ^= x11; x7 = rotate(x7, 7)
+                x0 &+= x5; x15 ^= x0; x15 = rotate(x15, 16); x10 &+= x15; x5 ^= x10; x5 = rotate(x5, 12)
+                x0 &+= x5; x15 ^= x0; x15 = rotate(x15, 8); x10 &+= x15; x5 ^= x10; x5 = rotate(x5, 7)
+                x1 &+= x6; x12 ^= x1; x12 = rotate(x12, 16); x11 &+= x12; x6 ^= x11; x6 = rotate(x6, 12)
+                x1 &+= x6; x12 ^= x1; x12 = rotate(x12, 8); x11 &+= x12; x6 ^= x11; x6 = rotate(x6, 7)
+                x2 &+= x7; x13 ^= x2; x13 = rotate(x13, 16); x8 &+= x13; x7 ^= x8; x7 = rotate(x7, 12)
+                x2 &+= x7; x13 ^= x2; x13 = rotate(x13, 8); x8 &+= x13; x7 ^= x8; x7 = rotate(x7, 7)
+                x3 &+= x4; x14 ^= x3; x14 = rotate(x14, 16); x9 &+= x14; x4 ^= x9; x4 = rotate(x4, 12)
+                x3 &+= x4; x14 ^= x3; x14 = rotate(x14, 8); x9 &+= x14; x4 ^= x9; x4 = rotate(x4, 7)
+                if stitched {
+                    // The batch's bytes are whole (512 of them), so every 16-byte load is in bounds.
+                    absorb(message.bytes, at: p)
+                    absorb(message.bytes, at: p &+ 16)
+                    absorb(message.bytes, at: p &+ 32)
+                    p &+= 48
+                }
+            }
+            if stitched {
+                absorb(message.bytes, at: p)
+                absorb(message.bytes, at: p &+ 16)
+                authenticated = polyStart &+ 512
+            }
+            x0 &+= SIMD8(repeating: c.0); x1 &+= SIMD8(repeating: c.1); x2 &+= SIMD8(repeating: c.2); x3 &+= SIMD8(repeating: c.3)
+            x4 &+= SIMD8(repeating: key[0]); x5 &+= SIMD8(repeating: key[1]); x6 &+= SIMD8(repeating: key[2]); x7 &+= SIMD8(repeating: key[3])
+            x8 &+= SIMD8(repeating: key[4]); x9 &+= SIMD8(repeating: key[5]); x10 &+= SIMD8(repeating: key[6]); x11 &+= SIMD8(repeating: key[7])
+            x12 &+= counters; x13 &+= SIMD8(repeating: nonce.0); x14 &+= SIMD8(repeating: nonce.1); x15 &+= SIMD8(repeating: nonce.2)
+            xorTransposed(&message, offset, x0.lowHalf, x1.lowHalf, x2.lowHalf, x3.lowHalf)
+            xorTransposed(&message, offset &+ 16, x4.lowHalf, x5.lowHalf, x6.lowHalf, x7.lowHalf)
+            xorTransposed(&message, offset &+ 32, x8.lowHalf, x9.lowHalf, x10.lowHalf, x11.lowHalf)
+            xorTransposed(&message, offset &+ 48, x12.lowHalf, x13.lowHalf, x14.lowHalf, x15.lowHalf)
+            xorTransposed(&message, offset &+ 256, x0.highHalf, x1.highHalf, x2.highHalf, x3.highHalf)
+            xorTransposed(&message, offset &+ 272, x4.highHalf, x5.highHalf, x6.highHalf, x7.highHalf)
+            xorTransposed(&message, offset &+ 288, x8.highHalf, x9.highHalf, x10.highHalf, x11.highHalf)
+            xorTransposed(&message, offset &+ 304, x12.highHalf, x13.highHalf, x14.highHalf, x15.highHalf)
+            offset &+= 512
+            blockCounter &+= 8
+        }
+        mac.h0 = h0
+        mac.h1 = h1
+        mac.h2 = h2
+        // The rest unstitched: the XOR from `offset`, and the MAC from `authenticated`, ciphertext either way
+        // (after the XOR when sealing, before it when opening).
+        if !sealing { mac.blocks(message.bytes.extracting(authenticated...)) }
+        do {
+            var rest = message._mutatingExtracting(offset...)
+            xor(&rest, key: key, counter: blockCounter, nonce: nonce)
+        }
+        if sealing { mac.blocks(message.bytes.extracting(authenticated...)) }
+    }
+
     /// XORs four words of four blocks into `message`: `a`, `b`, `c`, `d` hold words w to w + 3, lane b for
     /// block b; block b's 16 bytes go at `offset + 64b`. (The eight-block loop calls it once per half.)
     @inline(__always)
@@ -296,6 +432,47 @@ struct Poly1305 {
         pad1 = word(24)
     }
 
+    /// Adds one 16-byte block, `t0` and `t1` its two little-endian halves, with 2^128 for its padding bit.
+    @inline(__always)
+    mutating func absorb(_ t0: UInt64, _ t1: UInt64) {
+        Self.absorb(t0, t1, into: &h0, &h1, &h2, r0: r0, r1: r1, s1: s1)
+    }
+
+    /// The block step on an accumulator held in locals, so loops keep it in registers.
+    @inline(__always)
+    static func absorb(
+        _ t0: UInt64, _ t1: UInt64, into h0: inout UInt64, _ h1: inout UInt64, _ h2: inout UInt64, r0: UInt64, r1: UInt64, s1: UInt64
+    ) {
+        // h += the block, with 2^128 for its padding bit.
+        let (a0, c0) = h0.addingReportingOverflow(t0)
+        let (a1, c1) = h1.addingReportingOverflow(t1)
+        let (b1, c2) = a1.addingReportingOverflow(c0 ? 1 : 0)
+        h2 &+= 1 &+ (c1 ? 1 : 0) &+ (c2 ? 1 : 0)
+        // h × r, folding the products past 2^130 back (2^130 ≡ 5).
+        let d0 = UInt128(a0) &* UInt128(r0) &+ UInt128(b1) &* UInt128(s1)
+        let d1 = UInt128(a0) &* UInt128(r1) &+ UInt128(b1) &* UInt128(r0) &+ UInt128(h2 &* s1) &+ (d0 &>> 64)
+        let top = h2 &* r0 &+ UInt64(truncatingIfNeeded: d1 &>> 64)
+        // Partial reduction: top × 2^128 = (top >> 2) × 2^130 + (top & 3) × 2^128, and 2^130 ≡ 5.
+        let fold = (top &>> 2) &+ (top & ~3)
+        h2 = top & 3
+        let (e0, c3) = UInt64(truncatingIfNeeded: d0).addingReportingOverflow(fold)
+        let (e1, c4) = UInt64(truncatingIfNeeded: d1).addingReportingOverflow(c3 ? 1 : 0)
+        h0 = e0
+        h1 = e1
+        h2 &+= c4 ? 1 : 0
+    }
+
+    /// Adds the 16-byte block at `offset` in `data`.
+    ///
+    /// - Precondition: 16 bytes from `offset` (unchecked: callers have checked).
+    @inline(__always)
+    mutating func absorb(_ data: RawSpan, at offset: Int) {
+        // Unsafe: unchecked loads. Safe: callers check that 16 bytes remain.
+        let t0 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt64.self))
+        let t1 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 8, as: UInt64.self))
+        absorb(t0, t1)
+    }
+
     /// Adds full 16-byte blocks of `data`, and a last partial block zero-padded (RFC 8439, 2.8).
     @inline(__always)
     mutating func blocks(_ data: RawSpan) {
@@ -304,25 +481,7 @@ struct Poly1305 {
         var h0 = h0, h1 = h1, h2 = h2
         let r0 = r0, r1 = r1, s1 = s1
         @inline(__always)
-        func process(_ t0: UInt64, _ t1: UInt64) {
-            // h += the block, with 2^128 for its padding bit.
-            let (a0, c0) = h0.addingReportingOverflow(t0)
-            let (a1, c1) = h1.addingReportingOverflow(t1)
-            let (b1, c2) = a1.addingReportingOverflow(c0 ? 1 : 0)
-            h2 &+= 1 &+ (c1 ? 1 : 0) &+ (c2 ? 1 : 0)
-            // h × r, folding the products past 2^130 back (2^130 ≡ 5).
-            let d0 = UInt128(a0) &* UInt128(r0) &+ UInt128(b1) &* UInt128(s1)
-            let d1 = UInt128(a0) &* UInt128(r1) &+ UInt128(b1) &* UInt128(r0) &+ UInt128(h2 &* s1) &+ (d0 &>> 64)
-            let top = h2 &* r0 &+ UInt64(truncatingIfNeeded: d1 &>> 64)
-            // Partial reduction: top × 2^128 = (top >> 2) × 2^130 + (top & 3) × 2^128, and 2^130 ≡ 5.
-            let fold = (top &>> 2) &+ (top & ~3)
-            h2 = top & 3
-            let (e0, c3) = UInt64(truncatingIfNeeded: d0).addingReportingOverflow(fold)
-            let (e1, c4) = UInt64(truncatingIfNeeded: d1).addingReportingOverflow(c3 ? 1 : 0)
-            h0 = e0
-            h1 = e1
-            h2 &+= c4 ? 1 : 0
-        }
+        func process(_ t0: UInt64, _ t1: UInt64) { Self.absorb(t0, t1, into: &h0, &h1, &h2, r0: r0, r1: r1, s1: s1) }
         while count &- offset >= 16 {
             // Unsafe: unchecked loads. Safe: 16 bytes remain, checked by the loop.
             let t0 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt64.self))
@@ -350,12 +509,12 @@ struct Poly1305 {
     mutating func authenticate(aad: RawSpan, ciphertext: RawSpan) {
         blocks(aad)
         blocks(ciphertext)
-        var lengths = InlineArray<16, UInt8>(repeating: 0)
-        for index in 0..<8 {
-            lengths[index] = UInt8(truncatingIfNeeded: UInt64(aad.byteCount) &>> UInt64(8 &* index))
-            lengths[8 &+ index] = UInt8(truncatingIfNeeded: UInt64(ciphertext.byteCount) &>> UInt64(8 &* index))
-        }
-        blocks(lengths.span.bytes)
+        lengths(aad: aad.byteCount, ciphertext: ciphertext.byteCount)
+    }
+
+    /// The MAC input's last block: the additional data's and the ciphertext's lengths.
+    mutating func lengths(aad: Int, ciphertext: Int) {
+        absorb(UInt64(aad), UInt64(ciphertext))
     }
 
     /// The tag: h reduced modulo 2^130 - 5, plus the pad, modulo 2^128.

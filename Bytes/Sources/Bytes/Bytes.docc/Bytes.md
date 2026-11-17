@@ -7,27 +7,37 @@ Parse and write binary formats field by field, at bit or byte granularity, at me
 `Bytes` reads binary data from memory you already have (a `RawSpan` or `Span<UInt8>`) and writes it into
 memory you provide (a `MutableRawSpan`, `MutableSpan<UInt8>`, `OutputSpan<UInt8>`, or `OutputRawSpan`), or
 into a new array, without copying or allocating along the way. Fields are typed by their shape in the data,
-not by an integer type you have to pick and byte-swap yourself:
+not by an integer type you have to pick and byte-swap yourself, and the bits inside a byte have names:
 
 ```swift
-var reader = BytesReader(packet.span)
-try reader.expect(0x50_4B_03_04 as Byte4)                     // a signature
-let version = try reader.read(Byte2.self, .littleEndian)      // UInt16
-let length = try reader.read(Byte3.self, .bigEndian)          // UInt32, from 3 bytes
-let type = try reader.read(Nibble.self)                       // 4 bits
-let isRetained = try reader.read(Bool.self)                   // 1 bit
-let qos = try reader.read(QualityOfService.self, as: Crumb.self) // an enum with integer raw values, from 2 bits
+var reader = BigEndianBytesReader(packet.span)
+try reader.expect(0x504B_0304 as UInt32)                      // a signature
+let version = try reader.read(UInt16.self)                    // two bytes, in the reader's byte order
+let length = try reader.read(Int.self, as: Byte3.self)        // an Int, from 3 bytes
+let flags = try reader.read(Byte.self)                        // a byte of flags
+let isRetained = flags[PacketFlags.retained]                  // a named flag
+let qos = try flags.value(of: PacketFlags.qos)                // an enum with integer raw values, from 2 bits
 ```
 
 Writing mirrors reading:
 
 ```swift
-let bytes = try [UInt8](byteCapacity: 64) { writer in
-    try writer.write(0x50_4B_03_04 as Byte4)
-    try writer.write(20, as: Byte2.self, .littleEndian)
-    try writer.write(qos, as: Crumb.self)
+let bytes = try [UInt8](byteCapacity: 64, mode: BigEndianBytes.self) { (writer) throws(BytesError) in
+    try writer.write(0x504B_0304 as UInt32)
+    try writer.write(20 as UInt16)
+    try writer.write(Byte {
+        $0[PacketFlags.retained] = true
+        $0[PacketFlags.qos] = qos
+    })
 }
 ```
+
+(`PacketFlags` declares each field once: `static var retained: BitFlag { BitFlag(bit: 4) }`,
+`static var qos: BitField<QualityOfService> { BitField(bits: 2...3) }`. The `BytesMacros` product's
+`@BitFields` and `@BinaryRecord` generate that, and the reading and writing of whole records, from a
+struct's properties.) A reader with an explicit order, `AlignedBytesReader` with `read(Byte2.self,
+.littleEndian)`, suits formats that mix byte orders, and ``BytesReader`` reads fields of any bit width at any
+bit position (`read(Nibble.self)`, `read(Bool.self)`, `read(Crumb.self)`).
 
 The cursors are `~Copyable` and `~Escapable`: they can't outlive the memory they work on, and a position
 can't be duplicated by accident. A read or write that throws consumes or writes nothing and leaves the
@@ -35,9 +45,18 @@ cursor where it was (section writers may leave bytes ahead of it).
 
 ``BytesReader`` and ``BytesWriter`` are bit-addressable: sub-byte fields can sit anywhere in the stream. For
 formats whose stream is whole bytes, ``AlignedBytesReader`` and ``AlignedBytesWriter`` have the same byte-level
-API without the bit state (and so compile to less); see ``BytesCursorMode``. `[UInt8](alignedByteCapacity:writing:)`
-and `withAlignedBytesWriter` give the aligned writer, `[UInt8](byteCapacity:writing:)` and `withBytesWriter` the
-bit-addressable one.
+API without the bit state (and so compile to less); see ``BytesCursorMode``. When one byte order serves the
+whole format, ``BigEndianBytesReader``, ``LittleEndianBytesReader``, and the matching writers read and write
+integers by type without an order at each call. `[UInt8](alignedByteCapacity:writing:)` and
+`withAlignedBytesWriter` give the aligned writer, `[UInt8](byteCapacity:mode:writing:)` a byte-ordered one
+(`mode: BigEndianBytes.self`), and `[UInt8](byteCapacity:writing:)` and `withBytesWriter` the bit-addressable
+one.
+
+Fixed structures read and write themselves as records (``BinaryParsable``, ``BinaryWritable``,
+``FixedSizeBinary``), in one call with one bounds check. The macros that generate them live in the
+`BytesMacros` product. Streams go through ``ByteTransform`` stages composed into a ``Pipeline``; the
+`BytesAsync` product has their `async` counterparts and the parallel codecs' asynchronous entry points.
+<doc:WritingParsers> builds a format both ways.
 
 Every operation is `@inlinable` and compiles to what you'd write by hand: a byte-aligned `Byte4` read is
 one bounds check and one load, and loops over values (`forEach`, generating writes, and loops of single
@@ -46,11 +65,12 @@ write at a single core's memory bandwidth; with all cores, nearly every width re
 ceiling. `Benchmarks/RESULTS.md` has the measurements.
 
 Beyond the types below, `Bytes` extends the standard library (DocC can't link these extension members):
-`[UInt8](byteCapacity:writing:)`, `[UInt8](alignedByteCapacity:writing:)`, `append(byteCapacity:writing:)`,
-`append(alignedByteCapacity:writing:)`, `[UInt8](copying:)`, `append(copying:)`, and
+`[UInt8](byteCapacity:writing:)`, `[UInt8](alignedByteCapacity:writing:)`, `[UInt8](byteCapacity:mode:writing:)`,
+`append(byteCapacity:writing:)`, `append(alignedByteCapacity:writing:)`, `append(byteCapacity:mode:writing:)`, `[UInt8](copying:)`, `append(copying:)`, and
 `withOutputRawSpan(overwritingFrom:_:)` on `Array` (the last also on `MutableSpan<UInt8>` and
 `MutableRawSpan`); `String(utf8Capacity:writing:)`, which passes an ``AlignedBytesWriter``;
-`withBytesWriter` and `withAlignedBytesWriter` on `OutputSpan` and `OutputRawSpan`; `append(copying:)` and
+`withBytesWriter`, `withAlignedBytesWriter`, and `withBytesWriter(mode:_:)` on `OutputSpan` and `OutputRawSpan`;
+`withLentBytes(_:)` on `RawSpan` and `withLentFreeCapacity(_:)` on `OutputRawSpan` (see ``LentBytes``); `append(copying:)` and
 `withFreeCapacity(byteCount:_:)` on `OutputRawSpan`; `copyBytes(from:toByteOffset:)` and
 `copyBytes(within:toByteOffset:)` on `MutableRawSpan` and `MutableSpan<UInt8>`; `hasPrefix`, `hasSuffix`,
 `bytesEqual`, `containsByte(where:)`, `firstByteOffset(of:from:)`, `commonPrefixLength(at:and:from:maxLength:)`,
@@ -68,6 +88,10 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``BytesWriter``
 - ``AlignedBytesReader``
 - ``AlignedBytesWriter``
+- ``BigEndianBytesReader``
+- ``BigEndianBytesWriter``
+- ``LittleEndianBytesReader``
+- ``LittleEndianBytesWriter``
 - ``BytesError``
 - ``LocatedBytesError``
 - ``GenericBytesReader/located(_:)``
@@ -98,6 +122,18 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``Byte16``
 - ``ByteRepresentable``
 
+### Named bit fields
+
+- ``BitFlag``
+- ``BitField``
+- ``BitPattern``
+
+### Records
+
+- ``BinaryParsable``
+- ``BinaryWritable``
+- ``FixedSizeBinary``
+
 ### Variable-size data
 
 - ``LEB128``
@@ -117,6 +153,8 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 ### Buffers and copies
 
 - ``ByteBuffer``
+- ``LentBytes``
+- ``LentMutableBytes``
 
 ### Decoders, encoders, and checksums
 
@@ -124,6 +162,22 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``BitWriter``
 - ``HuffmanTable``
 - ``CRC32``
+- ``Adler32``
+- ``RunningChecksum``
+
+### Pipelines
+
+- ``ByteTransform``
+- ``ResettableByteTransform``
+- ``InPlaceByteTransform``
+- ``Pipeline``
+- ``FusedPipeline``
+- ``TransformFlush``
+- ``TransformStatus``
+- ``TransformProgress``
+- ``PromotedTransform``
+- ``PromotedInPlaceTransform``
+- ``MappedErrorTransform``
 
 ### Order and cursor modes
 
@@ -131,6 +185,10 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``BytesCursorMode``
 - ``BitAddressable``
 - ``ByteAligned``
+- ``ByteAlignedCursorMode``
+- ``ByteOrderedCursorMode``
+- ``BigEndianBytes``
+- ``LittleEndianBytes``
 - ``GenericBytesReader``
 - ``GenericBytesWriter``
 

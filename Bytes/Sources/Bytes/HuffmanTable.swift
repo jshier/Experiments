@@ -233,10 +233,6 @@ extension HuffmanTable {
         }
     }
 
-    /// Sorts the used symbols into `sorted` by code length, then builds the table. A function of its own
-    /// rather than a nested one: capturing the entry closures kept them from being inlined (5% more
-    /// instructions decoding small DEFLATE files).
-    ///
     /// Builds a decoding table from the used symbols, already in canonical order (by code length, then by
     /// value), and the number of codes of each length: what ``build(codeLengths:bitOrder:rootBits:maximumCodeLength:allowingIncomplete:into:invalid:symbol:subtable:)``
     /// computes from a full list of code lengths before it fills the table.
@@ -246,13 +242,21 @@ extension HuffmanTable {
     /// insert-and-copy alphabet has 704 symbols, of which a small stream uses a few dozen.
     ///
     /// - Parameters:
-    ///   - sortedSymbols: The used symbols, by code length, then value.
+    ///   - sorted: The used symbols, by code length, then value.
     ///   - counts: How many symbols have each code length, indexed by length (index 0 is ignored). They
-    ///     must add up to `sortedSymbols.count`.
-    ///   - Other parameters: As for the code-length form.
+    ///     must add up to `sorted.count`.
+    ///   - bitOrder: The bit order of the codes.
+    ///   - rootBits: The number of bits indexing the root table, 1 through 16.
+    ///   - maximumCodeLength: The longest code allowed, at most 16.
+    ///   - allowingIncomplete: Whether to accept an incomplete code (none, or a single 1-bit code).
+    ///   - table: The span to fill. It needs at least `1 << rootBits` entries, and room for the subtables.
+    ///   - invalid: The entry for bits that aren't a code.
+    ///   - makeSymbol: Makes the entry for a symbol and the length of its code.
+    ///   - makeLink: Makes the root entry linking to a subtable, from the subtable's offset in `table`
+    ///     and the number of bits that index it.
     /// - Returns: The number of entries of `table` used.
     /// - Throws: As the code-length form.
-    /// - Precondition: As the code-length form, and the counts add up to `sortedSymbols.count`.
+    /// - Precondition: As the code-length form, and the counts add up to `sorted.count`.
     @inlinable
     public static func build<Entry: BitwiseCopyable>(
         sortedSymbols sorted: Span<UInt16>,
@@ -310,6 +314,10 @@ extension HuffmanTable {
         }
     }
 
+    /// Sorts the used symbols into `sorted` by code length, then builds the table. A function of its own
+    /// rather than a nested one: capturing the entry closures kept them from being inlined (5% more
+    /// instructions decoding small DEFLATE files).
+    ///
     /// - Parameters:
     ///   - lengths: The code length of each symbol, 0 if unused.
     ///   - sorted: Zeroed scratch, at least as long as `lengths`.

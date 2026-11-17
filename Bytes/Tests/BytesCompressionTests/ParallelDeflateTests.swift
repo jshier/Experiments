@@ -1,4 +1,5 @@
 import Bytes
+import BytesAsync
 import BytesCompression
 import Dispatch
 import Testing

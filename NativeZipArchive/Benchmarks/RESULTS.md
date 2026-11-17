@@ -391,3 +391,14 @@ instructions); the inflate benchmarks are unchanged (±0.5%).
 
 No change in instructions, as the codegen check predicted; the time differences are the same size in the
 controls.
+
+## step14 (2026-11-17): named fields, macro records, `Data` from spans (baselines `trk-t0` → `trk-final`, Swift 6.4.4)
+
+- **The Huffman entry's fields by name** (`HuffmanEntry.totalBitsField` and so on, Bytes' `BitField`): the decode
+  loop went from 246 to 236 instructions (fewer moves), and inflate + CRC runs −2.8% (32 MB text, 247 → 240 M
+  instructions) and −2.5% (2,000 small files, 238 → 232 M).
+- **The central directory header as a `@BinaryRecord`** (`ZipRecords.swift`, with `DOSDate`/`DOSTime` and the
+  extended timestamp's flags as `@BitFields`), read in one call: 4,887 → 4,907 K instructions (+0.4%), the same
+  move as "Locate 2,000 payloads", whose code didn't change (layout). Name decoding dominates this parse.
+- `LittleEndianBytesReader` throughout, `read(byteCount:)` taking the `UInt64` sizes directly (no `Int(clamping:)`),
+  and `contents(of:)` appending chunks with Bytes' new `Data.append(_: RawSpan)` (BytesFoundation): unchanged.

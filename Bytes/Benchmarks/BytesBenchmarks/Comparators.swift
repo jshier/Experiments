@@ -155,7 +155,7 @@ enum CentralDirectory {
             try reader.skip(byteCount: commentLength)
             try extra.forEachRecord(tag: Byte2.self, length: Byte2.self, .littleEndian) { id, field throws(BytesError) in
                 if id == 0x5455, field.remainingByteCount >= 5, try field.read(Byte.self)[bit: 0] {
-                    try fields.add(field.readSigned(Byte4.self, .littleEndian, as: Int32.self))
+                    try fields.add(field.read(Int32.self, asSigned: Byte4.self, .littleEndian))
                 }
             }
         }
@@ -186,7 +186,7 @@ enum CentralDirectory {
         try reader.skip(byteCount: commentLength)
         try extra.forEachRecord(tag: Byte2.self, length: Byte2.self, .littleEndian) { id, field throws(BytesError) in
             if id == 0x5455, field.remainingByteCount >= 5, try field.read(Byte.self)[bit: 0] {
-                try fields.add(field.readSigned(Byte4.self, .littleEndian, as: Int32.self))
+                try fields.add(field.read(Int32.self, asSigned: Byte4.self, .littleEndian))
             }
         }
     }
@@ -288,7 +288,7 @@ enum CentralDirectory {
                 let size = try Int(fieldHeader.read(Byte2.self, .littleEndian))
                 var field = try extra.readSection(byteCount: size)
                 if id == 0x5455, size >= 5, try field.read(Byte.self)[bit: 0] {
-                    try fields.add(field.readSigned(Byte4.self, .littleEndian, as: Int32.self))
+                    try fields.add(field.read(Int32.self, asSigned: Byte4.self, .littleEndian))
                 }
             }
         }

@@ -30,11 +30,11 @@ import Testing
     @Test func signedGroupReads() throws {
         let data: [UInt8] = [0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFE, 0x00, 0x00, 0x7F]
         var reader = BytesReader(data.span)
-        #expect(try reader.readSigned(Byte4.self, .littleEndian, as: Int32.self) == -2)
-        #expect(try reader.readSigned(Byte3.self, .bigEndian, as: Int32.self) == -2)
-        #expect(try reader.readSigned(Byte3.self, .bigEndian) == 127)
+        #expect(try reader.read(Int32.self, asSigned: Byte4.self, .littleEndian) == -2)
+        #expect(try reader.read(Int32.self, asSigned: Byte3.self, .bigEndian) == -2)
+        #expect(try reader.read(Int.self, asSigned: Byte3.self, .bigEndian) == 127)
         #expect(reader.remainingByteCount == 0)
-        #expect(throws: BytesError.insufficientData) { try reader.readSigned(Byte2.self, .bigEndian, as: Int16.self) }
+        #expect(throws: BytesError.insufficientData) { try reader.read(Int16.self, asSigned: Byte2.self, .bigEndian) }
     }
 
     @Test func signedBitReads() throws {

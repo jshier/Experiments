@@ -10,6 +10,19 @@ cores), macOS 27.2, Swift 6.4.2. Single-core times vary about ±10% from run to 
 One core parses the same 1.25 MB again and again, from cache. All 32 cores each parse their own copies
 (4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput.
 
+## 2026-11-17: named flags, big-endian cursors, properties parsed once (baselines `trk-t0` … `trk-final`, Swift 6.4.4)
+
+- **Named flags** (`Flags.swift`: `ConnectFlags`, `PublishFlags`, …, Bytes' `BitFlag`/`BitField`): the same code as
+  the bit numbers they replace. The enum field setter first cost PUBLISH encoding +0.8% (an assert and a mask);
+  Bytes now checks the raw value and stores it unmasked: 5,132 K, as before.
+- **`BigEndianBytesReader`/`BigEndianBytesWriter`** throughout (`read(UInt16.self)`, `write(sectionPrefixedBy:)`, no
+  byte order at each call): identical instruction counts.
+- **Properties parsed once:** `MQTTPublish(parsing:visitingProperties:)` hands each property to a closure as it's
+  validated, where reading `properties` afterwards decodes them again. 10,000 PUBLISH frames with both properties
+  used: **7,365 K against 8,831 K instructions (−16.6%)**, no allocations. The plain path has its own body: through
+  an empty default closure it cost 2% (Xcode's compiler), and forcing that inline cost SocketStream's checker 10%
+  (its PR toolchain).
+
 ## 2026-11-16: byte-aligned cursors (baselines `p4-generic` → `p4-aligned`)
 
 MQTT now parses with `AlignedBytesReader` and writes with `AlignedBytesWriter`: the same API as before, with no

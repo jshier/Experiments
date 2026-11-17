@@ -20,7 +20,7 @@ enum Outcome: Equatable, CustomStringConvertible {
 }
 
 func outcome(_ bytes: [UInt8], maximumPacketSize: Int = .max) -> Outcome {
-    var reader = AlignedBytesReader(bytes.span)
+    var reader = BigEndianBytesReader(bytes.span)
     do {
         guard let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: maximumPacketSize) else {
             #expect(reader.byteOffset == 0)
@@ -78,8 +78,8 @@ func corpus() throws -> [[UInt8]] {
         try w.write(MQTTSubscription(topicFilter: "b/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .atMostOnce, retainHandling: .doNotSend)))
     }
     let filters = try fieldBytes { w throws(BytesError) in
-        try w.write("a/b".utf8Span, prefixedBy: Byte2.self, .bigEndian)
-        try w.write("c".utf8Span, prefixedBy: Byte2.self, .bigEndian)
+        try w.write("a/b".utf8Span, prefixedBy: Byte2.self)
+        try w.write("c".utf8Span, prefixedBy: Byte2.self)
     }
     let payload: [UInt8] = Array(repeating: 0x5A, count: 130) // 2-byte remaining length
     let codes: [UInt8] = [0x00, 0x01, 0x80]
@@ -161,7 +161,7 @@ struct SplitMix64: RandomNumberGenerator {
             }
             // Keep the remaining length consistent sometimes, so bodies get parsed.
             if Bool.random(using: &rng), bytes.count >= 2, bytes.count - 2 < 0x80 { bytes[1] = UInt8(bytes.count - 2) }
-            var reader = AlignedBytesReader(bytes.span)
+            var reader = BigEndianBytesReader(bytes.span)
             do {
                 if let packet = try MQTTPacket.read(from: &reader) {
                     accepted += 1

@@ -45,7 +45,7 @@ public struct TransferError: Error, CustomStringConvertible {
 
 /// How the bytes are produced and consumed.
 public enum TransferMode: String, Sendable, CaseIterable {
-    /// MQTT PUBLISH packets: encoded with `AlignedBytesWriter`, parsed and checked with `AlignedBytesReader`.
+    /// MQTT PUBLISH packets: encoded with `BigEndianBytesWriter`, parsed and checked with `BigEndianBytesReader`.
     case mqtt
     /// The same number of bytes, unencoded and unparsed: the socket's own ceiling.
     case raw
@@ -248,7 +248,7 @@ public enum Transfer {
     /// - Precondition: `batch` can hold at least one packet, and encoding fails only for lack of capacity.
     public static func encode(into batch: inout [UInt8], from next: inout Int, until end: Int, payloads: Payloads) -> Int {
         var span = batch.mutableSpan
-        var writer = AlignedBytesWriter(&span)
+        var writer = BigEndianBytesWriter(&span)
         // Bound to a local first: a span of another file's global is rejected ("lifetime-dependent value
         // escapes its scope") when files compile separately (debug builds), though not with whole-module
         // optimization (release builds). Once per batch, not per packet.

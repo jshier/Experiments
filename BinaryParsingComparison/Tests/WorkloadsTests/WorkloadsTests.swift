@@ -18,6 +18,21 @@ func dataFile(_ name: String) throws -> [UInt8] {
         #expect(try CentralDirectory.parseWithParserSpanRecords(span) == expected)
     }
 
+    @Test func mqttPublish() throws {
+        let stream = makeMQTTPublishStream(packetCount: 1_000)
+        let span = stream.span.bytes
+        let expected = try MQTTPublish.parseWithBytes(span)
+        #expect(expected != 0)
+        #expect(try MQTTPublish.parseWithParserSpan(span) == expected)
+    }
+
+    /// Both reject QoS 3, another packet type, and a packet cut short.
+    @Test(arguments: [[0x36, 0x03, 0x00, 0x01, 0x61], [0x20, 0x03, 0x00, 0x01, 0x61], [0x30, 0x05, 0x00, 0x01, 0x61]] as [[UInt8]])
+    func mqttPublishRejects(packet: [UInt8]) throws {
+        #expect(throws: (any Error).self) { _ = try MQTTPublish.parseWithBytes(packet.span.bytes) }
+        #expect(throws: (any Error).self) { _ = try MQTTPublish.parseWithParserSpan(packet.span.bytes) }
+    }
+
     @Test func integers() throws {
         let data = (0..<(3 * 4 * 1_000)).map { UInt8(truncatingIfNeeded: $0 &* 37) }
         let span = data.span.bytes

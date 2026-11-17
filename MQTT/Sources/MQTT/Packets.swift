@@ -63,7 +63,7 @@ enum Check {
     }
 }
 
-extension AlignedBytesReader {
+extension BigEndianBytesReader {
     /// Reads a topic name, checked as ``Check/topicName(_:hasTopicAlias:)`` does except for the empty case,
     /// which depends on the alias, later in the packet. One pass for an ASCII topic: its UTF-8, wildcards,
     /// and U+0000 together.
@@ -77,12 +77,12 @@ extension AlignedBytesReader {
     @_lifetime(self: copy self)
     mutating func readMQTTTopicName(_ detail: StaticString) throws(MQTTError) -> UTF8Span {
         do throws(BytesError) {
-            return try read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: Text.wildcardOrNull)
+            return try read(utf8PrefixedBy: Byte2.self, excluding: Text.wildcardOrNull)
         } catch {
             // Which rule it broke, now that it's an error (nothing was consumed): if it's valid UTF-8, a
             // wildcard or U+0000.
             let start = position
-            guard error == .invalidValue, (try? read(utf8PrefixedBy: Byte2.self, .bigEndian)) != nil else {
+            guard error == .invalidValue, (try? read(utf8PrefixedBy: Byte2.self)) != nil else {
                 throw .malformed(detail)
             }
             rewind(to: start)
@@ -180,7 +180,7 @@ public struct MQTTConnect: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader) throws(MQTTError) {
+    init(reading body: inout BigEndianBytesReader) throws(MQTTError) {
         // A server answers another protocol name or version with CONNACK 0x84 [MQTT-3.1.2-2].
         do throws(BytesError) { try body.expect(Self.protocolName) } catch {
             throw error == .mismatch ? MQTTError(.unsupportedProtocolVersion, "protocol name") : .malformed("protocol name")
@@ -188,20 +188,21 @@ public struct MQTTConnect: ~Escapable {
         guard try body.readMQTTByte("protocol version") == Self.protocolVersion else {
             throw MQTTError(.unsupportedProtocolVersion, "protocol version")
         }
-        // The connect flags, then the keep-alive. The flags, from the most significant bit: user name,
-        // password, will retain, will QoS (2 bits), will, clean start, and a reserved bit.
+        // The connect flags (`ConnectFlags`), then the keep-alive.
         let connectFlags: Byte
         do throws(BytesError) {
             connectFlags = try body.read(Byte.self)
-            keepAlive = try body.read(Byte2.self, .bigEndian)
+            keepAlive = try body.read(UInt16.self)
         } catch {
             throw .malformed("connect header")
         }
-        guard !connectFlags[bit: 0] else { throw .malformed("reserved connect flag") }
-        cleanStart = connectFlags[bit: 1]
-        let flags = (userName: connectFlags[bit: 7], password: connectFlags[bit: 6], willRetain: connectFlags[bit: 5],
-                     will: connectFlags[bit: 2])
-        guard let willQoS = MQTTQoS(rawBits: connectFlags[Crumb.self, at: 3]) else { throw .malformed("will QoS 3") }
+        guard connectFlags.isClear(ConnectFlags.reserved) else { throw .malformed("reserved connect flag") }
+        cleanStart = connectFlags[ConnectFlags.cleanStart]
+        let flags = (
+            userName: connectFlags[ConnectFlags.userName], password: connectFlags[ConnectFlags.password],
+            willRetain: connectFlags[ConnectFlags.willRetain], will: connectFlags[ConnectFlags.will]
+        )
+        guard let willQoS = connectFlags[ConnectFlags.willQoS] else { throw .malformed("will QoS 3") }
         guard flags.will || (willQoS == .atMostOnce && !flags.willRetain) else {
             throw .malformed("will QoS or retain without a will")
         }
@@ -249,19 +250,20 @@ public struct MQTTConnect: ~Escapable {
     }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
         try writer.write(Self.protocolName)
         try writer.write(Self.protocolVersion)
         // The connect flags, packed first: one store.
-        var flags = Byte.zero
-        flags[bit: 7] = userName != nil
-        flags[bit: 6] = password != nil
-        flags[bit: 5] = will?.retain ?? false
-        flags[Crumb.self, at: 3] = Crumb(rawBitsOf: will?.qos ?? .atMostOnce)
-        flags[bit: 2] = will != nil
-        flags[bit: 1] = cleanStart
+        let flags = Byte {
+            $0[ConnectFlags.userName] = userName != nil
+            $0[ConnectFlags.password] = password != nil
+            $0[ConnectFlags.willRetain] = will?.retain ?? false
+            $0[ConnectFlags.willQoS] = will?.qos ?? .atMostOnce
+            $0[ConnectFlags.will] = will != nil
+            $0[ConnectFlags.cleanStart] = cleanStart
+        }
         try writer.write(flags)
-        try writer.write(keepAlive, as: Byte2.self, .bigEndian)
+        try writer.write(keepAlive, as: Byte2.self)
         try writer.write(properties)
         try writer.writeMQTTString(clientIdentifier)
         if let will {
@@ -302,8 +304,8 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader) throws(MQTTError) {
-        // The flags: 7 reserved bits, then Session Present.
+    init(reading body: inout BigEndianBytesReader) throws(MQTTError) {
+        // The flags (`ConnectAcknowledgeFlags`).
         let flags: Byte
         do throws(BytesError) {
             flags = try body.read(Byte.self)
@@ -311,8 +313,8 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
         } catch {
             throw .malformed("connect acknowledge flags")
         }
-        guard flags[Bits<7>.self, at: 1] == 0 else { throw .malformed("reserved connect acknowledge flags") }
-        sessionPresent = flags[bit: 0]
+        guard flags.isZero(ConnectAcknowledgeFlags.reserved) else { throw .malformed("reserved connect acknowledge flags") }
+        sessionPresent = flags[ConnectAcknowledgeFlags.sessionPresent]
         try Self.check(reasonCode, sessionPresent: sessionPresent)
         properties = try MQTTProperties(reading: &body, allowing: .connectAcknowledgement)
         try body.expectMQTTEnd("connect acknowledgement")
@@ -341,7 +343,7 @@ public struct MQTTConnectAcknowledgement: ~Escapable {
     var bodyByteCount: Int { 2 &+ properties.encodedByteCount }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
         try writer.write(Byte(Bit(sessionPresent))) // 7 reserved bits, then Session Present
         try writer.write(reasonCode, as: Byte.self)
         try writer.write(properties)
@@ -395,16 +397,37 @@ public struct MQTTPublish: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader, flags: Nibble) throws(MQTTError) {
-        // The fixed header's flags: DUP, QoS (2 bits), RETAIN.
-        duplicate = flags[bit: 3]
-        guard let qos = MQTTQoS(rawBits: flags[Crumb.self, at: 1]) else { throw .malformed("QoS 3") }
+    init(reading body: inout BigEndianBytesReader, flags: Nibble) throws(MQTTError) {
+        // The fixed header's flags (`PublishFlags`).
+        duplicate = flags[PublishFlags.duplicate]
+        guard let qos = flags[PublishFlags.qos] else { throw .malformed("QoS 3") }
         self.qos = qos
-        retain = flags[bit: 0]
+        retain = flags[PublishFlags.retain]
         guard qos != .atMostOnce || !duplicate else { throw .malformed("DUP set on a QoS 0 message") }
         topic = try body.readMQTTTopicName("topic name")
         packetIdentifier = qos == .atMostOnce ? nil : try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .publish, repeatable: .repeatableInPublish)
+        guard !topic.isEmpty || properties.identifiers.contains(0x23) else {
+            throw .protocolError("empty topic name without a topic alias")
+        }
+        // The payload is the rest of the packet.
+        payload = body.readRemainingBytes()
+    }
+
+    /// As ``init(reading:flags:)``, passing each property to `visit` as it's validated. (Its own body, as
+    /// `MQTTProperties`' validating initializers are: see there.)
+    @inlinable
+    @_lifetime(copy body)
+    @_lifetime(body: copy body)
+    init(reading body: inout BigEndianBytesReader, flags: Nibble, visitingProperties visit: (borrowing MQTTProperty) -> Void) throws(MQTTError) {
+        duplicate = flags[PublishFlags.duplicate]
+        guard let qos = flags[PublishFlags.qos] else { throw .malformed("QoS 3") }
+        self.qos = qos
+        retain = flags[PublishFlags.retain]
+        guard qos != .atMostOnce || !duplicate else { throw .malformed("DUP set on a QoS 0 message") }
+        topic = try body.readMQTTTopicName("topic name")
+        packetIdentifier = qos == .atMostOnce ? nil : try body.readMQTTPacketIdentifier()
+        properties = try MQTTProperties(reading: &body, allowing: .publish, repeatable: .repeatableInPublish, visiting: visit)
         guard !topic.isEmpty || properties.identifiers.contains(0x23) else {
             throw .protocolError("empty topic name without a topic alias")
         }
@@ -426,13 +449,11 @@ public struct MQTTPublish: ~Escapable {
 
     @inlinable
     var flags: Nibble {
-        var flags = Nibble.zero
-        flags[bit: 3] = duplicate
-        // The checked `Crumb(_:)`, not `Crumb(rawBitsOf: qos)`: its range check lets the setter drop its
-        // mask, where `rawBitsOf` truncates (an `and`): encoding PUBLISH took 3 instructions more per packet.
-        flags[Crumb.self, at: 1] = Crumb(qos.rawValue)
-        flags[bit: 0] = retain
-        return flags
+        Nibble {
+            $0[PublishFlags.duplicate] = duplicate
+            $0[PublishFlags.qos] = qos
+            $0[PublishFlags.retain] = retain
+        }
     }
 
     @inlinable
@@ -441,9 +462,9 @@ public struct MQTTPublish: ~Escapable {
     }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
         try writer.writeMQTTString(topic)
-        if let packetIdentifier { try writer.write(packetIdentifier, as: Byte2.self, .bigEndian) }
+        if let packetIdentifier { try writer.write(packetIdentifier, as: Byte2.self) }
         try writer.write(properties)
         try writer.write(payload)
     }
@@ -485,7 +506,7 @@ public struct MQTTPublishResponse: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader, reasonCodes: ReasonCodeSet) throws(MQTTError) {
+    init(reading body: inout BigEndianBytesReader, reasonCodes: ReasonCodeSet) throws(MQTTError) {
         packetIdentifier = try body.readMQTTUInt16("packet identifier")
         // The reason code is omitted for success with no properties, and the properties when empty.
         reasonCode = body.isAtEnd ? .success : try body.readMQTTReasonCode()
@@ -507,8 +528,8 @@ public struct MQTTPublishResponse: ~Escapable {
     }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
-        try writer.write(packetIdentifier, as: Byte2.self, .bigEndian)
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
+        try writer.write(packetIdentifier, as: Byte2.self)
         if properties.isEmpty, reasonCode == .success { return }
         try writer.write(reasonCode, as: Byte.self)
         if !properties.isEmpty { try writer.write(properties) }
@@ -546,7 +567,7 @@ public struct MQTTSubscriptions: ~Escapable {
     /// non-empty topic filter, and doesn't set No Local on a shared subscription [MQTT-3.8.3-4].
     ///
     /// Wildcard placement isn't checked: a server answers an invalid filter with reason code 0x8F in its
-    /// SUBACK. Build the bytes by writing each ``MQTTSubscription`` to a `AlignedBytesWriter`.
+    /// SUBACK. Build the bytes by writing each ``MQTTSubscription`` to a `BigEndianBytesWriter`.
     ///
     /// - Parameter bytes: The encoded subscriptions: each a topic filter (a string) and an options byte.
     /// - Throws: `MQTTError.malformed(_:)` for an invalid topic filter or options byte, or a reserved
@@ -555,7 +576,7 @@ public struct MQTTSubscriptions: ~Escapable {
     @inlinable
     @_lifetime(copy bytes)
     public init(validating bytes: RawSpan) throws(MQTTError) {
-        var reader = AlignedBytesReader(bytes)
+        var reader = BigEndianBytesReader(bytes)
         guard !reader.isAtEnd else { throw .protocolError("no subscriptions") }
         while !reader.isAtEnd {
             let filter = try reader.readMQTTString("topic filter")
@@ -572,7 +593,7 @@ public struct MQTTSubscriptions: ~Escapable {
     /// - Throws: Whatever `body` throws.
     @inlinable
     public func forEach<E: Error>(_ body: (borrowing MQTTSubscription) throws(E) -> Void) throws(E) {
-        var reader = AlignedBytesReader(bytes)
+        var reader = BigEndianBytesReader(bytes)
         while !reader.isAtEnd {
             // Checked when the list was created, so reading can't fail, and needn't check again.
             let topicFilter = try! reader.readMQTTText(checked: false)
@@ -581,7 +602,7 @@ public struct MQTTSubscriptions: ~Escapable {
     }
 }
 
-public extension AlignedBytesWriter {
+public extension BigEndianBytesWriter {
     /// Writes a subscription, for building a list to view with ``MQTTSubscriptions/init(validating:)``.
     ///
     /// - Parameter subscription: The subscription.
@@ -623,7 +644,7 @@ public struct MQTTSubscribe: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader) throws(MQTTError) {
+    init(reading body: inout BigEndianBytesReader) throws(MQTTError) {
         packetIdentifier = try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .subscribe)
         subscriptions = try MQTTSubscriptions(validating: body.readRemainingBytes())
@@ -639,8 +660,8 @@ public struct MQTTSubscribe: ~Escapable {
     var bodyByteCount: Int { 2 &+ properties.encodedByteCount &+ subscriptions.bytes.byteCount }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
-        try writer.write(packetIdentifier, as: Byte2.self, .bigEndian)
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
+        try writer.write(packetIdentifier, as: Byte2.self)
         try writer.write(properties)
         try writer.write(subscriptions.bytes)
     }
@@ -661,7 +682,7 @@ public struct MQTTTopicFilters: ~Escapable {
     @inlinable
     @_lifetime(copy bytes)
     public init(validating bytes: RawSpan) throws(MQTTError) {
-        var reader = AlignedBytesReader(bytes)
+        var reader = BigEndianBytesReader(bytes)
         guard !reader.isAtEnd else { throw .protocolError("no topic filters") }
         while !reader.isAtEnd {
             guard try !reader.readMQTTString("topic filter").isEmpty else { throw .protocolError("empty topic filter") }
@@ -675,7 +696,7 @@ public struct MQTTTopicFilters: ~Escapable {
     /// - Throws: Whatever `body` throws.
     @inlinable
     public func forEach<E: Error>(_ body: (UTF8Span) throws(E) -> Void) throws(E) {
-        var reader = AlignedBytesReader(bytes)
+        var reader = BigEndianBytesReader(bytes)
         while !reader.isAtEnd {
             try body(try! reader.readMQTTText(checked: false))
         }
@@ -710,7 +731,7 @@ public struct MQTTUnsubscribe: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader) throws(MQTTError) {
+    init(reading body: inout BigEndianBytesReader) throws(MQTTError) {
         packetIdentifier = try body.readMQTTPacketIdentifier()
         properties = try MQTTProperties(reading: &body, allowing: .unsubscribe)
         topicFilters = try MQTTTopicFilters(validating: body.readRemainingBytes())
@@ -726,8 +747,8 @@ public struct MQTTUnsubscribe: ~Escapable {
     var bodyByteCount: Int { 2 &+ properties.encodedByteCount &+ topicFilters.bytes.byteCount }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
-        try writer.write(packetIdentifier, as: Byte2.self, .bigEndian)
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
+        try writer.write(packetIdentifier, as: Byte2.self)
         try writer.write(properties)
         try writer.write(topicFilters.bytes)
     }
@@ -779,7 +800,7 @@ public struct MQTTSubscribeAcknowledgement: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader, reasonCodes allowed: ReasonCodeSet) throws(MQTTError) {
+    init(reading body: inout BigEndianBytesReader, reasonCodes allowed: ReasonCodeSet) throws(MQTTError) {
         packetIdentifier = try body.readMQTTUInt16("packet identifier")
         properties = try MQTTProperties(reading: &body, allowing: .acknowledgement)
         reasonCodes = Span(viewing: body.readRemainingBytes())
@@ -804,8 +825,8 @@ public struct MQTTSubscribeAcknowledgement: ~Escapable {
     var bodyByteCount: Int { 2 &+ properties.encodedByteCount &+ reasonCodes.count }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
-        try writer.write(packetIdentifier, as: Byte2.self, .bigEndian)
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
+        try writer.write(packetIdentifier, as: Byte2.self)
         try writer.write(properties)
         try writer.write(reasonCodes)
     }
@@ -838,7 +859,7 @@ public struct MQTTDisconnect: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader) throws(MQTTError) {
+    init(reading body: inout BigEndianBytesReader) throws(MQTTError) {
         // Remaining length 0: normal disconnection; 1: a reason code without properties [3.14.2.2.1].
         reasonCode = body.isAtEnd ? .normalDisconnection : try body.readMQTTReasonCode()
         try Check.reasonCode(reasonCode, in: .disconnect)
@@ -859,7 +880,7 @@ public struct MQTTDisconnect: ~Escapable {
     }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
         if properties.isEmpty, reasonCode == .normalDisconnection { return }
         try writer.write(reasonCode, as: Byte.self)
         if !properties.isEmpty { try writer.write(properties) }
@@ -890,7 +911,7 @@ public struct MQTTAuthenticate: ~Escapable {
     @inlinable
     @_lifetime(copy body)
     @_lifetime(body: copy body)
-    init(reading body: inout AlignedBytesReader) throws(MQTTError) {
+    init(reading body: inout BigEndianBytesReader) throws(MQTTError) {
         // Remaining length 0: success without properties [3.15.2.1]. (A lone reason code is accepted too.)
         reasonCode = body.isAtEnd ? .success : try body.readMQTTReasonCode()
         try Check.reasonCode(reasonCode, in: .authenticate)
@@ -911,7 +932,7 @@ public struct MQTTAuthenticate: ~Escapable {
     }
 
     @inlinable
-    func writeBody(to writer: inout AlignedBytesWriter) throws(BytesError) {
+    func writeBody(to writer: inout BigEndianBytesWriter) throws(BytesError) {
         if properties.isEmpty, reasonCode == .success { return }
         try writer.write(reasonCode, as: Byte.self)
         try writer.write(properties)

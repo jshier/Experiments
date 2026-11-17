@@ -1,5 +1,6 @@
 // swift-tools-version: 6.4
 
+import CompilerPluginSupport
 import PackageDescription
 
 let strictSettings: [SwiftSetting] = [
@@ -17,6 +18,36 @@ let strictSettings: [SwiftSetting] = [
 let portableCSettings: [CSetting] = [.define("BYTES_PORTABLE", .when(traits: ["Portable"]))]
 let portableSwiftSettings: [SwiftSetting] = [.unsafeFlags(["-Xcc", "-DBYTES_PORTABLE"], .when(traits: ["Portable"]))]
 
+// `@BitFields` and `@BinaryRecord`: packed flags and fixed records that read and write themselves. (`.macro` needs
+// `import CompilerPluginSupport`; without it the manifest fails as "unable to type-check this expression in
+// reasonable time" rather than naming `.macro`: ~/Downloads/swift-bugs/27.)
+let macroTargets: [Target] = [
+    .macro(
+        name: "BytesMacrosPlugin",
+        dependencies: [
+            .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
+            .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
+        ],
+        swiftSettings: [.swiftLanguageMode(.v6)]
+    ),
+    .target(
+        name: "BytesMacros",
+        dependencies: ["Bytes", "BytesMacrosPlugin"],
+        swiftSettings: strictSettings + portableSwiftSettings
+    ),
+    .testTarget(
+        name: "BytesMacrosTests",
+        dependencies: [
+            "Bytes",
+            "BytesMacros",
+            "BytesMacrosPlugin",
+            .product(name: "MacroTesting", package: "swift-macro-testing"),
+            .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
+        ],
+        swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+    ),
+]
+
 let package = Package(
     name: "Bytes",
     platforms: [.macOS(.v27), .iOS(.v27), .tvOS(.v27), .watchOS(.v27), .visionOS(.v27)],
@@ -24,6 +55,9 @@ let package = Package(
         .library(name: "Bytes", targets: ["Bytes"]),
         .library(name: "BytesCompression", targets: ["BytesCompression"]),
         .library(name: "BytesCrypto", targets: ["BytesCrypto"]),
+        .library(name: "BytesAsync", targets: ["BytesAsync"]),
+        .library(name: "BytesMacros", targets: ["BytesMacros"]),
+        .library(name: "BytesFoundation", targets: ["BytesFoundation"]),
     ],
     // Three builds, for measuring each (see Benchmarks/RESULTS.md):
     // - default: the C modules' NEON and CRC instructions (what Apple silicon gets);
@@ -47,6 +81,8 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
+        .package(url: "https://github.com/swiftlang/swift-syntax", from: "603.0.0"),
+        .package(url: "https://github.com/pointfreeco/swift-macro-testing", from: "0.6.5"),
     ],
     targets: [
         // NEON `tbl` wrappers Swift inlines; a portable fallback elsewhere.
@@ -64,7 +100,7 @@ let package = Package(
         ),
         .testTarget(
             name: "BytesTests",
-            dependencies: ["Bytes"],
+            dependencies: ["Bytes", "BytesAsync"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         // DEFLATE (raw, zlib, gzip) and Brotli, compressing and decompressing.
@@ -73,10 +109,28 @@ let package = Package(
             dependencies: ["Bytes"],
             swiftSettings: strictSettings + portableSwiftSettings + [.enableExperimentalFeature("BuiltinModule")]
         ),
+        // The asynchronous parts: `ByteBuffer.receive`, lending spans to tasks, the parallel codecs' `async`
+        // entry points, and asynchronous pipeline stages.
+        .target(
+            name: "BytesAsync",
+            dependencies: ["Bytes", "BytesCompression"],
+            swiftSettings: strictSettings + portableSwiftSettings
+        ),
+        .testTarget(
+            name: "BytesAsyncTests",
+            dependencies: ["Bytes", "BytesCompression", "BytesAsync"],
+            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+        ),
+        // `Data` with spans (standard library ones only), apart so `Bytes` needn't depend on Foundation.
+        .target(
+            name: "BytesFoundation",
+            dependencies: [],
+            swiftSettings: strictSettings + portableSwiftSettings
+        ),
         // Authenticated encryption on spans: ChaCha20-Poly1305, and TLS 1.3 record protection.
         .target(
             name: "BytesCrypto",
-            dependencies: ["Bytes"],
+            dependencies: ["Bytes", "BytesFoundation"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         .testTarget(
@@ -91,7 +145,7 @@ let package = Package(
         .systemLibrary(name: "CBrotli", pkgConfig: "libbrotlienc", providers: [.brew(["brotli"])]),
         .testTarget(
             name: "BytesCompressionTests",
-            dependencies: ["Bytes", "BytesCompression", "CLibDeflate", "CBrotli"],
+            dependencies: ["Bytes", "BytesCompression", "BytesAsync", "CLibDeflate", "CBrotli"],
             // Not strict memory safety: the tests call the reference libraries' C APIs.
             swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
         ),
@@ -99,6 +153,7 @@ let package = Package(
             name: "CompressionBenchmarks",
             dependencies: [
                 "BytesCompression",
+                "BytesAsync",
                 "BytesCrypto",
                 "CLibDeflate",
                 "CBrotli",
@@ -118,5 +173,5 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings,
             plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
         ),
-    ]
+    ] + macroTargets
 )

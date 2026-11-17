@@ -13,13 +13,13 @@ let unitName = "unit"
 let unitValue = "celsius"
 
 /// Message expiry 60 s and a user property, encoded once.
-let propertyBytes: [UInt8] = try! [UInt8](alignedByteCapacity: 64) { writer in
+let propertyBytes: [UInt8] = try! [UInt8](byteCapacity: 64, mode: BigEndianBytes.self) { writer in
     try writer.write(MQTTProperty.messageExpiryInterval(60))
     try writer.write(MQTTProperty.userProperty(name: unitName.utf8Span, value: unitValue.utf8Span))
 }
 
 func encode(_ packet: borrowing MQTTPacket, into stream: inout [UInt8]) {
-    try! stream.append(alignedByteCapacity: packet.encodedByteCount) { writer in try packet.write(to: &writer) }
+    try! stream.append(byteCapacity: packet.encodedByteCount, mode: BigEndianBytes.self) { writer in try packet.write(to: &writer) }
 }
 
 /// 10,000 QoS 1 PUBLISH packets.
@@ -40,12 +40,12 @@ let mixedStream: [UInt8] = {
     var stream: [UInt8] = []
     let properties = try! MQTTProperties(validating: propertyBytes.span.bytes)
     // CONNECT can't carry Message Expiry Interval: a session expiry and the user property instead.
-    let connectPropertyBytes = try! [UInt8](alignedByteCapacity: 64) { writer in
+    let connectPropertyBytes = try! [UInt8](byteCapacity: 64, mode: BigEndianBytes.self) { writer in
         try writer.write(MQTTProperty.sessionExpiryInterval(3_600))
         try writer.write(MQTTProperty.userProperty(name: unitName.utf8Span, value: unitValue.utf8Span))
     }
     let connectProperties = try! MQTTProperties(validating: connectPropertyBytes.span.bytes)
-    let subscriptions = try! [UInt8](alignedByteCapacity: 64) { writer in
+    let subscriptions = try! [UInt8](byteCapacity: 64, mode: BigEndianBytes.self) { writer in
         try writer.write(MQTTSubscription(topicFilter: "sensors/+/floor-1/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .atLeastOnce)))
         try writer.write(MQTTSubscription(topicFilter: "alerts/#".utf8Span, options: MQTTSubscriptionOptions(maximumQoS: .exactlyOnce)))
     }
@@ -117,7 +117,7 @@ func range(ofCopy index: Int, byteCount: Int) -> Range<Int> { index * byteCount.
 /// Parses copy `index` of `publishStream` with views: every field, and every property when
 /// `iteratingProperties`.
 func parsePublishes(copy index: Int, iteratingProperties: Bool) {
-    var reader = AlignedBytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
+    var reader = BigEndianBytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
         guard case let .publish(publish) = packet else { fatalError() }
@@ -138,7 +138,7 @@ func parsePublishes(copy index: Int, iteratingProperties: Bool) {
 /// Parses copy `index` of `publishStream` as `parsePublishes` does, without `MQTTPacket`: reads frames and
 /// parses each as the PUBLISH its type says.
 func parsePublishFrames(copy index: Int) {
-    var reader = AlignedBytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
+    var reader = BigEndianBytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
     var checksum = 0
     while let frame = try! MQTTFrame.read(from: &reader) {
         guard frame.type == .publish else { fatalError() }
@@ -155,9 +155,27 @@ func parsePublishFrames(copy index: Int) {
     blackHole(checksum)
 }
 
+/// As `parsePublishFrames`, taking the properties as they're validated: each decoded once.
+func parsePublishFramesVisitingProperties(copy index: Int) {
+    var reader = BigEndianBytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
+    var checksum = 0
+    while let frame = try! MQTTFrame.read(from: &reader) {
+        guard frame.type == .publish else { fatalError() }
+        let publish = try! MQTTPublish(parsing: frame) { property in
+            switch property {
+            case let .messageExpiryInterval(seconds): checksum &+= Int(seconds)
+            case let .userProperty(name, value): checksum &+= name.count &+ value.count
+            default: break
+            }
+        }
+        checksum &+= publish.topic.count &+ publish.payload.byteCount &+ Int(publish.packetIdentifier ?? 0)
+    }
+    blackHole(checksum)
+}
+
 /// Parses copy `index` of `mixedStream` with views.
 func parseMixedStream(copy index: Int) {
-    var reader = AlignedBytesReader(mixedStreams.span.bytes.extracting(range(ofCopy: index, byteCount: mixedStream.count)))
+    var reader = BigEndianBytesReader(mixedStreams.span.bytes.extracting(range(ofCopy: index, byteCount: mixedStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
         checksum &+= Int(packet.type.rawValue)
@@ -170,7 +188,7 @@ func parseMixedStream(copy index: Int) {
 /// Encodes 10,000 PUBLISH packets into copy `index` of `encodeBuffers`.
 func encodePublishes(copy index: Int) {
     let buffer = UnsafeMutableRawBufferPointer(rebasing: encodeBuffers[range(ofCopy: index, byteCount: publishStream.count)])
-    var writer = AlignedBytesWriter(MutableRawSpan(_unsafeBytes: buffer))
+    var writer = BigEndianBytesWriter(MutableRawSpan(_unsafeBytes: buffer))
     let inputs = encodeInputs[index]
     let properties = try! MQTTProperties(validating: inputs.propertyBytes.span.bytes)
     for packet in 0..<packetCount {
@@ -185,7 +203,7 @@ func encodePublishes(copy index: Int) {
 /// Encodes the same packets as `encodePublishes`, each `MQTTPublish` writing itself, without `MQTTPacket`.
 func encodePublishesDirectly(copy index: Int) {
     let buffer = UnsafeMutableRawBufferPointer(rebasing: encodeBuffers[range(ofCopy: index, byteCount: publishStream.count)])
-    var writer = AlignedBytesWriter(MutableRawSpan(_unsafeBytes: buffer))
+    var writer = BigEndianBytesWriter(MutableRawSpan(_unsafeBytes: buffer))
     let inputs = encodeInputs[index]
     let properties = try! MQTTProperties(validating: inputs.propertyBytes.span.bytes)
     for packet in 0..<packetCount {
@@ -200,7 +218,7 @@ func encodePublishesDirectly(copy index: Int) {
 /// Parses copy `index` of `publishStream` with views, copying out what a caller would keep: the topic as a
 /// `String`, the payload as an `Array`, and the user property's strings.
 func parsePublishesCopying(copy index: Int) {
-    var reader = AlignedBytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
+    var reader = BigEndianBytesReader(publishStreams.span.bytes.extracting(range(ofCopy: index, byteCount: publishStream.count)))
     var checksum = 0
     while let packet = try! MQTTPacket.read(from: &reader) {
         guard case let .publish(publish) = packet else { fatalError() }
@@ -287,6 +305,8 @@ let workloads: [Workload] = [
              isAllocationFree: true) { parsePublishes(copy: $0, iteratingProperties: true) },
     Workload(name: "Parse PUBLISH: frames, MQTTPublish(parsing:)", byteCount: publishStream.count,
              packetCount: packetCount, isAllocationFree: true, run: parsePublishFrames),
+    Workload(name: "Parse PUBLISH: frames, properties visited while parsing", byteCount: publishStream.count,
+             packetCount: packetCount, isAllocationFree: true, run: parsePublishFramesVisitingProperties),
     Workload(name: "Parse PUBLISH: Bytes views, properties not iterated", byteCount: publishStream.count,
              packetCount: packetCount, isAllocationFree: true) { parsePublishes(copy: $0, iteratingProperties: false) },
     Workload(name: "Parse PUBLISH: Bytes views, copying topic, payload, and strings", byteCount: publishStream.count,

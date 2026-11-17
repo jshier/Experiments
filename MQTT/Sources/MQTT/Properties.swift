@@ -46,7 +46,7 @@ public enum MQTTProperty: ~Escapable {
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    static func read(from reader: inout AlignedBytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
+    static func read(from reader: inout BigEndianBytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
         let identifier = try reader.read(LEB128.self, maxByteCount: 4, requiringMinimal: checked)
         return try read(identifier, from: &reader, checked: checked)
     }
@@ -63,34 +63,34 @@ public enum MQTTProperty: ~Escapable {
     @inlinable @inline(__always)
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    static func read(_ identifier: UInt64, from reader: inout AlignedBytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
+    static func read(_ identifier: UInt64, from reader: inout BigEndianBytesReader, checked: Bool) throws(BytesError) -> MQTTProperty {
         switch identifier {
         case 0x01: try .payloadFormatIndicator(reader.read(Byte.self).rawValue)
-        case 0x02: try .messageExpiryInterval(reader.read(Byte4.self, .bigEndian))
+        case 0x02: try .messageExpiryInterval(reader.read(UInt32.self))
         case 0x03: try .contentType(reader.readMQTTText(checked: checked))
         case 0x08: try .responseTopic(reader.readMQTTText(checked: checked))
-        case 0x09: try .correlationData(reader.read(bytesPrefixedBy: Byte2.self, .bigEndian))
+        case 0x09: try .correlationData(reader.read(bytesPrefixedBy: Byte2.self))
         case 0x0B:
             try .subscriptionIdentifier(UInt32(reader.read(LEB128.self, maxByteCount: 4, requiringMinimal: checked)))
-        case 0x11: try .sessionExpiryInterval(reader.read(Byte4.self, .bigEndian))
+        case 0x11: try .sessionExpiryInterval(reader.read(UInt32.self))
         case 0x12: try .assignedClientIdentifier(reader.readMQTTText(checked: checked))
-        case 0x13: try .serverKeepAlive(reader.read(Byte2.self, .bigEndian))
+        case 0x13: try .serverKeepAlive(reader.read(UInt16.self))
         case 0x15: try .authenticationMethod(reader.readMQTTText(checked: checked))
-        case 0x16: try .authenticationData(reader.read(bytesPrefixedBy: Byte2.self, .bigEndian))
+        case 0x16: try .authenticationData(reader.read(bytesPrefixedBy: Byte2.self))
         case 0x17: try .requestProblemInformation(reader.read(Byte.self).rawValue)
-        case 0x18: try .willDelayInterval(reader.read(Byte4.self, .bigEndian))
+        case 0x18: try .willDelayInterval(reader.read(UInt32.self))
         case 0x19: try .requestResponseInformation(reader.read(Byte.self).rawValue)
         case 0x1A: try .responseInformation(reader.readMQTTText(checked: checked))
         case 0x1C: try .serverReference(reader.readMQTTText(checked: checked))
         case 0x1F: try .reasonString(reader.readMQTTText(checked: checked))
-        case 0x21: try .receiveMaximum(reader.read(Byte2.self, .bigEndian))
-        case 0x22: try .topicAliasMaximum(reader.read(Byte2.self, .bigEndian))
-        case 0x23: try .topicAlias(reader.read(Byte2.self, .bigEndian))
+        case 0x21: try .receiveMaximum(reader.read(UInt16.self))
+        case 0x22: try .topicAliasMaximum(reader.read(UInt16.self))
+        case 0x23: try .topicAlias(reader.read(UInt16.self))
         case 0x24: try .maximumQoS(reader.read(Byte.self).rawValue)
         case 0x25: try .retainAvailable(reader.read(Byte.self).rawValue)
         case 0x26:
             try .userProperty(name: reader.readMQTTText(checked: checked), value: reader.readMQTTText(checked: checked))
-        case 0x27: try .maximumPacketSize(reader.read(Byte4.self, .bigEndian))
+        case 0x27: try .maximumPacketSize(reader.read(UInt32.self))
         case 0x28: try .wildcardSubscriptionAvailable(reader.read(Byte.self).rawValue)
         case 0x29: try .subscriptionIdentifierAvailable(reader.read(Byte.self).rawValue)
         case 0x2A: try .sharedSubscriptionAvailable(reader.read(Byte.self).rawValue)
@@ -166,7 +166,7 @@ struct PropertySet {
     @inlinable static var valueChecked: Self { Self(bits: 0x7BA_0280_0800) }
 }
 
-extension AlignedBytesWriter {
+extension BigEndianBytesWriter {
     /// Writes `property`: its identifier, then its value. Build a property list in a buffer this way, then
     /// view it with ``MQTTProperties/init(validating:)``.
     ///
@@ -225,14 +225,14 @@ extension AlignedBytesWriter {
     @_lifetime(self: copy self)
     mutating func writeProperty(_ identifier: Byte, two value: UInt16) throws(BytesError) {
         try write(identifier)
-        try write(value, as: Byte2.self, .bigEndian)
+        try write(value, as: Byte2.self)
     }
 
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func writeProperty(_ identifier: Byte, four value: UInt32) throws(BytesError) {
         try write(identifier)
-        try write(value, as: Byte4.self, .bigEndian)
+        try write(value, as: Byte4.self)
     }
 
     @inlinable @inline(__always)
@@ -276,7 +276,7 @@ public struct MQTTProperties: ~Escapable {
     /// value, that only User Property and Subscription Identifier repeat, and that Authentication Data comes
     /// with an Authentication Method. Writing a packet checks that it may carry them.
     ///
-    /// - Parameter bytes: The encoded properties, as `AlignedBytesWriter` writes each ``MQTTProperty``.
+    /// - Parameter bytes: The encoded properties, as `BigEndianBytesWriter` writes each ``MQTTProperty``.
     /// - Throws: `MQTTError.malformed(_:)` for an unknown identifier or an invalid encoding;
     ///   `MQTTError.protocolError(_:)` for a duplicate property, a forbidden value, or Authentication Data
     ///   without a method.
@@ -299,7 +299,10 @@ public struct MQTTProperties: ~Escapable {
     @inlinable
     @_lifetime(copy bytes)
     init(validating bytes: RawSpan, allowing allowed: PropertySet, repeatable: PropertySet) throws(MQTTError) {
-        var reader = AlignedBytesReader(bytes)
+        // Not the visiting form with an empty closure: its own body. Through the closure, parsing PUBLISH took
+        // 2% more instructions (Xcode's compiler), or with that form forced inline, SocketStream's check 10%
+        // more (its toolchain).
+        var reader = BigEndianBytesReader(bytes)
         var seen = PropertySet.none
         while !reader.isAtEnd {
             let identifier: UInt64
@@ -322,6 +325,40 @@ public struct MQTTProperties: ~Escapable {
         identifiers = seen
     }
 
+    /// Validates the properties, passing each to `visit` as it's decoded: for callers that want their values,
+    /// one decode each (``forEach(_:)`` afterwards decodes them again). The loop is
+    /// ``init(validating:allowing:repeatable:)``'s, with the call to `visit`. Inlined: 3% fewer instructions
+    /// parsing PUBLISH with a visitor.
+    @inlinable @inline(__always)
+    @_lifetime(copy bytes)
+    init(
+        validating bytes: RawSpan, allowing allowed: PropertySet, repeatable: PropertySet,
+        visiting visit: (borrowing MQTTProperty) -> Void
+    ) throws(MQTTError) {
+        var reader = BigEndianBytesReader(bytes)
+        var seen = PropertySet.none
+        while !reader.isAtEnd {
+            let identifier: UInt64
+            do throws(BytesError) { identifier = try reader.readMQTTVariableByteInteger() } catch { throw .malformed("property") }
+            // An unknown identifier is in no packet's set, so it's malformed too.
+            guard allowed.contains(identifier) else { throw .malformed("property not allowed in this packet") }
+            guard !seen.contains(identifier) || repeatable.contains(identifier) else { throw .protocolError("duplicate property") }
+            seen.bits[bit: Int(identifier)] = true
+            let property: MQTTProperty
+            do throws(BytesError) {
+                property = try MQTTProperty.read(identifier, from: &reader, checked: true)
+            } catch {
+                throw .malformed("property")
+            }
+            if PropertySet.valueChecked.contains(identifier) { try property.checkValue() }
+            visit(property)
+        }
+        // Authentication Data needs an Authentication Method.
+        guard !seen.contains(0x16) || seen.contains(0x15) else { throw .protocolError("authentication data without a method") }
+        self.bytes = bytes
+        identifiers = seen
+    }
+
     /// Reads a property list for a packet: its length (a minimal Variable Byte Integer), then properties
     /// checked as ``init(validating:allowing:repeatable:)`` does.
     ///
@@ -334,14 +371,31 @@ public struct MQTTProperties: ~Escapable {
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    init(reading reader: inout AlignedBytesReader, allowing allowed: PropertySet, repeatable: PropertySet = .repeatable) throws(MQTTError) {
-        let bytes: RawSpan
+    init(reading reader: inout BigEndianBytesReader, allowing allowed: PropertySet, repeatable: PropertySet = .repeatable) throws(MQTTError) {
+        try self.init(validating: Self.readList(&reader), allowing: allowed, repeatable: repeatable)
+    }
+
+    /// Reads a property list as ``init(reading:allowing:repeatable:)`` does, passing each property to `visit`.
+    @inlinable
+    @_lifetime(copy reader)
+    @_lifetime(reader: copy reader)
+    init(
+        reading reader: inout BigEndianBytesReader, allowing allowed: PropertySet, repeatable: PropertySet,
+        visiting visit: (borrowing MQTTProperty) -> Void
+    ) throws(MQTTError) {
+        try self.init(validating: Self.readList(&reader), allowing: allowed, repeatable: repeatable, visiting: visit)
+    }
+
+    /// The list's bytes, after its length.
+    @inlinable @inline(__always)
+    @_lifetime(copy reader)
+    @_lifetime(reader: copy reader)
+    static func readList(_ reader: inout BigEndianBytesReader) throws(MQTTError) -> RawSpan {
         do throws(BytesError) {
-            bytes = try reader.read(bytesPrefixedBy: LEB128.self, maxByteCount: 4, requiringMinimal: true)
+            return try reader.read(bytesPrefixedBy: LEB128.self, maxByteCount: 4, requiringMinimal: true)
         } catch {
             throw .malformed("property length")
         }
-        try self.init(validating: bytes, allowing: allowed, repeatable: repeatable)
     }
 
     /// Whether there are no properties.
@@ -354,7 +408,7 @@ public struct MQTTProperties: ~Escapable {
     /// - Throws: Whatever `body` throws.
     @inlinable
     public func forEach<E: Error>(_ body: (borrowing MQTTProperty) throws(E) -> Void) throws(E) {
-        var reader = AlignedBytesReader(bytes)
+        var reader = BigEndianBytesReader(bytes)
         while !reader.isAtEnd {
             // Checked when the list was created, so reading can't fail, and needn't check again.
             try body(try! MQTTProperty.read(from: &reader, checked: false))
@@ -375,7 +429,7 @@ public struct MQTTProperties: ~Escapable {
     var encodedByteCount: Int { Size.lengthPrefixed(bytes.byteCount) }
 }
 
-public extension AlignedBytesWriter {
+public extension BigEndianBytesWriter {
     /// Writes a property list: its length, then the properties.
     ///
     /// - Parameter properties: The list.

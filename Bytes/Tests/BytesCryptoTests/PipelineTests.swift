@@ -137,15 +137,57 @@ struct CopyStage: ByteTransform {
         }
     }
 
-    /// A buffer smaller than a TLS record: the opener can never write one into it. A precondition failure,
-    /// not a loop that never returns.
-    @Test func bufferTooSmallForAStageStops() async throws {
+    /// A requested buffer smaller than a TLS record: the pipeline sizes it for the units the stages declare
+    /// (the opener writes a record's body at once), so it still works.
+    @Test func bufferSmallerThanARecordIsSizedForIt() throws {
+        let keys = TLSKeySchedule.applicationKeys(sharedSecret: [UInt8](repeating: 2, count: 32).span.bytes).server
+        var send = TLSRecordSealer(keys: keys)
+        let plain = Array(PipelineTests.text.prefix(40_000))
+        let wire = try run(&send, plain, chunk: 40_000, outputChunk: 1 << 16, flush: .flush)
+        var receive = TLSRecordOpener(keys: keys).then(CopyStage().promoted(to: BytesError.self), bufferCapacity: 1_000)
+        #expect(try run(&receive, wire, chunk: wire.count, outputChunk: 1 << 16) == plain)
+    }
+
+    /// A stage that needs more output than it declares (2,000 bytes at once, declaring 1), in a buffer that
+    /// can't hold it: a precondition failure, not a loop that never returns.
+    @Test func undeclaredUnitStops() async throws {
         await #expect(processExitsWith: .failure) {
-            let keys = TLSKeySchedule.applicationKeys(sharedSecret: [UInt8](repeating: 2, count: 32).span.bytes).server
-            var send = TLSRecordSealer(keys: keys)
-            let wire = try run(&send, Array(PipelineTests.text.prefix(10_000)), chunk: 10_000, outputChunk: 1 << 16, flush: .flush)
-            var receive = TLSRecordOpener(keys: keys).then(CopyStage().promoted(to: BytesError.self), bufferCapacity: 1_000)
-            _ = try run(&receive, wire, chunk: wire.count, outputChunk: 1 << 16)
+            var pipeline = UnitStage(unit: 2_000).then(HoldBackStage(), bufferCapacity: 1_000)
+            let input = [UInt8](repeating: 7, count: 4_000)
+            var output = [UInt8](repeating: 0, count: 4_000)
+            output.withUnsafeMutableBytes { buffer in
+                var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+                _ = pipeline.transform(input.span.bytes, into: &span, flush: .finish)
+                _ = span.finalize(for: buffer)
+            }
+        }
+    }
+
+    /// The drive loop: whole messages through stages into growing arrays, ending `.finished` at `.finish`.
+    @Test func driveLoopTransformsWholeMessages() throws {
+        let keys = TLSKeySchedule.applicationKeys(sharedSecret: [UInt8](repeating: 3, count: 32).span.bytes).server
+        let plain = Array(PipelineTests.text.prefix(100_000))
+        var send = DeflateEncoder(format: .gzip, level: 6).then(TLSRecordSealer(keys: keys))
+        var wire: [UInt8] = []
+        let sent = try send.transform(plain.span.bytes, appending: &wire, flush: .finish, growth: 1_000)
+        #expect(sent.consumed == plain.count && sent.status == .finished && sent.produced == wire.count)
+
+        var receive = TLSRecordOpener(keys: keys).then(DeflateDecoder(format: .gzip))
+        var received: [UInt8] = []
+        let got = try receive.transform(wire.span.bytes, appending: &received, flush: .finish)
+        #expect(got.status == .finished && received == plain)
+
+        // The opener alone: `.finished` at `.finish` once every record is open; a partial record throws.
+        var opener = TLSRecordOpener(keys: keys)
+        var records: [UInt8] = []
+        var sealer = TLSRecordSealer(keys: keys)
+        _ = try sealer.transform(plain.span.bytes.extracting(0..<5_000), appending: &records, flush: .finish)
+        var opened: [UInt8] = []
+        #expect(try opener.transform(records.span.bytes, appending: &opened, flush: .finish).status == .finished)
+        #expect(opened == Array(plain.prefix(5_000)))
+        opener.reset(sequence: 0)
+        #expect(throws: BytesError.insufficientData) {
+            _ = try opener.transform(records.span.bytes.extracting(0..<(records.count - 1)), appending: &opened, flush: .finish)
         }
     }
 

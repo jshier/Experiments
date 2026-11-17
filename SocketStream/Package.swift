@@ -68,6 +68,7 @@ let package = Package(
                 .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BytesCompression", package: "Bytes"),
                 .product(name: "BytesCrypto", package: "Bytes"),
+                .product(name: "BytesAsync", package: "Bytes"),
                 .product(name: "MQTT", package: "MQTT"),
                 .product(name: "PlatformExecutors", package: "swift-platform-executors"),
             ],

@@ -24,6 +24,7 @@ let package = Package(
             dependencies: [
                 .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BinaryParsing", package: "swift-binary-parsing"),
+                .product(name: "BytesMacros", package: "Bytes"),
             ],
             swiftSettings: settings
         ),

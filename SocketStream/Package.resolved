@@ -1,5 +1,5 @@
 {
-  "originHash" : "86b9f0d26628c031aaa80f6f23c9a2471bc0684f78b3eef5774b19f027274821",
+  "originHash" : "6c1c10ca4e4bcf39f04c5d51e649d9fb4ba2c88b23a7b038d6a5c0a5c5bfbd24",
   "pins" : [
     {
       "identity" : "benchmark",
@@ -70,6 +70,15 @@
       "location" : "https://github.com/swiftlang/swift-platform-executors",
       "state" : {
         "revision" : "bd74d56cde5767a8bf43f803379b00790a7e9798"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax",
+      "state" : {
+        "revision" : "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
+        "version" : "603.0.2"
       }
     },
     {

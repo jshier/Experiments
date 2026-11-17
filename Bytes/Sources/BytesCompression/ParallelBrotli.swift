@@ -1,5 +1,4 @@
 public import Bytes
-public import Dispatch
 
 /// Brotli compressed on several cores at once: the input cut into chunks, each compressed by its own lane,
 /// the lanes' meta-blocks joined in order into one standard stream that any decoder reads.
@@ -10,10 +9,10 @@ public import Dispatch
 /// ``historySize`` bytes before the chunk, so matches reach back across the boundary (any distance within
 /// the window is valid there: the decoder has those bytes). And since the decoder's last four distances at a
 /// chunk's start depend on the chunks before it, which run at the same time, a lane starts with every last
-/// distance unknown (``BrotliEngine/forgetDistances()``): it uses the short distance codes only for
+/// distance unknown (`BrotliEngine.forgetDistances()`): it uses the short distance codes only for
 /// distances of its own.
 ///
-/// The synchronous and async forms schedule chunks as ``ParallelDeflateEncoder``'s do (``ChunkScheduler``).
+/// The synchronous and async forms schedule chunks as ``ParallelDeflateEncoder``'s do (`ChunkScheduler`).
 /// Lanes and output slots are allocated once, at initialization.
 @safe
 public struct ParallelBrotliEncoder: ~Copyable {
@@ -82,71 +81,35 @@ public struct ParallelBrotliEncoder: ~Copyable {
     ///   written).
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
         let job = job(byteCount: input.byteCount)
-        let (lanes, slots) = unsafe buffers()
-        // Unsafe: the input and the output's free capacity as pointers, for the workers. Safe: both are
-        // borrowed until the scheduler returns, after every worker is done; only what it delivered is counted.
-        let source = input.withUnsafeBytes { unsafe UnsafeBytes(buffer: $0) }
-        let target = unsafe ParallelDeflateEncoder.freeCapacity(of: &output)
-        let delivery = unsafe scheduler.run(
-            job, chunkCount: job.chunkCount, format: .raw, lanes: lanes, slots: slots, input: source, output: target, checksum: 0
-        )
-        try Self.commit(delivery, into: &output)
-    }
-
-    // MARK: - Async
-
-    /// Compresses all of `input` into `output` as ``compressAll(_:into:)`` does, on `queue`: the calling task
-    /// suspends until it's done, and its thread is free meanwhile.
-    ///
-    /// - Throws: As ``compressAll(_:into:)``.
-    public nonisolated(nonsending) mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan, on queue: DispatchQueue) async throws(BytesError) {
-        let job = job(byteCount: input.byteCount)
-        let (lanes, slots) = unsafe buffers()
-        // Unsafe and safe as in the synchronous form: this call waits for the closure.
-        let source = input.withUnsafeBytes { unsafe UnsafeBytes(buffer: $0) }
-        let target = unsafe ParallelDeflateEncoder.freeCapacity(of: &output)
-        let scheduler = scheduler
-        let delivery: ChunkScheduler.Delivery = await unsafe withUnsafeContinuation { continuation in
-            queue.async {
-                unsafe continuation.resume(returning: unsafe scheduler.run(
-                    job, chunkCount: job.chunkCount, format: .raw, lanes: lanes, slots: slots, input: source, output: target,
-                    checksum: 0
-                ))
-            }
+        // Unsafe: the input and the output's free capacity lent to the workers. Safe: `run` returns only once
+        // every worker has.
+        let delivery = unsafe input.withLent(output: &output) { source, target in
+            unsafe batch(job, input: source, output: target).run()
         }
-        try Self.commit(delivery, into: &output)
+        try Self.end(delivery)
     }
 
-    /// Compresses all of `input` into `output` as ``compressAll(_:into:)`` does, the workers child tasks of a
-    /// task group on Swift's cooperative thread pool.
-    ///
-    /// - Throws: As ``compressAll(_:into:)``.
-    public nonisolated(nonsending) mutating func compressAllConcurrently(_ input: RawSpan, into output: inout OutputRawSpan) async throws(BytesError) {
-        let job = job(byteCount: input.byteCount)
+    // MARK: - The steps of a call, for `BytesAsync`
+
+    /// The workers of a call over lent input and output, to run.
+    package mutating func batch(_ job: Job, input: LentBytes, output: LentMutableBytes) -> ChunkBatch {
         let (lanes, slots) = unsafe buffers()
-        // Unsafe and safe as in the synchronous form: the task group ends before this call does.
-        let source = input.withUnsafeBytes { unsafe UnsafeBytes(buffer: $0) }
-        let target = unsafe ParallelDeflateEncoder.freeCapacity(of: &output)
-        let delivery = await unsafe scheduler.runConcurrently(
-            job, chunkCount: job.chunkCount, format: .raw, lanes: lanes, slots: slots, input: source, output: target, checksum: 0
+        return unsafe scheduler.batch(
+            job, chunkCount: job.chunkCount, format: .raw, lanes: lanes, slots: slots, input: input, output: output, checksum: 0
         )
-        try Self.commit(delivery, into: &output)
     }
 
-    /// Counts what the workers delivered as initialized output.
-    static func commit(_ delivery: ChunkScheduler.Delivery, into output: inout OutputRawSpan) throws(BytesError) {
-        // Unsafe: counts the delivered bytes as initialized. Safe: the workers initialized exactly those, at
-        // the start of the free capacity.
-        unsafe output.withUnsafeMutableBytes { _, initializedCount in
-            initializedCount &+= delivery.produced
-        }
+    /// Ends a call once its workers are done (the delivered bytes already counted in the output).
+    ///
+    /// - Throws: ``BytesError/insufficientCapacity`` if the output ran out of room.
+    package static func end(_ delivery: ChunkDelivery) throws(BytesError) {
         guard !delivery.failed else { throw .insufficientCapacity }
     }
 
     // MARK: - Engine
 
     /// What one call compresses: the input's size, how it's cut into chunks, and the history to prime.
-    struct Job: Sendable {
+    package struct Job: Sendable {
         let byteCount: Int
         let size: Int
         let chunkCount: Int
@@ -162,7 +125,7 @@ public struct ParallelBrotliEncoder: ~Copyable {
 
     /// The job for `byteCount` bytes: equal chunks, at most ``chunkSize`` and at least 32 KB, a whole number
     /// per lane.
-    func job(byteCount: Int) -> Job {
+    package func job(byteCount: Int) -> Job {
         let laneCount = lanes.count
         let rounds = max(1, (byteCount &+ laneCount &* chunkSize &- 1) / (laneCount &* chunkSize))
         let size = max(32 << 10, (byteCount &+ rounds &* laneCount &- 1) / (rounds &* laneCount))

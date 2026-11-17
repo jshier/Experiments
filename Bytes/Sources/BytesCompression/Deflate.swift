@@ -12,6 +12,36 @@ public enum DeflateFormat: Hashable, Sendable {
     case gzip
 }
 
+/// The zlib header's fields (RFC 1950, 2.2), as one big-endian `UInt16`: CMF (window size, method), then FLG
+/// (level, preset dictionary, check bits).
+enum ZlibHeader {
+    static var windowBits: BitField<Int> { BitField(bits: 12...15) }
+    static var method: BitField<Int> { BitField(bits: 8...11) }
+    static var level: BitField<Int> { BitField(bits: 6...7) }
+    static var presetDictionary: BitFlag { BitFlag(bit: 5) }
+
+    /// DEFLATE with a 32 KB window, `level`'s class, and the check bits that make the header a multiple of 31.
+    ///
+    /// - Parameter level: The compression level, 0 through 9.
+    /// - Returns: The header, big-endian when written.
+    static func header(level: Int) -> UInt16 {
+        var header: UInt16 = 0
+        header[method] = 8
+        header[windowBits] = 7
+        header[Self.level] = level <= 1 ? 0 : level <= 5 ? 1 : level == 6 ? 2 : 3
+        return header | (31 &- header % 31)
+    }
+}
+
+/// The gzip header's flags byte (RFC 1952, 2.3.1).
+enum GzipFlags {
+    static var reserved: BitField<Int> { BitField(bits: 5...7) }
+    static var comment: BitFlag { BitFlag(bit: 4) }
+    static var name: BitFlag { BitFlag(bit: 3) }
+    static var extra: BitFlag { BitFlag(bit: 2) }
+    static var headerCRC: BitFlag { BitFlag(bit: 1) }
+}
+
 /// DEFLATE's fixed tables (RFC 1951, 3.2.5 and 3.2.7).
 enum Deflate {
     /// The longest match.

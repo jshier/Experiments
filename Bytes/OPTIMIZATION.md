@@ -8,8 +8,22 @@ C. It builds three ways (with NEON, with portable C fallbacks, and in Swift alon
 builds average within about 2% of the NEON one. Then it grew compression (DEFLATE, zlib, gzip, and Brotli,
 both directions: DEFLATE 6–19% slower than libdeflate on large inputs and up to a third on small ones,
 encoding 2x faster than zlib, and 14–19x faster on 24 cores than on one; Brotli decoding level with Google's
-on large inputs), ChaCha20-Poly1305 and TLS 1.3 records (1.8x CryptoKit's ChaChaPoly), and pipelines that compose them with no allocation and no measurable cost, carrying
-MQTT over a socket compressed and encrypted.
+on large inputs), ChaCha20-Poly1305 and TLS 1.3 records (2.50 GB/s at 1 MB with Poly1305 stitched into
+ChaCha20's rounds, about 3x CryptoKit's ChaChaPoly), and pipelines that compose them with no allocation
+and no measurable cost, carrying MQTT over a socket compressed and encrypted.
+
+The last day turned from speed to API. Cursors with a byte order in their type
+(`BigEndianBytesReader`: `read(UInt32.self)`), named bit fields, and macros (`@BitFields`,
+`@BinaryRecord`) that generate a format's parsers and writers now read as declarations of the format, and
+the generated code is instruction for instruction what was written by hand (199 K instructions for 2,000
+zip directory entries, both ways). Every change in that pass was benchmarked in every package that uses
+Bytes, which caught five regressions before they stayed (section 2, section 10).
+
+The library is split into modules: `Bytes` (cursors, field types, bit fields, `BitBuffer`, `HuffmanTable`,
+CRC-32 and Adler-32, `ByteBuffer`, pipelines), `BytesCompression` (DEFLATE, zlib, gzip, Brotli, the
+parallel codecs), `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records), `BytesAsync` (async pipeline stages,
+and the codecs' async entry points), `BytesMacros` (with its plugin, `BytesMacrosPlugin`), and
+`BytesFoundation` (`Data` conversions).
 
 This document covers the design and optimization techniques that got it there, with before-and-after code
 and the measurements behind each. It's for experienced Swift programmers who know CPUs only at the
@@ -18,9 +32,12 @@ surface: section 1 covers the hardware basics, terms are glossed where they firs
 [Benchmarks/RESULTS.md](Benchmarks/RESULTS.md) and each project's RESULTS.md.
 
 All numbers are from one machine: an Apple M3 Ultra (24 performance and 8 efficiency cores), macOS 27.2,
-Swift 6.4.2 (Xcode 27.3), release builds, medians from the [ordo-one benchmark
+Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 measurements), release builds, medians from the [ordo-one benchmark
 package](https://github.com/ordo-one/benchmark). "GB/s" is bytes processed per second. "x% faster" means
-x% less time unless it says "throughput".
+x% less time unless it says "throughput". Where a number was taken while other jobs loaded the machine,
+the text says so, and the claim rests on instruction counts, which don't depend on load. Numbers from the
+2026-11-17 pass come from its tracking log (baselines `trk-t0` through `trk-t5` in each package); older
+ones from the RESULTS.md files named in the text.
 
 ## Contents
 
@@ -33,7 +50,7 @@ x% less time unless it says "throughput".
 7. [Let LLVM vectorize your loops](#7-let-llvm-vectorize-your-loops)
 8. [Write SIMD yourself with `SIMD16`](#8-write-simd-yourself-with-simd16)
 9. [Reach instructions Swift can't express](#9-reach-instructions-swift-cant-express)
-10. [Case studies: Base64, CRC-32, DEFLATE, three builds, compression, ChaCha20-Poly1305, pipelines](#10-case-studies)
+10. [Case studies: Base64, CRC-32, DEFLATE, three builds, compression, ChaCha20-Poly1305 stitched, pipelines, macros, parsing values once, what tracking caught, swift-binary-parsing's examples](#10-case-studies)
 11. [Smaller lessons](#11-smaller-lessons)
 12. [Limitations and bugs found in Swift and LLVM](#12-limitations-and-bugs-found-in-swift-and-llvm)
 13. [Glossary](#13-glossary)
@@ -102,8 +119,23 @@ folded each field into `checksum = checksum * 31 + value`: 13 dependent multipli
 waiting about 3 cycles for the last. That took longer than the parsing, so all four parsers measured
 19 µs. A plain sum revealed the real differences (10 to 17 µs).
 
-Three more came later:
+Five more came later:
 
+- **Track every change across every package.** Bytes' clients (MQTT, SocketStream, NativeZip, Base64, the
+  swift-binary-parsing comparison) each keep a benchmark baseline, and the 2026-11-17 pass saved one named
+  `trk-t0` before touching anything, then `trk-t1` … `trk-t5` after each step, in every package, and
+  compared instruction and allocation counts step to step. A change that helped the library's own
+  benchmarks moved a client by 10%, and one move of code between modules cost 1.3–1.7% on small Brotli
+  streams where nothing else changed; neither shows up if you only benchmark the code you edited (section
+  10, "What tracking caught"). An unchanged benchmark can also move: one 3-byte-run benchmark went 104 → 78
+  → 104 K instructions across three steps in code nobody touched (layout), so a move under about 1% needs
+  a second look before it's called a regression, or a win.
+- **Check a new API's code from another module.** Clients see only what's inlinable, so the proof an
+  abstraction is free is a throwaway package depending on the library, with `@inline(never)` probe
+  functions beside hand-written equivalents, compiled and disassembled. LLVM merges functions whose code
+  is identical, so "the two probes became one symbol" is the check, not a judgment of the assembly. Named
+  bit fields passed it (section 4); a `BitPattern` literal passed it only after both its initializers got
+  `@inline(__always)` (without them, a run-time parse of the pattern string per call).
 - **Only the work goes inside the measured loop.** Early benchmarks read a clock, looked up fixtures in a
   dictionary, or checked results inside package-benchmark's `scaledIterations` loop. Now fixtures (inputs
   and output buffers) are made before a benchmark is registered, results are checked once beforehand, and
@@ -165,10 +197,55 @@ Each type exists to give the compiler something it can turn into a few instructi
   API is written once, generic over the mode, and the aligned forms read the bit offset (and the writer's partial
   byte) as the constant 0, so every test of them folds away. MQTT, Base64, the codecs' outputs, and TLS records
   use them (instructions: MQTT encode −6%, parse −1 to −3%, Base64 short inputs −2 to −8%).
+- **`BigEndianBytesReader`, `LittleEndianBytesReader`, and the writers**: byte-aligned cursors with a
+  *byte order in their type*. Most formats have one byte order, and the aligned form still passed it at every
+  read (`read(Byte4.self, .bigEndian)`). A byte-ordered cursor is `GenericBytesReader<BigEndianBytes>`, a
+  mode that conforms to `ByteOrderedCursorMode` (`static var byteOrder`), so integers are read by their own
+  type with no order argument:
+
+  ```swift
+  var reader = BigEndianBytesReader(packet)
+  let length = try reader.read(UInt16.self)                 // was: read(Byte2.self, .bigEndian)
+  let identifier = try reader.read(Int.self, as: Byte3.self)
+  let delta = try reader.read(Int32.self, asSigned: Byte4.self)   // sign-extended; was readSigned(_:_:as:)
+  ```
+
+  The order is a constant after specialization, so the generated code is the explicit-order code: a probe
+  built both ways was merged into one function by LLVM. Writes needed one fix: testing
+  `Mode.byteOrder == .bigEndian` compiled to a call per store, because the standard library's `ByteOrder.==`
+  isn't inlinable (section 12); a `switch` folds, and the byte-ordered writer went from 71 to 53
+  instructions in the probe. In the clients: MQTT and SocketStream use the big-endian cursors, NativeZip and
+  the zip directory the little-endian ones; MQTT parsing −0.7 to −1.3% instructions, the zip directory
+  −0.3%. The cursors are also how a parser chooses its byte order once (section 10, "swift-binary-parsing's
+  examples").
 - **`Bits<let width: Int>`** (1–8 bits; aliases `Bit`, `Crumb` (2), `Nibble` (4), `Byte` (8)): one `UInt8`.
   The width is an integer generic parameter (SE-0452), a compile-time constant, so masks and shifts fold
   into immediates and the range checks of `value[bit: 3]` fold away. Setting a nibble is an `and`
   and an `orr`; toggling a bit is one `eor`.
+- **`BitFlag`, `BitField<Value>`, `BitPattern`**: *named* fields inside a value already read, declared once
+  and used by name instead of with shifts, masks, and bit numbers at every use. MQTT's CONNECT flags:
+
+  ```swift
+  enum ConnectFlags {
+      static var userName: BitFlag { BitFlag(bit: 7) }
+      static var willQoS: BitField<MQTTQoS> { BitField(bits: 3...4) }   // an enum with UInt8 raw values
+      static var reserved: BitFlag { BitFlag(bit: 0) }
+  }
+  let flags = try reader.read(Byte.self)
+  try flags.requireClear(ConnectFlags.reserved)
+  let qos = try flags.value(of: ConnectFlags.willQoS)    // throws for a raw value with no case
+  let hasUserName = flags[ConnectFlags.userName]          // a Bool
+  guard flags.matches("01??_??0?") else { throw BytesError.invalidValue }   // a BitPattern literal
+  ```
+
+  Descriptors are computed `static var`s, not `static let`: a `static let` is a lazily initialized global
+  (section 11). Codegen was checked from another module (section 2): flags, enum fields, and `Int` fields
+  compile to the same shift and mask as the hand-written version, and a `Byte { $0[flag] = true … }`
+  builder to 4 instructions against 3. They're adopted in MQTT (CONNECT, CONNACK, PUBLISH, subscription
+  options), the LZ4 frame descriptor, QOI's operations, NativeZip's DOS date and attributes, the zlib and
+  gzip headers, and DEFLATE's HLIT/HDIST/HCLEN; across all of them the instruction counts moved by at most
+  0.3%, except the one regression the setter's `assert` caused (section 10, "What tracking caught"). The
+  macros in section 10 generate these.
 - **`Byte2` … `Byte16`** (`ByteGroup`): N bytes as they appear in memory, stored in the narrowest unsigned
   integer that holds them (`Byte3` in a `UInt32`, `Byte9`–`Byte16` in a `UInt128`). On a little-endian CPU
   that integer is just the loaded bytes, so a read is one load (two overlapping loads for odd widths).
@@ -190,12 +267,25 @@ Each type exists to give the compiler something it can turn into a few instructi
   the optimizer sees the section's length, so reads inside need no bounds checks (section 6).
 - **`ByteLanes` and `ByteMatches`**: a `SIMD16<UInt8>` wrapper whose every operation compiles to a few NEON
   instructions on every Swift version, for scanning 16 bytes at a time (section 8), plus table lookups and
-  shuffles through a small C module (section 9).
+  shuffles through a small C module (section 9). `ByteMatches.nibbleMask` turns the matches into 4 bits per
+  lane (`shrn`, `fmov`, `and`, from plain Swift) for finding the first match by counting zero bits.
 - **`BitBuffer`**: 64 bits of input in one register, for decoders that read many small codes (DEFLATE,
   JPEG). Its refill has no loop, and it doesn't check for the end of input per read (section 10).
 - **`HuffmanTable`**: decoding a code is one table lookup (two for long codes), and the entry type is
-  yours, so an entry can carry everything the next step needs (section 10).
-- **`CRC32`**: the zip/PNG checksum, at 63 GB/s with the CPU's carry-less multiply (section 10).
+  yours, so an entry can carry everything the next step needs (section 10). Building the codes' lengths
+  (`HuffmanCodeBuilder`) stays in `BytesCompression`, where moving it into the core cost instructions
+  (section 10, "What tracking caught").
+- **`CRC32` and `Adler32`**: the zip/PNG and zlib checksums, both in the core and both `RunningChecksum`s.
+  CRC-32 runs at 63 GB/s with the CPU's carry-less multiply (section 10).
+- **`ByteBuffer`**: a buffer filled at its end (`fill`, or `receive` from an async source such as a socket,
+  in `BytesAsync`) and drained from its front, compacting below a threshold. The codecs, TLS records,
+  `Pipeline`, and SocketStream moved onto it and `OutputRawSpan.append(copying:)`/`copyBytes(…)` from
+  `withUnsafeMutableBytes` and `copyMemory`: no instruction count changed beyond the benchmark's resolution
+  (`Benchmarks/RESULTS.md`, 2026-11-16).
+- **`@BitFields`, `@BinaryRecord`** (`BytesMacros`): a format's packed flags and fixed records as
+  declarations that read and write themselves (section 10).
+- **`ByteTransform`, `Pipeline`**: streaming stages that compose without a cost, with declared unit sizes
+  (section 10).
 
 ## 5. Keep the cursor in registers
 
@@ -281,12 +371,14 @@ as help; each was tested alone.
 can see, so reads inside it need no checks:
 
 ```swift
-// Field by field: a check per field. 301 K instructions, 11 µs for 2,000 zip headers.
+// Field by field: a check per field. 301 K instructions in the first measurement (285 K in the latest
+// tracked run), 11 µs for 2,000 zip headers.
 let signature = try reader.read(Byte4.self)
 let version = try reader.read(Byte2.self, .littleEndian)
 // … 15 more fields
 
-// One check for the record, none per field: 199 K instructions (−34%), 7.8 µs.
+// One check for the record, none per field: 199 K instructions (−34%, or −30% against the latest 285 K),
+// 7.8 µs. (`@BinaryRecord` generates this; section 10.)
 var record = BytesReader(try reader.read(byteCount: 46))
 let signature = try record.read(Byte4.self)
 let version = try record.read(Byte2.self, .littleEndian)   // bytes 4..<6 of 46: known in bounds
@@ -702,6 +794,9 @@ decodes 32 MB of text in 13 ms against zlib's 14, with zero allocations. In orde
    so the lookup's latency overlaps the work.
 5. **Copies that may overrun.** Instead of an exact byte loop, back-references copy 16 bytes at a time and
    may write up to 32 bytes past their end; this loop runs only while 32 spare bytes remain in the output.
+6. **Named fields in the table entries.** The decoder's Huffman table entry fields are named bit fields
+   (section 4); the decode loop went from 246 to 236
+   instructions, and NativeZip's inflate plus CRC ran 2.5–2.8% fewer instructions.
 
 ### Three builds: NEON, portable C, Swift only
 
@@ -783,7 +878,13 @@ Level 1's output is the same size as libdeflate's; Brotli's is within 3–6% of 
    still preferred tags). What the tags save did: the bucket entries they rule out, 3–6 of 16 for text and
    10–14 for binaries. The encoder counts them (every search with tags, every 32nd without) and picks the
    next meta-block's mode: within 2% of the faster path on every file tried. Storing the tags isn't free
-   (about 5% on its own): quality 5 on text runs 4–12% more instructions than before tags.
+   (about 5% on its own): quality 5 on text runs 4–12% more instructions than before tags. A cheaper way to
+   find the matching tags didn't help: `ByteMatches.nibbleMask` (one `shrn` from plain Swift, section 8)
+   finds the first lane in far fewer instructions than the one-bit-per-lane gather, but a 16-slot tag
+   filter on 4-bit slots walks them one at a time, and quality 5 on `dickens` ran 2.7% more instructions
+   (2,529 M against 2,463 M). Reverted; the output was byte-identical either way (every corpus file at
+   qualities 1, 5, and 9), so the check was instruction counts, not correctness. A cheaper mask isn't a
+   cheaper loop.
 5. **A copy of the loop per constant.** Quality 1's one-entry table ran through the bucket code's loop: 7–10%
    more instructions. Two `@inline(never)` wrappers over an `@inline(__always)` body taking a constant
    `Bool` gave each its own loop.
@@ -810,7 +911,9 @@ encoder and staging buffer). In rounds (one chunk per lane, a barrier, copy the 
 call, workers claiming chunks with an atomic counter and handing output to slots by swapping buffers, and
 whichever worker finishes the next chunk in order copying it out: 8–22% faster with two rounds, 22–41% with
 four (samba on 24 lanes), even with one; 14–19x one core at 24 lanes. The thread pools allocate a few dozen
-small blocks per call; the compression itself allocates nothing.
+small blocks per call; the compression itself allocates nothing. The scheduler hands the codecs a
+non-generic `ChunkBatch`, and the async entry points (a task group per call, `ChunkBatch.runConcurrently`)
+live in `BytesAsync`.
 
 A bug that shows only as size: DEFLATE's tables hold 16-bit positions relative to a base, moved forward
 when a position reaches 32 KB past it. The check was `==`. Positions that are never inserted (a flush's last
@@ -827,28 +930,73 @@ chunk's first byte, it matched, and the stream decoded one byte long. Each searc
 own limit, and a test builds the input that forces two delays at a chunk's end: random and text inputs
 never reached it.
 
-### ChaCha20-Poly1305: 1.0 → 1.52 GB/s
+### ChaCha20-Poly1305: 1.0 → 2.50 GB/s
 
 `BytesCrypto`'s AEAD seals and opens in place, allocating nothing, for TLS 1.3 records (keys from
 CryptoKit's X25519 and HKDF). ChaCha20 holds one block per vector lane, 16 state words; Poly1305 is scalar.
-Sealing 1 MB took 1.0 ms, ChaCha20 two thirds of it.
+Sealing 1 MB took 1.0 ms, ChaCha20 two thirds of it. Three changes, in the order they paid:
 
 1. **Independent work, not just lanes.** Each quarter-round step depends on the one before. Four blocks in
    `SIMD4<UInt32>` gave four chains, which kept Apple silicon's vector pipes half busy. Eight blocks in
    `SIMD8<UInt32>` (two registers per word, all 32 registers): +36%.
 2. **Fewer, wider multiplies.** Poly1305 with 44-bit limbs took nine 64 × 64 → 128-bit products per
    16-byte block; in radix 2^64, as OpenSSL's 64-bit code, four of those and two 64-bit ones (56 → 43
-   instructions per block): +12%.
+   instructions per block): +12%. Together 1.00 → 1.52 GB/s.
+3. **Stitching: use the units that are idle.** After the first two changes the vector pipes were full of
+   ChaCha20 while the integer multiplier sat idle through the ChaCha20 pass, and then Poly1305's chain of
+   multiplies ran alone. The two are independent (Poly1305 reads ciphertext; ChaCha20 doesn't read the
+   tag state), so the CPU can run both at once if the instructions are interleaved close enough for its
+   out-of-order window to see them: *stitching*, as OpenSSL does for the same pair. Each eight-block batch
+   (512 bytes) is 10 double rounds of vector instructions with 3 Poly1305 blocks (16 bytes each) of scalar
+   work after each, and 2 at the end: 32 blocks per batch, exactly the batch's size.
 
-| Seal, 1 MB per iteration (µs) | Bytes | CryptoKit ChaChaPoly | CryptoKit AES-128-GCM |
-|---|---|---|---|
-| 64 B messages | **4,461** | 16,000 | 13,000 |
-| 1 KB messages | **805** | 2,222 | 905 |
-| 1 MB message | 690 | 1,239 | **104** |
+   ```swift
+   // Before: two passes. ChaCha20 over the whole message, then Poly1305 over the ciphertext.
+   ChaCha20.xor(&message, key: key, counter: 1, nonce: nonce)
+   mac.blocks(message.bytes)
+
+   // After, from one batch (512 bytes) up: one pass. Sealing authenticates the batch before the one
+   // being encrypted, since a batch's ciphertext exists only when its rounds are done.
+   ChaCha20.seal(&message, key: key, counter: 1, nonce: nonce, mac: &mac)
+   ```
+
+   Opening authenticates the batch it's decrypting (the ciphertext is read during the rounds and the
+   plaintext written after them). That decrypts before the tag is checked, so on a mismatch the function XORs
+   with the same keystream again to give back the ciphertext, and the caller sees `message` unchanged, as
+   documented. Two details decided the result. The Poly1305 accumulator stays in locals through the rounds
+   (the first version called `blocks`, which copied the whole struct: 64-byte seals 79 → 74 M instructions
+   once fixed). And below 512 bytes it keeps two passes: the stitched path's split tail cost 180
+   instructions more per 64-byte seal.
+
+| Seal, per iteration (µs) | Bytes, before stitching | Bytes, stitched | CryptoKit ChaChaPoly | CryptoKit AES-128-GCM |
+|---|---|---|---|---|
+| 1 MB × 1 | 690 | **419–421** (2.50 GB/s) | 1,239 | 103 |
+| 16 KB × 64 | 714 | **432–442** | 1,315 | 151 |
+| 1 KB × 1,024 | 805 | **668–749** | 2,222 | 891 |
+| 64 B × 16,384 | 4,461 | **4,211–4,219** | 16,000 | 12,000 |
+
+The stitched column is the controlled comparison: three interleaved rounds of old and new on a machine
+another job was loading (both sides alike); the same run's old code measured 691–764, 698, 804–812, and
+4,391–4,899 µs. The other columns are `final-1`'s. Measured again with the stitched code in one run (baseline `ck-final`,
+machine shared with a build), CryptoKit's ChaChaPoly against Bytes: 1 MB 1,271 against 469 µs (2.7x), 16 KB × 64
+1,302 against 433 (3.0x), 1 KB × 1,024 2,173 against 668 (3.3x), 64 B × 16,384 16,000 against 4,309 (3.7x); AES-128-GCM
+117, 167, 899, and 13,000 µs.
+
+Stitching saves time, not instructions: 1 MB is 8.77 M instructions before and 8.64 M after (16 KB seals
+−1.5%, 64 B −3.9%), and the time falls 40% because the multiplier now works during cycles it used to wait
+through. Instruction counts alone would have called it a failure; the other half of "count instructions,
+and ask the CPU" (section 2). It reached sockets: SocketStream's in-memory protect with TLS 1,162 → 715 µs
+(−38%) and unprotect 1,230 → 758 (−38%), and with Brotli or DEFLATE in the pipeline −11 to −14% (`trk-t0` →
+`trk-final`; times move 5–10% between runs here, so the smaller rows are indicative).
+
+**Why Poly1305 isn't in NEON.** The natural next step is a vector Poly1305 (four lanes, with powers of the
+key), which removes the multiplier chain. It wasn't pursued: in the stitched loop it would compete with
+ChaCha20 for the vector pipes that eight-block ChaCha20 already fills, while the scalar chain now runs in
+ChaCha20's shadow for free.
 
 CryptoKit allocates per call, which dominates short messages. Nothing in Swift matches AES-GCM on hardware
-AES instructions (10 GB/s). Not done: "stitching" Poly1305's scalar multiplies into ChaCha20's vector
-rounds, so the integer and vector units work at once.
+AES instructions (9 GB/s in `ck-final`), still about 4x ahead of Bytes at 1 MB; at 1 KB and below Bytes' ChaCha20
+is faster even than AES-GCM (668 against 899 µs at 1 KB).
 
 ### Pipelines: composing stages for free
 
@@ -864,12 +1012,202 @@ stream; opening and inflating, 3,297 µs both.
 - **Reset, and what not to reset.** `ResettableByteTransform` lets a pipeline built once carry stream after
   stream. A TLS sealer's reset keeps its record sequence: restarting it under the same keys would reuse
   nonces. Replaying records (tests, benchmarks) is the opener's `reset(sequence:)`.
-- **A buffer smaller than a stage's unit** (a TLS record needs 16 KB of room) can't make progress; that's a
-  precondition failure, not a loop that never returns.
+- **Declared units.** Some stages work in whole units: a TLS record can't be opened from half a record or
+  sealed into less than a record's room. `ByteTransform` states them as constants,
+  `maximumUnitByteCount` (the most input a call may need before it can consume any: 16,645 bytes for the TLS
+  opener) and `minimumOutputCapacity` (the least free output it needs to make progress: 16,624), both 1 by
+  default. A `Pipeline` sizes its buffer from them (`First.minimumOutputCapacity +
+  Second.maximumUnitByteCount`, at least the requested capacity), so a pipeline made with a 1,000-byte
+  buffer around a TLS stage now works; before, a buffer smaller than a unit couldn't make progress, and the
+  answer was a precondition failure. A drive loop sizes its output the same way.
+- **One end-of-stream rule.** At `.finish` every stage either returns `.finished` once all its output is
+  delivered (`.needsOutput` until then) or throws because its input ended early (a decoder's truncated
+  stream, a partial record). The TLS opener didn't report it before. With one rule, a drive loop needs no
+  knowledge of which kind of stage it has: it stops at `.finished`, and `.needsInput` only ever means "more
+  input, please".
+  `transform(_:appending:flush:)` is that loop, written once for whole messages in memory.
+- **The same stages, asynchronous.** `BytesAsync` has `AsyncByteTransform`, and any `ByteTransform` becomes
+  one with `synchronously()` (calls run in place, without suspending) or `offloaded(to:)` (calls run on a
+  Dispatch queue, so a compressor at a high level doesn't hold a thread of the cooperative pool: one hop out
+  and one back per call, so for calls that do a lot). It also holds the parallel codecs' async entry points
+  and `ByteBuffer.receive`.
 - **Over a socket** (`SocketStream`), MQTT packets encoded, compressed, sealed, sent, opened, decompressed,
   and checked: TLS alone about 1 GB/s on one connection (ChaCha20-Poly1305 bound, against 3.4–7.4 GB/s
   plain), DEFLATE level 1 plus TLS 0.49–0.60 GB/s with 64-byte to 1 KB JSON payloads, at 14–16% of the
-  bytes on the wire: the compressor bounds it. No allocation per packet on either end.
+  bytes on the wire: the compressor bounds it. No allocation per packet on either end. (Those
+  transfer numbers predate stitching, which made the in-memory TLS protect step 38% faster; the transfers
+  haven't been re-run.)
+
+### Macros: formats as declarations, at hand-written speed
+
+A format's fixed records and packed flags are declarations: field, position, width, byte order. `BytesMacros`
+turns them into the parser and writer a person would write, and the work was making sure that is what
+they get.
+
+```swift
+@BitFields(Byte.self, reserved: 0...0)               // bit 0 must be 0
+struct ConnectFlags {
+    @Flag(bit: 7) var userName: Bool
+    @Field(bits: 3...4) var willQoS: QualityOfService      // an enum with UInt8 raw values
+    @Flag(bit: 1) var cleanStart: Bool
+    // …
+}
+
+@BinaryRecord(.littleEndian)
+struct LocalFileHeader {
+    @Field(Byte4.self, expecting: 0x0403_4B50) var signature: UInt32
+    @Field(Byte2.self) var versionNeeded: Int
+    var flags: GeneralPurposeFlags                     // a @BitFields type, or another record
+    @Field(Byte2.self) var method: CompressionMethod   // an enum with integer raw values
+    // …
+}
+
+let header = try reader.read(LocalFileHeader.self)     // throws for a bad signature or an enum with no case
+try writer.write(header)
+```
+
+`@BitFields` generates a memberwise initializer, `init(rawValue:)` (every field decoded, reserved bits
+checked), `rawValue`, and `BinaryParsable`, `BinaryWritable`, and `FixedSizeBinary` conformances.
+`@BinaryRecord` generates the same set plus `byteCount`, the fields' sizes summed as a constant. Its
+`init(parsing:)` takes the record's bytes with one bounds check, as the "known size" technique of section
+6, and reads every field from that fixed-size section; on any error it rewinds, so a failed read consumes
+nothing:
+
+```swift
+// Generated (abbreviated). Without @inline(__always) on it, 297 K instructions for 2,000 entries.
+@inline(__always) init<Mode: BytesCursorMode>(parsing reader: inout GenericBytesReader<Mode>) throws(BytesError) {
+    let start = reader.position
+    var record = AlignedBytesReader(try reader.read(byteCount: Self.byteCount))
+    do throws(BytesError) {
+        let signature = try record.read(UInt32.self, as: Byte4.self, .littleEndian)
+        guard signature == 0x0403_4B50 else { throw .mismatch }
+        self.signature = signature
+        // … one read per field
+    } catch { reader.rewind(to: start); throw error }
+}
+```
+
+**Generated code has to be forced inline.** The first expansion left `init(parsing:)` an ordinary function:
+the optimizer kept it a call, and a 17-field record came back through memory. The zip directory benchmark
+(2,000 entries) took 297 K instructions. With `@inline(__always)` on the generated initializer and writer,
+199 K: exactly the hand-written fixed-record parser's count. Nobody reading a record's declaration would
+guess a call boundary was the cost, and no amount of attention to the field code would have found it: the
+fields were fine. Measured against the same workload:
+
+| Zip directory, 2,000 entries | Instructions | Against the macro |
+|---|---|---|
+| `@BinaryRecord` (and the hand-written record parser) | 199 K | |
+| Bytes, field by field | 285 K | +43% (the macro is −30%) |
+| `ParserSpan`, fixed records | 325 K | +63% (the macro is −39%) |
+| `ParserSpan`, field by field | 461 K | +132% (the macro is −57%) |
+
+No allocations in any of them. In NativeZip, whose central directory now uses macro records, the benchmark
+went 4,887 → 4,907 K (+0.4%); an unchanged benchmark beside it moved the same +0.4%, so it's layout, not
+the macro.
+
+The macros are tested with swift-macro-testing: the expansion text and the diagnostics, which point at the
+offending property instead of at the whole struct. Attached macros
+also showed two toolchain traps (section 12).
+
+### Parsing values once
+
+Decoding a value twice looks free when the second pass is "just a check". MQTT's properties (a
+variable-length list of typed values) were decoded twice whenever a caller iterated them: once to validate
+the packet at parse time, then again when `forEach` handed them out. An audit for values read twice found
+it. `MQTTPublish(parsing:visitingProperties:)` takes a closure that sees each property as it is validated:
+
+```swift
+// Before (illustrative): validate while parsing, then decode every property again to look at it.
+let publish = try MQTTPublish(parsing: frame)
+try publish.properties.forEach { property in … }
+
+// After (illustrative): the properties are decoded once, as they're validated, and handed to `visit`.
+let publish = try MQTTPublish(parsing: frame, visitingProperties: { property in … })
+```
+
+Parsing a stream of PUBLISH packets and visiting their properties took 7,365 K instructions against 8,831 K for parsing the frames
+and then `forEach` (−16.6%). The first version cost something else: the visiting initializer, forced
+inline, changed what the PR toolchain's inliner did to the plain path, and SocketStream's check ran 10.4%
+more instructions (unprotect +4–6%); and the plain path through an empty `{ _ in }` closure cost MQTT's
+parse 2% under Xcode's compiler. The plain and visiting paths now have separate bodies, and the plain one is
+the code it was before: both toolchains back at their earlier counts.
+
+The same audit of the swift-binary-parsing ports (next) found one of its own: a binary property list's
+`0xF`-escaped dictionary count was read once for the keys and again for the values; the tests caught it.
+Each of the ports notes where it reads a value once and why (the chunk type as one `UInt32` to switch on,
+the byte-order magic once to choose the parser).
+
+### What tracking caught
+
+With a baseline per step in every package (section 2), five regressions showed up that no single
+benchmark would have:
+
+| Change | What moved | Cause | Fix |
+|---|---|---|---|
+| Named bit fields | MQTT PUBLISH encoding +0.8% (5,132 → 5,173 K), SocketStream encode +0.4% | An enum field's setter did `assert` plus a mask | `precondition(raw <= mask)`, then an unmasked store: both fold away when the enum's raw values are visible |
+| `visitingProperties` forced inline | SocketStream check +10.4%, unprotect +4–6% (PR toolchain); MQTT parse +2% via an empty closure (Xcode) | A forced inline in one function changed the inliner's choices for its neighbors, differently per compiler | Separate bodies for the plain and visiting paths; force-inline only the one that needs it |
+| `ByteMatches.nibbleMask` for Brotli's tag filter | Quality 5 on `dickens` +2.7% (2,463 → 2,529 M) | Walking 4-bit slots costs more than the gather saves | Reverted (output identical, checked on every corpus file) |
+| `HuffmanCodeBuilder` moved into Bytes | Brotli 1.6 KB streams +1.3% (quality 1), +1.7% (5): 149 → 151 K | Crossing a module: `@inlinable`, `@inline(__always)`, and `@inline(always)` each left 151 K, in-module is 149 K | Moved back to `BytesCompression` |
+| `@BinaryRecord` (above) | 297 K against 199 K | `init(parsing:)` not inlined | `@inline(__always)` in the generated code |
+
+Two lessons beyond each fix. A cross-module move can cost instructions even when everything is inlinable,
+so every move is benchmarked. And two compilers
+disagree: SocketStream builds with a PR toolchain whose inliner differs from Xcode's, and a change that
+helped MQTT under one hurt SocketStream under the other, so both are tracked. The byte-identical Brotli
+output made the nibble filter an instruction-count question, not a correctness one.
+
+### swift-binary-parsing's examples, ported to Bytes
+
+Apple's [swift-binary-parsing](https://github.com/apple/swift-binary-parsing) (`ParserSpan`) ships example
+parsers: ELF, PNG, PCAPNG, and Apple's binary property list. Each was ported to Bytes unchanged in what it
+builds (the example's own result types, through their memberwise initializers, so both sides allocate the
+same arrays and strings and only the parsing differs), checked against the example on every test file, and
+benchmarked by instruction count and malloc count (the machine was loaded, so no times). An MQTT PUBLISH
+parser was ported both ways. Ratios of the example's instructions to Bytes':
+
+| Workload | Example (`ParserSpan`) | Bytes | Ratio |
+|---|---|---|---|
+| ELF, helloworld (352 B, 5 headers) | 7,819 | 4,023 | 1.94 |
+| ELF, swift-help (64-bit, 65 headers) | 28 K | 9,095 | 3.08 |
+| PNG, tiny.png (7 chunks) | 26 K | 18 K | 1.44 |
+| PNG, antelope.png (4.6 MB, 288 chunks) | 1,410 K | 1,389 K | 1.02 |
+| PCAPNG, 1,000 packets | 4,854 K | 4,094 K | 1.19 |
+| Property list, 1,000 records (8,990 objects) | 30.0 M | 25.0 M | 1.20 |
+| MQTT PUBLISH, 10,000 packets | 4,198 K | 3,265 K | 1.29 |
+
+Allocations are equal or lower on the Bytes side in every row (PNG tiny: 12 against 9), and zero in MQTT's.
+The ratio shrinks as the work moves from parsing to allocating and copying: antelope.png is 281 copies of
+16 KB, so `memcpy` and `malloc` dominate both.
+
+**The main gap is the byte order, chosen at run time.** ELF and PCAPNG name their byte order in the data,
+so the example passes an `Endianness` value to every read. Each field then calls an out-of-line
+`MultiByteInteger.init(parsing:endianness:)` (52 instructions: bounds check, load, a swap test on the
+run-time value) and has its own throw path: a section header's initializer is 277 instructions with 13 such
+calls. The Bytes port decides once, from the identification record, and calls a parser generic over the
+cursor's byte order (`parse<Mode: ByteOrderedCursorMode>`), specialized for each order. A 64-bit section
+header is then 87 or 93 instructions (one check for its 64-byte section, the fields folded). The example's
+cost is per field, so it grows with the headers: 1.94x with 5 headers, 3.08x with 65. This is the reason
+byte-ordered cursors are types (section 4): the order is a constant by the time the reads compile.
+
+The rest are smaller and have the same flavor of out-of-line, per-site code. PNG tracked chunk order in a
+`Set` (a hash table allocated and hashed per ancillary chunk), the port in a bit mask. BPList read every
+runtime-width integer through a byte-at-a-time generic `reduce`; the port does one 8-byte load and a shift.
+MQTT's `ParserSpan` version called `sliceSpan` out of line from five sites and read variable-byte
+integers in a checked 4-iteration loop; the Bytes version reads each length-prefixed part with one check
+and a single-byte fast path (the multi-byte case is out of line on purpose, since a remaining length of 128
+or more takes it).
+
+What the ports taught about Bytes: `@BitFields` with enum fields worked well for ELF's identification and
+MQTT's fixed header, and `read(sectionPrefixedBy:)`, `read(utf8PrefixedBy:)`, and `read(_:as:)` for the
+example's `RawRepresentable` types and `OptionSet`s matched what they needed. What was awkward is recorded as
+proposals, not added: `@BinaryRecord` always bakes in one byte order, so ELF's and PCAPNG's records had to be
+hand-written as fixed-size sections; single-byte and padding fields; integers of a run-time width;
+NUL-terminated strings; 4-byte-aligned tag-length-value records; and `readSection(byteCount:)` trapping on
+a negative count computed from untrusted lengths (`ParserSpan` throws). Where the examples depart from
+their formats (sign-extended 1-, 2-, and 4-byte property-list integers, a MAC address option that can't
+parse), the ports reproduce them, so the comparison stays of like with like. Earlier comparisons: Bytes'
+zip directory and 24-bit values against `ParserSpan` (11 / 7 µs against 23 / 13), and the QOI and LZ4 examples
+within 5% either way (`../BinaryParsingComparison/RESULTS.md`).
 
 ## 11. Smaller lessons
 
@@ -955,6 +1293,31 @@ saw the old, empty one. Take the result into a local first.
 stored property is rejected as escaping its scope; `let batch = batch` (a retain, not a copy) gives the
 span a local to depend on. Release it before mutating the property, or the mutation copies.
 
+**Spans can't be captured through two closures.** A span borrowed in one closure and used in a closure
+nested inside it is rejected ("lifetime-dependent variable escapes its scope"), and so is borrowing one
+stored property's span while a closure mutates another property of the same value. The TLS sealer's
+`ByteBuffer`s hit both; the fix is to pass the buffers as parameters to a `static` function that does the
+work, which also keeps the cursor a local (section 5).
+
+**Store a checked value unmasked.** An enum field's setter did `assert(raw <= mask)` and then stored
+`raw & mask`; that cost MQTT's PUBLISH encoding 0.8% instructions. `precondition(raw <= mask)` and an
+unmasked store folds both away when the enum's raw values are visible: once the precondition has run, the
+mask can't change the value, and the optimizer knows it.
+
+**An empty default closure isn't free, and compilers disagree about it.** A `visit: { _ in }` parameter on
+MQTT's property validation cost 2% instructions under Xcode's compiler; forced inline it gained 1% there and
+cost SocketStream, built with a PR toolchain, 10%. Give the plain path its own body, and force inline only
+the variant that needs it (section 10).
+
+**Overloads and literals.** A generic `write(_: some FixedWidthInteger, as:)` beside `write(_: T.Integer,
+as: T)` takes integer literals (which default to `Int`) unless it's `@_disfavoredOverload`, which keeps a
+literal the group's own type. And a bare `writer.write(7)` is ambiguous between `Byte`, `UInt8`, and `Int8`:
+that's right, state the width. Also, on a bit-addressable writer, `write(rawRepresentable, as: Byte.self)` was
+ambiguous until it got concrete overloads.
+
+**Bring the build settings along.** `.macro` targets need `import CompilerPluginSupport` in Package.swift;
+without it the manifest fails with a type-check timeout rather than naming `.macro` (section 12).
+
 **Measure hints.** Without its `likely`/`unlikely` hints (Bytes' wrappers for LLVM's branch weights,
 through `Builtin`), bit-field parsing took 14% more instructions (689 K → 787 K) in the same time; the
 hints were kept. `@frozen` changed nothing outside a binary framework, so it was removed. Spacing the CRC
@@ -962,8 +1325,10 @@ tables apart in memory, in case they evicted each other from the cache, changed 
 
 ## 12. Limitations and bugs found in Swift and LLVM
 
-A summary; most of it is covered above. Swift 6.4.2 (Xcode 27.2–27.3) unless noted. Two compiler bugs
-have reports with reproducers written but not yet filed.
+A summary; most of it is covered above. Swift 6.4.2 (Xcode 27.2–27.3) unless noted (the
+swift-binary-parsing ports ran on 6.4.4). Several have reports with reproducers written, kept outside the
+repository (numbers 25 to 27 are the most recent); the typed-throws `rethrows` one is
+swiftlang/swift#90291.
 
 | Issue | Effect | Workaround |
 |---|---|---|
@@ -994,7 +1359,11 @@ have reports with reproducers written but not yet filed.
 | **`min(a, b, c, …)` with three or more arguments** is the variadic overload: an array per call | An allocation in Brotli's literal loop | Nested two-argument `min` |
 | **A `~Copyable` initializer reading a stored `let` before its `UniqueArray` fields are set**: the optimized build frees those uninitialized fields as if reassigning them | Crash, release builds only | Compute into locals first |
 | **Default cross-module optimization inlined a public type's `deinit` into clients**, referencing an internal type's metadata | Link error in clients | `@usableFromInline` on the internal type |
-| **A typed-throws closure returning a tuple, passed to `Array.withUnsafeMutableBytes`**, crashes SILGen ("unsupported collection upcast kind"); and typed errors don't pass through it at all (it rethrows `any Error`) | Compiler crash; doesn't compile | Bytes' `array.withOutputRawSpan { … }` or `array.mutableSpan.withUnsafeMutableBytes`, which keep the error type |
+| **A `throws(E)` closure passed to an untyped generic `rethrows` API** (`Array.withUnsafeMutableBytes`, `withUnsafeBytes`, `func f<R>(_: () throws -> R) rethrows -> R`) throws the wrong error, silently: the closure throws an `any Error` box as an `E`, and the caller catches the box's address as the enum (a `BytesError` printed `()`). With a `Void` or tuple result (tuple: "unsupported collection upcast kind") SILGen crashes instead. Report 25, swiftlang/swift#90291 | Wrong error, silently; or a compiler crash | Bytes' `array.withOutputRawSpan { … }` or `array.mutableSpan.withUnsafeMutableBytes`, which are generic over the error type and keep it |
+| **The standard library's `ByteOrder.==` isn't inlinable** (2027 SDK; the derived `==` of any other module's `@frozen` enum is a call). `Mode.byteOrder == .bigEndian` compiled to a call per store. Report 26 | 71 against 53 instructions in a byte-ordered writer probe | `switch` over the order |
+| **`.macro` in Package.swift without `import CompilerPluginSupport`** fails as a type-check timeout ("unable to type-check this expression in reasonable time") rather than naming `.macro`. Report 27 | A manifest that won't load, with a misleading error | Add the import |
+| **Spans can't be captured through nested closures**, nor borrowed from one stored property while a closure mutates another ("lifetime-dependent variable escapes its scope") | Doesn't compile | Pass the buffers as parameters to a `static` function (section 11) |
+| **`try parse(make().span.bytes)` where `make()` throws and returns an array** fails LLVM verification at `-Onone` ("Instruction does not dominate all uses": a `swift_bridgeObjectRelease` of the temporary). Swift 6.4.4. `-O` compiles; a non-throwing `make()` compiles. The same bug as swiftlang/swift#94359 (a delegating-init shape); report 28 adds this one as a comment | Debug builds crash the compiler | Bind the array to a local first |
 | **`SIMD16<UInt16>(truncatingIfNeeded:)`** isn't inlined | A call per vector | Bit casts, masks, and shifts |
 | **package-benchmark's thresholds** for names with spaces or `/` are written under one name and looked up under another ([ordo-one/benchmark#301](https://github.com/ordo-one/benchmark/issues/301), [#373](https://github.com/ordo-one/benchmark/issues/373)) | A check that silently doesn't run | Names without spaces |
 
@@ -1002,15 +1371,23 @@ have reports with reproducers written but not yet filed.
 
 - **AEAD**: authenticated encryption with associated data: encrypts a message and computes a tag over it
   and unencrypted data (a record header), so tampering with either is detected. ChaCha20-Poly1305 is one.
+- **Attached macro**: a Swift macro (`@BitFields`, `@BinaryRecord`) that adds members and conformances to a
+  type you declare, by generating source code at compile time in a compiler plugin. What it generates is
+  ordinary code: it's as fast as it is inlinable.
 - **Auto-vectorization**: the compiler rewriting a loop to use SIMD instructions on several elements per
   iteration.
 - **Back-reference**: in LZ77 compression (DEFLATE), "copy N bytes from D bytes back in the output".
+- **Bit field, bit flag**: a run of adjacent bits (or one bit) inside a value, such as the QoS in bits 3 and
+  4 of MQTT's CONNECT flags. Bytes declares them by name (`BitField`, `BitFlag`, `BitPattern`).
 - **Bounds check**: a test that an index or offset is within a buffer, with a trap or throw if not.
 - **Branch prediction**: the CPU guessing a branch's direction to keep working; a wrong guess costs ~15
   cycles.
 - **Byte order (endianness)**: whether a multi-byte integer is stored least significant byte first
   (little-endian, Apple's CPUs) or most significant first (big-endian, most network formats). Converting is
   a byte swap (`rev` on Arm), one instruction.
+- **Byte-ordered cursor**: a reader or writer whose byte order is part of its type
+  (`BigEndianBytesReader`), so integers are read by type with no order at each call, and the order is a
+  constant when the code is compiled.
 - **Cache, cache line**: small fast memories between the core and main memory (L1, L2), filled in fixed
   blocks called cache lines: 128 bytes on Apple silicon.
 - **Carry-less multiplication**: multiplying bit strings with XOR in place of addition; the core of fast
@@ -1043,8 +1420,12 @@ have reports with reproducers written but not yet filed.
   for all.
 - **Meta-block**: a Brotli stream's unit, with its own prefix codes; the encoder chooses settings per
   meta-block (here 256 KB).
+- **Micro-op**: the smaller operations an instruction is split into inside the core. Some limits are in
+  micro-ops, not instructions: a `tbl` costs one per table register.
 - **NEON**: Arm's 128-bit SIMD instruction set.
 - **Nonce**: a number used once per message under a key; an AEAD's security fails if one repeats.
+- **Out-of-order execution**: the core running later instructions while earlier ones wait for their inputs,
+  within a window of a few hundred. It's what lets two independent chains of instructions overlap.
 - **Package trait**: an optional feature of a Swift package, declared in Package.swift and turned on or off
   by its users (SE-0450).
 - **Prefetching**: the CPU loading cache lines before they're asked for, when it detects a pattern.
@@ -1056,10 +1437,14 @@ have reports with reproducers written but not yet filed.
 - **Spill**: storing a register's value to the stack because the compiler ran out of registers or needed
   its address.
 - **Stall**: a cycle in which the core can't start any instruction, usually waiting for memory or a result.
+- **Stitching**: interleaving two independent computations (Poly1305's scalar multiplies and ChaCha20's
+  vector rounds) in one loop, so the core's different units work on both at once.
 - **Structure loads and stores (`ld3`, `st4`)**: Arm instructions that load or store several registers
   interleaved: `ld3` puts bytes 0, 3, 6 … in one register, 1, 4, 7 … in the next, 2, 5, 8 … in the third.
 - **`swift_once`**: the runtime call behind lazily initialized globals and `static let`s: it runs the
   initializer once, and every use checks it.
+- **Tag filter**: Brotli's encoder keeps a few extra bits of each hash entry's hash (a tag) so 16 entries
+  can be compared at once, loading only those whose tag matches.
 - **Thunk**: a small compiler-generated function that adapts one calling convention to another.
 - **Value witness table**: a per-type table of functions (copy, destroy, …) Swift uses to handle values
   whose type's layout it doesn't know at compile time, such as a type from another module.

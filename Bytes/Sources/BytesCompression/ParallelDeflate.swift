@@ -1,11 +1,11 @@
 public import Bytes
-public import Dispatch
+internal import Dispatch
 
 /// DEFLATE (raw, zlib, or gzip) compressed on several cores at once, pigz-style: the input is cut into
 /// chunks, each compressed by its own lane, and the lanes' output joined in order into one standard stream
 /// that any decoder reads.
 ///
-/// Each chunk's compressor is primed with the 32 KB before the chunk (``DeflateCompressor/prime(_:from:to:)``),
+/// Each chunk's compressor is primed with the 32 KB before the chunk (`DeflateCompressor.prime(_:from:to:)`),
 /// so matches reach back across chunk boundaries as in a sequential stream, and every chunk but the last
 /// ends with a sync flush (an empty stored block) so the next starts on a byte boundary. Against one
 /// sequential stream that costs the flush (5 bytes per chunk), the priming (inserting 32 KB per chunk), and
@@ -20,7 +20,7 @@ public import Dispatch
 /// blocks per call). The input is cut into equal chunks of at most ``chunkSize``, a whole number per lane.
 /// One worker per lane takes the next chunk as it finishes the last, hands its output to a slot (swapping
 /// buffers, no copy), and whichever worker finishes the next chunk in order copies it to the output while
-/// the others go on compressing (``ChunkScheduler``). Three ways to run the workers:
+/// the others go on compressing (`ChunkScheduler`). Three ways to run the workers:
 ///
 /// - ``compressAll(_:into:)``: synchronous. Dispatch's `concurrentPerform` runs them, the calling thread
 ///   among them, and the call returns when all are done. For threads that may block: a dedicated I/O thread,
@@ -47,7 +47,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
     public var laneCount: Int { lanes.count }
 
     private var lanes: UniqueArray<DeflateLane>
-    /// The one-shot forms' output slots and scheduler (``ChunkScheduler``).
+    /// The one-shot forms' output slots and scheduler (`ChunkScheduler`).
     private var slots: UniqueArray<ChunkSlot>
     private let scheduler = ChunkScheduler()
 
@@ -125,81 +125,37 @@ public struct ParallelDeflateEncoder: ~Copyable {
     /// - Throws: ``BytesError/insufficientCapacity`` if `output` runs out of room (what was written stays
     ///   written).
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
-        let job = job(byteCount: input.byteCount)
+        let job = try begin(byteCount: input.byteCount, into: &output)
+        // Unsafe: the input and the output's free capacity lent to the workers. Safe: `run` returns only once
+        // every worker has.
+        let delivery = unsafe input.withLent(output: &output) { source, target in
+            unsafe batch(job, input: source, output: target).run()
+        }
+        try Self.end(delivery, job: job, into: &output)
+    }
+
+    // MARK: - The steps of a call, for `BytesAsync`
+
+    /// Starts a call over `byteCount` bytes: its job, and the container header written to `output`.
+    package mutating func begin(byteCount: Int, into output: inout OutputRawSpan) throws(BytesError) -> Job {
+        let job = job(byteCount: byteCount)
         try Self.write(header: job.format, level: job.level, into: &output)
+        return job
+    }
+
+    /// The call's workers over lent input and output, to run.
+    package mutating func batch(_ job: Job, input: LentBytes, output: LentMutableBytes) -> ChunkBatch {
         let (lanes, slots) = unsafe buffers()
-        // Unsafe: the input and the output's free capacity as pointers, for the workers. Safe: both are
-        // borrowed until the scheduler returns, after every worker is done; only what it delivered is counted.
-        let source = input.withUnsafeBytes { unsafe UnsafeBytes(buffer: $0) }
-        let target = unsafe Self.freeCapacity(of: &output)
-        let delivery = unsafe scheduler.run(
-            job, chunkCount: job.chunkCount, format: job.format, lanes: lanes, slots: slots, input: source, output: target,
+        return unsafe scheduler.batch(
+            job, chunkCount: job.chunkCount, format: job.format, lanes: lanes, slots: slots, input: input, output: output,
             checksum: job.initialChecksum
         )
-        try Self.commit(delivery, job: job, into: &output)
     }
 
-    // MARK: - Async
-
-    /// Compresses all of `input` into `output` as ``compressAll(_:into:)`` does, on `queue`: the calling task
-    /// suspends until it's done, and its thread is free meanwhile. One hop to the queue and one back per call.
+    /// Ends a call once its workers are done (the delivered bytes already counted in `output`): the trailer.
     ///
-    /// - Parameter queue: Where to run: any queue (the workers themselves use Dispatch's worker threads).
-    /// - Throws: As ``compressAll(_:into:)``.
-    public nonisolated(nonsending) mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan, on queue: DispatchQueue) async throws(BytesError) {
-        let job = job(byteCount: input.byteCount)
-        try Self.write(header: job.format, level: job.level, into: &output)
-        let (lanes, slots) = unsafe buffers()
-        // Unsafe and safe as in the synchronous form: this call waits for the closure.
-        let source = input.withUnsafeBytes { unsafe UnsafeBytes(buffer: $0) }
-        let target = unsafe Self.freeCapacity(of: &output)
-        let scheduler = scheduler
-        let delivery: ChunkScheduler.Delivery = await unsafe withUnsafeContinuation { continuation in
-            queue.async {
-                unsafe continuation.resume(returning: unsafe scheduler.run(
-                    job, chunkCount: job.chunkCount, format: job.format, lanes: lanes, slots: slots, input: source,
-                    output: target, checksum: job.initialChecksum
-                ))
-            }
-        }
-        try Self.commit(delivery, job: job, into: &output)
-    }
-
-    /// Compresses all of `input` into `output` as ``compressAll(_:into:)`` does, the workers child tasks of a
-    /// task group on Swift's cooperative thread pool.
-    ///
-    /// - Throws: As ``compressAll(_:into:)``.
-    public nonisolated(nonsending) mutating func compressAllConcurrently(_ input: RawSpan, into output: inout OutputRawSpan) async throws(BytesError) {
-        let job = job(byteCount: input.byteCount)
-        try Self.write(header: job.format, level: job.level, into: &output)
-        let (lanes, slots) = unsafe buffers()
-        // Unsafe and safe as in the synchronous form: the task group ends before this call does.
-        let source = input.withUnsafeBytes { unsafe UnsafeBytes(buffer: $0) }
-        let target = unsafe Self.freeCapacity(of: &output)
-        let delivery = await unsafe scheduler.runConcurrently(
-            job, chunkCount: job.chunkCount, format: job.format, lanes: lanes, slots: slots, input: source, output: target,
-            checksum: job.initialChecksum
-        )
-        try Self.commit(delivery, job: job, into: &output)
-    }
-
-    /// The output's free capacity as a pointer, for the workers.
-    ///
-    /// Unsafe: the pointer outlives the closure. Safe: callers use it only while `output` stays borrowed, and
-    /// count only what was written to it with ``commit(_:job:into:)``.
-    static func freeCapacity(of output: inout OutputRawSpan) -> UnsafeMutableBytes {
-        unsafe output.withUnsafeMutableBytes { buffer, initializedCount in
-            unsafe UnsafeMutableBytes(buffer: UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount...]))
-        }
-    }
-
-    /// Counts what the workers delivered as initialized output, then writes the trailer.
-    static func commit(_ delivery: ChunkScheduler.Delivery, job: Job, into output: inout OutputRawSpan) throws(BytesError) {
-        // Unsafe: counts the delivered bytes as initialized. Safe: the workers initialized exactly those, at
-        // the start of the free capacity.
-        unsafe output.withUnsafeMutableBytes { _, initializedCount in
-            initializedCount &+= delivery.produced
-        }
+    /// - Throws: ``BytesError/insufficientCapacity`` if the output ran out of room.
+    package static func end(_ delivery: ChunkDelivery, job: Job, into output: inout OutputRawSpan) throws(BytesError) {
         guard !delivery.failed else { throw .insufficientCapacity }
         try write(trailer: job.format, checksum: delivery.checksum, length: job.byteCount, into: &output)
     }
@@ -207,7 +163,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
     // MARK: - Engine
 
     /// What one call compresses: the input's size, how it's cut into chunks, and the container.
-    struct Job: Sendable {
+    package struct Job: Sendable {
         /// Where the data starts in the buffer (bytes before it are history), and how much there is.
         let base: Int
         let byteCount: Int
@@ -276,10 +232,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
         case .raw:
             return (bytes, 0)
         case .zlib:
-            // CMF: DEFLATE, 32 KB window. FLG: the level's class, then the check bits.
-            let levelClass: UInt16 = level <= 1 ? 0 : level <= 5 ? 1 : level == 6 ? 2 : 3
-            var header: UInt16 = 0x7800 | levelClass << 6
-            header |= 31 &- header % 31
+            let header = ZlibHeader.header(level: level)
             bytes[0] = UInt8(header >> 8)
             bytes[1] = UInt8(header & 0xFF)
             return (bytes, 2)
@@ -551,14 +504,3 @@ struct UnsafeLanes<Lane: ~Copyable>: @unchecked Sendable {
     let buffer: UnsafeMutableBufferPointer<Lane>
 }
 
-/// Input bytes for another thread. Unsafe: a pointer, valid while its owner keeps the bytes borrowed.
-@unsafe
-struct UnsafeBytes: @unchecked Sendable {
-    let buffer: UnsafeRawBufferPointer
-}
-
-/// Output memory for another thread. Unsafe: a pointer, valid while its owner keeps the memory borrowed.
-@unsafe
-struct UnsafeMutableBytes: @unchecked Sendable {
-    let buffer: UnsafeMutableRawBufferPointer
-}

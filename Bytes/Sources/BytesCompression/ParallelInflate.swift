@@ -1,5 +1,5 @@
 public import Bytes
-public import Dispatch
+internal import Dispatch
 
 /// DEFLATE (raw, zlib, or gzip) decompressed on several cores at once, where the stream allows it, and
 /// sequentially where it doesn't: always the same output as ``DeflateDecoder``.
@@ -90,47 +90,6 @@ public struct ParallelDeflateDecoder: ~Copyable {
         lastSegmentCount = 1
         sequential.reset()
         return try sequential.decompressAll(input, into: &output)
-    }
-
-    // MARK: - Async
-
-    /// Decompresses as ``decompressAll(_:into:)`` does, on `queue`: the calling task suspends until it's done,
-    /// and its thread is free meanwhile.
-    ///
-    /// - Returns: The bytes of `input` the stream took.
-    /// - Throws: As ``decompressAll(_:into:)``.
-    public nonisolated(nonsending) mutating func decompressAll(
-        _ input: RawSpan, into output: inout OutputRawSpan, on queue: DispatchQueue
-    ) async throws(BytesError) -> Int {
-        // Unsafe: the decoder, the input, and the output's free capacity as pointers, for a closure on
-        // another thread. Safe: all are borrowed for this whole call, which waits for the closure; only the
-        // bytes it reports are counted as initialized.
-        let source = input.withUnsafeBytes { unsafe UnsafeBytes(buffer: $0) }
-        let target = unsafe output.withUnsafeMutableBytes { buffer, initializedCount in
-            unsafe UnsafeMutableBytes(buffer: UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount...]))
-        }
-        // The decoder's pointer escapes its closure: `self` is an `inout` parameter, whose storage stays put
-        // until this call returns, and the closure finishes before then.
-        let decoder = withUnsafeMutablePointer(to: &self) { unsafe UnsafeDecoder(pointer: $0) }
-        let result: Result<(consumed: Int, produced: Int), BytesError> = await unsafe withUnsafeContinuation { continuation in
-            queue.async {
-                let input = unsafe RawSpan(_unsafeBytes: source.buffer)
-                var output = unsafe OutputRawSpan(buffer: target.buffer, initializedCount: 0)
-                do throws(BytesError) {
-                    let consumed = try unsafe decoder.pointer.pointee.decompressAll(input, into: &output)
-                    unsafe continuation.resume(returning: .success((consumed, unsafe output.finalize(for: target.buffer))))
-                } catch {
-                    unsafe continuation.resume(returning: .failure(error))
-                }
-            }
-        }
-        let (consumed, produced) = try result.get()
-        // Unsafe: counts the bytes the decoder wrote as initialized. Safe: it initialized exactly those, at the
-        // start of the free capacity.
-        unsafe output.withUnsafeMutableBytes { _, initializedCount in
-            initializedCount &+= produced
-        }
-        return consumed
     }
 
     // MARK: - Engine
@@ -312,9 +271,3 @@ struct UnsafeSplits: @unchecked Sendable {
     let buffer: UnsafeBufferPointer<Int>
 }
 
-/// A decoder, for a closure on another thread. Unsafe: a pointer, valid while its owner keeps the decoder
-/// borrowed.
-@unsafe
-struct UnsafeDecoder: @unchecked Sendable {
-    let pointer: UnsafeMutablePointer<ParallelDeflateDecoder>
-}

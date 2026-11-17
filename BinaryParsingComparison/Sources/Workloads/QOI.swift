@@ -29,6 +29,17 @@ public struct DecodedImage: Equatable, Sendable {
 /// A QOI file the decoders reject: a bad header, or an image of 400 million pixels or more.
 public struct QOIError: Error {}
 
+/// The fields of a QOI op's first byte, by name: a 2-bit tag, then 6 bits whose meaning depends on it.
+enum QOIOp {
+    static var tag: BitField<Int> { BitField(bits: 6...7) }
+    /// QOI_OP_INDEX's index, QOI_OP_LUMA's green delta, QOI_OP_RUN's run length: the low 6 bits.
+    static var value: BitField<Int> { BitField(bits: 0...5) }
+    // QOI_OP_DIFF's deltas, each biased by 2.
+    static var redDelta: BitField<Crumb> { BitField(bits: 4...5) }
+    static var greenDelta: BitField<Crumb> { BitField(bits: 2...3) }
+    static var blueDelta: BitField<Crumb> { BitField(bits: 0...1) }
+}
+
 public enum QOI {
     static var maximumPixelCount: Int { 400_000_000 }
 
@@ -122,14 +133,14 @@ public enum QOI {
                     let rgb = try reader.read(Byte3.self)
                     pixel = SIMD4(rgb[0], rgb[1], rgb[2], previous[3])
                 default:
-                    let value = UInt8(first[Bits<6>.self, at: 0])
-                    switch first[Crumb.self, at: 6] {
+                    let value = UInt8(truncatingIfNeeded: first[QOIOp.value])
+                    switch first[QOIOp.tag] {
                     case 0b00: // QOI_OP_INDEX
                         pixel = cache[Int(value)]
                     case 0b01: // QOI_OP_DIFF: three 2-bit deltas, biased by 2
                         let delta = SIMD4(
-                            UInt8(first[Crumb.self, at: 4]), UInt8(first[Crumb.self, at: 2]),
-                            UInt8(first[Crumb.self, at: 0]), 2
+                            UInt8(first[QOIOp.redDelta]), UInt8(first[QOIOp.greenDelta]),
+                            UInt8(first[QOIOp.blueDelta]), 2
                         ) &- 2
                         pixel = previous &+ delta
                     case 0b10: // QOI_OP_LUMA: green's delta, then red's and blue's relative to it

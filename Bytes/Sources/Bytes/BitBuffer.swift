@@ -121,7 +121,7 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     ///
     /// ```swift
     /// let unit = bits.position
-    /// let symbol = table.decode(&bits)
+    /// let symbol = try table.decode(&bits)
     /// if bits.isOverrun {   // The input ended inside the code: undo it, and ask for more.
     ///     bits.rewind(to: unit)
     ///     return .needsInput

@@ -18,6 +18,22 @@ import Bytes
 /// more (or, for the `ParserSpan` decoder, a bad magic or a match distance of 0).
 public struct LZ4Error: Error {}
 
+/// The frame descriptor's fields, by name: its FLG byte, its BD byte, and each block's size word.
+enum LZ4Fields {
+    // FLG: version (2 bits), independent blocks, block checksums, content size, content checksum, a reserved
+    // bit, dictionary ID.
+    static var independentVersion1: BitPattern { "011? ??0?" }
+    static var blockChecksums: BitFlag { BitFlag(bit: 4) }
+    static var contentSize: BitFlag { BitFlag(bit: 3) }
+    static var dictionaryID: BitFlag { BitFlag(bit: 0) }
+    // BD: a reserved bit, the block maximum size code (3 bits), 4 reserved bits.
+    static var blockDescriptor: BitPattern { "0??? 0000" }
+    static var blockMaximumSize: BitField<Int> { BitField(bits: 4...6) }
+    // A block's size word: stored uncompressed (the top bit), then the size.
+    static var uncompressed: BitFlag { BitFlag(bit: 31) }
+    static var blockSize: BitField<Int> { BitField(bits: 0...30) }
+}
+
 public enum LZ4 {
     // MARK: Bytes
 
@@ -58,15 +74,14 @@ public enum LZ4 {
         try reader.expect(0x04_22_4D_18 as Byte4) // 0x184D2204, little-endian
         let flags = try reader.read(Byte.self)
         let descriptor = try reader.read(Byte.self)
-        let sizeCode = Int(descriptor[Bits<3>.self, at: 4])
-        // Version 01, reserved bit 1 clear, independent blocks (bit 5); the descriptor's reserved bits
-        // clear; block sizes 64 KB to 4 MB.
-        guard flags.matches(0b0110_0000, mask: 0b1110_0010), descriptor.matches(0, mask: 0b1000_1111), sizeCode >= 4
+        let sizeCode = descriptor[LZ4Fields.blockMaximumSize]
+        // Version 01 with independent blocks; the reserved bits clear; block sizes 64 KB to 4 MB.
+        guard flags.matches(LZ4Fields.independentVersion1), descriptor.matches(LZ4Fields.blockDescriptor), sizeCode >= 4
         else { throw LZ4Error() }
         let blockMaximum = 1 << (8 &+ 2 &* sizeCode)
-        let hasBlockChecksums = flags[bit: 4]
-        let contentSize = try flags[bit: 3] ? reader.read(Int.self, as: Byte8.self, .littleEndian) : 0
-        if flags[bit: 0] { try reader.skip(byteCount: 4) } // dictionary ID
+        let hasBlockChecksums = flags[LZ4Fields.blockChecksums]
+        let contentSize = try flags[LZ4Fields.contentSize] ? reader.read(Int.self, as: Byte8.self, .littleEndian) : 0
+        if flags[LZ4Fields.dictionaryID] { try reader.skip(byteCount: 4) } // dictionary ID
         try reader.skip(byteCount: 1) // header checksum
 
         var output: [UInt8] = []
@@ -74,9 +89,9 @@ public enum LZ4 {
         while true {
             let size = try reader.read(Byte4.self, .littleEndian)
             if size == 0 { break } // EndMark
-            let block = try reader.read(byteCount: Int(size[bits: 0..<31]))
+            let block = try reader.read(byteCount: size[LZ4Fields.blockSize])
             if hasBlockChecksums { try reader.skip(byteCount: 4) }
-            if size[bit: 31] { // Stored uncompressed.
+            if size[LZ4Fields.uncompressed] {
                 try output.append(alignedByteCapacity: block.byteCount) { writer throws(BytesError) in try writer.write(block) }
             } else {
                 try output.append(alignedByteCapacity: blockMaximum) { writer throws(BytesError) in

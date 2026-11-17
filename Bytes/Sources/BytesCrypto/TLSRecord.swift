@@ -1,5 +1,6 @@
 public import Bytes
 internal import CryptoKit
+internal import BytesFoundation
 internal import Foundation
 
 /// One direction's TLS 1.3 traffic keys (RFC 8446, 7.3): a 32-byte AEAD key and a 12-byte IV.
@@ -17,11 +18,7 @@ public struct TLSTrafficKeys: Sendable {
     }
 
     static func data(_ span: RawSpan) -> Data {
-        var data = Data(count: span.byteCount)
-        for index in 0..<span.byteCount {
-            data[index] = span.load(fromByteOffset: index, as: UInt8.self)
-        }
-        return data
+        Data(copying: span)
     }
 
     static func inline<let count: Int>(_ data: Data) -> InlineArray<count, UInt8> {
@@ -109,19 +106,17 @@ public struct TLSRecordSealer: ~Copyable {
     let iv: InlineArray<12, UInt8>
     var sequence: UInt64 = 0
     /// Plaintext waiting to fill a record.
-    var plaintext: UniqueArray<UInt8>
-    var fill = 0
+    var plaintext: ByteBuffer
     /// A sealed record waiting for room in the output.
-    var sealed: UniqueArray<UInt8>
-    var sealedStart = 0
-    var sealedEnd = 0
+    var sealed: ByteBuffer
 
     /// Creates a sealer for one direction's keys.
     public init(keys: TLSTrafficKeys) {
         aead = ChaCha20Poly1305(key: keys.key.span.bytes)
         iv = keys.iv
-        plaintext = UniqueArray(repeating: 0, count: TLSRecord.maximumPlaintext)
-        sealed = UniqueArray(repeating: 0, count: TLSRecord.size(plaintext: TLSRecord.maximumPlaintext))
+        // Each is filled from empty and emptied whole (or delivered to the end), so neither compacts.
+        plaintext = ByteBuffer(capacity: TLSRecord.maximumPlaintext, compactingBelow: 0)
+        sealed = ByteBuffer(capacity: TLSRecord.size(plaintext: TLSRecord.maximumPlaintext), compactingBelow: 0)
     }
 
     /// Seals `bytes` as one record into `destination`, which must have room, and advances `sequence`.
@@ -164,22 +159,30 @@ public struct TLSRecordSealer: ~Copyable {
 
     /// Seals the buffered plaintext into ``sealed``.
     mutating func sealBuffered() {
-        var target = sealed.mutableSpan
-        var raw = MutableRawSpan(mutating: &target)
-        sealedEnd = Self.seal(plaintext.span.bytes.extracting(0..<fill), into: &raw, aead: aead, iv: iv, sequence: &sequence)
-        sealedStart = 0
-        fill = 0
+        Self.seal(plaintext, into: &sealed, aead: aead, iv: iv, sequence: &sequence)
+        plaintext.removeAll()
+    }
+
+    /// Seals `plaintext`'s bytes into one record appended to `sealed`. (The buffers are parameters, not
+    /// properties, so the plaintext's span can depend on one while the other is filled.)
+    static func seal(
+        _ plaintext: borrowing ByteBuffer, into sealed: inout ByteBuffer, aead: ChaCha20Poly1305,
+        iv: InlineArray<12, UInt8>, sequence: inout UInt64
+    ) {
+        let bytes = plaintext.unread
+        let size = TLSRecord.size(plaintext: bytes.byteCount)
+        sealed.fill { output in
+            output.withFreeCapacity(byteCount: size) { span, written in
+                written = seal(bytes, into: &span, aead: aead, iv: iv, sequence: &sequence)
+            }
+        }
     }
 
     private mutating func deliverSealed(into output: inout OutputRawSpan) -> Int {
-        let count = min(sealedEnd &- sealedStart, output.freeCapacity)
+        let count = min(sealed.unreadByteCount, output.freeCapacity)
         guard count > 0 else { return 0 }
-        output.append(copying: sealed.span.bytes.extracting(sealedStart..<(sealedStart &+ count)))
-        sealedStart &+= count
-        if sealedStart == sealedEnd {
-            sealedStart = 0
-            sealedEnd = 0
-        }
+        output.append(copying: sealed.unread.extracting(0..<count))
+        sealed.consume(count)
         return count
     }
 }
@@ -190,9 +193,8 @@ extension TLSRecordSealer: ResettableByteTransform {
     /// Discards buffered plaintext and sealed bytes not yet delivered. The record sequence continues: with the
     /// same keys, restarting it would seal new records under nonces already used.
     public mutating func reset() {
-        fill = 0
-        sealedStart = 0
-        sealedEnd = 0
+        plaintext.removeAll()
+        sealed.removeAll()
     }
 
     /// Seals `input` into records, appending them to `output`; `.flush` or `.finish` seals what's buffered.
@@ -201,13 +203,13 @@ extension TLSRecordSealer: ResettableByteTransform {
         var produced = 0
         while true {
             produced &+= deliverSealed(into: &output)
-            if sealedEnd > 0 {
+            if !sealed.isEmpty {
                 return TransformProgress(consumed: consumed, produced: produced, status: .needsOutput)
             }
             let available = input.byteCount &- consumed
             if available > 0 {
                 let count = min(available, TLSRecord.maximumPlaintext)
-                if fill == 0 && (count == TLSRecord.maximumPlaintext || flush != .none)
+                if plaintext.isEmpty && (count == TLSRecord.maximumPlaintext || flush != .none)
                     && output.freeCapacity >= TLSRecord.size(plaintext: count) {
                     // Straight into the output.
                     let bytes = input.extracting(consumed..<(consumed &+ count))
@@ -219,17 +221,15 @@ extension TLSRecordSealer: ResettableByteTransform {
                     produced &+= size
                     continue
                 }
-                let take = min(available, TLSRecord.maximumPlaintext &- fill)
-                var target = plaintext.mutableSpan
-                target.copyBytes(from: input.extracting(consumed..<(consumed &+ take)), toByteOffset: fill)
-                fill &+= take
+                let take = min(available, plaintext.freeCapacity)
+                plaintext.fill { $0.append(copying: input.extracting(consumed..<(consumed &+ take))) }
                 consumed &+= take
-                if fill == TLSRecord.maximumPlaintext {
+                if plaintext.isFull {
                     sealBuffered()
                 }
                 continue
             }
-            if flush != .none && fill > 0 {
+            if flush != .none && !plaintext.isEmpty {
                 sealBuffered()
                 continue
             }
@@ -258,6 +258,12 @@ public struct TLSRecordOpener: ~Copyable {
 extension TLSRecordOpener: ResettableByteTransform {
     public typealias Failure = BytesError
 
+    /// A whole record: header and up to 16,640 bytes of ciphertext and tag.
+    public static var maximumUnitByteCount: Int { TLSRecord.headerSize &+ TLSRecord.maximumEncrypted }
+
+    /// A record's body, opened straight into the output: up to 16,624 bytes.
+    public static var minimumOutputCapacity: Int { TLSRecord.maximumEncrypted &- TLSRecord.tagSize }
+
     /// Nothing to discard: records are opened whole. The record sequence continues, in step with a sealer's
     /// (``TLSRecordSealer/reset()``); ``reset(sequence:)`` sets it.
     public mutating func reset() {}
@@ -272,7 +278,7 @@ extension TLSRecordOpener: ResettableByteTransform {
     ///
     /// - Throws: ``BytesError/mismatch`` for a record that fails authentication; ``BytesError/invalidValue``
     ///   for one that isn't application data or is too long; ``BytesError/insufficientData`` at `.finish` with
-    ///   a partial record left.
+    ///   a partial record left. At `.finish` with every record opened, the status is `.finished`.
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         var consumed = 0
         var produced = 0
@@ -312,7 +318,8 @@ extension TLSRecordOpener: ResettableByteTransform {
             consumed &+= TLSRecord.headerSize &+ length
             produced &+= plaintextLength
         }
-        if flush == .finish && consumed < input.byteCount { throw .insufficientData }
-        return TransformProgress(consumed: consumed, produced: produced, status: .needsInput)
+        guard flush == .finish else { return TransformProgress(consumed: consumed, produced: produced, status: .needsInput) }
+        guard consumed == input.byteCount else { throw .insufficientData }
+        return TransformProgress(consumed: consumed, produced: produced, status: .finished)
     }
 }

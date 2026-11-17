@@ -273,17 +273,15 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
     ///   `MQTTError.protocolError(_:)` if retain handling or maximum QoS is 3.
     @inlinable
     @_lifetime(reader: copy reader)
-    init(reading reader: inout AlignedBytesReader) throws(MQTTError) {
+    init(reading reader: inout BigEndianBytesReader) throws(MQTTError) {
         let options: Byte
         do throws(BytesError) { options = try reader.read(Byte.self) } catch { throw .malformed("subscription options") }
-        guard options[Crumb.self, at: 6] == 0 else { throw .malformed("reserved subscription option bits") }
-        guard let handling = MQTTRetainHandling(rawBits: options[Crumb.self, at: 4]) else {
-            throw .protocolError("retain handling 3")
-        }
-        guard let qos = MQTTQoS(rawBits: options[Crumb.self, at: 0]) else { throw .protocolError("maximum QoS 3") }
+        guard options.isZero(SubscriptionOptionFlags.reserved) else { throw .malformed("reserved subscription option bits") }
+        guard let handling = options[SubscriptionOptionFlags.retainHandling] else { throw .protocolError("retain handling 3") }
+        guard let qos = options[SubscriptionOptionFlags.maximumQoS] else { throw .protocolError("maximum QoS 3") }
         retainHandling = handling
-        retainAsPublished = options[bit: 3]
-        noLocal = options[bit: 2]
+        retainAsPublished = options[SubscriptionOptionFlags.retainAsPublished]
+        noLocal = options[SubscriptionOptionFlags.noLocal]
         maximumQoS = qos
     }
 
@@ -292,20 +290,20 @@ public struct MQTTSubscriptionOptions: Hashable, Sendable {
     /// - Parameter writer: The writer to append to.
     /// - Throws: `BytesError.insufficientCapacity` if there's no room for the byte.
     @inlinable
-    func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
-        var options = Byte.zero
-        options[Crumb.self, at: 4] = Crumb(rawBitsOf: retainHandling)
-        options[bit: 3] = retainAsPublished
-        options[bit: 2] = noLocal
-        options[Crumb.self, at: 0] = Crumb(rawBitsOf: maximumQoS)
-        try writer.write(options)
+    func write(to writer: inout BigEndianBytesWriter) throws(BytesError) {
+        try writer.write(Byte {
+            $0[SubscriptionOptionFlags.retainHandling] = retainHandling
+            $0[SubscriptionOptionFlags.retainAsPublished] = retainAsPublished
+            $0[SubscriptionOptionFlags.noLocal] = noLocal
+            $0[SubscriptionOptionFlags.maximumQoS] = maximumQoS
+        })
     }
 }
 
 // MARK: - Field encodings
 
 /// MQTT's data representations (section 1.5), on top of `Bytes`.
-extension AlignedBytesReader {
+extension BigEndianBytesReader {
     /// Reads a UTF-8 Encoded String: a 2-byte big-endian length, then UTF-8 without U+0000 [MQTT-1.5.4-2].
     ///
     /// Unchecked, it trusts that the string was validated before: for iterating validated lists. The
@@ -324,10 +322,10 @@ extension AlignedBytesReader {
             // Unsafe: skips UTF-8 validation, which is what makes iterating a validated packet's string lists
             // cheap. Safe enough: only called on packets whose `validate()` already checked these strings, and
             // validation is a precondition of the unchecked iterators. No safe construct skips the check.
-            return unsafe try UTF8Span(unchecked: Span(viewing: read(bytesPrefixedBy: Byte2.self, .bigEndian)))
+            return unsafe try UTF8Span(unchecked: Span(viewing: read(bytesPrefixedBy: Byte2.self)))
         }
         // One pass for ASCII: UTF-8 and U+0000 checked together, 16 bytes at a time.
-        return try read(utf8PrefixedBy: Byte2.self, .bigEndian, excluding: Text.null)
+        return try read(utf8PrefixedBy: Byte2.self, excluding: Text.null)
     }
 
     /// Reads a checked UTF-8 Encoded String (see ``readMQTTText(checked:)``).
@@ -353,7 +351,7 @@ extension AlignedBytesReader {
     @_lifetime(copy self)
     @_lifetime(self: copy self)
     mutating func readMQTTBinary(_ detail: StaticString) throws(MQTTError) -> RawSpan {
-        do throws(BytesError) { return try read(bytesPrefixedBy: Byte2.self, .bigEndian) } catch { throw .malformed(detail) }
+        do throws(BytesError) { return try read(bytesPrefixedBy: Byte2.self) } catch { throw .malformed(detail) }
     }
 
     /// Reads a Two Byte Integer, big-endian.
@@ -364,7 +362,7 @@ extension AlignedBytesReader {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func readMQTTUInt16(_ detail: StaticString) throws(MQTTError) -> UInt16 {
-        do throws(BytesError) { return try read(Byte2.self, .bigEndian) } catch { throw .malformed(detail) }
+        do throws(BytesError) { return try read(UInt16.self) } catch { throw .malformed(detail) }
     }
 
     /// Reads a non-zero packet identifier [MQTT-2.2.1-3].
@@ -422,7 +420,7 @@ extension AlignedBytesReader {
     }
 }
 
-extension AlignedBytesWriter {
+extension BigEndianBytesWriter {
     /// Writes a UTF-8 Encoded String: a 2-byte big-endian length, then the text. It doesn't check for U+0000
     /// (``MQTTPacket/validate()`` does).
     ///
@@ -432,7 +430,7 @@ extension AlignedBytesWriter {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func writeMQTTString(_ text: UTF8Span) throws(BytesError) {
-        try write(text, prefixedBy: Byte2.self, .bigEndian)
+        try write(text, prefixedBy: Byte2.self)
     }
 
     /// Writes Binary Data: a 2-byte big-endian length, then the bytes.
@@ -443,7 +441,7 @@ extension AlignedBytesWriter {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func writeMQTTBinary(_ bytes: RawSpan) throws(BytesError) {
-        try write(bytes, prefixedBy: Byte2.self, .bigEndian)
+        try write(bytes, prefixedBy: Byte2.self)
     }
 }
 

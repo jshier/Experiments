@@ -51,9 +51,25 @@ public struct TransformProgress: Hashable, Sendable {
 /// Compose stages with ``then(_:bufferCapacity:)``; stages share one error type, ``Failure`` (`Never` for
 /// stages that can't fail, which makes a pipeline of them non-throwing). ``promoted(to:)`` lifts a
 /// non-throwing stage into another's error type, and ``mapError(_:)`` converts between types.
+///
+/// ## The end of a stream
+///
+/// Every stage follows one rule at `.finish`: it returns ``TransformStatus/finished`` once all its output is
+/// delivered (``TransformStatus/needsOutput`` until then), or throws if its input ended early (a decoder's
+/// truncated stream, a partial record). So a drive loop stops at `.finished`, and `.needsInput` only ever
+/// means "more input, please". ``transform(_:appending:flush:growth:)`` is that loop.
 public protocol ByteTransform: ~Copyable {
     /// What the stage throws: `Never` if it can't fail.
     associatedtype Failure: Error
+
+    /// The most input a call may need at once before it can consume any: a whole unit, such as a TLS record
+    /// (16,645 bytes). A stage that keeps back a partial unit needs its buffer to hold this much. 1 (the
+    /// default) for stages that consume byte by byte.
+    static var maximumUnitByteCount: Int { get }
+
+    /// The least free output a call needs to make progress: a whole unit of output, such as a TLS record
+    /// sealed at once. 1 (the default) for stages that can write any amount.
+    static var minimumOutputCapacity: Int { get }
 
     /// Transforms as much of `input` as it can, appending to `output`.
     ///
@@ -62,8 +78,65 @@ public protocol ByteTransform: ~Copyable {
     ///   - output: Where to append transformed bytes.
     ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
     /// - Returns: What was consumed and produced, and why it returned.
-    /// - Throws: The stage's ``Failure``.
+    /// - Throws: The stage's `Failure`.
     mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress
+}
+
+public extension ByteTransform where Self: ~Copyable {
+    @inlinable
+    static var maximumUnitByteCount: Int { 1 }
+
+    @inlinable
+    static var minimumOutputCapacity: Int { 1 }
+
+    /// Transforms all of `input`, appending the output to `output`, which grows as needed: the drive loop
+    /// for a whole message or stream in memory.
+    ///
+    /// ```swift
+    /// var compressed: [UInt8] = []
+    /// let progress = try encoder.transform(message, appending: &compressed, flush: .finish)
+    /// precondition(progress.status == .finished)
+    /// ```
+    ///
+    /// Calls the stage until it has taken all the input it can (``TransformStatus/needsInput``) or finished,
+    /// adding room whenever it needs more: at least ``minimumOutputCapacity``, and `growth` or the input's size
+    /// beyond that.
+    ///
+    /// - Parameters:
+    ///   - input: The bytes to transform.
+    ///   - output: The array to append to.
+    ///   - flush: As for ``transform(_:into:flush:)``; with `.finish`, this returns ``TransformStatus/finished``.
+    ///   - growth: The least room to add at a time.
+    /// - Returns: What was consumed and produced: input a stage keeps back (a partial unit) isn't consumed.
+    /// - Throws: The stage's `Failure`. The output appended before it stays.
+    @inlinable
+    mutating func transform(
+        _ input: RawSpan, appending output: inout [UInt8], flush: TransformFlush, growth: Int = 16 << 10
+    ) throws(Failure) -> TransformProgress {
+        var consumed = 0
+        var produced = 0
+        while true {
+            let room = max(Self.minimumOutputCapacity, growth, input.byteCount &- consumed)
+            output.reserveCapacity(output.count &+ room)
+            let rest = input.extracting(consumed...)
+            var progress = TransformProgress(consumed: 0, produced: 0, status: .needsInput)
+            try output.append(addingCapacity: room) { (span: inout OutputSpan<UInt8>) throws(Failure) in
+                // Unsafe: an output span over the array's new capacity. Safe: it covers only the uninitialized
+                // part and ends with the closure; what the stage wrote is added to the initialized count.
+                try unsafe span.withUnsafeMutableBufferPointer { buffer, initializedCount throws(Failure) in
+                    let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
+                    var raw = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
+                    progress = try transform(rest, into: &raw, flush: flush)
+                    initializedCount &+= unsafe raw.finalize(for: free)
+                }
+            }
+            consumed &+= progress.consumed
+            produced &+= progress.produced
+            if progress.status != .needsOutput {
+                return TransformProgress(consumed: consumed, produced: produced, status: progress.status)
+            }
+        }
+    }
 }
 
 /// A stage that can start over on a new stream, keeping its allocations: a pipeline built once serves stream
@@ -74,7 +147,7 @@ public protocol ResettableByteTransform: ByteTransform, ~Copyable {
 }
 
 /// A stage that rewrites bytes in place, one for one: a stream cipher, a checksum that passes bytes
-/// through. After another stage (``ByteTransform/then(_:)-(InPlaceByteTransform)``) it works on that stage's
+/// through. After another stage (`then(_:)` with an in-place stage) it works on that stage's
 /// output where it was written, with no buffer between them.
 public protocol InPlaceByteTransform: ~Copyable {
     /// What the stage throws: `Never` if it can't fail.
@@ -94,7 +167,7 @@ public extension ByteTransform where Self: ~Copyable {
     /// A pipeline of this stage, then `next`, with a buffer between them.
     ///
     /// ```swift
-    /// var pipeline = DeflateEncoder(format: .raw).then(RecordSealer(key: key))
+    /// var pipeline = DeflateEncoder(format: .raw).then(TLSRecordSealer(keys: keys))   // from BytesCompression and BytesCrypto
     /// let progress = try pipeline.transform(message, into: &output, flush: .flush)
     /// ```
     ///
@@ -154,17 +227,31 @@ public struct Pipeline<First: ByteTransform & ~Copyable, Second: ByteTransform &
     /// The first stage's status from its last call.
     @usableFromInline var firstStatus = TransformStatus.needsInput
 
-    /// Composes `first` and `second` with a buffer of `bufferCapacity` bytes between them.
+    /// Composes `first` and `second` with a buffer of at least `bufferCapacity` bytes between them: more if the
+    /// stages need it, room for the first's output unit beside a partial input unit the second keeps
+    /// (`First.minimumOutputCapacity + Second.maximumUnitByteCount`).
+    ///
+    /// - Parameters:
+    ///   - first: The first stage.
+    ///   - second: The stage that receives the first's output.
+    ///   - bufferCapacity: The buffer between the stages, allocated once, now.
     @inlinable
     public init(_ first: consuming First, _ second: consuming Second, bufferCapacity: Int = 64 << 10) {
         self.first = first
         self.second = second
-        buffer = ByteBuffer(capacity: bufferCapacity, compactingBelow: bufferCapacity &>> 2)
+        let capacity = max(bufferCapacity, First.minimumOutputCapacity &+ Second.maximumUnitByteCount)
+        buffer = ByteBuffer(capacity: capacity, compactingBelow: capacity &>> 2)
     }
 }
 
 extension Pipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
     public typealias Failure = First.Failure
+
+    @inlinable
+    public static var maximumUnitByteCount: Int { First.maximumUnitByteCount }
+
+    @inlinable
+    public static var minimumOutputCapacity: Int { Second.minimumOutputCapacity }
 
     /// Runs `input` through both stages into `output`.
     ///
@@ -212,9 +299,9 @@ extension Pipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
                     if firstStatus == .needsOutput && buffer.compact() {
                         continue
                     }
-                    // The first stage wants room the buffer can't give: the second keeps all of the buffer
-                    // (a partial unit, such as a TLS record bigger than the buffer). No call could move.
-                    precondition(firstStatus != .needsOutput, "A pipeline's buffer is smaller than its second stage's unit: raise bufferCapacity")
+                    // The first stage wants room the buffer can't give while the second keeps the rest: the buffer
+                    // is sized for the units the stages declare, so one of them keeps or needs more than it says.
+                    precondition(firstStatus != .needsOutput, "A stage keeps more input than its maximumUnitByteCount, or needs more output than its minimumOutputCapacity")
                     return TransformProgress(consumed: consumed, produced: produced, status: .needsInput)
                 }
             }
@@ -260,6 +347,12 @@ public struct FusedPipeline<First: ByteTransform & ~Copyable, Second: InPlaceByt
 
 extension FusedPipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
     public typealias Failure = First.Failure
+
+    @inlinable
+    public static var maximumUnitByteCount: Int { First.maximumUnitByteCount }
+
+    @inlinable
+    public static var minimumOutputCapacity: Int { First.minimumOutputCapacity }
 
     /// Runs `input` through the first stage into `output`, then rewrites what it produced in place; the
     /// second stage sees `flush` only when the first has used all its input.
@@ -319,6 +412,12 @@ public struct PromotedTransform<Base: ByteTransform & ~Copyable, Failure: Error>
 }
 
 extension PromotedTransform: ByteTransform where Base: ~Copyable {
+    @inlinable
+    public static var maximumUnitByteCount: Int { Base.maximumUnitByteCount }
+
+    @inlinable
+    public static var minimumOutputCapacity: Int { Base.minimumOutputCapacity }
+
     /// Transforms with the base stage; never throws.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {
@@ -349,6 +448,12 @@ public struct MappedErrorTransform<Base: ByteTransform & ~Copyable, Failure: Err
 }
 
 extension MappedErrorTransform: ByteTransform where Base: ~Copyable {
+    @inlinable
+    public static var maximumUnitByteCount: Int { Base.maximumUnitByteCount }
+
+    @inlinable
+    public static var minimumOutputCapacity: Int { Base.minimumOutputCapacity }
+
     /// Transforms with the base stage, throwing its errors converted.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {

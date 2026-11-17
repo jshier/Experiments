@@ -24,7 +24,7 @@ let package = Package(
     targets: [
         .target(
             name: "NativeZip",
-            dependencies: [.product(name: "Bytes", package: "Bytes")],
+            dependencies: [.product(name: "Bytes", package: "Bytes"), .product(name: "BytesMacros", package: "Bytes"), .product(name: "BytesFoundation", package: "Bytes")],
             swiftSettings: strictSettings
         ),
         .executableTarget(

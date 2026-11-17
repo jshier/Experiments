@@ -41,11 +41,17 @@ struct HuffmanEntry {
     /// Bits to consume: the code, plus a length's or distance's extra bits.
     /// Masked to 6 bits, the width a variable shift uses: so `BitBuffer.consume` can shift by the raw entry
     /// (ARM's `lsr` ignores the rest), keeping the mask off the decode loop's critical path.
-    @inline(__always) var totalBits: Int { Int(raw[bits: 0..<6]) }
-    @inline(__always) var codeLength: Int { Int(raw[Nibble.self, at: 8]) }
+    @inline(__always) var totalBits: Int { raw[Self.totalBitsField] }
+    @inline(__always) var codeLength: Int { raw[Self.codeLengthField] }
     /// Compiles to the same code as comparing the raw field: the optimizer folds the conversion away.
-    @inline(__always) var kind: Kind { Kind(rawBits: raw[Bits<3>.self, at: 12]) ?? .invalid }
-    @inline(__always) var value: Int { Int(raw[bits: 16..<32]) }
+    @inline(__always) var kind: Kind { raw[Self.kindField] ?? .invalid }
+    @inline(__always) var value: Int { raw[Self.valueField] }
+
+    // The fields, by name (the layout above; `totalBits` read as 6 bits).
+    static var totalBitsField: BitField<Int> { BitField(bits: 0...5) }
+    static var codeLengthField: BitField<Int> { BitField(bits: 8...11) }
+    static var kindField: BitField<Kind> { BitField(bits: 12...14) }
+    static var valueField: BitField<Int> { BitField(bits: 16...31) }
 
     /// The extra bits' value, from bits whose first is this entry's code's first.
     ///

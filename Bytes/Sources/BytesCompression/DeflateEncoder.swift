@@ -242,10 +242,7 @@ public struct DeflateEncoder: ~Copyable {
         case .raw:
             break
         case .zlib:
-            // CMF: DEFLATE, 32 KB window. FLG: the level's class, then the check bits.
-            let levelClass: UInt16 = level <= 1 ? 0 : level <= 5 ? 1 : level == 6 ? 2 : 3
-            var header: UInt16 = 0x7800 | levelClass << 6
-            header |= 31 &- header % 31
+            let header = ZlibHeader.header(level: level)
             let bytes: InlineArray<2, UInt8> = [UInt8(header >> 8), UInt8(header & 0xFF)]
             compressor.stage(bytes.span.bytes)
         case .gzip:

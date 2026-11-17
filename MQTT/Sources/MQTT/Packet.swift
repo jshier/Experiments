@@ -6,7 +6,7 @@ public import Bytes
 /// append more data and try again:
 ///
 /// ```swift
-/// var reader = AlignedBytesReader(received.span)
+/// var reader = BigEndianBytesReader(received.span)
 /// while let packet = try MQTTPacket.read(from: &reader) {
 ///     switch packet {
 ///     case .publish(let publish): deliver(String(copying: publish.topic), publish.payload)
@@ -65,7 +65,7 @@ public enum MQTTPacket: ~Escapable {
     @inlinable
     @_lifetime(copy reader)
     @_lifetime(reader: copy reader)
-    public static func read(from reader: inout AlignedBytesReader, maximumPacketSize: Int = .max) throws(MQTTError) -> MQTTPacket? {
+    public static func read(from reader: inout BigEndianBytesReader, maximumPacketSize: Int = .max) throws(MQTTError) -> MQTTPacket? {
         let start = reader.position
         guard let frame = try MQTTFrame.read(from: &reader, maximumPacketSize: maximumPacketSize) else { return nil }
         do throws(MQTTError) {
@@ -201,7 +201,7 @@ public enum MQTTPacket: ~Escapable {
     ///   packet is longer than ``maximumRemainingLength``; `BytesError.insufficientCapacity` if `writer`
     ///   doesn't have ``encodedByteCount`` bytes left.
     @inlinable
-    public func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
+    public func write(to writer: inout BigEndianBytesWriter) throws(BytesError) {
         switch self {
         case let .connect(packet): try packet.write(to: &writer)
         case let .connectAcknowledgement(packet): try packet.write(to: &writer)

@@ -188,7 +188,7 @@ public extension GenericBytesReader where Mode == BitAddressable {
     }
 }
 
-public extension GenericBytesReader where Mode == ByteAligned {
+public extension GenericBytesReader where Mode: ByteAlignedCursorMode {
     /// Creates a cursor at the start of `span`.
     ///
     /// - Parameter span: The bytes to read. The cursor borrows them.
@@ -550,25 +550,25 @@ public extension GenericBytesReader {
         _byteOffset &+= T.byteCount
     }
 
-    /// Reads the next `T.byteCount` bytes as a two's-complement signed integer in `byteOrder`,
-    /// sign-extended to `I`: the signed counterpart of ``read(_:_:)``.
+    /// Reads a `T` field in `byteOrder` as a two's complement signed integer, sign-extended to `I`: the signed
+    /// counterpart of `read(_:as:_:)`, which reads a field's unsigned value.
     ///
     /// ```swift
-    /// let offset = try reader.readSigned(Byte4.self, .littleEndian, as: Int32.self)
-    /// let sample = try reader.readSigned(Byte3.self, .bigEndian, as: Int32.self)   // FF FF FE → -2
+    /// let seconds = try reader.read(Int32.self, asSigned: Byte4.self, .littleEndian)
+    /// let sample = try reader.read(Int.self, asSigned: Byte3.self, .bigEndian)   // FF FF FE → -2
     /// ```
     ///
     /// - Parameters:
-    ///   - type: The byte group to read, such as `Byte4.self`.
+    ///   - type: The signed integer type to read, such as `Int32.self`.
+    ///   - fieldType: The byte group the field is stored as, such as `Byte4.self`.
     ///   - byteOrder: The byte order of the field.
-    ///   - integerType: The signed integer type to return.
-    /// - Returns: The signed value.
+    /// - Returns: The value.
     /// - Throws: ``BytesError/insufficientData`` if fewer whole bytes remain, consuming nothing.
-    /// - Precondition: `I` is at least as wide as the group.
+    /// - Precondition: `I` is at least as wide as the field (checked when the types are known, at no cost).
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func readSigned<T: ByteGroup, I: FixedWidthInteger & SignedInteger>(
-        _ type: T.Type, _ byteOrder: ByteOrder, as integerType: I.Type = Int.self
+    mutating func read<I: FixedWidthInteger & SignedInteger, T: ByteGroup>(
+        _ type: I.Type, asSigned fieldType: T.Type, _ byteOrder: ByteOrder
     ) throws(BytesError) -> I {
         try read(T.self).signedInteger(byteOrder, as: I.self)
     }
@@ -589,7 +589,7 @@ public extension GenericBytesReader {
     /// zip directory, all in the catch). Don't wrap the parse in a closure that adds the location
     /// instead: the closure isn't inlined, so the cursor lives in memory (+15%).
     ///
-    /// The offset is in this cursor. A read that failed inside a section (``readSection(byteCount:)``) is
+    /// The offset is in this cursor. A read that failed inside a section (``readSection(byteCount:)-(Int)``) is
     /// reported at the section's start or end in its parent; locate it in the section to be exact.
     ///
     /// - Parameter error: The error a read threw.

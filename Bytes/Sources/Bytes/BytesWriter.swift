@@ -159,7 +159,7 @@ public extension GenericBytesWriter where Mode == BitAddressable {
     }
 }
 
-public extension GenericBytesWriter where Mode == ByteAligned {
+public extension GenericBytesWriter where Mode: ByteAlignedCursorMode {
     /// Creates a writer at the start of `bytes`, overwriting them.
     ///
     /// - Parameter bytes: The memory to write into; the writer's capacity is its length.
@@ -1675,6 +1675,101 @@ public extension [UInt8] {
     ) throws(E) {
         try append(addingCapacity: byteCapacity) { (output: inout OutputSpan<UInt8>) throws(E) in
             try output._withBytesWriter(bitOrder: .mostSignificantFirst, body)
+        }
+    }
+}
+
+public extension [UInt8] {
+    /// ``init(byteCapacity:bitOrder:writing:)`` with a byte-aligned writer of the given mode: a byte-ordered
+    /// writer (``BigEndianBytesWriter``, ``LittleEndianBytesWriter``) for formats whose integers all share
+    /// one order. The mode is an argument, so the closure's writer type needs no annotation (annotate its
+    /// error type, as below, or it throws `any Error`).
+    ///
+    /// ```swift
+    /// let bytes = try [UInt8](byteCapacity: 6, mode: BigEndianBytes.self) { (writer) throws(BytesError) in
+    ///     try writer.write(UInt16(type))
+    ///     try writer.write(UInt32(length))
+    /// }
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - byteCapacity: The most bytes `body` can write; also the array's reserved capacity.
+    ///   - mode: The writer's mode, such as `BigEndianBytes.self`.
+    ///   - body: Receives a writer over that many bytes.
+    /// - Throws: What `body` throws.
+    @inlinable @inline(always)
+    init<Mode: ByteAlignedCursorMode, E: Error>(
+        byteCapacity: Int, mode: Mode.Type, writing body: (inout GenericBytesWriter<Mode>) throws(E) -> Void
+    ) throws(E) {
+        var array: [UInt8] = []
+        array.reserveCapacity(byteCapacity)
+        try array.append(addingCapacity: byteCapacity) { (output: inout OutputSpan<UInt8>) throws(E) in
+            try output._withBytesWriter(bitOrder: .mostSignificantFirst, body)
+        }
+        self = array
+    }
+
+    /// ``append(byteCapacity:bitOrder:writing:)`` with a byte-aligned writer of the given mode.
+    ///
+    /// - Parameters:
+    ///   - byteCapacity: The most bytes `body` can write.
+    ///   - mode: The writer's mode, such as `BigEndianBytes.self`.
+    ///   - body: Receives a writer over that many bytes.
+    /// - Throws: What `body` throws.
+    @inlinable @inline(always)
+    mutating func append<Mode: ByteAlignedCursorMode, E: Error>(
+        byteCapacity: Int, mode: Mode.Type, writing body: (inout GenericBytesWriter<Mode>) throws(E) -> Void
+    ) throws(E) {
+        try append(addingCapacity: byteCapacity) { (output: inout OutputSpan<UInt8>) throws(E) in
+            try output._withBytesWriter(bitOrder: .mostSignificantFirst, body)
+        }
+    }
+}
+
+public extension OutputSpan where Element == UInt8 {
+    /// ``withBytesWriter(bitOrder:_:)`` with a byte-aligned writer of the given mode.
+    ///
+    /// - Parameters:
+    ///   - mode: The writer's mode, such as `BigEndianBytes.self`.
+    ///   - body: Receives a writer over the free capacity. If it throws, nothing is added.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws.
+    @inlinable
+    @_lifetime(self: copy self)
+    mutating func withBytesWriter<Mode: ByteAlignedCursorMode, R: ~Copyable, E: Error>(
+        mode: Mode.Type, _ body: (inout GenericBytesWriter<Mode>) throws(E) -> R
+    ) throws(E) -> R {
+        // Unsafe and safe as for the plain form.
+        try unsafe withUnsafeMutableBufferPointer { buffer, initializedCount throws(E) -> R in
+            let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
+            var writer = unsafe GenericBytesWriter<Mode>(MutableRawSpan(_unsafeBytes: free))
+            let result = try body(&writer)
+            initializedCount &+= writer.byteCount
+            return result
+        }
+    }
+}
+
+public extension OutputRawSpan {
+    /// ``withBytesWriter(bitOrder:_:)`` with a byte-aligned writer of the given mode.
+    ///
+    /// - Parameters:
+    ///   - mode: The writer's mode, such as `BigEndianBytes.self`.
+    ///   - body: Receives a writer over the free capacity. If it throws, nothing is added.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws.
+    @inlinable
+    @_lifetime(self: copy self)
+    mutating func withBytesWriter<Mode: ByteAlignedCursorMode, R: ~Copyable, E: Error>(
+        mode: Mode.Type, _ body: (inout GenericBytesWriter<Mode>) throws(E) -> R
+    ) throws(E) -> R {
+        // Unsafe and safe as for the plain form.
+        try unsafe withUnsafeMutableBytes { buffer, initializedCount throws(E) -> R in
+            let free = unsafe UnsafeMutableRawBufferPointer(rebasing: buffer[initializedCount...])
+            var writer = unsafe GenericBytesWriter<Mode>(MutableRawSpan(_unsafeBytes: free))
+            let result = try body(&writer)
+            initializedCount &+= writer.byteCount
+            return result
         }
     }
 }

@@ -1,4 +1,5 @@
 import Bytes
+import BytesAsync
 import PlatformExecutors
 
 /// A receiver's buffer for reassembling packets from a byte stream is Bytes' `ByteBuffer`: reads append at

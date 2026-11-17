@@ -205,7 +205,7 @@ struct InflateStream: ~Copyable {
     /// Bits of the next call's first input byte already consumed.
     var bitOffset = 0
     /// gzip's header flags.
-    private var gzipFlags: UInt8 = 0
+    private var gzipFlags = Byte.zero
     /// The CRC-32 of the gzip header so far, for its optional header CRC.
     private var headerCRC = CRC32()
     /// The running checksum of the output: CRC-32 for gzip, Adler-32 for zlib.
@@ -250,7 +250,7 @@ struct InflateStream: ~Copyable {
         stage = Self.initialStage(format)
         isFinalBlock = false
         bitOffset = 0
-        gzipFlags = 0
+        gzipFlags = .zero
         headerCRC = CRC32()
         checksum = Self.initialChecksum(format)
         length = 0
@@ -373,21 +373,19 @@ struct InflateStream: ~Copyable {
             switch stage {
             case .zlibHeader:
                 let header = try reader.read(Byte2.self, .bigEndian)
-                let method = header >> 8 & 0x0F
-                let windowBits = header >> 12
-                let presetDictionary = header & 0x20 != 0
-                guard method == 8, windowBits <= 7, header % 31 == 0, !presetDictionary else { throw BytesError.invalidValue }
+                guard header[ZlibHeader.method] == 8, header[ZlibHeader.windowBits] <= 7, header % 31 == 0,
+                      header.isClear(ZlibHeader.presetDictionary) else { throw BytesError.invalidValue }
                 stage = .blockHeader
             case .gzipHeader:
                 let fixed = try reader.read(byteCount: 10)
                 var header = AlignedBytesReader(fixed)
                 try header.expect(0x1F_8B_08 as Byte3) // ID1, ID2, CM (8, DEFLATE)
-                gzipFlags = try header.read(Byte.self).rawValue
-                guard gzipFlags & 0xE0 == 0 else { throw BytesError.invalidValue } // Reserved flags.
+                gzipFlags = try header.read(Byte.self)
+                try gzipFlags.requireZero(GzipFlags.reserved)
                 headerCRC.update(fixed)
                 stage = .gzipExtraLength
             case .gzipExtraLength:
-                if gzipFlags & 0x04 != 0 { // FEXTRA
+                if gzipFlags[GzipFlags.extra] {
                     let lengthBytes = try reader.read(byteCount: 2)
                     headerCRC.update(lengthBytes)
                     var lengthReader = AlignedBytesReader(lengthBytes)
@@ -405,7 +403,7 @@ struct InflateStream: ~Copyable {
                 }
             case .gzipName, .gzipComment:
                 let isName = if case .gzipName = stage { true } else { false }
-                if gzipFlags & (isName ? 0x08 : 0x10) != 0 { // FNAME, FCOMMENT: zero-terminated
+                if gzipFlags[isName ? GzipFlags.name : GzipFlags.comment] { // Zero-terminated.
                     let rest = reader.remainingBytes
                     var zero = -1
                     for index in 0..<rest.byteCount where rest.load(fromByteOffset: index, as: UInt8.self) == 0 {
@@ -421,7 +419,7 @@ struct InflateStream: ~Copyable {
                 }
                 stage = isName ? .gzipComment : .gzipHeaderCRC
             case .gzipHeaderCRC:
-                if gzipFlags & 0x02 != 0 { // FHCRC: the low 16 bits of the header's CRC-32
+                if gzipFlags[GzipFlags.headerCRC] { // The low 16 bits of the header's CRC-32.
                     let expected = try reader.read(Byte2.self, .littleEndian)
                     guard expected == UInt16(truncatingIfNeeded: headerCRC.value) else { throw BytesError.mismatch }
                 }
@@ -516,9 +514,9 @@ struct InflateStream: ~Copyable {
     /// - Throws: ``BytesError/invalidValue`` for too many codes, an invalid or over-subscribed code, a bad
     ///   repeat, or a missing end-of-block code.
     private mutating func readDynamicTables(_ bits: inout BitBuffer) throws(BytesError) -> Bool {
-        let literalCount = Int(bits.read(Bits<5>.self)) &+ 257 // HLIT
-        let distanceCount = Int(bits.read(Bits<5>.self)) &+ 1 // HDIST
-        let codeLengthCount = Int(bits.read(Nibble.self)) &+ 4 // HCLEN
+        let literalCount = bits.read(Int.self, as: Bits<5>.self) &+ 257 // HLIT
+        let distanceCount = bits.read(Int.self, as: Bits<5>.self) &+ 1 // HDIST
+        let codeLengthCount = bits.read(Int.self, as: Nibble.self) &+ 4 // HCLEN
         guard !bits.isOverrun else { return false }
         guard literalCount <= 286, distanceCount <= 30 else { throw .invalidValue }
 

@@ -9,47 +9,118 @@ as it works; the few that own memory (``ByteBuffer``, ``Pipeline``) allocate onc
 
 | Job | Types |
 |---|---|
-| Read fields from bytes | ``BytesReader``, ``AlignedBytesReader`` |
-| Write fields into bytes | ``BytesWriter``, ``AlignedBytesWriter`` |
+| Read fields from bytes | ``BytesReader``, ``AlignedBytesReader``, ``BigEndianBytesReader``, ``LittleEndianBytesReader`` |
+| Write fields into bytes | ``BytesWriter``, ``AlignedBytesWriter``, ``BigEndianBytesWriter``, ``LittleEndianBytesWriter`` |
+| Name the flags and fields inside a value | ``BitFlag``, ``BitField``, ``BitPattern`` (and `@BitFields` in `BytesMacros`) |
+| Records that read and write themselves | ``BinaryParsable``, ``BinaryWritable``, ``FixedSizeBinary`` (and `@BinaryRecord` in `BytesMacros`) |
 | Decode entropy-coded bits (Huffman, ANS) | ``BitBuffer``, ``HuffmanTable`` |
 | Encode entropy-coded bits | ``BitWriter`` |
 | Hold bytes between a producer and a consumer | ``ByteBuffer`` |
-| Stream bytes through stages (compress, encrypt) | ``ByteTransform``, ``Pipeline``, ``FusedPipeline`` |
+| Stream bytes through stages (compress, encrypt) | ``ByteTransform``, ``Pipeline``, ``FusedPipeline`` (and `AsyncByteTransform` in `BytesAsync`) |
+| Share spans with other threads for one call | ``LentBytes``, ``LentMutableBytes`` |
 | Test 16 bytes at once | ``ByteLanes``, ``ByteMatches`` |
-| Checksums | ``CRC32`` |
+| Checksums | ``CRC32``, ``Adler32``, ``RunningChecksum`` |
 | Field types | ``Byte2`` through ``Byte16``, ``Bits`` (``Bit``, ``Crumb``, ``Nibble``, ``Byte``) |
+
+The package's products: `Bytes` (everything above except the rows marked otherwise), `BytesMacros` (the
+`@BitFields` and `@BinaryRecord` macros, with their swift-syntax plugin: depend on it only if you use them), `BytesAsync` (asynchronous pipelines and sockets), `BytesCompression` (DEFLATE, zlib, gzip, and
+Brotli), `BytesCrypto` (ChaCha20-Poly1305 and TLS 1.3 records), and `BytesFoundation` (`Data` with spans).
 
 The rest is extensions to the standard library's spans: copying between them, finding patterns in them, and
 building arrays and strings with a writer.
 
 ## Readers and writers
 
-A reader is a cursor over a `RawSpan` you lend it. It reads fields in order: fixed-width groups in either
-byte order (`read(Byte3.self, .bigEndian)`), enums by their raw values, LEB128 integers, length-prefixed
-sections and strings, and views of the bytes themselves (`read(byteCount:)` returns a span of the same
-memory, no copy). A writer is its mirror over a `MutableRawSpan`.
+A reader is a cursor over a `RawSpan` you lend it. It reads fields in order: integers (`read(UInt32.self)`
+on a byte-ordered cursor, or fixed-width groups in either byte order, `read(Byte3.self, .bigEndian)`, and
+`read(Int.self, as: Byte3.self)` for odd widths), enums by their raw values, LEB128 integers,
+length-prefixed sections and strings, whole records (`read(Header.self)`), and views of the bytes
+themselves (`read(byteCount:)` returns a span of the same memory, no copy). A writer is its mirror over a
+`MutableRawSpan`.
 
 Both are `~Copyable`, so a position can't be duplicated by accident (pass them `inout`), and `~Escapable`,
 so they can't outlive the memory they borrow. A read or write that throws consumes or writes nothing: the
 cursor stays where it was, and ``GenericBytesReader/position`` and ``GenericBytesReader/rewind(to:)`` undo a sequence of
 them (a message whose end hasn't arrived).
 
-### Bit-addressable or byte-aligned
+### Which cursor
 
-There are two of each:
+There are three kinds of each, all one generic type (``GenericBytesReader``, ``GenericBytesWriter``) in
+different modes:
 
 - ``BytesReader`` and ``BytesWriter`` read and write at any bit position: a 3-bit field, then a 12-bit
   one, then a `Byte2` that starts mid-byte. Video and audio headers, DEFLATE's block headers, packed
-  telemetry.
+  telemetry. Only they have the bit-level API (``Bits`` reads and writes, `seek(toBitPosition:)`,
+  `skip(bitCount:)`).
 - ``AlignedBytesReader`` and ``AlignedBytesWriter`` work only in whole bytes: the same byte-level API, and
   nothing that would leave them mid-byte. Most formats are like this: network protocols (MQTT, HTTP/2,
-  TLS records), archives' headers, images' chunk structures, Base64.
+  TLS records), archives' headers, images' chunk structures, Base64. Integers carry their byte order at each
+  call (`read(Byte4.self, .bigEndian)`), which suits formats that mix orders.
+- ``BigEndianBytesReader``/``BigEndianBytesWriter`` and the little-endian pair are aligned cursors that
+  know their byte order, so a format with one order (most of them) reads and writes integers by type:
+  `read(UInt32.self)`, `write(UInt16(length))`, `read(Int.self, as: Byte3.self)`, and the group, prefixed, and
+  section forms without an order argument. They compile to the same code as an aligned cursor passing the
+  order each time.
 
-A format with flag bits inside a byte is still byte-aligned: read the ``Byte`` and take its bits with
-`flags[Crumb.self, at: 6]`. Only formats whose fields cross byte boundaries in the stream need the
-bit-addressable cursors. When one part of a format needs them, convert at a byte boundary:
-`AlignedBytesReader(bytesReader)` (throws ``BytesError/misaligned`` partway through a byte) and
-`BytesReader(alignedReader)`.
+A format with flag bits inside a byte is still byte-aligned: read the ``Byte`` and take its fields apart by
+name (below). Only formats whose fields cross byte boundaries in the stream need the bit-addressable
+cursors. When one part of a format needs them, convert at a byte boundary: `AlignedBytesReader(bytesReader)`
+(throws ``BytesError/misaligned`` partway through a byte) and `BytesReader(alignedReader)`.
+
+### Named fields: no bit numbers in parsing code
+
+A byte of flags is read as a ``Byte`` and its parts are accessed by name, from descriptors declared once:
+
+```swift
+enum ConnectFlags {
+    static var userName: BitFlag { BitFlag(bit: 7) }
+    static var willQoS: BitField<QualityOfService> { BitField(bits: 3...4) }
+    static var reserved: BitFlag { BitFlag(bit: 0) }
+}
+
+let flags = try reader.read(Byte.self)
+try flags.requireClear(ConnectFlags.reserved)
+let qos = try flags.value(of: ConnectFlags.willQoS)     // throws for a raw value with no case
+let hasUserName = flags[ConnectFlags.userName]
+```
+
+- ``BitFlag`` is one bit, read and written as a `Bool`. ``BitField`` is adjacent bits, read and written as an
+  `Int`, a ``Bits`` value, or a `RawRepresentable` type (an enum) with an integer raw value. Positions count
+  from the least significant bit; the `…FromMostSignificant` initializers count from the other end, for
+  specifications that draw bit 0 on the left.
+- The subscripts (`flags[flag]`, `flags[field]`) work on any integer and on ``Bits`` values: a DOS date read
+  as a `UInt16` takes its parts as `date[DOSDate.month]`. Setting a field leaves the other bits alone, and
+  `Byte { $0[…] = … }` builds a value from fields set on zero.
+- ``BitPattern`` checks fixed bits at once, written as the specification draws them:
+  `flags.matches("01??_??0?")` (`?` is a free bit).
+- Declare descriptors as computed `static var`s: each use compiles to the shift and mask written by hand.
+
+The `@BitFields` macro (in `BytesMacros`) declares the same thing as a struct and generates the reading and
+writing, so a flags byte is `reader.read(ConnectFlags.self)`.
+
+### Records
+
+A format's fixed-size structures read and write themselves. ``BinaryParsable`` is an `init(parsing:)` taking
+the cursor (generic over its mode, so one implementation serves every cursor), ``BinaryWritable`` is
+`write(to:)`, and ``FixedSizeBinary`` states a constant size, which lets a record containing such fields be
+read with one bounds check. Write them by hand or have `@BinaryRecord` generate them from the stored
+properties:
+
+```swift
+@BinaryRecord(.littleEndian)
+struct EntryHeader {
+    @Field(Byte4.self, expecting: 0x0201_4B50) var signature: UInt32
+    @Field(Byte2.self) var method: Int
+    @Field(Byte4.self) var compressedSize: UInt64
+}
+
+var reader = LittleEndianBytesReader(directory)
+let header = try reader.read(EntryHeader.self)        // one bounds check, then each field once
+```
+
+The macros live in their own product: add **`BytesMacros`** to the target's dependencies and `import
+BytesMacros`. Everything they generate is available to write by hand with the types above, so `Bytes` itself
+has no macro dependency. See <doc:WritingParsers> for a format written both ways.
 
 ### Why the byte-aligned cursors are faster
 
@@ -102,9 +173,14 @@ Three details keep it that way:
 - **No run-time generics.** The slow paths that stay out of line (long copies, unaligned assembly, multi-byte
   LEB128) are in the bit-addressable cursor's own extensions, where they aren't generic: specialized code of
   either mode calls them without passing type metadata.
-- **The same names.** ``BytesReader``, ``BytesWriter``, ``AlignedBytesReader``, and ``AlignedBytesWriter``
-  are typealiases; you rarely write `GenericBytesReader` except in code that works with either (a decoder
-  generic over `Mode`).
+- **Modes nest.** ``ByteAligned``, ``BigEndianBytes``, and ``LittleEndianBytes`` all conform to
+  ``ByteAlignedCursorMode`` (the byte-level API is there for all of them), and the last two to
+  ``ByteOrderedCursorMode``, whose constant `byteOrder` the integer-by-type reads and writes switch on
+  (a `switch`, not `==`: the standard library's `ByteOrder.==` isn't inlinable, and a comparison compiled to
+  a call per store). So an ordered cursor is an aligned cursor with the order filled in.
+- **The same names.** ``BytesReader``, ``BytesWriter``, ``AlignedBytesReader``, ``AlignedBytesWriter``, and
+  the byte-ordered readers and writers are typealiases; you rarely write `GenericBytesReader` except in code
+  that works with any of them (a record's `init(parsing:)`, a decoder generic over `Mode`).
 
 Measured (instructions, M3 Ultra, Swift 6.4.2; `Benchmarks/RESULTS.md`):
 
@@ -130,6 +206,8 @@ The builders hand you a writer over fresh capacity and keep exactly what it wrot
   ``AlignedBytesWriter``.
 - `withBytesWriter` and `withAlignedBytesWriter` on `OutputSpan<UInt8>` and `OutputRawSpan` do the same for
   an output span you already have.
+- `[UInt8](byteCapacity:mode:writing:)`, `append(byteCapacity:mode:writing:)`, and `withBytesWriter(mode:_:)` take
+  the mode as an argument, for a byte-ordered writer: `[UInt8](byteCapacity: 6, mode: BigEndianBytes.self) { … }`.
 - `String(utf8Capacity:writing:)` gives an ``AlignedBytesWriter``: UTF-8 is whole bytes.
 
 The aligned builders have their own names because an overload on the closure's writer type made every
@@ -161,6 +239,23 @@ bit first, the order of the codecs that use it.
 - ``ByteTransform`` is one stage of a stream (a compressor, a TLS record sealer): input span in, output span
   out, flush semantics like zlib's. `then` composes stages into a ``Pipeline`` (with a ``ByteBuffer``
   between them) or, for a stage that works in place, a ``FusedPipeline`` with no buffer at all.
+  - A stage declares its units: ``ByteTransform/maximumUnitByteCount`` (the most input it needs at once, as a
+    TLS record's 16,645 bytes) and ``ByteTransform/minimumOutputCapacity``. Pipelines size their buffers
+    from them, so a stage that keeps back a partial unit always fits.
+  - Every stage ends a stream the same way: at ``TransformFlush/finish`` it reports
+    ``TransformStatus/finished`` once its output is delivered, or throws if its input ended early.
+  - ``ByteTransform/transform(_:appending:flush:growth:)`` is the drive loop for a message or stream in
+    memory: it calls the stage, adding room to an array, until the stage has taken its input.
+- `AsyncByteTransform` (the `BytesAsync` product) is `ByteTransform` with `async` calls, for stages that
+  wait on a socket or run on another queue. `synchronously()` and `offloaded(to:)` make any stage one, and
+  `ByteBuffer.receive` fills a buffer from a read that suspends. The parallel codecs have `async` entry points
+  too (`compressAll(_:into:on:)` on a Dispatch queue, or as child tasks of a task group).
+- ``LentBytes`` and ``LentMutableBytes`` carry a span's memory to other threads for the length of one
+  call (`withLentBytes`, `withLentFreeCapacity`): a span can't be captured by a task, so parallel work over
+  a caller's input and output is lent it as a `Sendable` pointer, valid until the lending call returns (which
+  the work must finish before).
+- ``RunningChecksum`` is what ``CRC32`` and ``Adler32`` share: update over pieces, and combine checksums of
+  pieces computed separately.
 
 ## Checked and unchecked forms
 

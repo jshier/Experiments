@@ -5,6 +5,79 @@ Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (r
 other benchmarks running); the 2026-11-12 sections have newer full runs. Compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
+## 2026-11-17, the proposals pass: named fields, byte-ordered cursors, macros, BytesAsync, stitched ChaCha20-Poly1305 (baselines `trk-t0` … `trk-t5`, `trk-final`, each also `-portable` and `-portable-no-c` where run; Swift 6.4.4)
+
+Every proposal from the 2026-11-16 review, implemented one step at a time, each step benchmarked across every
+package that uses Bytes (this one, MQTT, BinaryParsingComparison, Base64, NativeZip, SocketStream) and, at
+milestones, in all three builds. Instruction counts are the measure; times only where the change is large or was
+A/B'd. Steps, in order:
+
+| Step | What | Baselines |
+|---|---|---|
+| t1 | Named bit fields: `BitFlag`, `BitField<Value>`, `BitPattern`; `read(UInt8.self)`, `read(Int.self, as: Bits<n>.self)` | `trk-t1` |
+| t2 | `read(_:asSigned:_:)` (replaces `readSigned`), any-integer writes and byte counts; `BigEndianBytes`/`LittleEndianBytes` cursor modes; MQTT parse-once | `trk-t2` (+ builds) |
+| t3 | Adler-32 and `RunningChecksum` in the core; `nibbleMask`; declared transform units, one end-of-stream rule, a drive loop; `BytesAsync`; `LentBytes` | `trk-t3` (+ builds) |
+| t4 | `BinaryParsable`/`BinaryWritable`/`FixedSizeBinary`; `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` | `trk-t4` |
+| t5 | Stitched ChaCha20-Poly1305 | `trk-t5` |
+
+### Results, t0 → final (instructions unless noted)
+
+| Workload | t0 | final | Change |
+|---|---|---|---|
+| ChaCha20-Poly1305 seal 1 MB, time (interleaved A/B, 3 rounds) | 691–764 µs | 419–421 µs | **−40%** (1.52 → 2.50 GB/s) |
+| ChaCha20-Poly1305 seal 16 KB × 64, time | 717 µs | 433 µs | **−40%** |
+| ChaCha20-Poly1305 seal 16 KB × 64 | 8,905 K | 8,774 K | −1.5% |
+| ChaCha20-Poly1305 seal 64 B × 16,384 | 77 M | 74 M | −3.9% |
+| SocketStream protect, TLS records (time) | 1,162 µs | 715 µs | **−38%** |
+| SocketStream unprotect, TLS records (time) | 1,230 µs | 758 µs | **−38%** |
+| SocketStream protect/unprotect with brotli or deflate (time) | | | −11 to −14% |
+| NativeZip inflate + CRC, 32 MB text / 2,000 files | 247 / 238 M | 240 / 232 M | −2.8 / −2.5% |
+| MQTT PUBLISH parse, properties visited while parsing (new) vs frames + `forEach` | 8,831 K | 7,365 K | **−16.6%** |
+| Zip directory with `@BinaryRecord` (new) vs field by field / ParserSpan | 285 / 461 K | 199 K | −30 / −57% |
+| Everything else in all packages and all three builds | | | within ±0.5% |
+
+Sync parallel DEFLATE allocates once more per call (11 → 12): the scheduler's `ChunkBatch` holds its worker as a
+closure. Times of the other rows moved within this machine's drift (±5–10% between runs; `trk-t0` also ran while
+tests built).
+
+### Kept, measured neutral
+
+- Named fields: every accessor compiles to the hand-written shift and mask (a probe package; LLVM merged each pair).
+  A `BitPattern` literal folds to its two masks only with `@inline(__always)` on both initializers. Adopted in MQTT,
+  LZ4, QOI, NativeZip (DOS date/time, attributes, the Huffman entry: decode loop 246 → 236 instructions, inflate
+  −2.5 to −2.8%), and DEFLATE/zlib/gzip headers.
+- Byte-ordered cursors: `read(UInt32.self)` on a `BigEndianBytesReader` compiles to `read(Byte4.self, .bigEndian)`
+  exactly; writes too, once the order test is a `switch` (the standard library's `ByteOrder.==` is an out-of-line
+  call: 71 against 53 instructions; `~/Downloads/swift-bugs/26`). Adopted: MQTT, SocketStream, NativeZip, BPC's zip.
+- Macros: `@BinaryRecord` parses BPC's zip directory in 199 K instructions, the same as the hand-written
+  fixed-record parser, once the generated `init(parsing:)` is forced inline (297 K before: a call, the record
+  returned through memory). NativeZip's directory with macro records: +0.4% (unchanged code in the same file
+  moved as much). Brotli output byte-identical through every change.
+- `BytesAsync`: the async entry points moved without change; `withLentBytes`/`withLentFreeCapacity` replace the
+  codecs' private pointer wrappers; `offloaded(to:)` runs any stage on a queue.
+
+### Reverted or not done, with the measurement
+
+| Change | Measured | Outcome |
+|---|---|---|
+| Enum field setter with `assert` + mask | MQTT PUBLISH encode +0.8% | `precondition`, unmasked store: back to t0 |
+| Properties validation through an empty `visit` closure, forced inline | MQTT parse −1%, SocketStream check +10.4% (PR toolchain) | separate bodies: both at t1 |
+| Brotli tag filter on `nibbleMask` (4 bits per slot) | q5 dickens +2.7% | reverted; the one-bit gather stays |
+| `HuffmanCodeBuilder` in the Bytes core | Brotli 1.6 KB streams +1.3–1.7%, whatever the inlining attribute | moved back to BytesCompression |
+| Public unchecked loads | the codecs use the standard library's `unsafeLoadUnaligned` | dropped |
+| Generic `withBitBuffer` over the error type | no callers | dropped |
+| NEON Poly1305 | would compete with eight-block ChaCha20 for the vector pipes in the stitched loop | not pursued |
+| DEFLATE compressor staging on `ByteBuffer` | needs `BitWriter` slack and zero-copy buffer swaps | kept as is |
+
+### ChaCha20-Poly1305, stitched
+
+Poly1305's multiply chain (integer units) between ChaCha20's eight-block double rounds (vector units, all 32
+registers): three Poly1305 blocks after each double round, two at the end, 32 per 512-byte batch. Sealing
+authenticates the batch before the one being encrypted; opening authenticates the batch it decrypts and, on a
+tag mismatch, XORs again to restore the ciphertext. Below 512 bytes, two passes, as before. The loop is the old
+264-instruction double round plus 127 for the Poly1305 blocks (`Tools/loops`), with the same spills. Instructions
+for 1 MB: 8.77 → 8.64 M; time −40%.
+
 ## 2026-11-16, byte-aligned cursors: `AlignedBytesReader` and `AlignedBytesWriter` (baselines `exp10-*`, `p4-generic`, `p4-aligned`)
 
 **The cost.** `BytesReader` and `BytesWriter` can read and write at any bit position, and they carry that state
