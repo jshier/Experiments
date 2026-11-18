@@ -4,6 +4,24 @@ Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 
 one core. Random input; each measured iteration encodes at least 4 MB, repeating short inputs. Throughput
 counts input bytes; output is 4/3 as many.
 
+## 2026-11-18: a reshuffling encoder kernel, not kept
+
+The SSE/AVX encoders' scheme on NEON: one-register `tbl`s place each 3-byte group in its 4 output bytes as
+`[b1, b0, b2, b1]`, then shifts and masks in 32-bit lanes extract the four 6-bit values in output order, so the
+characters need no interleave. It cuts the shuffles' `tbl` micro-ops from 9 (three 3-register lookups) to 4,
+but costs more elsewhere. `Tools/loops`, instructions in the loop per 48-byte block:
+
+| Kernel | Instructions | Vector work |
+|---|---|---|
+| Deinterleave, compute, interleave (kept) | 32 | 7 `tbl` (25 micro-ops), 10 for the fields, interleave folded into 2 `st2` |
+| Reshuffle, 32-bit shifts and masks | 75 | 8 `tbl` (20 micro-ops), 44 for the fields (16 `and`, 12 `orr`, 16 shifts) |
+| Reshuffle, per-lane shifts on 16-bit lanes | 143 | split into 64-bit halves with `rev32`/`trn2` |
+| Reshuffle by lane picks (`SIMD16(a[1], a[0], …)`) | 243 | byte loads and lane inserts |
+
+On deinterleaved bytes each 6-bit value is one or two shifts and an `or`, shared by 16 groups; on reshuffled lanes
+it's a shift and a mask per value per lane. Not benchmarked: double the vector operations of a loop that is
+already vector-bound. (Lane picks across two vectors compile to `ext` when they're a contiguous run.)
+
 ## 2026-11-16: byte-aligned cursors (baselines `p4-generic` → `p4-aligned`)
 
 The API now takes `AlignedBytesReader` and `AlignedBytesWriter` (Base64 is whole bytes), and

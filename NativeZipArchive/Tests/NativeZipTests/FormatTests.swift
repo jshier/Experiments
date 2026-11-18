@@ -36,7 +36,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
 
 @Suite struct FormatTests {
     @Test(arguments: ["bzip2.zip", "bzip2-large.zip", "lzma.zip", "xz.zip", "deflate64.zip", "zipcrypto.zip", "bsdtar-traditional.zip",
-                      "bsdtar-aes128.zip", "bsdtar-aes256.zip", "prefixed.zip", "prefixed-adjusted.zip"])
+                      "bsdtar-aes128.zip", "bsdtar-aes256.zip", "prefixed.zip", "prefixed-adjusted.zip",
+                      "large-zipcrypto-stored.zip", "large-zipcrypto-deflated.zip", "large-aes256-store.zip", "large-aes256-deflate.zip",
+                      "zstd.zip", "zstd-large.zip", "zstd-zipcrypto.zip"])
     func decodesAndVerifies(name: String) async throws {
         let archive = try fixture(name)
         for backend in [ZipDecoder.Backend.bytes, .zlib] {
@@ -49,6 +51,7 @@ private func zip(_ arguments: [String], in directory: URL) throws {
         #expect(try fixture("deflate64.zip").entries[0].method == ZipArchive.Method.deflate64)
         #expect(try fixture("bzip2.zip").entries[0].method == ZipArchive.Method.bzip2)
         #expect(try fixture("xz.zip").entries[0].method == ZipArchive.Method.xz)
+        #expect(try fixture("zstd.zip").entries[0].method == ZipArchive.Method.zstd)
         #expect(try fixture("zipcrypto.zip").entries[0].encryption == .traditional)
         // AES entries report the real method, not 99. bsdtar writes AE-2 (no CRC) for small entries.
         let aes = try fixture("bsdtar-aes256.zip").entries[0]
@@ -57,9 +60,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
     }
 
     @Test func rejectsUnsupportedMethods() async throws {
-        let failures = try await fixture("zstd.zip").verify()
-        guard case ZipError.unsupportedMethod(93, _)? = failures.first?.error as? ZipError else {
-            Issue.record("expected unsupportedMethod(93): \(failures)")
+        let failures = try await fixture("ppmd.zip").verify()
+        guard case ZipError.unsupportedMethod(98, _)? = failures.first?.error as? ZipError else {
+            Issue.record("expected unsupportedMethod(98): \(failures)")
             return
         }
     }
@@ -154,17 +157,38 @@ private func zip(_ arguments: [String], in directory: URL) throws {
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: directory.appending(path: "link").path) == "dir/target.txt")
     }
 
+    /// Large encrypted entries, decrypted in pieces as they're extracted (the 5 MB entries take the pipelined path).
+    @Test func extractsLargeEncryptedEntries() async throws {
+        let directory = try temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        var options = ExtractionOptions()
+        options.password = "secret"
+        let names = ["large-zipcrypto-stored.zip", "large-zipcrypto-deflated.zip", "large-aes256-store.zip", "large-aes256-deflate.zip"]
+        let failures = try await ZipExtractor.extract { extractor in
+            for name in names {
+                let destination = FilePath(directory.appending(path: name).path)
+                _ = try extractor.add(fixture(name), to: destination, options: options)
+            }
+        }
+        #expect(failures.isEmpty, "\(failures)")
+        let expected = try Data(contentsOf: directory.appending(path: names[0]).appending(path: "large.txt"))
+        #expect(expected.count == 17 * 300_000)
+        for name in names.dropFirst() {
+            #expect(try Data(contentsOf: directory.appending(path: name).appending(path: "large.txt")) == expected, "\(name)")
+        }
+    }
+
     @Test func collectsFailuresAndExtractsTheRest() async throws {
         let directory = try temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
         let failures = try await ZipExtractor.extract { extractor in
-            try extractor.add(fixture("zstd.zip"), to: FilePath(directory.appending(path: "zstd").path))
+            try extractor.add(fixture("ppmd.zip"), to: FilePath(directory.appending(path: "ppmd").path))
             try extractor.add(fixture("zipcrypto.zip"), to: FilePath(directory.appending(path: "crypto").path))
             try extractor.add(fixture("bzip2.zip"), to: FilePath(directory.appending(path: "bzip2").path))
         }
         #expect(failures.count == 2)
         #expect(FileManager.default.fileExists(atPath: directory.appending(path: "bzip2/sample.txt").path))
-        #expect(!FileManager.default.fileExists(atPath: directory.appending(path: "zstd/sample.txt").path))
+        #expect(!FileManager.default.fileExists(atPath: directory.appending(path: "ppmd/sample.txt").path))
     }
 
     /// A stored entry big enough to be copied in pieces, intact and then with one byte changed.

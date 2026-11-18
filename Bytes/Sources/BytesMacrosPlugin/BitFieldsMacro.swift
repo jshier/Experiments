@@ -13,8 +13,11 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
         let type: String
         let byteCount: Int
         let bitCount: Int
-        /// The byte order, for storage wider than a byte.
+        /// The byte order, for storage wider than a byte; `nil` there for the cursor's.
         let byteOrder: String?
+
+        /// Whether the fields are stored in the byte order of the cursor that reads them.
+        var inCursorOrder: Bool { byteCount > 1 && byteOrder == nil }
 
         var zero: String { type == "Byte" ? "Byte.zero" : "0" }
 
@@ -22,14 +25,14 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
             switch type {
             case "Byte": "\(reader).read(Byte.self)"
             case "UInt8": "\(reader).read(UInt8.self)"
-            default: "\(reader).read(Byte\(byteCount).self, \(byteOrder!))"
+            default: byteOrder.map { "\(reader).read(Byte\(byteCount).self, \($0))" } ?? "\(reader).read(\(type).self)"
             }
         }
 
         func write(_ value: String, _ writer: String) -> String {
             switch type {
             case "Byte", "UInt8": "\(writer).write(\(value))"
-            default: "\(writer).write(\(value), as: Byte\(byteCount).self, \(byteOrder!))"
+            default: byteOrder.map { "\(writer).write(\(value), as: Byte\(byteCount).self, \($0))" } ?? "\(writer).write(\(value))"
             }
         }
     }
@@ -44,7 +47,7 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
         case "Byte", "UInt8": return Storage(type: type, byteCount: 1, bitCount: 8, byteOrder: nil)
         case "UInt16", "UInt32", "UInt64":
             let bytes = type == "UInt16" ? 2 : type == "UInt32" ? 4 : 8
-            guard let order else { throw MacroError("@BitFields(\(type).self, …) needs a byte order: .bigEndian or .littleEndian") }
+            // Without a byte order, the cursor's: read only from byte-ordered cursors.
             return Storage(type: type, byteCount: bytes, bitCount: bytes * 8, byteOrder: order)
         default:
             throw MacroError("@BitFields stores its fields in Byte, UInt8, UInt16, UInt32, or UInt64, not \(type)")
@@ -169,12 +172,15 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
         let storage = try storage(of: node)
         let access = declaration.accessPrefix
         let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
+        let (conformances, mode) = storage.inCursorOrder
+            ? ("ByteOrderedParsable, ByteOrderedWritable", "ByteOrderedCursorMode")
+            : ("BinaryParsable, BinaryWritable", "BytesCursorMode")
         let declaration: DeclSyntax = """
-            extension \(type.trimmed): BinaryParsable, BinaryWritable, FixedSizeBinary {
-            \(raw: inlinable)\(raw: access)init<Mode: BytesCursorMode>(parsing reader: inout GenericBytesReader<Mode>) throws(BytesError) {
+            extension \(type.trimmed): \(raw: conformances), FixedSizeBinary {
+            \(raw: inlinable)\(raw: access)init<Mode: \(raw: mode)>(parsing reader: inout GenericBytesReader<Mode>) throws(BytesError) {
             try self.init(rawValue: \(raw: storage.read("reader")))
             }
-            \(raw: inlinable)\(raw: access)func write<Mode: BytesCursorMode>(to writer: inout GenericBytesWriter<Mode>) throws(BytesError) {
+            \(raw: inlinable)\(raw: access)func write<Mode: \(raw: mode)>(to writer: inout GenericBytesWriter<Mode>) throws(BytesError) {
             try \(raw: storage.write("rawValue", "writer"))
             }
             \(raw: inlinable)\(raw: access)static var byteCount: Int { \(raw: storage.byteCount) }

@@ -1,14 +1,17 @@
 import Foundation
+import zlib
 
 /// Deterministic benchmark archives, generated once and cached in a fixed temporary directory.
 enum Fixtures {
-    static let version = 2
+    static let version = 3
     static let root = URL(filePath: NSTemporaryDirectory()).appending(path: "NativeZipBenchmarkFixtures-v\(version)")
 
     static var smallFiles: URL { root.appending(path: "small.zip") } // 2,000 text files, ~4–16 KB each
     static var largeText: URL { root.appending(path: "text.zip") } // one 32 MB deflated text file
     static var largeRandom: URL { root.appending(path: "random.zip") } // one 32 MB stored (incompressible) file
     static var raster: URL { root.appending(path: "raster.zip") } // one 32 MB deflated file of pixel runs
+    static var zstdText: URL { root.appending(path: "text-zstd.zip") } // the 32 MB text as Zstandard (method 93), level 3
+    static var zstdRaster: URL { root.appending(path: "raster-zstd.zip") } // the 32 MB raster as Zstandard, level 3
 
     /// A per-iteration scratch directory for extraction output, always inside `root`.
     static func scratchDirectory() -> URL {
@@ -60,6 +63,8 @@ enum Fixtures {
         try zip("small", into: smallFiles, from: source)
         try zip("text", into: largeText, from: source)
         try zip("raster", into: raster, from: source)
+        try zstdZip("text", file: "big.txt", into: zstdText, from: source)
+        try zstdZip("raster", file: "big.raw", into: zstdRaster, from: source)
         // Last: `prepare` checks for it to tell whether the fixtures are complete.
         try zip("random", into: largeRandom, from: source)
     }
@@ -101,10 +106,39 @@ enum Fixtures {
     }
 
     private static func zip(_ directory: String, into archive: URL, from source: URL) throws {
+        try run("/usr/bin/zip", ["-qr", archive.path, directory], in: source)
+    }
+
+    /// A one-entry archive of `directory/file` compressed by the `zstd` command (`brew install zstd`) at level 3:
+    /// zip stores the compressed file, then its headers are patched to say method 93 with the original's CRC-32 and
+    /// size (no macOS tool writes Zstandard entries).
+    private static func zstdZip(_ directory: String, file: String, into archive: URL, from source: URL) throws {
+        let original = try Data(contentsOf: source.appending(path: directory).appending(path: file))
+        let work = root.appending(path: "zstd-work")
+        try FileManager.default.createDirectory(at: work.appending(path: directory), withIntermediateDirectories: true)
+        let compressed = work.appending(path: directory).appending(path: file)
+        try run("/usr/bin/env", ["zstd", "-q", "-3", "-f", source.appending(path: directory).appending(path: file).path, "-o", compressed.path], in: work)
+        try run("/usr/bin/zip", ["-q0r", archive.path, directory], in: work)
+        var raw = try [UInt8](Data(contentsOf: archive))
+        let crc = original.withUnsafeBytes { UInt32(crc32(0, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt($0.count))) }
+        func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
+            withUnsafeBytes(of: value.littleEndian) { raw.replaceSubrange(offset..<(offset + $0.count), with: $0) }
+        }
+        // Local header: method at 8, CRC at 14, uncompressed size at 22. Central header: 10, 16, 24.
+        let central = (0..<(raw.count - 4)).last { raw[$0] == 0x50 && raw[$0 + 1] == 0x4B && raw[$0 + 2] == 1 && raw[$0 + 3] == 2 }!
+        for (base, method, crcOffset, size) in [(0, 8, 14, 22), (central, 10, 16, 24)] {
+            store(UInt16(93), at: base + method)
+            store(crc, at: base + crcOffset)
+            store(UInt32(original.count), at: base + size)
+        }
+        try Data(raw).write(to: archive)
+    }
+
+    private static func run(_ tool: String, _ arguments: [String], in directory: URL) throws {
         let process = Process()
-        process.executableURL = URL(filePath: "/usr/bin/zip")
-        process.arguments = ["-qr", archive.path, directory]
-        process.currentDirectoryURL = source
+        process.executableURL = URL(filePath: tool)
+        process.arguments = arguments
+        process.currentDirectoryURL = directory
         try process.run()
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { throw CocoaError(.fileWriteUnknown) }

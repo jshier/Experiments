@@ -15,6 +15,7 @@ let benchmarks: @Sendable () -> Void = {
     registerCRCBenchmarks()
     registerRunsAndCopiesBenchmarks()
     registerBuildersAndSectionsBenchmarks()
+    registerASCIIBenchmarks()
 
     // MARK: Field parsing: a 2,000-entry zip central directory (~170 KB)
 

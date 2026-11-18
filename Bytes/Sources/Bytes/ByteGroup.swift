@@ -458,107 +458,186 @@ public extension ByteGroup where Integer == UInt128 {
 
 // MARK: - Byte2 through Byte16
 
+// Each group stores its bytes as a little-endian integer (`littleEndian`): the first byte in memory is the least
+// significant, whatever the CPU. `init(littleEndian:)` keeps the group's bytes of its argument and drops any
+// above them.
+
 /// 2 bytes, as they appear in memory.
 public struct Byte2: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt16
+    /// The group's size: 2 bytes.
     @inlinable public static var byteCount: Int { 2 }
+    /// Creates the group from `value`'s bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer.
     @inlinable public init(littleEndian value: UInt16) { littleEndian = value }
 }
 
 /// 3 bytes, as they appear in memory.
 public struct Byte3: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt32
+    /// The group's size: 3 bytes.
     @inlinable public static var byteCount: Int { 3 }
+    /// Creates the group from `value`'s low 3 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high byte is ignored.
     @inlinable public init(littleEndian value: UInt32) { littleEndian = value & Self._mask }
 }
 
 /// 4 bytes, as they appear in memory.
 public struct Byte4: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt32
+    /// The group's size: 4 bytes.
     @inlinable public static var byteCount: Int { 4 }
+    /// Creates the group from `value`'s bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer.
     @inlinable public init(littleEndian value: UInt32) { littleEndian = value }
 }
 
 /// 5 bytes, as they appear in memory.
 public struct Byte5: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt64
+    /// The group's size: 5 bytes.
     @inlinable public static var byteCount: Int { 5 }
+    /// Creates the group from `value`'s low 5 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 3 bytes are ignored.
     @inlinable public init(littleEndian value: UInt64) { littleEndian = value & Self._mask }
 }
 
 /// 6 bytes, as they appear in memory.
 public struct Byte6: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt64
+    /// The group's size: 6 bytes.
     @inlinable public static var byteCount: Int { 6 }
+    /// Creates the group from `value`'s low 6 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 2 bytes are ignored.
     @inlinable public init(littleEndian value: UInt64) { littleEndian = value & Self._mask }
 }
 
 /// 7 bytes, as they appear in memory.
 public struct Byte7: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt64
+    /// The group's size: 7 bytes.
     @inlinable public static var byteCount: Int { 7 }
+    /// Creates the group from `value`'s low 7 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high byte is ignored.
     @inlinable public init(littleEndian value: UInt64) { littleEndian = value & Self._mask }
 }
 
 /// 8 bytes, as they appear in memory.
 public struct Byte8: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt64
+    /// The group's size: 8 bytes.
     @inlinable public static var byteCount: Int { 8 }
+    /// Creates the group from `value`'s bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer.
     @inlinable public init(littleEndian value: UInt64) { littleEndian = value }
 }
 
 /// 9 bytes, as they appear in memory.
 public struct Byte9: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 9 bytes.
     @inlinable public static var byteCount: Int { 9 }
+    /// Creates the group from `value`'s low 9 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 7 bytes are ignored.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value & Self._mask }
 }
 
 /// 10 bytes, as they appear in memory.
 public struct Byte10: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 10 bytes.
     @inlinable public static var byteCount: Int { 10 }
+    /// Creates the group from `value`'s low 10 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 6 bytes are ignored.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value & Self._mask }
 }
 
 /// 11 bytes, as they appear in memory.
 public struct Byte11: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 11 bytes.
     @inlinable public static var byteCount: Int { 11 }
+    /// Creates the group from `value`'s low 11 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 5 bytes are ignored.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value & Self._mask }
 }
 
 /// 12 bytes, as they appear in memory.
 public struct Byte12: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 12 bytes.
     @inlinable public static var byteCount: Int { 12 }
+    /// Creates the group from `value`'s low 12 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 4 bytes are ignored.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value & Self._mask }
 }
 
 /// 13 bytes, as they appear in memory.
 public struct Byte13: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 13 bytes.
     @inlinable public static var byteCount: Int { 13 }
+    /// Creates the group from `value`'s low 13 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 3 bytes are ignored.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value & Self._mask }
 }
 
 /// 14 bytes, as they appear in memory.
 public struct Byte14: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 14 bytes.
     @inlinable public static var byteCount: Int { 14 }
+    /// Creates the group from `value`'s low 14 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high 2 bytes are ignored.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value & Self._mask }
 }
 
 /// 15 bytes, as they appear in memory.
 public struct Byte15: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 15 bytes.
     @inlinable public static var byteCount: Int { 15 }
+    /// Creates the group from `value`'s low 15 bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer; its high byte is ignored.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value & Self._mask }
 }
 
 /// 16 bytes, as they appear in memory.
 public struct Byte16: ByteGroup {
+    /// The bytes as a little-endian integer: the first byte is the least significant.
     public let littleEndian: UInt128
+    /// The group's size: 16 bytes.
     @inlinable public static var byteCount: Int { 16 }
+    /// Creates the group from `value`'s bytes, least significant first.
+    ///
+    /// - Parameter value: The bytes as a little-endian integer.
     @inlinable public init(littleEndian value: UInt128) { littleEndian = value }
 }

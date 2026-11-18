@@ -16,8 +16,13 @@ let benchmarks: @Sendable () -> Void = {
     registerDeflateBenchmarks()
     registerBrotliDecodeBenchmarks()
     registerBrotliEncodeBenchmarks()
+    registerZstdBenchmarks()
+    registerZstdAllocationBenchmarks()
+    registerLZMABenchmarks()
+    registerLZMAAllocationBenchmarks()
     registerParallelBenchmarks()
     registerCryptoBenchmarks()
+    registerPrimitiveBenchmarks()
     registerPipelineBenchmarks()
 }
 

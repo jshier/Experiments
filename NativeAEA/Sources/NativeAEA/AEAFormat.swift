@@ -1,0 +1,292 @@
+import Bytes
+
+// The Apple Encrypted Archive container (`AEA1`), as Apple's libAppleArchive writes it. Apple doesn't publish
+// the layout; it's documented here from the archive itself, and checked against `aea decrypt` (FORMAT.md in this
+// package has the whole description).
+//
+// A file is a prologue, then clusters, then optional padding:
+//
+//     prologue  "AEA1" | profile u24 | scrypt strength u8 | auth data size u32 | auth data
+//               | signature (128 bytes on profile 0) | key material (32 bytes on profile 0) | salt (32)
+//               | root header HMAC (32) | root header (48) | first cluster header HMAC (32)
+//     cluster   segment infos: per segment, raw size u32 | compressed size u32 | checksum
+//               | next cluster header HMAC (32) | segment HMACs (32 per segment) | the segments' data
+//
+// Every integer is little-endian.
+
+/// An archive's profile: how its keys are derived and whether it's encrypted and signed.
+public enum AEAProfile: Int, Sendable, CaseIterable {
+    /// No encryption, signed with ECDSA P-256 (Xcode's archives).
+    case signed = 0
+    /// AES-256-CTR with a symmetric key, not signed.
+    case symmetric = 1
+    /// AES-256-CTR with a symmetric key, signed.
+    case symmetricSigned = 2
+    /// AES-256-CTR with an ECDH P-256 key agreement, not signed.
+    case ecdhe = 3
+    /// AES-256-CTR with an ECDH P-256 key agreement, signed.
+    case ecdheSigned = 4
+    /// AES-256-CTR with a key derived from a password with scrypt.
+    case scrypt = 5
+
+    /// The bytes of the prologue's signature field.
+    var signatureByteCount: Int {
+        switch self {
+        case .signed: 128
+        case .symmetricSigned, .ecdheSigned: 160
+        case .symmetric, .ecdhe, .scrypt: 0
+        }
+    }
+
+    /// The bytes of the prologue's key material: the main key's input on profile 0, the sender's ephemeral
+    /// public key on the ECDHE profiles.
+    var keyMaterialByteCount: Int {
+        switch self {
+        case .signed: 32
+        case .ecdhe, .ecdheSigned: 65
+        case .symmetric, .symmetricSigned, .scrypt: 0
+        }
+    }
+
+    /// The name `aea` uses for the profile.
+    public var name: String {
+        switch self {
+        case .signed: "hkdf_sha256_hmac__none__ecdsa_p256"
+        case .symmetric: "hkdf_sha256_aesctr_hmac__symmetric__none"
+        case .symmetricSigned: "hkdf_sha256_aesctr_hmac__symmetric__ecdsa_p256"
+        case .ecdhe: "hkdf_sha256_aesctr_hmac__ecdhe_p256__none"
+        case .ecdheSigned: "hkdf_sha256_aesctr_hmac__ecdhe_p256__ecdsa_p256"
+        case .scrypt: "hkdf_sha256_aesctr_hmac__scrypt__none"
+        }
+    }
+}
+
+/// How each segment is compressed: a byte holding an ASCII letter.
+public enum AEACompression: UInt8, Sendable {
+    case none = 0x2D // "-"
+    case lz4 = 0x34 // "4"
+    case lzbitmap = 0x62 // "b"
+    case lzfse = 0x65 // "e"
+    case lzvn = 0x66 // "f"
+    case lzraven = 0x6D // "m": macOS 27's `aea encrypt -a lzraven`
+    case lzma = 0x78 // "x": an xz stream per segment
+    case zlib = 0x7A // "z"
+}
+
+/// The checksum kept for each segment's decompressed bytes.
+public enum AEAChecksum: UInt8, Sendable {
+    case none = 0
+    case murmur64 = 1
+    case sha256 = 2
+
+    /// The checksum's size in a cluster header's segment info.
+    public var byteCount: Int {
+        switch self {
+        case .none: 0
+        case .murmur64: 8
+        case .sha256: 32
+        }
+    }
+}
+
+/// The 48-byte root header: sizes and the segment format.
+public struct AEARootHeader: Sendable, Equatable {
+    /// The total decompressed size: the Apple Archive stream's.
+    public var rawSize: Int
+    /// The archive file's size, padding included.
+    public var containerSize: Int
+    /// The decompressed size of every segment but the last.
+    public var segmentSize: Int
+    /// Segments per cluster.
+    public var segmentsPerCluster: Int
+    public var compression: AEACompression
+    public var checksum: AEAChecksum
+
+    static var byteCount: Int { 48 }
+
+    init(parsing bytes: RawSpan) throws(AEAError) {
+        do {
+            var reader = AlignedBytesReader(bytes)
+            let raw = try reader.read(Byte8.self, .littleEndian)
+            let container = try reader.read(Byte8.self, .littleEndian)
+            let segment = try reader.read(Byte4.self, .littleEndian)
+            let perCluster = try reader.read(Byte4.self, .littleEndian)
+            let compressionByte = try UInt8(reader.read(Byte.self))
+            let checksumByte = try UInt8(reader.read(Byte.self))
+            guard let compression = AEACompression(rawValue: compressionByte) else {
+                throw AEAError.unsupportedCompression(compressionByte)
+            }
+            guard let checksum = AEAChecksum(rawValue: checksumByte) else {
+                throw AEAError.invalidHeader("checksum mode \(checksumByte)")
+            }
+            // Bounds that keep every later size computation in range: 64-bit sizes under 2^62, segments under
+            // 2^31 (their sizes in cluster headers are 32-bit), clusters under 2^20 segments.
+            guard raw < 1 << 62, container < 1 << 62, segment > 0, segment < 1 << 31, perCluster > 0,
+                  perCluster < 1 << 20
+            else { throw AEAError.invalidHeader("root header sizes") }
+            rawSize = Int(raw)
+            containerSize = Int(container)
+            segmentSize = Int(segment)
+            segmentsPerCluster = Int(perCluster)
+            self.compression = compression
+            self.checksum = checksum
+        } catch let error as AEAError {
+            throw error
+        } catch {
+            throw AEAError.invalidHeader("root header")
+        }
+    }
+
+    /// The bytes of a cluster header: per segment an info (8 bytes and the checksum) and a 32-byte HMAC, plus the
+    /// next cluster header's HMAC.
+    var clusterHeaderByteCount: Int {
+        segmentsPerCluster * (8 + checksum.byteCount + 32) + 32
+    }
+}
+
+/// An entry of the prologue's auth data, which archives use as a key-value store (Xcode's holds its signing
+/// certificate chain).
+public struct AEAAuthDataEntry: Sendable, Equatable {
+    public var key: String
+    public var value: [UInt8]
+}
+
+/// The prologue: everything before the first cluster.
+public struct AEAPrologue: Sendable {
+    public var profile: AEAProfile
+    /// The scrypt cost (profile 5 only).
+    public var scryptStrength: Int
+    /// The auth data, as stored.
+    public var authData: [UInt8]
+    /// The signature field: a DER ECDSA signature, zero-padded.
+    public var signature: [UInt8]
+    /// The 32 bytes the main key is derived from (profile 0).
+    public var keyMaterial: [UInt8]
+    public var salt: [UInt8]
+    public var rootHeaderMAC: [UInt8]
+    /// The root header's 48 bytes (encrypted on profiles other than 0).
+    public var rootHeaderBytes: [UInt8]
+    public var firstClusterMAC: [UInt8]
+    /// The header word with the profile and scrypt strength, as the main key's derivation uses it.
+    var profileWord: UInt32
+    /// The prologue's size: where the first cluster starts.
+    public var byteCount: Int
+    /// Where the signature field starts.
+    var signatureOffset: Int
+
+    /// The fixed part: magic, profile word, auth data size.
+    static var fixedByteCount: Int { 12 }
+
+    /// Parses a prologue from the start of a file.
+    ///
+    /// - Parameter bytes: The file's first bytes: at least ``byteCount(parsing:)`` of them.
+    init(parsing bytes: RawSpan) throws(AEAError) {
+        do {
+            var reader = AlignedBytesReader(bytes)
+            guard bytes.byteCount >= Self.fixedByteCount else { throw AEAError.notAnAEAFile }
+            do { try reader.expect(Byte4(ascii: "AEA1")) } catch { throw AEAError.notAnAEAFile }
+            profileWord = try reader.read(Byte4.self, .littleEndian)
+            let profileValue = Int(profileWord & 0xFF_FFFF)
+            guard let profile = AEAProfile(rawValue: profileValue) else { throw AEAError.unsupportedProfile(profileValue) }
+            self.profile = profile
+            scryptStrength = Int(profileWord >> 24)
+            let authCount = try Int(reader.read(Byte4.self, .littleEndian))
+            authData = try Self.bytes(&reader, authCount)
+            signatureOffset = reader.byteOffset
+            signature = try Self.bytes(&reader, profile.signatureByteCount)
+            keyMaterial = try Self.bytes(&reader, profile.keyMaterialByteCount)
+            salt = try Self.bytes(&reader, 32)
+            rootHeaderMAC = try Self.bytes(&reader, 32)
+            rootHeaderBytes = try Self.bytes(&reader, AEARootHeader.byteCount)
+            firstClusterMAC = try Self.bytes(&reader, 32)
+            byteCount = reader.byteOffset
+        } catch let error as AEAError {
+            throw error
+        } catch {
+            throw AEAError.truncated
+        }
+    }
+
+    /// The prologue's size, from its fixed part.
+    ///
+    /// - Parameter bytes: At least the first 12 bytes of the file.
+    /// - Returns: The bytes to read before parsing.
+    static func byteCount(parsing bytes: RawSpan) throws(AEAError) -> Int {
+        var reader = AlignedBytesReader(bytes)
+        do {
+            try reader.expect(Byte4(ascii: "AEA1"))
+            let word = try reader.read(Byte4.self, .littleEndian)
+            guard let profile = AEAProfile(rawValue: Int(word & 0xFF_FFFF)) else {
+                throw AEAError.unsupportedProfile(Int(word & 0xFF_FFFF))
+            }
+            let authCount = try Int(reader.read(Byte4.self, .littleEndian))
+            return fixedByteCount + authCount + profile.signatureByteCount + profile.keyMaterialByteCount + 32 + 32
+                + AEARootHeader.byteCount + 32
+        } catch let error as AEAError {
+            throw error
+        } catch {
+            throw AEAError.notAnAEAFile
+        }
+    }
+
+    private static func bytes(_ reader: inout AlignedBytesReader, _ count: Int) throws(BytesError) -> [UInt8] {
+        let span = try reader.read(byteCount: count)
+        return span.withUnsafeBytes { unsafe Array($0) } // Copies the bytes out of a borrowed span: safe.
+    }
+
+    /// The auth data as key-value entries, or `nil` when it isn't in that format.
+    ///
+    /// Each entry is a 32-bit size (including itself), a NUL-terminated key, then the value.
+    public var authDataEntries: [AEAAuthDataEntry]? {
+        var entries: [AEAAuthDataEntry] = []
+        var reader = AlignedBytesReader(authData.span.bytes)
+        do {
+            while reader.remainingByteCount > 0 {
+                let size = try Int(reader.read(Byte4.self, .littleEndian))
+                guard size >= 5 else { return nil }
+                var entry = AlignedBytesReader(try reader.read(byteCount: size - 4))
+                var key: [UInt8] = []
+                while true {
+                    let byte = try UInt8(entry.read(Byte.self))
+                    if byte == 0 { break }
+                    key.append(byte)
+                }
+                let value = try entry.read(byteCount: entry.remainingByteCount)
+                entries.append(AEAAuthDataEntry(
+                    key: String(decoding: key, as: UTF8.self),
+                    value: value.withUnsafeBytes { unsafe Array($0) } // Copies out of a borrowed span: safe.
+                ))
+            }
+        } catch {
+            return nil
+        }
+        return entries
+    }
+
+    /// The prologue as signed: its bytes with the signature field zeroed.
+    ///
+    /// - Parameter original: The prologue's bytes as stored.
+    func signedBytes(_ original: [UInt8]) -> [UInt8] {
+        var bytes = original
+        for index in signatureOffset..<(signatureOffset + signature.count) { bytes[index] = 0 }
+        return bytes
+    }
+}
+
+/// One segment: where its compressed bytes are and what they decompress to.
+public struct AEASegment: Sendable, Equatable {
+    /// The segment's position in the archive, counting from 0 across clusters.
+    public var index: Int
+    /// The cluster it's in, and its position there (the segment key's index).
+    public var cluster: Int
+    public var indexInCluster: Int
+    /// Where its compressed bytes start in the file.
+    public var fileOffset: Int
+    public var compressedSize: Int
+    /// Where its decompressed bytes start in the Apple Archive stream.
+    public var rawOffset: Int
+    public var rawSize: Int
+
+    /// Whether the segment is stored without compression (its sizes are equal).
+    public var isStored: Bool { compressedSize == rawSize }
+}

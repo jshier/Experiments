@@ -14,8 +14,14 @@ public import Bytes
 /// block; a 4×4 transpose per group of words puts each block's keystream back in order. Poly1305 works in
 /// radix 2^64 with 64 × 64 → 128-bit multiplies, as OpenSSL's 64-bit code.
 ///
-/// Not audited, and not constant-time against every compiler transformation: an experiment in performance.
+/// Security: tested against RFC 8439's vectors and all of Project Wycheproof's for this AEAD; no table lookup or
+/// branch depends on the key or data, and the tag is compared in constant time. Opening authenticates before
+/// releasing plaintext (a forged message is left as it was). A message is at most 2³² − 1 blocks (RFC 8439's limit,
+/// which keeps the 32-bit block counter from wrapping). Not independently audited.
 public struct ChaCha20Poly1305: Sendable {
+    /// The longest message: 2³² − 1 blocks of 64 bytes (block 0 makes the Poly1305 key).
+    public static var maximumMessageByteCount: Int { Int(UInt32.max) &* 64 }
+
     /// The key, as eight little-endian words.
     let key: InlineArray<8, UInt32>
 
@@ -50,7 +56,9 @@ public struct ChaCha20Poly1305: Sendable {
     ///   - nonce: 12 bytes, never reused with this key.
     ///   - aad: Additional data authenticated but not encrypted (a record header).
     /// - Returns: The 16-byte tag.
+    /// - Precondition: `message` is at most ``maximumMessageByteCount`` bytes, and `nonce` is 12.
     public func seal(_ message: inout MutableRawSpan, nonce: RawSpan, authenticating aad: RawSpan) -> InlineArray<16, UInt8> {
+        precondition(message.byteCount <= Self.maximumMessageByteCount, "ChaCha20-Poly1305 messages are at most 2^32 - 1 blocks")
         let (n0, n1, n2) = Self.nonceWords(nonce)
         let polyKey = ChaCha20.block(key: key, counter: 0, nonce: (n0, n1, n2))
         var mac = Poly1305(key: polyKey)
@@ -74,11 +82,13 @@ public struct ChaCha20Poly1305: Sendable {
     ///   - nonce: The 12 bytes it was sealed with.
     ///   - aad: The additional data it was sealed with.
     ///   - tag: The 16-byte tag.
-    /// - Throws: ``BytesError/mismatch`` if the tag doesn't match; `message` is then unchanged.
+    /// - Throws: ``BytesError/mismatch`` if the tag doesn't match; ``BytesError/invalidValue`` if `tag` isn't 16
+    ///   bytes or the message is longer than ``maximumMessageByteCount``. `message` is then unchanged.
+    /// - Precondition: `nonce` is 12 bytes.
     public func open(
         _ message: inout MutableRawSpan, nonce: RawSpan, authenticating aad: RawSpan, tag: RawSpan
     ) throws(BytesError) {
-        precondition(tag.byteCount == 16, "Tags are 16 bytes")
+        guard tag.byteCount == 16, message.byteCount <= Self.maximumMessageByteCount else { throw .invalidValue }
         let (n0, n1, n2) = Self.nonceWords(nonce)
         let polyKey = ChaCha20.block(key: key, counter: 0, nonce: (n0, n1, n2))
         var mac = Poly1305(key: polyKey)
@@ -147,6 +157,9 @@ enum ChaCha20 {
         x &<< SIMD4(repeating: n) | x &>> SIMD4(repeating: 32 &- n)
     }
 
+    // Rotating by 8 as a byte shuffle (one `tbl` instead of `shl` + `usra`) was measured and reverted (2026-11-18):
+    // the eight-block state fills all 32 vector registers, so the shuffle's index vector was rebuilt every round
+    // (`dup`, `mov.b`, `zip1`), and the double round grew from 264 to 323 instructions.
     @inline(__always)
     static func rotate(_ x: SIMD8<UInt32>, _ n: UInt32) -> SIMD8<UInt32> {
         x &<< SIMD8(repeating: n) | x &>> SIMD8(repeating: 32 &- n)

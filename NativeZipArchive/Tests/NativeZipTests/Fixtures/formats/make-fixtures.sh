@@ -28,6 +28,18 @@ for encryption in traditional aes128 aes256; do
     (cd "$work" && bsdtar --format zip --options "zip:encryption=$encryption" --passphrase secret -cf "$out/bsdtar-$encryption.zip" sample.txt)
 done
 
+# Large encrypted entries, stored and deflated with each cipher: 5 MB, so decryption runs in many pieces (the
+# decoder's 256 KB staging buffer, its 1 MB output chunks) and extraction takes its pipelined path (4 MB and up).
+for _ in $(seq 17); do cat "$work/sample.txt"; done > "$work/large.txt"
+rm -f "$out/large-zipcrypto-stored.zip" "$out/large-zipcrypto-deflated.zip"
+(cd "$work" && zip -q -0 -P secret "$out/large-zipcrypto-stored.zip" large.txt)
+(cd "$work" && zip -q -P secret "$out/large-zipcrypto-deflated.zip" large.txt)
+for compression in store deflate; do
+    rm -f "$out/large-aes256-$compression.zip"
+    (cd "$work" && bsdtar --format zip --options "zip:encryption=aes256,zip:compression=$compression" --passphrase secret \
+        -cf "$out/large-aes256-$compression.zip" large.txt)
+done
+
 # A self-extractor: data before the archive, offsets not adjusted (as `cat stub archive.zip` makes).
 head -c 5000 /bin/ls > "$work/stub"
 (cd "$work" && zip -q plain.zip sample.txt)

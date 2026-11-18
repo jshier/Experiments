@@ -27,6 +27,7 @@ import Testing
 
     static let protections: [Protection] = [
         Protection(compression: .deflate), Protection(compression: .brotli), Protection(encrypted: true),
+        Protection(encrypted: true, sealingLanes: 4),
         Protection(compression: .deflate, encrypted: true), Protection(compression: .brotli, encrypted: true),
     ]
 

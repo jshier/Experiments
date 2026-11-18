@@ -71,7 +71,7 @@ public enum LZ4 {
     @inline(always)
     static func decodeWithBytes(_ data: RawSpan, overrunningLiterals: Bool) throws -> [UInt8] {
         var reader = AlignedBytesReader(data)
-        try reader.expect(0x04_22_4D_18 as Byte4) // 0x184D2204, little-endian
+        try reader.expect(0x184D_2204 as UInt32, .littleEndian) // The frame magic, as the specification writes it
         let flags = try reader.read(Byte.self)
         let descriptor = try reader.read(Byte.self)
         let sizeCode = descriptor[LZ4Fields.blockMaximumSize]

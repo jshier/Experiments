@@ -123,7 +123,7 @@ public enum PCAPNG {
         case 0x0000_0006: return .enhancedPacket(try readEnhancedPacket(&reader))
         default:
             let blockLength = try reader.read(UInt32.self)
-            guard blockLength >= 12 else { throw .invalidValue }
+            // Under 12 bytes, the length is negative: `invalidValue`.
             let buffer = [UInt8](copying: try reader.read(byteCount: Int(blockLength) &- 12))
             try reader.expect(blockLength)
             return .custom(code: String(code, radix: 16), buffer: buffer)
@@ -139,7 +139,7 @@ public enum PCAPNG {
         let linkType = try fields.read(UInt16.self)
         try fields.skip(byteCount: 2) // Reserved.
         let snapshotLength = try fields.read(Int.self, as: Byte4.self)
-        guard blockLength >= 20 else { throw .invalidValue } // The example traps (a `UInt32` subtraction).
+        // Under 20 bytes, the length is negative: `invalidValue` (the example traps, on a `UInt32` subtraction).
         var options = try reader.readSection(byteCount: Int(blockLength) &- 20)
         let parsedOptions = try readOptions(&options) { (code, value) throws(BytesError) -> ExampleInterfaceDescription.Option in
             switch code {
@@ -183,9 +183,8 @@ public enum PCAPNG {
         try reader.skip(byteCount: paddedLength &- capturedLength)
         let packetData = try readPacket(&packet)
 
-        let optionsLength = Int(blockLength) &- 32 &- paddedLength
-        guard optionsLength >= 0 else { throw .invalidValue }
-        var options = try reader.readSection(byteCount: optionsLength)
+        // A negative length (a block too short for its packet) is `invalidValue`.
+        var options = try reader.readSection(byteCount: Int(blockLength) &- 32 &- paddedLength)
         let parsedOptions = try readOptions(&options) { (code, value) throws(BytesError) -> ExampleEnhancedPacket.Option in
             if code[PCAPNGFields.customOption] { return .custom(code, [UInt8](copying: value.readRemainingBytes())) }
             return switch code {
@@ -256,13 +255,11 @@ public enum PCAPNG {
         _ parse: (UInt16, inout GenericBytesReader<Mode>) throws(BytesError) -> Option
     ) throws(BytesError) -> [Option] {
         var options: [Option] = []
-        while !section.isAtEnd {
-            let code = try section.read(UInt16.self)
-            let length = try section.read(Int.self, as: Byte2.self)
-            var value = try section.readSection(byteCount: length)
-            try section.skip(byteCount: length.roundedUpToMultipleOf4 &- length) // The padding.
+        try section.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { (code, value) throws(BytesError) in
             try options.append(parse(code, &value))
         }
+        // Trailing bytes too few for an option's code and length: the example reads them and throws.
+        guard section.isAtEnd else { throw .insufficientData }
         return options
     }
 

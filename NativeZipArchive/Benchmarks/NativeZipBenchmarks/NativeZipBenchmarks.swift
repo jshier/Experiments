@@ -186,6 +186,20 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
+    // Zstandard (method 93, the `zstd` command at level 3) against the DEFLATE rows above, on the same 32 MB.
+    for (label, url) in [("text", Fixtures.zstdText), ("raster", Fixtures.zstdRaster)] {
+        Benchmark("Zstd + CRC 32 MB \(label)") { benchmark in
+            let archive = try ZipArchive(url: url)
+            let entry = firstFile(archive)
+            var decoder = ZipDecoder()
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+            }
+        }
+    }
+    extractionBenchmark("Extract 32 MB text: Zstd", archive: Fixtures.zstdText)
+
     for workers in [1, 2, 4, 8] {
         extractionBenchmark("Extract 2,000 small files (\(workers) worker\(workers == 1 ? "" : "s"))",
                             archive: Fixtures.smallFiles, maxConcurrency: workers)

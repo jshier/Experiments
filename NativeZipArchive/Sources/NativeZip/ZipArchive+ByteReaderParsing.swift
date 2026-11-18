@@ -162,7 +162,7 @@ enum ByteReaderParsing {
             uncompressedSize: uncompressedSize,
             externalAttributes: externalAttributes,
             localHeaderOffset: localHeaderOffset,
-            modificationDate: unixModificationTime ?? ZipArchive.date(dosDate: dosDate, dosTime: dosTime)
+            modificationTime: (unixModificationTime ?? ZipArchive.date(dosDate: dosDate, dosTime: dosTime))?.timeIntervalSince1970 ?? .nan
         )
     }
 

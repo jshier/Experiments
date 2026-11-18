@@ -71,6 +71,8 @@ public extension FixedWidthInteger {
     /// let qos = try flags.value(of: ConnectFlags.willQoS)
     /// ```
     ///
+    /// - Parameter field: The field, such as `ConnectFlags.willQoS`.
+    /// - Returns: The value whose raw value is the field's.
     /// - Throws: ``BytesError/invalidValue`` if no `R` has the field's value as its raw value.
     @inlinable @inline(__always)
     func value<R: RawRepresentable>(of field: BitField<R>) throws(BytesError) -> R where R.RawValue: BinaryInteger {
@@ -79,6 +81,8 @@ public extension FixedWidthInteger {
     }
 
     /// Whether every bit of the field is 0.
+    ///
+    /// - Parameter field: The field to test.
     @inlinable @inline(__always)
     func isZero<Value>(_ field: BitField<Value>) -> Bool { _bits(of: field) == 0 }
 
@@ -88,6 +92,7 @@ public extension FixedWidthInteger {
     /// try flags.requireZero(ConnectAcknowledgeFlags.reserved)
     /// ```
     ///
+    /// - Parameter field: The field that must be 0.
     /// - Throws: ``BytesError/invalidValue`` if any bit is set.
     @inlinable @inline(__always)
     func requireZero<Value>(_ field: BitField<Value>) throws(BytesError) {
@@ -95,11 +100,14 @@ public extension FixedWidthInteger {
     }
 
     /// Whether the flag's bit is 0.
+    ///
+    /// - Parameter flag: The flag to test.
     @inlinable @inline(__always)
     func isClear(_ flag: BitFlag) -> Bool { !self[flag] }
 
     /// Checks that the flag's bit is 0: a reserved bit.
     ///
+    /// - Parameter flag: The flag that must be clear.
     /// - Throws: ``BytesError/invalidValue`` if it's set.
     @inlinable @inline(__always)
     func requireClear(_ flag: BitFlag) throws(BytesError) {
@@ -112,6 +120,7 @@ public extension FixedWidthInteger {
     /// guard descriptor.matches("0???_0000") else { throw .invalidValue }
     /// ```
     ///
+    /// - Parameter pattern: The pattern, one digit per bit, most significant first.
     /// - Precondition: The pattern has `bitWidth` digits.
     @inlinable @inline(__always)
     func matches(_ pattern: BitPattern) -> Bool {
@@ -180,6 +189,8 @@ public extension Bits {
 
     /// The field as an `R` through its raw value.
     ///
+    /// - Parameter field: The field, such as `ConnectFlags.willQoS`.
+    /// - Returns: The value whose raw value is the field's.
     /// - Throws: ``BytesError/invalidValue`` if no `R` has the field's value as its raw value.
     @inlinable @inline(__always)
     func value<R: RawRepresentable>(of field: BitField<R>) throws(BytesError) -> R where R.RawValue: BinaryInteger {
@@ -188,11 +199,14 @@ public extension Bits {
     }
 
     /// Whether every bit of the field is 0.
+    ///
+    /// - Parameter field: The field to test.
     @inlinable @inline(__always)
     func isZero<Value>(_ field: BitField<Value>) -> Bool { _checkField(field); return rawValue.isZero(field) }
 
     /// Checks that every bit of the field is 0: a reserved field.
     ///
+    /// - Parameter field: The field that must be 0.
     /// - Throws: ``BytesError/invalidValue`` if any bit is set.
     @inlinable @inline(__always)
     func requireZero<Value>(_ field: BitField<Value>) throws(BytesError) {
@@ -200,11 +214,14 @@ public extension Bits {
     }
 
     /// Whether the flag's bit is 0.
+    ///
+    /// - Parameter flag: The flag to test.
     @inlinable @inline(__always)
     func isClear(_ flag: BitFlag) -> Bool { !self[flag] }
 
     /// Checks that the flag's bit is 0: a reserved bit.
     ///
+    /// - Parameter flag: The flag that must be clear.
     /// - Throws: ``BytesError/invalidValue`` if it's set.
     @inlinable @inline(__always)
     func requireClear(_ flag: BitFlag) throws(BytesError) {
@@ -213,6 +230,7 @@ public extension Bits {
 
     /// Whether the value matches `pattern`: its `0` and `1` digits, ignoring its `?`s.
     ///
+    /// - Parameter pattern: The pattern, one digit per bit, most significant first.
     /// - Precondition: The pattern has `width` digits.
     @inlinable @inline(__always)
     func matches(_ pattern: BitPattern) -> Bool {

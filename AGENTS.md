@@ -10,11 +10,12 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 
 | Project | What | Record |
 |---|---|---|
-| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work; `BytesAsync` (async buffers, pipelines, parallel codecs); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions); `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records) | `Benchmarks/RESULTS.md` |
+| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work; `BytesAsync` (async buffers, pipelines, parallel codecs); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions; Zstandard decoding, XXH64; LZMA, LZMA2, and `.xz` decoding, CRC-64); `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR on ARM's AES/PMULL instructions via the `CBytesCrypto` C target, SHA-1/256/384/512, HMAC, PBKDF2, HKDF, TLS 1.3's key schedule and record layer, sealing in parallel) | `Benchmarks/RESULTS.md` |
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
 | `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
 | `Base64` | Vectorized Base64 encoder on Bytes (`tbl` kernel, auto-vectorized `ld3`/`st4` kernel) | `Benchmarks/RESULTS.md` |
-| `NativeZipArchive` | ZIP: stored, DEFLATE, Deflate64, bzip2, LZMA, xz; ZipCrypto and WinZip AES; `ZipExtractor` (many archives, one worker pool); `nunzip` (Info-ZIP unzip's options) | `Benchmarks/RESULTS.md` |
+| `NativeZipArchive` | ZIP: stored, DEFLATE, Deflate64, bzip2, LZMA, xz, Zstandard; ZipCrypto and WinZip AES (on BytesCrypto, decrypted as streamed); `ZipExtractor` (many archives, one worker pool); `nunzip` (Info-ZIP unzip's options) | `Benchmarks/RESULTS.md` |
+| `NativeAEA` | Apple Encrypted Archives (`.aea`, Xcode's): the signed container verified (ECDSA, certificate chain, HKDF/HMAC chain, SHA-256), segments decoded in parallel (BytesCompression's LZMA2), the Apple Archive stream walked across segments with no copies, files written as `aa extract` writes them (APFS `decmpfs` compression) by writers outside a file system semaphore; `unaea`; FORMAT.md documents the format | `RESULTS.md` |
 | `BinaryParsingComparison` | Bytes vs swift-binary-parsing | `RESULTS.md` |
 | `NativeISO8601`, `*Benchmark` | Smaller benchmarks | READMEs |
 
@@ -209,12 +210,16 @@ programs (`--runtime`), and tests (`test`) with one. See Toolchains below.
 `TestData/SET/` at the repository root (ignored by git). Run `Tools/test-data fetch` on a fresh clone; tests that
 need a missing set fail saying which `fetch` to run. Two kinds of set:
 - **Downloaded**, pinned to a revision and checked by SHA-256: `swift-binary-parsing` (its PNG, QOI, ELF, PCAPNG,
-  and binary plist samples, read by BinaryParsingComparison after its own `Data/`).
+  and binary plist samples, read by BinaryParsingComparison after its own `Data/`), `wycheproof` (C2SP's AEAD,
+  HMAC, and HKDF vectors, for BytesCrypto), `rfc8448` (TLS 1.3's example handshake traces, for the key schedule
+  and record tests).
 - **Generated** by a checked-in script, run with the output directory as its argument and made again when any
   file in the script's directory changes: `swift-help-lz4` (`BinaryParsingComparison/TestDataGenerators`:
   swift-binary-parsing's `ELF/swift-help` through `lz4 -9`; lz4 1.11.1 reproduces the benchmarked file byte for
   byte, and the script warns when another version doesn't), `nativezip-formats` and `nativezip-lzma`
-  (`NativeZipArchive/Tests/NativeZipTests/Fixtures/{formats,lzma}`, read through the tests' `testDataFile`). When
+  (`NativeZipArchive/Tests/NativeZipTests/Fixtures/{formats,lzma}`, read through the tests' `testDataFile`). `nativeaea-synthetic`
+  (`NativeAEA/Benchmarks/Fixtures`: an Xcode-like Apple Archive stream in a signed `aea` container, about 1 GB;
+  the signature differs each time, the archived files don't). When
   a generated file is what benchmarks measure, the generator checks its SHA-256 against the measured one.
 
 Don't check in archives, images, or other test binaries: add a download line or a generator to the script.
@@ -540,6 +545,88 @@ API design and code generation (the 2026-11-17 proposals pass; numbers in `Bytes
   (`~/Downloads/swift-bugs/27`).
 - **Cross-toolchain checks:** SocketStream builds with a PR toolchain whose inliner differs; a change that helps MQTT
   under Xcode's compiler can hurt SocketStream. Track both.
+
+The 2026-11-18 pass (Zstandard, native crypto and TLS, parallel sealing; numbers in each package's RESULTS.md):
+
+- **A count check is one unsigned compare.** `UInt(bitPattern: n) <= UInt(bitPattern: remaining)` rejects negative and
+  too-large counts at once; `n >= 0 && n <= remaining` cost BinaryParsingComparison's LZ4 2% in instructions.
+- **`InlineArray` passed `borrowing` can be copied at every subscript.** The zstd decoder's FSE spreading loop copied a
+  512-byte table (`memmove`) per access: 16,000 copies per 4 KB frame, 22% of its time. Hot tables go in raw memory
+  the decoder owns (a workspace), indexed through a pointer, with the safety argument in a comment.
+- **An out-of-line `mutating` call makes its struct live in memory for the whole loop.** The zstd bit reader's reload
+  (and Brotli's bit buffer before it) kept the reader spilled while one cold path called a `mutating` method on it:
+  make such helpers static functions that take values and return them.
+- **Lane-mask tricks need varied test data.** `ByteMatches.nibbleMask` shifted bytes right before narrowing, so odd
+  lanes reported bit 3: bytes like `0x70` matched. Tests with one filler byte never showed it. Spread the high bit
+  first (an arithmetic shift by 7), and test with varied bytes around each match.
+- **`~Copyable` members made on first use:** an `Optional`. `x!.mutate()` works in place, but `x!.property` in a read
+  consumes the optional ("cannot partially consume 'self'"): borrow with `switch x { case let .some(y): … }`
+  (SE-0432). NativeZip's staging buffer and streaming decoder are made this way, on the first encrypted entry. A
+  benchmark that makes its decoder inside the measured closure then counts that first-use setup as per-iteration
+  mallocs.
+- **Records are independent once their sequence numbers are fixed.** TLS sealing in parallel: full records have known
+  sizes, so each lane seals its records straight into their places in the output (`concurrentPerform` over pointers
+  in an `@unchecked Sendable` wrapper). 3.6–3.8x on 4 lanes, 5.8–6.9x on 8. Opening isn't symmetric: a record's
+  plaintext length (inner type and padding at its end) is known only after decrypting it.
+- **Register pressure beats instruction choice:** ChaCha20's rotate by 8 as a `tbl` byte shuffle (one instruction
+  instead of shift and insert) took the eight-block double round from 264 to 323 instructions, from spills of the
+  shuffle's table. Reverted.
+- **A shuffle-heavy SSE kernel isn't a NEON kernel.** Base64's reshuffling encoder (one-register `tbl`s, then shifts
+  and masks per 32-bit lane) was 75 instructions per block against the deinterleaving kernel's 32, which LLVM folds
+  into `st2` stores. Per-lane shift amounts on `SIMD8<UInt16>` compiled to split halves (143); lane picks across two
+  vectors became byte inserts unless written as a contiguous run (one `ext`).
+- **Bytes' crypto types share CryptoKit's names** (`SHA256`, `HMAC`, `HKDF`, `AES`, `HashFunction`): qualify with the
+  module in code importing both (`CryptoKit.AES.GCM`).
+- **Don't take `.span` of a throwing call's result directly**: at `-Onone` the LLVM verifier crashed
+  (`~/Downloads/swift-bugs/28`). Bind the result to a local first.
+- **Test reads that end exactly at the data's end.** `read(_:asciiDigits:)`'s two-load path lacked a `count > 8`
+  condition, so short reads near the end loaded 8 bytes past the data (unchecked loads); every test with bytes after
+  the field passed. Every fast path with wide loads gets a test whose input ends where the field does.
+- **`pointwiseMin`/`pointwiseMax` on `SIMD16<UInt8>` are calls** (Swift 6.4): use a vector comparison
+  (`a .<= b`, one `cmhs`/`cmhi`) and `replacing(with:where:)`.
+- **ASCII tags fold:** `Byte4(ascii: "IHDR")` (`@inline(__always)`, a `StaticString` read in a loop over the
+  constant width) compiles to the same code as the hex literal; LLVM merged the two benchmark functions. A
+  `static let` of it would still be lazily initialized.
+
+Apple Encrypted Archives and the LZMA decoder (NativeAEA/RESULTS.md, Bytes' RESULTS.md 2026-11-18; format in
+NativeAEA/FORMAT.md):
+
+- **APFS file creation peaks at about 4 threads** (46,000 small files a second) and slows beyond 8, in one directory
+  or many: the contention is in the file system. Keep CPU work (compression) outside a semaphore around the calls;
+  extracting Xcode went 11.4 → 9.0 s with 24 writers and at most 6 in the kernel (Apple's `aa extract`, 32 threads
+  in the kernel: 47 s, 347 s of system time). Instrument the stages (time per call kind, summed) before guessing.
+- **Creating entries relative to an open parent wasn't faster** than paths from the destination (3% slower: the
+  name cache makes lookups cheap, and opening each directory is one more call). Deep paths cost ~20% in a
+  microbenchmark but not in the pipeline.
+- **Setting an extended attribute checks the file's mode, not the descriptor's**: `fsetxattr` on a file created
+  0444 fails with `EACCES` even with the descriptor open for writing. Create owner-writable, `fchmod` at the end.
+- **APFS compression (`decmpfs`) is three calls after `open`:** the resource fork (`fsetxattr("com.apple.ResourceFork",
+  position)`), `com.apple.decmpfs` (16-byte header, data inline when small), `fchflags(UF_COMPRESSED)`. Chunks are
+  64 KiB, 0xFF + raw bytes when they don't compress. `clonefile` keeps all of it but was slower than creating (23,000
+  a second on 4 threads, one source).
+- **A pool of slots that jobs hold until they finish waits on the queue's latency**, not the work's: 4 large-file
+  slots made the walker wait 6.0 s of 9.0 s, because a piece's job sat behind 16,000 queued small files. Size such
+  pools for the queue.
+- **Overwrite consumed input in place** to compress pieces in parallel without memory: each 64 KiB chunk's output
+  moves back over the piece's own consumed bytes while the output stays behind the unread input (it can grow by a
+  byte per chunk), falling back to a buffer when it would catch up.
+- **Shared mutable state the walker reads to decide reference handoffs is a leak**: a writer cleared a large file's
+  fork type while the walker used it to decide whether to pass a buffer reference on; the reference leaked and
+  `DispatchSemaphore` trapped at deinit (freed below its initial value). Keep the decider's own copy.
+- **package-benchmark's malloc interposer traps on thread exit** (`count_free` → `_tlv_get_addr` → `calloc` in
+  `_pthread_tsd_cleanup`): benchmarks that start threads can't count mallocs. Count them in single-threaded ones.
+- **`aea` rejects some PEM keys**: a P-256 private scalar with a leading zero byte (1 in 256) DER-encodes in 31
+  bytes, and `aea` fails with "Error parsing PEM blob". CryptoKit's PKCS #8 PEM isn't accepted at all; use
+  `openssl ecparam -genkey` and check the octet string is 32 bytes.
+- **`aea decrypt -o -` doesn't write to stdout**: it writes a file named `-`.
+- **LZMA decoding (the decoder agent):** LLVM turned a range coder's `one ? 1 : 0` into a branch that mispredicted
+  half the literal bits; the bit from the borrow (`(UInt64(code) &- UInt64(bound)) >> 63`) cut cycles 20%. Load both
+  children's probabilities (adjacent `UInt16`s, one 32-bit load) while the parent bit decodes (−14%). `x < 1 << 24`
+  compiles to `lsr`+`cmp`; a threshold in a register is one `cmp` (−5%). The normalization branch predicts well:
+  every branchless form was 2–10% slower. CRC-64 by `pmull` folding: 24–41 GB/s against a table's 2.2.
+- **Destructive shell sequences:** `perl … > new && diff …; cp new file` copied an empty file over a source file when
+  the script failed to compile (the `;` ran `cp` anyway), and the new package wasn't in git yet. Chain every step
+  with `&&`, or use Edit.
 
 ## Benchmarks (ordo-one/package-benchmark)
 

@@ -5,38 +5,153 @@ import BytesMacros
 // header, then the program and section header tables, into the example's own types, so both sides build the same
 // result (two arrays, reserved to their counts) and only the parsing differs.
 //
-// - The 16 identification bytes, the same in every ELF file, are a `@BinaryRecord` of `@BitFields`: class, byte
-//   order, version, and OS ABI by name, each enum checked as it's read.
+// - The 16 identification bytes, the same in every ELF file, are a `@BinaryRecord` of single bytes: class, byte
+//   order, version, and OS ABI by name, each enum checked as it's read, then 7 bytes of padding.
 // - Everything after them is in the byte order the identification names. That's decided once: the parser is
 //   generic over the cursor's byte order (`LittleEndianBytesReader` or `BigEndianBytesReader`), so each order
 //   compiles to its own code, with no test per field. (The example passes an `Endianness` value to every read.)
-//   `@BinaryRecord` fixes its byte order when it's declared, so these headers are read by hand.
-// - Each header (or the part of one that doesn't depend on the class) is a fixed-size section, so its fields'
-//   bounds checks fold to one per section.
+//   The headers are `@BinaryRecord`s without a byte order, which read in the cursor's.
+// - Each header (or the part of one that doesn't depend on the class) is a fixed-size record, so its fields'
+//   bounds checks fold to one per record.
 //
 // Every value is read once.
-
-/// The 4 identification bytes after the magic: the class, byte order, version, and OS ABI.
-@BitFields(UInt32.self, .bigEndian)
-struct ELFIdentity {
-    @Field(bits: 24...31) var fileClass: ExampleELF.Header.Class
-    @Field(bits: 16...23) var byteOrder: ExampleELF.Header.Endian
-    @Field(bits: 8...15) var version: UInt8
-    @Field(bits: 0...7) var osABI: ExampleELF.Header.OSABI
-}
-
-/// The identification's last 8 bytes: the ABI version, then 7 bytes of padding (not checked, as in the example).
-@BitFields(UInt64.self, .bigEndian)
-struct ELFABIVersion {
-    @Field(bits: 56...63) var version: UInt8
-}
 
 /// `e_ident`: the 16 bytes every ELF file starts with, in either byte order (they're single bytes).
 @BinaryRecord(.bigEndian)
 struct ELFIdentification {
     @Field(Byte4.self, expecting: 0x7F45_4C46) var magic: UInt32 // "\x7FELF"
-    var identity: ELFIdentity
-    var abi: ELFABIVersion
+    @Field(Byte.self) var fileClass: ExampleELF.Header.Class
+    @Field(Byte.self) var byteOrder: ExampleELF.Header.Endian
+    @Field(Byte.self) var version: UInt8
+    @Field(Byte.self) var osABI: ExampleELF.Header.OSABI
+    @Field(Byte.self) var abiVersion: UInt8
+    var padding: Padding<Byte7> // Not checked, as in the example.
+}
+
+/// The file header after the identification, up to the entry point: the same in both classes.
+@BinaryRecord
+struct ELFHeaderStart {
+    @Field(Byte2.self) var fileType: ExampleELF.Header.FileType
+    @Field(Byte2.self) var instructionSet: UInt16
+    @Field(Byte4.self, expecting: 1) var version: UInt32 // e_version
+}
+
+/// The entry point and the two tables' offsets, in a 64-bit file.
+@BinaryRecord
+struct ELFAddresses64 {
+    @Field(Byte8.self) var entryPoint: UInt64
+    @Field(Byte8.self) var programHeaderTable: UInt64
+    @Field(Byte8.self) var sectionHeaderTable: UInt64
+}
+
+/// The entry point and the two tables' offsets, in a 32-bit file.
+@BinaryRecord
+struct ELFAddresses32 {
+    @Field(Byte4.self) var entryPoint: UInt64
+    @Field(Byte4.self) var programHeaderTable: UInt64
+    @Field(Byte4.self) var sectionHeaderTable: UInt64
+}
+
+/// The file header's last 16 bytes: flags, sizes, and counts.
+@BinaryRecord
+struct ELFHeaderEnd {
+    @Field(Byte4.self) var architectureFlags: UInt32
+    @Field(Byte2.self) var headerSize: UInt16
+    @Field(Byte2.self) var programHeaderEntrySize: UInt16
+    @Field(Byte2.self) var programHeaderCount: UInt16
+    @Field(Byte2.self) var sectionHeaderEntrySize: UInt16
+    @Field(Byte2.self) var sectionHeaderCount: UInt16
+    @Field(Byte2.self) var sectionNameIndex: UInt16
+}
+
+/// A 64-bit program header (`Elf64_Phdr`).
+@BinaryRecord
+struct ELFProgramHeader64 {
+    @Field(Byte4.self) var type: ExampleELF.ProgramHeader.SegmentType
+    @Field(Byte4.self) var flags: ExampleELF.ProgramHeader.Flags
+    @Field(Byte8.self) var offset: UInt64
+    @Field(Byte8.self) var virtualAddress: UInt64
+    @Field(Byte8.self) var physicalAddress: UInt64
+    @Field(Byte8.self) var fileSize: UInt64
+    @Field(Byte8.self) var memorySize: UInt64
+    @Field(Byte8.self) var alignment: UInt64
+
+    @inline(__always)
+    var programHeader: ExampleELF.ProgramHeader {
+        ExampleELF.ProgramHeader(
+            type: type, flags: flags, offset: offset, virtualAddress: virtualAddress, physicalAddress: physicalAddress,
+            fileSize: fileSize, memorySize: memorySize, alignment: alignment
+        )
+    }
+}
+
+/// A 32-bit program header (`Elf32_Phdr`): 4-byte fields, and the flags after the sizes.
+@BinaryRecord
+struct ELFProgramHeader32 {
+    @Field(Byte4.self) var type: ExampleELF.ProgramHeader.SegmentType
+    @Field(Byte4.self) var offset: UInt64
+    @Field(Byte4.self) var virtualAddress: UInt64
+    @Field(Byte4.self) var physicalAddress: UInt64
+    @Field(Byte4.self) var fileSize: UInt64
+    @Field(Byte4.self) var memorySize: UInt64
+    @Field(Byte4.self) var flags: ExampleELF.ProgramHeader.Flags
+    @Field(Byte4.self) var alignment: UInt64
+
+    @inline(__always)
+    var programHeader: ExampleELF.ProgramHeader {
+        ExampleELF.ProgramHeader(
+            type: type, flags: flags, offset: offset, virtualAddress: virtualAddress, physicalAddress: physicalAddress,
+            fileSize: fileSize, memorySize: memorySize, alignment: alignment
+        )
+    }
+}
+
+/// A 64-bit section header (`Elf64_Shdr`).
+@BinaryRecord
+struct ELFSectionHeader64 {
+    @Field(Byte4.self) var nameOffset: UInt32
+    @Field(Byte4.self) var type: ExampleELF.SectionHeader.HeaderType
+    @Field(Byte8.self) var flags: ExampleELF.SectionHeader.Flags
+    @Field(Byte8.self) var virtualAddress: UInt64
+    @Field(Byte8.self) var offset: UInt64
+    @Field(Byte8.self) var size: UInt64
+    @Field(Byte4.self) var associatedSectionIndex: UInt32
+    @Field(Byte4.self) var infoSectionIndex: UInt32
+    @Field(Byte8.self) var alignment: UInt64
+    @Field(Byte8.self) var entrySize: UInt64
+
+    @inline(__always)
+    var sectionHeader: ExampleELF.SectionHeader {
+        ExampleELF.SectionHeader(
+            nameOffset: nameOffset, type: type, flags: flags, virtualAddress: virtualAddress, offset: offset, size: size,
+            associatedSectionIndex: associatedSectionIndex, infoSectionIndex: infoSectionIndex, alignment: alignment,
+            entrySize: entrySize
+        )
+    }
+}
+
+/// A 32-bit section header (`Elf32_Shdr`): every field 4 bytes.
+@BinaryRecord
+struct ELFSectionHeader32 {
+    @Field(Byte4.self) var nameOffset: UInt32
+    @Field(Byte4.self) var type: ExampleELF.SectionHeader.HeaderType
+    @Field(Byte4.self) var flags: ExampleELF.SectionHeader.Flags
+    @Field(Byte4.self) var virtualAddress: UInt64
+    @Field(Byte4.self) var offset: UInt64
+    @Field(Byte4.self) var size: UInt64
+    @Field(Byte4.self) var associatedSectionIndex: UInt32
+    @Field(Byte4.self) var infoSectionIndex: UInt32
+    @Field(Byte4.self) var alignment: UInt64
+    @Field(Byte4.self) var entrySize: UInt64
+
+    @inline(__always)
+    var sectionHeader: ExampleELF.SectionHeader {
+        ExampleELF.SectionHeader(
+            nameOffset: nameOffset, type: type, flags: flags, virtualAddress: virtualAddress, offset: offset, size: size,
+            associatedSectionIndex: associatedSectionIndex, infoSectionIndex: infoSectionIndex, alignment: alignment,
+            entrySize: entrySize
+        )
+    }
 }
 
 public enum ELF {
@@ -50,7 +165,7 @@ public enum ELF {
     public static func parseWithBytes(_ data: RawSpan) throws(BytesError) -> ExampleELF {
         var reader = AlignedBytesReader(data)
         let identification = try reader.read(ELFIdentification.self)
-        return switch identification.identity.byteOrder {
+        return switch identification.byteOrder {
         case .little: try parse(data, identification, LittleEndianBytes.self)
         case .big: try parse(data, identification, BigEndianBytes.self)
         }
@@ -61,150 +176,47 @@ public enum ELF {
         _ data: RawSpan, _ identification: ELFIdentification, _: Mode.Type
     ) throws(BytesError) -> ExampleELF {
         var reader = try GenericBytesReader<Mode>(data, atByteOffset: ELFIdentification.byteCount)
-        let identity = identification.identity
-        let fileClass = identity.fileClass
+        let fileClass = identification.fileClass
         let is64 = fileClass == .class64Bit
         // The example checks the identification's version only for 32-bit files.
-        guard is64 || identity.version == 1 else { throw .mismatch }
+        guard is64 || identification.version == 1 else { throw .mismatch }
 
-        var start = try reader.readSection(byteCount: 8)
-        let fileType = try start.read(ExampleELF.Header.FileType.self, as: Byte2.self)
-        let instructionSet = ExampleELF.Header.ISA(rawValue: try start.read(UInt16.self))
-        try start.expect(1 as UInt32) // e_version
-
-        // The entry point and the two tables' offsets: 4 or 8 bytes each.
-        let entryPoint: UInt64, programHeaderTable: UInt64, sectionHeaderTable: UInt64
-        if is64 {
-            var addresses = try reader.readSection(byteCount: 24)
-            entryPoint = try addresses.read(UInt64.self)
-            programHeaderTable = try addresses.read(UInt64.self)
-            sectionHeaderTable = try addresses.read(UInt64.self)
-        } else {
-            var addresses = try reader.readSection(byteCount: 12)
-            entryPoint = UInt64(try addresses.read(UInt32.self))
-            programHeaderTable = UInt64(try addresses.read(UInt32.self))
-            sectionHeaderTable = UInt64(try addresses.read(UInt32.self))
-        }
-
-        var end = try reader.readSection(byteCount: 16)
-        let architectureFlags = try end.read(UInt32.self)
-        try end.expect(fileClass.headerSize)
-        try end.expect(fileClass.programHeaderEntrySize)
-        let programHeaderCount = try end.read(UInt16.self)
-        try end.expect(fileClass.sectionHeaderEntrySize)
-        let sectionHeaderCount = try end.read(UInt16.self)
-        let sectionNameIndex = try end.read(UInt16.self)
+        let start = try reader.read(ELFHeaderStart.self)
+        let addresses = is64 ? try reader.read(ELFAddresses64.self) : try reader.read(ELFAddresses32.self).wide
+        let end = try reader.read(ELFHeaderEnd.self)
+        guard end.headerSize == fileClass.headerSize, end.programHeaderEntrySize == fileClass.programHeaderEntrySize,
+              end.sectionHeaderEntrySize == fileClass.sectionHeaderEntrySize else { throw .mismatch }
 
         let header = ExampleELF.Header(
-            class: fileClass, endian: identity.byteOrder, version: identity.version, osABI: identity.osABI,
-            abiVersion: identification.abi.version, fileType: fileType, instructionSet: instructionSet,
-            entryPoint: entryPoint, programHeaderTable: programHeaderTable, sectionHeaderTable: sectionHeaderTable,
-            architectureFlags: architectureFlags, programHeaderEntryCount: programHeaderCount,
-            sectionHeaderEntryCount: sectionHeaderCount, sectionNameIndex: sectionNameIndex
+            class: fileClass, endian: identification.byteOrder, version: identification.version, osABI: identification.osABI,
+            abiVersion: identification.abiVersion, fileType: start.fileType,
+            instructionSet: ExampleELF.Header.ISA(rawValue: start.instructionSet),
+            entryPoint: addresses.entryPoint, programHeaderTable: addresses.programHeaderTable,
+            sectionHeaderTable: addresses.sectionHeaderTable, architectureFlags: end.architectureFlags,
+            programHeaderEntryCount: end.programHeaderCount, sectionHeaderEntryCount: end.sectionHeaderCount,
+            sectionNameIndex: end.sectionNameIndex
         )
 
-        // Each table: seek to it (as the example does, even when it's empty), then an entry per fixed-size section.
-        try reader.seek(toByteOffset: offset(programHeaderTable))
+        // Each table: seek to it (as the example does, even when it's empty), then a record per entry.
+        try reader.seek(toByteOffset: addresses.programHeaderTable)
         var programHeaders: [ExampleELF.ProgramHeader] = []
-        programHeaders.reserveCapacity(Int(programHeaderCount))
+        programHeaders.reserveCapacity(Int(end.programHeaderCount))
         if is64 {
-            for _ in 0..<programHeaderCount { try programHeaders.append(programHeader64(&reader)) }
+            for _ in 0..<end.programHeaderCount { programHeaders.append(try reader.read(ELFProgramHeader64.self).programHeader) }
         } else {
-            for _ in 0..<programHeaderCount { try programHeaders.append(programHeader32(&reader)) }
+            for _ in 0..<end.programHeaderCount { programHeaders.append(try reader.read(ELFProgramHeader32.self).programHeader) }
         }
 
-        try reader.seek(toByteOffset: offset(sectionHeaderTable))
+        try reader.seek(toByteOffset: addresses.sectionHeaderTable)
         var sectionHeaders: [ExampleELF.SectionHeader] = []
-        sectionHeaders.reserveCapacity(Int(sectionHeaderCount))
+        sectionHeaders.reserveCapacity(Int(end.sectionHeaderCount))
         if is64 {
-            for _ in 0..<sectionHeaderCount { try sectionHeaders.append(sectionHeader64(&reader)) }
+            for _ in 0..<end.sectionHeaderCount { sectionHeaders.append(try reader.read(ELFSectionHeader64.self).sectionHeader) }
         } else {
-            for _ in 0..<sectionHeaderCount { try sectionHeaders.append(sectionHeader32(&reader)) }
+            for _ in 0..<end.sectionHeaderCount { sectionHeaders.append(try reader.read(ELFSectionHeader32.self).sectionHeader) }
         }
 
         return ExampleELF(header: header, programHeaders: programHeaders, sectionHeaders: sectionHeaders)
-    }
-
-    /// A file offset from the data as an `Int`.
-    @inline(__always)
-    static func offset(_ value: UInt64) throws(BytesError) -> Int {
-        guard let offset = Int(exactly: value) else { throw .insufficientData }
-        return offset
-    }
-
-    @inline(__always)
-    static func programHeader64<Mode: ByteOrderedCursorMode>(
-        _ reader: inout GenericBytesReader<Mode>
-    ) throws(BytesError) -> ExampleELF.ProgramHeader {
-        var entry = try reader.readSection(byteCount: 0x38)
-        // Arguments are evaluated in order: the fields as they're stored.
-        return try ExampleELF.ProgramHeader(
-            type: entry.read(ExampleELF.ProgramHeader.SegmentType.self, as: Byte4.self),
-            flags: ExampleELF.ProgramHeader.Flags(rawValue: entry.read(UInt32.self)),
-            offset: entry.read(UInt64.self),
-            virtualAddress: entry.read(UInt64.self),
-            physicalAddress: entry.read(UInt64.self),
-            fileSize: entry.read(UInt64.self),
-            memorySize: entry.read(UInt64.self),
-            alignment: entry.read(UInt64.self)
-        )
-    }
-
-    @inline(__always)
-    static func programHeader32<Mode: ByteOrderedCursorMode>(
-        _ reader: inout GenericBytesReader<Mode>
-    ) throws(BytesError) -> ExampleELF.ProgramHeader {
-        var entry = try reader.readSection(byteCount: 0x20)
-        let type = try entry.read(ExampleELF.ProgramHeader.SegmentType.self, as: Byte4.self)
-        let offset = UInt64(try entry.read(UInt32.self))
-        let virtualAddress = UInt64(try entry.read(UInt32.self))
-        let physicalAddress = UInt64(try entry.read(UInt32.self))
-        let fileSize = UInt64(try entry.read(UInt32.self))
-        let memorySize = UInt64(try entry.read(UInt32.self))
-        let flags = ExampleELF.ProgramHeader.Flags(rawValue: try entry.read(UInt32.self)) // after the sizes in 32-bit files
-        let alignment = UInt64(try entry.read(UInt32.self))
-        return ExampleELF.ProgramHeader(
-            type: type, flags: flags, offset: offset, virtualAddress: virtualAddress, physicalAddress: physicalAddress,
-            fileSize: fileSize, memorySize: memorySize, alignment: alignment
-        )
-    }
-
-    @inline(__always)
-    static func sectionHeader64<Mode: ByteOrderedCursorMode>(
-        _ reader: inout GenericBytesReader<Mode>
-    ) throws(BytesError) -> ExampleELF.SectionHeader {
-        var entry = try reader.readSection(byteCount: 0x40)
-        return try ExampleELF.SectionHeader(
-            nameOffset: entry.read(UInt32.self),
-            type: entry.read(ExampleELF.SectionHeader.HeaderType.self, as: Byte4.self),
-            flags: ExampleELF.SectionHeader.Flags(rawValue: entry.read(UInt64.self)),
-            virtualAddress: entry.read(UInt64.self),
-            offset: entry.read(UInt64.self),
-            size: entry.read(UInt64.self),
-            associatedSectionIndex: entry.read(UInt32.self),
-            infoSectionIndex: entry.read(UInt32.self),
-            alignment: entry.read(UInt64.self),
-            entrySize: entry.read(UInt64.self)
-        )
-    }
-
-    @inline(__always)
-    static func sectionHeader32<Mode: ByteOrderedCursorMode>(
-        _ reader: inout GenericBytesReader<Mode>
-    ) throws(BytesError) -> ExampleELF.SectionHeader {
-        var entry = try reader.readSection(byteCount: 0x28)
-        return try ExampleELF.SectionHeader(
-            nameOffset: entry.read(UInt32.self),
-            type: entry.read(ExampleELF.SectionHeader.HeaderType.self, as: Byte4.self),
-            flags: ExampleELF.SectionHeader.Flags(rawValue: entry.read(UInt64.self, as: Byte4.self)),
-            virtualAddress: entry.read(UInt64.self, as: Byte4.self),
-            offset: entry.read(UInt64.self, as: Byte4.self),
-            size: entry.read(UInt64.self, as: Byte4.self),
-            associatedSectionIndex: entry.read(UInt32.self),
-            infoSectionIndex: entry.read(UInt32.self),
-            alignment: entry.read(UInt64.self, as: Byte4.self),
-            entrySize: entry.read(UInt64.self, as: Byte4.self)
-        )
     }
 
     /// The name of the section at `index`, from the section-name string table: the example's
@@ -224,9 +236,17 @@ public enum ELF {
             // The name runs to the first NUL from its offset, not bounded by the table: as in the example.
             var reader = try AlignedBytesReader(data, atByteOffset: namesOffset)
             try reader.skip(byteCount: Int(elf.sectionHeaders[index].nameOffset))
-            return String(copying: try reader.readNulTerminatedUTF8())
+            return String(copying: try reader.read(utf8TerminatedBy: 0))
         } catch {
             return nil
         }
+    }
+}
+
+extension ELFAddresses32 {
+    /// The same addresses as a 64-bit file's.
+    @inline(__always)
+    var wide: ELFAddresses64 {
+        ELFAddresses64(entryPoint: entryPoint, programHeaderTable: programHeaderTable, sectionHeaderTable: sectionHeaderTable)
     }
 }

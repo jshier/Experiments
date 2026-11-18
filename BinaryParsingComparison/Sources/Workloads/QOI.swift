@@ -97,7 +97,7 @@ public enum QOI {
         _ reader: consuming GenericBytesReader<Mode>, fillingRuns: Bool
     ) throws -> DecodedImage {
         var reader = reader
-        try reader.expect(0x71_6F_69_66 as Byte4) // "qoif"
+        try reader.expect(Byte4(ascii: "qoif"))
         let width = try reader.read(Int.self, as: Byte4.self, .bigEndian)
         let height = try reader.read(Int.self, as: Byte4.self, .bigEndian)
         let channels = try Int(reader.read(Byte.self))

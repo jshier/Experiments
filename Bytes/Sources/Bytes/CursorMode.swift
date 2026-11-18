@@ -15,6 +15,7 @@ public protocol BytesCursorMode {
 
 /// Bit and byte fields in any mix: the mode of ``BytesReader`` and ``BytesWriter``.
 public enum BitAddressable: BytesCursorMode {
+    /// `true`: fields of any bit width, at any bit position.
     @inlinable @inline(__always)
     public static var addressesBits: Bool { true }
 }
@@ -24,6 +25,7 @@ public enum BitAddressable: BytesCursorMode {
 /// `flags[ConnectFlags.willQoS]`, see ``BitField``). With an explicit byte order at each integer; for one
 /// order throughout, use the byte-ordered modes below.
 public enum ByteAligned: ByteAlignedCursorMode {
+    /// `false`: whole bytes only.
     @inlinable @inline(__always)
     public static var addressesBits: Bool { false }
 }
@@ -33,6 +35,7 @@ public enum ByteAligned: ByteAlignedCursorMode {
 public protocol ByteAlignedCursorMode: BytesCursorMode {}
 
 public extension ByteAlignedCursorMode {
+    /// `false`: whole bytes only.
     @inlinable @inline(__always)
     static var addressesBits: Bool { false }
 }
@@ -56,12 +59,14 @@ public protocol ByteOrderedCursorMode: ByteAlignedCursorMode {
 /// Whole bytes, integers big-endian (network order): the mode of ``BigEndianBytesReader`` and
 /// ``BigEndianBytesWriter``.
 public enum BigEndianBytes: ByteOrderedCursorMode {
+    /// `.bigEndian`.
     @inlinable @inline(__always)
     public static var byteOrder: ByteOrder { .bigEndian }
 }
 
 /// Whole bytes, integers little-endian: the mode of ``LittleEndianBytesReader`` and ``LittleEndianBytesWriter``.
 public enum LittleEndianBytes: ByteOrderedCursorMode {
+    /// `.littleEndian`.
     @inlinable @inline(__always)
     public static var byteOrder: ByteOrder { .littleEndian }
 }

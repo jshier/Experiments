@@ -112,6 +112,9 @@ public struct ParallelDeflateEncoder: ~Copyable {
     }
 
     /// The most bytes compressing `byteCount` bytes can produce, container included.
+    ///
+    /// - Parameter byteCount: The input's size.
+    /// - Returns: A size no stream of that input exceeds.
     public func maximumCompressedSize(forByteCount byteCount: Int) -> Int {
         let chunks = max(1, (byteCount &+ chunkSize &- 1) / chunkSize) &+ lanes.count
         return byteCount &+ byteCount / 800 &+ chunks &* 1024 &+ 64
@@ -122,6 +125,9 @@ public struct ParallelDeflateEncoder: ~Copyable {
     /// Compresses all of `input` into `output` as one stream, header and trailer included, compressing up to
     /// ``laneCount`` chunks at once. Blocks the calling thread until done.
     ///
+    /// - Parameters:
+    ///   - input: All the data.
+    ///   - output: Where to append the stream, header and trailer included.
     /// - Throws: ``BytesError/insufficientCapacity`` if `output` runs out of room (what was written stays
     ///   written).
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
@@ -424,8 +430,17 @@ public struct ParallelDeflateEncoder: ~Copyable {
 }
 
 extension ParallelDeflateEncoder: ResettableByteTransform {
+    /// What compressing throws: `insufficientCapacity` and nothing else in practice.
     public typealias Failure = BytesError
 
+    /// Compresses as much of `input` as it can into `output`: ``compress(_:into:flush:)`` as a pipeline stage.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append the stream.
+    ///   - flush: `.flush` ends the output so far on a byte boundary; `.finish` ends the stream.
+    /// - Returns: What was consumed and produced, and why it returned.
+    /// - Throws: ``BytesError`` as ``compress(_:into:flush:)`` does.
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         try compress(input, into: &output, flush: flush)
     }

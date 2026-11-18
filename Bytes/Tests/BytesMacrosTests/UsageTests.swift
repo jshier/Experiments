@@ -39,7 +39,100 @@ struct Header: Equatable {
     @Field(Byte3.self) var length: UInt32
 }
 
+enum ColorType: UInt8 { case grayscale = 0, truecolor = 2, indexed = 3 }
+
+/// One-byte fields, padding, and reserved bytes: a PNG `IHDR`-like record.
+@BinaryRecord(.bigEndian)
+struct ImageHeader: Equatable {
+    @Field(Byte4.self) var width: Int
+    @Field(Byte4.self) var height: Int
+    @Field(Byte.self) var bitDepth: UInt8
+    @Field(Byte.self) var colorType: ColorType
+    @Field(Byte.self, expecting: 1) var version: Int
+    @Field(Byte.self) var offset: Int16
+    var unused: Padding<Byte2>
+    var reserved: Reserved<Byte3>
+}
+
+/// Flags in the cursor's byte order.
+@BitFields(UInt16.self)
+struct SegmentFlags: Equatable {
+    @Flag(bit: 15) var executable: Bool
+    @Field(bits: 0...3) var kind: Int
+}
+
+/// A record in the cursor's byte order, with a nested one.
+@BinaryRecord
+struct Segment: Equatable {
+    @Field(Byte4.self, expecting: 0x5345_474D) var magic: UInt32
+    @Field(Byte2.self) var type: CompressionMethod
+    var flags: SegmentFlags
+    @Field(Byte8.self) var offset: UInt64
+    @Field(Byte3.self) var delta: Int32
+    @Field(Byte.self) var count: Int
+}
+
+@BinaryRecord
+struct SegmentPair: Equatable {
+    var first: Segment
+    var second: Segment
+}
+
 @Suite struct UsageTests {
+    @Test func oneByteFieldsPaddingAndReservedBytes() throws {
+        let header = ImageHeader(width: 640, height: 480, bitDepth: 8, colorType: .truecolor, offset: -3)
+        #expect(ImageHeader.byteCount == 17)
+        let bytes = try [UInt8](byteCapacity: ImageHeader.byteCount) { (writer) throws(BytesError) in try writer.write(header) }
+        #expect(bytes == [0, 0, 2, 0x80, 0, 0, 1, 0xE0, 8, 2, 1, 0xFD, 0, 0, 0, 0, 0])
+        var reader = AlignedBytesReader(bytes.span)
+        #expect(try reader.read(ImageHeader.self) == header)
+
+        var padded = bytes
+        padded[12] = 0xFF // Padding: ignored.
+        var paddedReader = AlignedBytesReader(padded.span)
+        #expect(try paddedReader.read(ImageHeader.self) == header)
+        var reserved = bytes
+        reserved[15] = 1 // Reserved: must be zero.
+        var reservedReader = AlignedBytesReader(reserved.span)
+        #expect(throws: BytesError.invalidValue) { _ = try reservedReader.read(ImageHeader.self) }
+        #expect(reservedReader.byteOffset == 0)
+        var version = bytes
+        version[10] = 2
+        var versionReader = AlignedBytesReader(version.span)
+        #expect(throws: BytesError.mismatch) { _ = try versionReader.read(ImageHeader.self) }
+
+        let tooBig = ImageHeader(width: 1, height: 1, bitDepth: 8, colorType: .indexed, offset: 200)
+        #expect(throws: BytesError.invalidValue) {
+            _ = try [UInt8](byteCapacity: ImageHeader.byteCount) { (writer) throws(BytesError) in try writer.write(tooBig) }
+        }
+    }
+
+    @Test func recordsInTheCursorsByteOrder() throws {
+        let segment = Segment(type: .deflate, flags: SegmentFlags(executable: true, kind: 5), offset: 0x0102_0304_0506_0708,
+                              delta: -2, count: 200)
+        let pair = SegmentPair(first: segment, second: Segment(type: .stored, flags: SegmentFlags(executable: false, kind: 1),
+                                                               offset: 9, delta: 7, count: 0))
+        #expect(Segment.byteCount == 20 && SegmentPair.byteCount == 40)
+
+        let big = try [UInt8](byteCapacity: SegmentPair.byteCount, mode: BigEndianBytes.self) { (writer) throws(BytesError) in
+            try writer.write(pair)
+        }
+        let little = try [UInt8](byteCapacity: SegmentPair.byteCount, mode: LittleEndianBytes.self) { (writer) throws(BytesError) in
+            try writer.write(pair)
+        }
+        #expect(big.prefix(8) == [0x53, 0x45, 0x47, 0x4D, 0, 8, 0x80, 5])
+        #expect(little.prefix(8) == [0x4D, 0x47, 0x45, 0x53, 8, 0, 5, 0x80])
+        #expect(big[16...19] == [0xFF, 0xFF, 0xFE, 200])
+        var bigReader = BigEndianBytesReader(big.span)
+        var littleReader = LittleEndianBytesReader(little.span)
+        #expect(try bigReader.read(SegmentPair.self) == pair)
+        #expect(try littleReader.read(SegmentPair.self) == pair)
+        // The other order: the magic doesn't match, and nothing is consumed.
+        var wrongReader = LittleEndianBytesReader(big.span)
+        #expect(throws: BytesError.mismatch) { _ = try wrongReader.read(SegmentPair.self) }
+        #expect(wrongReader.byteOffset == 0)
+    }
+
     @Test func bitFieldsRoundTrip() throws {
         let flags = ConnectFlags(userName: true, password: false, willRetain: true, willQoS: .exactlyOnce, will: true, cleanStart: false)
         #expect(flags.rawValue == 0b1011_0100)

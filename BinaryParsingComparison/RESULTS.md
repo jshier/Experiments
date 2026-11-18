@@ -12,6 +12,24 @@ decoders reproduce the original files, and the QOI decoders match the example's 
 
 Medians from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
 
+## 2026-11-18: cursor-order records, NUL-terminated strings, padded records (baselines `d2-start` → `d2-api2`, Swift 6.4.4)
+
+The ports use Bytes' new API: `@BinaryRecord` without a byte order (the cursor's: ELF's headers are one record type
+read by either endianness's reader), `Byte`, `Padding` and `Reserved` fields, `read(utf8TerminatedBy: 0)` (ELF
+section names, PNG text keywords: a 16-byte scan), `read(_:signedByteCount:)` (BPList's run-time integer widths), and
+`forEachRecord(… paddedTo: 4)` (PCAPNG). `PortSupport.swift` is down to one helper. Instructions, p50:
+
+| Workload | d2-start | d2-api2 | Change |
+|---|---|---|---|
+| ELF swift-help, section names | 25 K | 19 K | **−24%** |
+| ELF swift-help | 9,095 | 8,647 | −4.9% |
+| ELF helloworld | 4,053 | 3,977 | −1.9% |
+| BPList sample.plist | 93 K | 92 K | −1.1% |
+| LZ4, exact literal copies | 49 M | 49 M | 0 (+2% with the checked `read(byteCount:)`'s first form, two compares; one unsigned compare fixed it) |
+| PNG, PCAPNG, QOI, zip directory, MQTT | | | unchanged |
+
+The example parsers (unchanged) moved by 0–1.6%, the noise of a rebuilt binary.
+
 ## 2026-11-17: every example, MQTT both ways, macro records (baseline `trk-final`, Swift 6.4.4)
 
 The four examples not yet ported (ELF, PNG, PCAPNG, BPList) now have `Bytes` versions

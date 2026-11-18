@@ -53,8 +53,12 @@ integers by type without an order at each call. `[UInt8](alignedByteCapacity:wri
 one.
 
 Fixed structures read and write themselves as records (``BinaryParsable``, ``BinaryWritable``,
-``FixedSizeBinary``), in one call with one bounds check. The macros that generate them live in the
-`BytesMacros` product. Streams go through ``ByteTransform`` stages composed into a ``Pipeline``; the
+``FixedSizeBinary``), in one call with one bounds check; formats that name their byte order in their first
+bytes (ELF, PCAPNG, TIFF) declare records in the cursor's order (``ByteOrderedParsable``), compiled once per
+order. ``Padding`` and ``Reserved`` fields skip bytes or require them to be zero. The macros that generate
+records live in the `BytesMacros` product. Lengths, widths, and terminators that come from the data are read
+as the data says, and fail as data does: a negative length, a width outside 1 through 8, or a missing
+terminator throws instead of trapping. Streams go through ``ByteTransform`` stages composed into a ``Pipeline``; the
 `BytesAsync` product has their `async` counterparts and the parallel codecs' asynchronous entry points.
 <doc:WritingParsers> builds a format both ways.
 
@@ -73,7 +77,7 @@ Beyond the types below, `Bytes` extends the standard library (DocC can't link th
 `withLentBytes(_:)` on `RawSpan` and `withLentFreeCapacity(_:)` on `OutputRawSpan` (see ``LentBytes``); `append(copying:)` and
 `withFreeCapacity(byteCount:_:)` on `OutputRawSpan`; `copyBytes(from:toByteOffset:)` and
 `copyBytes(within:toByteOffset:)` on `MutableRawSpan` and `MutableSpan<UInt8>`; `hasPrefix`, `hasSuffix`,
-`bytesEqual`, `containsByte(where:)`, `firstByteOffset(of:from:)`, `commonPrefixLength(at:and:from:maxLength:)`,
+`bytesEqual`, `containsByte(where:)`, `firstByteOffset(where:)`, `firstByteOffset(of:from:)`, `commonPrefixLength(at:and:from:maxLength:)`,
 and its unchecked form `unsafeCommonPrefixLength` on `RawSpan`; `UTF8Span(validating:excluding:)`; and bit
 helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bits(from:upTo:)`,
 `bits(from:count:)`, `keepingLowBits(_:)`, `lowBitMask(_:)`, `signedBits(_:as:)`, and `matches(_:mask:)`.
@@ -133,19 +137,40 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``BinaryParsable``
 - ``BinaryWritable``
 - ``FixedSizeBinary``
+- ``ByteOrderedParsable``
+- ``ByteOrderedWritable``
+- ``Padding``
+- ``Reserved``
 
 ### Variable-size data
 
 - ``LEB128``
 - ``GenericBytesReader/read(sectionPrefixedBy:_:)``
 - ``GenericBytesReader/read(utf8PrefixedBy:_:)``
-- ``GenericBytesReader/forEachRecord(tag:length:_:_:)``
+- ``GenericBytesReader/read(bytesTerminatedBy:)``
+- ``GenericBytesReader/read(utf8TerminatedBy:)``
+- ``GenericBytesReader/forEachRecord(tag:length:_:paddedTo:_:)``
+- ``GenericBytesReader/read(_:byteCount:_:)``
+- ``GenericBytesReader/read(_:signedByteCount:_:)``
 - ``GenericBytesWriter/write(sectionPrefixedBy:_:_:)``
+- ``GenericBytesWriter/write(_:terminatedBy:)-(UTF8Span,_)``
+- ``GenericBytesWriter/write(_:byteCount:_:)``
+- ``GenericBytesWriter/write(_:signedByteCount:_:)``
+
+### ASCII: tags, characters, and digits
+
+- ``ByteGroup/init(ascii:)``
+- ``GenericBytesReader/expect(_:_:)``
+- ``GenericBytesReader/read(_:asciiDigits:)``
+- ``GenericBytesWriter/write(_:asciiDigits:)``
+- ``Bits/init(ascii:)``
 
 ### Scanning and shuffling 16 bytes at once
 
 - ``ByteLanes``
 - ``ByteMatches``
+- ``ByteLanes/matching(in:)``
+- ``ByteLanes/asciiDigits``
 - ``ByteLanes/lookup(in:)-(SIMD16<UInt8>)``
 - ``ByteLanes/deinterleave(_:_:_:)``
 - ``ByteLanes/interleave(_:_:_:)``

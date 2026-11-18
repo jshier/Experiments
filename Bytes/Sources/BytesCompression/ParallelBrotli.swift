@@ -67,6 +67,9 @@ public struct ParallelBrotliEncoder: ~Copyable {
     }
 
     /// The most bytes compressing `byteCount` bytes can produce.
+    ///
+    /// - Parameter byteCount: The input's size.
+    /// - Returns: A size no stream of that input exceeds.
     public func maximumCompressedSize(forByteCount byteCount: Int) -> Int {
         let chunks = max(1, (byteCount &+ chunkSize &- 1) / chunkSize) &+ lanes.count
         return BrotliEncoder.maximumCompressedSize(forByteCount: byteCount) &+ chunks &* 16
@@ -77,6 +80,9 @@ public struct ParallelBrotliEncoder: ~Copyable {
     /// Compresses all of `input` into `output` as one stream, compressing up to ``laneCount`` chunks at once.
     /// Blocks the calling thread until done.
     ///
+    /// - Parameters:
+    ///   - input: All the data.
+    ///   - output: Where to append the stream.
     /// - Throws: ``BytesError/insufficientCapacity`` if `output` runs out of room (what was written stays
     ///   written).
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {

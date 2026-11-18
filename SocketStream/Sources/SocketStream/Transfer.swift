@@ -146,7 +146,7 @@ public enum Transfer {
         let listener = try await TCPListener.bind(to: .v4(SocketAddress.V4(address: .loopback, port: 0)))
         let address = try listener.localAddress
         let protected = mode == .mqtt && !protection.isNone
-        let keys = Protection.connectionKeys()
+        let keys = Protection.connectionKeys(suite: protection.suite)
         let result: PairResult
         do {
         result = try await withThrowingTaskGroup(of: Int.self) { group in

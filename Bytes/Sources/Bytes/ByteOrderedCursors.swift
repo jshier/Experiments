@@ -235,6 +235,31 @@ public extension GenericBytesReader where Mode: ByteOrderedCursorMode {
     mutating func readSectionIfComplete<L: ByteGroup>(prefixedBy lengthType: L.Type) -> Self? {
         readSectionIfComplete(prefixedBy: L.self, Mode.byteOrder)
     }
+
+    /// Calls `body` with each tag-length-value record's tag and a cursor over its value, tags and lengths in the
+    /// cursor's byte order, as ``GenericBytesReader/forEachRecord(tag:length:_:paddedTo:_:)``.
+    ///
+    /// ```swift
+    /// try options.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { (code, value) throws(BytesError) in
+    ///     …
+    /// }
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - tagType: The byte group each tag is stored as, such as `Byte2.self`.
+    ///   - lengthType: The byte group each length is stored as, such as `Byte2.self`.
+    ///   - alignment: The multiple each value is padded to, a power of two: 1 (the default) for no padding.
+    ///   - body: Called with each record's tag and a cursor over its value.
+    /// - Throws: As ``GenericBytesReader/forEachRecord(tag:length:_:paddedTo:_:)``.
+    /// - Precondition: `alignment` is a power of two.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func forEachRecord<Tag: ByteGroup, Length: ByteGroup>(
+        tag tagType: Tag.Type, length lengthType: Length.Type, paddedTo alignment: Int = 1,
+        _ body: (Tag.Integer, inout Self) throws(BytesError) -> Void
+    ) throws(BytesError) {
+        try forEachRecord(tag: Tag.self, length: Length.self, Mode.byteOrder, paddedTo: alignment, body)
+    }
 }
 
 public extension GenericBytesWriter where Mode: ByteOrderedCursorMode {

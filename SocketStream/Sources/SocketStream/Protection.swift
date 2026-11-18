@@ -15,17 +15,40 @@ public enum StreamCompression: String, Sendable, CaseIterable {
     case brotli
 }
 
+/// The AEAD protecting TLS records: the cipher suite's.
+public enum RecordCipher: String, Sendable, CaseIterable {
+    /// ChaCha20-Poly1305 (TLS_CHACHA20_POLY1305_SHA256).
+    case chacha20
+    /// AES-128-GCM (TLS_AES_128_GCM_SHA256).
+    case aes128gcm
+    /// AES-256-GCM (TLS_AES_256_GCM_SHA384).
+    case aes256gcm
+}
+
 /// What happens to the MQTT stream between the encoder and the socket: compression, encryption, both, or
 /// neither. Each is a Bytes pipeline stage, built once per connection.
 public struct Protection: Sendable, Hashable, CustomStringConvertible {
     /// The compression applied before encryption.
     public var compression: StreamCompression
-    /// Whether the stream goes in TLS 1.3 records (ChaCha20-Poly1305), with keys from an X25519 exchange.
+    /// Whether the stream goes in TLS 1.3 records, with keys from an X25519 exchange.
     public var encrypted: Bool
+    /// The records' cipher.
+    public var cipher: RecordCipher = .chacha20
+
+    var suite: TLSCipherSuite {
+        switch cipher {
+        case .chacha20: .chaCha20Poly1305SHA256
+        case .aes128gcm: .aes128GCMSHA256
+        case .aes256gcm: .aes256GCMSHA384
+        }
+    }
     /// How many cores compress each sender's stream: above 1, DEFLATE runs as a `ParallelDeflateEncoder`
     /// with this many lanes, each batch cut into that many chunks (at least 32 KB each). Brotli stays
     /// sequential.
     public var compressionLanes: Int
+    /// How many cores seal each sender's TLS records: above 1, a batch holding several full records' worth seals
+    /// them in parallel (`TLSRecordSealer.sealingLanes`), each straight into its place in the output.
+    public var sealingLanes: Int
 
     /// Creates a protection.
     ///
@@ -33,10 +56,12 @@ public struct Protection: Sendable, Hashable, CustomStringConvertible {
     ///   - compression: The compression to apply.
     ///   - encrypted: Whether to seal the stream in TLS records.
     ///   - compressionLanes: How many cores compress DEFLATE (1: sequentially).
-    public init(compression: StreamCompression = .none, encrypted: Bool = false, compressionLanes: Int = 1) {
+    ///   - sealingLanes: How many cores seal TLS records (1: sequentially).
+    public init(compression: StreamCompression = .none, encrypted: Bool = false, compressionLanes: Int = 1, sealingLanes: Int = 1) {
         self.compression = compression
         self.encrypted = encrypted
         self.compressionLanes = max(compressionLanes, 1)
+        self.sealingLanes = max(sealingLanes, 1)
     }
 
     /// Plain MQTT on the socket.
@@ -49,9 +74,9 @@ public struct Protection: Sendable, Hashable, CustomStringConvertible {
     public var description: String {
         switch (compression, encrypted) {
         case (.none, false): "plain"
-        case (.none, true): "TLS records"
+        case (.none, true): "TLS records\(sealingDescription)"
         case (let compression, false): "\(compression)\(lanesDescription)"
-        case (let compression, true): "\(compression)\(lanesDescription) + TLS records"
+        case (let compression, true): "\(compression)\(lanesDescription) + TLS records\(sealingDescription)"
         }
     }
 
@@ -59,16 +84,28 @@ public struct Protection: Sendable, Hashable, CustomStringConvertible {
         compression == .deflate && compressionLanes > 1 ? " on \(compressionLanes) lanes" : ""
     }
 
+    private var sealingDescription: String {
+        (cipher == .chacha20 ? "" : cipher == .aes128gcm ? " (AES-128-GCM)" : " (AES-256-GCM)")
+            + (sealingLanes > 1 ? " sealed on \(sealingLanes) lanes" : "")
+    }
+
+    /// The sender's record stage.
+    func sealer(_ keys: TLSTrafficKeys) -> TLSRecordSealer {
+        var sealer = TLSRecordSealer(keys: keys)
+        sealer.sealingLanes = sealingLanes
+        return sealer
+    }
+
     /// Traffic keys for one connection: an X25519 exchange between its two ends (both here, in place of a
     /// TLS handshake) and TLS 1.3's key schedule. The sender seals with the client's keys, the receiver opens
     /// with them.
-    static func connectionKeys() -> TLSTrafficKeys {
+    static func connectionKeys(suite: TLSCipherSuite) -> TLSTrafficKeys {
         let client = Curve25519.KeyAgreement.PrivateKey()
         let server = Curve25519.KeyAgreement.PrivateKey()
         let shared = try! client.sharedSecretFromKeyAgreement(with: server.publicKey)
         // Unsafe: the secret's bytes, copied out. Safe: the buffer is valid for the closure, which copies it.
         let secret = unsafe shared.withUnsafeBytes { unsafe [UInt8]($0) }
-        return TLSKeySchedule.applicationKeys(sharedSecret: secret.span.bytes).client
+        return TLSKeySchedule.applicationKeys(sharedSecret: secret.span.bytes, suite: suite).client
     }
 }
 
@@ -80,25 +117,25 @@ extension Transfer {
     ) async throws -> Int {
         switch (protection.compression, protection.encrypted) {
         case (.none, _):
-            return try await sendProtected(workload, to: address, through: TLSRecordSealer(keys: keys))
+            return try await sendProtected(workload, to: address, through: protection.sealer(keys))
         case (.deflate, false) where protection.compressionLanes > 1:
             return try await sendProtected(workload, to: address, through: parallelDeflate(protection.compressionLanes))
         case (.deflate, true) where protection.compressionLanes > 1:
             return try await sendProtected(
                 workload, to: address,
-                through: parallelDeflate(protection.compressionLanes).then(TLSRecordSealer(keys: keys), bufferCapacity: workload.batchSize &+ (64 << 10))
+                through: parallelDeflate(protection.compressionLanes).then(protection.sealer(keys), bufferCapacity: workload.batchSize &+ (64 << 10))
             )
         case (.deflate, false):
             return try await sendProtected(workload, to: address, through: DeflateEncoder(format: .raw, level: 1))
         case (.deflate, true):
             return try await sendProtected(
-                workload, to: address, through: DeflateEncoder(format: .raw, level: 1).then(TLSRecordSealer(keys: keys))
+                workload, to: address, through: DeflateEncoder(format: .raw, level: 1).then(protection.sealer(keys))
             )
         case (.brotli, false):
             return try await sendProtected(workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18))
         case (.brotli, true):
             return try await sendProtected(
-                workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18).then(TLSRecordSealer(keys: keys))
+                workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18).then(protection.sealer(keys))
             )
         }
     }

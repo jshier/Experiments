@@ -93,6 +93,31 @@ its 5 bytes with one bounds check, then each field from a cursor whose length th
 consumes nothing if any of them throws. Both are ``BinaryParsable``, ``BinaryWritable``, and
 ``FixedSizeBinary``: `reader.read(SensorHeader.self)` and `writer.write(header)`.
 
+A record's fields can be single bytes (`@Field(Byte.self) var bitDepth: UInt8`), bytes it skips
+(`var unused: Padding<Byte2>`), or bytes that must be zero (`var reserved: Reserved<Byte3>`); the last two
+store nothing. A format that names its byte order in its first bytes, as ELF and PCAPNG do, declares its
+records without one, `@BinaryRecord`, and reads them from a generic parser specialized for each order:
+
+```swift
+@BinaryRecord                                   // in the byte order of the cursor that reads it
+struct SectionHeader {
+    @Field(Byte4.self) var name: UInt32
+    @Field(Byte4.self) var type: SectionType
+    @Field(Byte8.self) var offset: UInt64
+}
+
+func parse<Mode: ByteOrderedCursorMode>(_ reader: inout GenericBytesReader<Mode>) throws(BytesError) -> SectionHeader {
+    try reader.read(SectionHeader.self)
+}
+let header = switch byteOrder {
+case .littleEndian: var reader = LittleEndianBytesReader(data); try parse(&reader)
+case .bigEndian: var reader = BigEndianBytesReader(data); try parse(&reader)
+}
+```
+
+Such a record is ``ByteOrderedParsable``: only byte-ordered cursors read it, so a cursor whose order isn't known
+is a compile error rather than a guess.
+
 ### Parse
 
 Create a cursor over the input and read the fields in order. A function that reads part of a message takes
@@ -255,6 +280,44 @@ try writer.write(sectionPrefixedBy: Byte2.self) { (section) throws(BytesError) i
     try section.write(topic, prefixedBy: Byte2.self)
 }
 ```
+
+Lengths computed from the data (a block's length less its header) can come out negative: reading a section or
+bytes of a negative length throws ``BytesError/invalidValue``, as any malformed length does, so the
+subtraction needs no guard of its own. Other parts are found by what ends them, or have widths the data names:
+
+```swift
+let name = try reader.read(utf8TerminatedBy: 0)                      // a C string, validated
+let offset = try table.read(Int.self, byteCount: trailer.offsetSize)  // 1 through 8 bytes, chosen at run time
+try options.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { (code, value) throws(BytesError) in
+    …                                                                 // each value padded to 4 bytes
+}
+```
+
+### Text inside binary formats
+
+Tags, signatures, and numbers written as digits have their own reads, written the way that compiles best, so a
+parser needs no hex constants or bit tricks for them:
+
+```swift
+try reader.expect(Byte4(ascii: "qoif"))                 // a signature, as its characters
+switch try reader.read(Byte4.self) {                    // a PNG chunk type
+case Byte4(ascii: "IHDR"): …
+case Byte4(ascii: "IEND"): …
+default: …
+}
+try reader.expect(0x184D_2204 as UInt32, .littleEndian) // a magic number as the specification writes it
+
+let year = try reader.read(Int.self, asciiDigits: 4)    // "2026": one load, checked and combined at once
+try reader.expect(Byte(ascii: "-"))
+try writer.write(month, asciiDigits: 2)                 // "07"
+```
+
+``ByteGroup/init(ascii:)`` folds to the integer you'd otherwise write in hex, in memory order (use it where it's
+evaluated, or in a computed property; a `static let` of it is initialized lazily). Single bytes have character
+classes as `UInt8` properties (`isASCIIDigit`, `asciiDigitValue`, `asciiHexDigitValue`, `isASCIIWhitespace`,
+`asciiLowercased`), each a subtraction and one unsigned compare with no branch, and
+``ByteLanes`` has the same classes for 16 bytes at once (``ByteLanes/asciiDigits``,
+``ByteLanes/matching(in:)``, ``ByteLanes/matching(_:)-(Unicode.Scalar)``), with no per-lane comparisons.
 
 ### Parse each value once
 

@@ -71,6 +71,21 @@ import Testing
         #expect(ByteLanes(.zero).matching(0).nibbleMask.nonzeroBitCount == 16)
     }
 
+    /// Only the lanes that match count, whatever the other lanes hold: `matching(_:)` leaves arbitrary low bits
+    /// in lanes that don't match (0x70 leaves bit 3 set), which mustn't read as matches.
+    @Test func nibbleMasksIgnoreLowBits() {
+        for filler in UInt8.min...UInt8.max where filler != 0 {
+            for lane in [0, 1, 6, 7, 14, 15] {
+                var lanes = SIMD16<UInt8>(repeating: filler)
+                lanes[lane] = 0
+                let matches = ByteLanes(lanes).matching(0)
+                #expect(matches.nibbleMask == 1 << (4 * lane + 3), "filler \(filler), lane \(lane)")
+                #expect(matches.firstIndex == lane)
+            }
+            #expect(ByteLanes(SIMD16(repeating: filler)).matching(0).firstIndex == nil)
+        }
+    }
+
     @Test func bitFieldsByWidth() {
         let value: UInt64 = 0b1011_0110_1100
         for low in 0..<12 {

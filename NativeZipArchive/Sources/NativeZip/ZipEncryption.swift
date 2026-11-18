@@ -1,8 +1,11 @@
-import CommonCrypto
+internal import Bytes
+internal import BytesCrypto
 
 // Zip encryption: the traditional PKWARE stream cipher ("ZipCrypto", APPNOTE 6.1) and WinZip's AES
 // (AE-1/AE-2: PBKDF2-HMAC-SHA1 keys, AES in counter mode with a little-endian counter, HMAC-SHA1 over the
-// ciphertext). Both decrypt a whole payload at once, into a buffer the decoder owns, before decompression.
+// ciphertext). Both decrypt in pieces, into the decoder's own buffers: nothing is allocated per entry, and no
+// payload is held whole in memory. The primitives are `BytesCrypto`'s, in Swift (AES and SHA-1 with ARM's
+// instructions through its small C module).
 
 /// How an entry is encrypted.
 public enum ZipEncryption: Sendable, Hashable {
@@ -24,10 +27,10 @@ struct TraditionalCipher {
     /// The length of the encryption header before the data.
     static var headerSize: Int { 12 }
 
-    init(password: [UInt8]) {
+    init(password: RawSpan) {
         let table = Self.crcTable.span
-        for byte in password {
-            update(byte, table)
+        for offset in 0..<password.byteCount {
+            update(password.load(fromByteOffset: offset, as: UInt8.self), table)
         }
     }
 
@@ -52,20 +55,20 @@ struct TraditionalCipher {
     /// - Returns: The decrypted check byte.
     mutating func checkByte(_ header: RawSpan) -> UInt8 {
         let table = Self.crcTable.span
-        let bytes = Span<UInt8>(viewing: header)
         var last: UInt8 = 0
-        for index in bytes.indices {
-            last = decrypt(bytes[index], table)
+        for offset in 0..<header.byteCount {
+            last = decrypt(header.load(fromByteOffset: offset, as: UInt8.self), table)
         }
         return last
     }
 
-    /// Decrypts `input` into `output`, which holds exactly as many bytes.
-    mutating func decrypt(_ input: Span<UInt8>, into output: inout MutableSpan<UInt8>) {
-        precondition(output.count == input.count)
+    /// Decrypts `input` into the start of `output`, which holds at least as many bytes. The cipher's state
+    /// carries over, so a payload can be decrypted in pieces.
+    mutating func decrypt(_ input: RawSpan, into output: inout MutableRawSpan) {
+        precondition(output.byteCount >= input.byteCount)
         let table = Self.crcTable.span
-        for index in input.indices {
-            output[index] = decrypt(input[index], table)
+        for offset in 0..<input.byteCount {
+            output.storeBytes(of: decrypt(input.load(fromByteOffset: offset, as: UInt8.self), table), toByteOffset: offset, as: UInt8.self)
         }
     }
 
@@ -79,8 +82,7 @@ struct TraditionalCipher {
     }
 }
 
-/// WinZip AES decryption of one payload: salt, a 2-byte password verifier, the ciphertext, and a 10-byte
-/// authentication code.
+/// WinZip AES for one payload: salt, a 2-byte password verifier, the ciphertext, and a 10-byte authentication code.
 enum WinZipAES {
     enum Failure: Error {
         case badPassword, authenticationFailed, truncated
@@ -96,129 +98,91 @@ enum WinZipAES {
     }
 
     /// The PBKDF2-HMAC-SHA1 output (1,000 iterations): the encryption key, the authentication key, then the
-    /// 2-byte password verifier.
-    ///
-    /// Unsafe: CommonCrypto takes pointers and lengths. Safe: `salt` is valid for the call, the others are
-    /// arrays whose buffers live for it.
-    private static func deriveKeys(salt: UnsafeRawBufferPointer, bits: Int, password: [UInt8]) -> [UInt8] {
-        var derived = [UInt8](repeating: 0, count: 2 * (bits / 8) + verifierSize)
-        let status = password.withUnsafeBytes { password in
-            derived.withUnsafeMutableBufferPointer { derived in
-                unsafe CCKeyDerivationPBKDF(
-                    CCPBKDFAlgorithm(kCCPBKDF2),
-                    password.baseAddress?.assumingMemoryBound(to: CChar.self), password.count,
-                    salt.baseAddress?.assumingMemoryBound(to: UInt8.self), salt.count,
-                    CCPseudoRandomAlgorithm(kCCPRFHmacAlgSHA1), 1000,
-                    derived.baseAddress, derived.count
-                )
-            }
-        }
-        precondition(status == kCCSuccess, "PBKDF2 failed: \(status)")
+    /// 2-byte password verifier, at most 66 bytes (for 256-bit keys).
+    static func deriveKeys(salt: RawSpan, bits: Int, password: RawSpan) -> InlineArray<66, UInt8> {
+        var derived = InlineArray<66, UInt8>(repeating: 0)
+        var span = derived.mutableSpan
+        var bytes = MutableRawSpan(mutating: &span)
+        var used = bytes._mutatingExtracting(0..<(2 * (bits / 8) + verifierSize))
+        PBKDF2.deriveKey(SHA1.self, password: password, salt: salt, iterations: 1000, into: &used)
         return derived
     }
 
     /// Whether `password` matches the payload's verifier, without decrypting.
-    static func verify(_ payload: RawSpan, bits: Int, password: [UInt8]) -> Bool {
+    static func verify(_ payload: RawSpan, bits: Int, password: RawSpan) -> Bool {
         let saltSize = saltSize(bits: bits)
         guard payload.byteCount >= saltSize + verifierSize else { return false }
-        // Unsafe: buffers over the payload's span, valid for the closure.
-        return payload.withUnsafeBytes { payload in
-            let derived = unsafe deriveKeys(salt: UnsafeRawBufferPointer(rebasing: payload[..<saltSize]), bits: bits, password: password)
-            return unsafe derived[(bits / 4)...].elementsEqual(payload[saltSize..<(saltSize + verifierSize)])
-        }
+        let derived = deriveKeys(salt: payload.extracting(0..<saltSize), bits: bits, password: password)
+        let keyBytes = bits / 8
+        return constantTimeEquals(derived.span.bytes.extracting((2 * keyBytes)..<(2 * keyBytes + verifierSize)),
+                                  payload.extracting(saltSize..<(saltSize + verifierSize)))
     }
 
-    /// Checks the password and the authentication code, then decrypts the ciphertext into `output`.
+    /// Checks the password and the whole payload's authentication code, and returns a decryptor for the
+    /// ciphertext, which is `payload[ciphertextRange]`.
     ///
-    /// - Parameters:
-    ///   - payload: The whole payload.
-    ///   - bits: The key size: 128, 192, or 256.
-    ///   - password: The password's bytes.
-    ///   - output: Room for at least ``plaintextSize(payloadSize:bits:)`` bytes.
-    /// - Returns: The number of plaintext bytes.
-    /// - Throws: ``Failure/badPassword`` if the verifier doesn't match; ``Failure/authenticationFailed`` if
-    ///   the HMAC doesn't (the data is corrupt or was altered); ``Failure/truncated`` if the payload is too
-    ///   short for its header and code.
-    static func decrypt(
-        _ payload: RawSpan, bits: Int, password: [UInt8], into output: UnsafeMutableRawBufferPointer
-    ) throws(Failure) -> Int {
+    /// The HMAC covers the ciphertext and is checked first, over the whole payload, before anything is decrypted:
+    /// a corrupt or altered entry fails here, never reaching the decompressor. That reads the ciphertext twice (it's
+    /// mapped, and HMAC-SHA1 with SHA instructions runs at about 3 GB/s) instead of decrypting it all into memory.
+    ///
+    /// - Throws: ``Failure/badPassword`` if the verifier doesn't match; ``Failure/authenticationFailed`` if the HMAC
+    ///   doesn't; ``Failure/truncated`` if the payload is too short for its header and code.
+    static func open(_ payload: RawSpan, bits: Int, password: RawSpan) throws(Failure) -> (cipher: AES, counter: AES.Counter, ciphertext: Range<Int>) {
         let saltSize = saltSize(bits: bits)
-        let keySize = bits / 8
+        let keyBytes = bits / 8
         guard payload.byteCount >= saltSize + verifierSize + macSize else { throw .truncated }
-        let count = plaintextSize(payloadSize: payload.byteCount, bits: bits)
-        precondition(output.count >= count)
+        let start = saltSize + verifierSize
+        let ciphertext = start..<(payload.byteCount - macSize)
 
-        // Unsafe throughout: CommonCrypto's C API takes pointers and lengths. Safe: each describes a buffer
-        // valid for the call (the payload's span, the output buffer, or a local array), with the exact length.
-        return try payload.withUnsafeBytes { (payload) throws(Failure) -> Int in
-            let salt = unsafe UnsafeRawBufferPointer(rebasing: payload[..<saltSize])
-            let verifier = unsafe UnsafeRawBufferPointer(rebasing: payload[saltSize..<(saltSize + verifierSize)])
-            let ciphertextStart = saltSize + verifierSize
-            let ciphertext = unsafe UnsafeRawBufferPointer(rebasing: payload[ciphertextStart..<(ciphertextStart + count)])
-            let mac = unsafe UnsafeRawBufferPointer(rebasing: payload[(ciphertextStart + count)...])
-
-            let derived = unsafe deriveKeys(salt: salt, bits: bits, password: password)
-            guard unsafe derived[(2 * keySize)...].elementsEqual(verifier) else { throw .badPassword }
-
-            // The HMAC covers the ciphertext: check it before decrypting anything.
-            var digest = [UInt8](repeating: 0, count: Int(CC_SHA1_DIGEST_LENGTH))
-            derived.withUnsafeBufferPointer { derived in
-                digest.withUnsafeMutableBytes { digest in
-                    unsafe CCHmac(
-                        CCHmacAlgorithm(kCCHmacAlgSHA1), derived.baseAddress! + keySize, keySize,
-                        ciphertext.baseAddress, ciphertext.count, digest.baseAddress
-                    )
-                }
-            }
-            guard unsafe digest.prefix(macSize).elementsEqual(mac) else { throw .authenticationFailed }
-
-            derived.withUnsafeBytes { key in
-                unsafe counterMode(ciphertext, key: UnsafeRawBufferPointer(rebasing: key[..<keySize]), into: output)
-            }
-            return count
+        let derived = deriveKeys(salt: payload.extracting(0..<saltSize), bits: bits, password: password)
+        let keys = derived.span.bytes
+        guard constantTimeEquals(keys.extracting((2 * keyBytes)..<(2 * keyBytes + verifierSize)), payload.extracting(saltSize..<start)) else {
+            throw .badPassword
         }
+        var mac = HMAC<SHA1>(key: keys.extracting(keyBytes..<(2 * keyBytes)))
+        mac.update(payload.extracting(ciphertext))
+        var digest = InlineArray<20, UInt8>(repeating: 0)
+        var span = digest.mutableSpan
+        var bytes = MutableRawSpan(mutating: &span)
+        mac.finalize(into: &bytes)
+        guard constantTimeEquals(digest.span.bytes.extracting(0..<macSize), payload.extracting(ciphertext.upperBound...)) else {
+            throw .authenticationFailed
+        }
+        return (AES(key: keys.extracting(0..<keyBytes)), AES.Counter(littleEndianFrom: 1), ciphertext)
+    }
+}
+
+/// An entry's decryption in progress: the cipher, and how much of the ciphertext it has decrypted.
+struct PayloadDecryptor {
+    enum Cipher {
+        case traditional(TraditionalCipher)
+        case aes(AES, AES.Counter)
     }
 
-    /// AES in counter mode as WinZip uses it: the counter is a 128-bit little-endian integer starting at 1
-    /// (CommonCrypto's CTR mode counts big-endian), so the key stream is made by encrypting counter blocks
-    /// in ECB mode, a batch at a time.
-    ///
-    /// Unsafe: raw buffers for CommonCrypto. Safe: `input` and `output` hold at least `input.count` bytes, and
-    /// the batch buffers are local.
-    private static func counterMode(_ input: UnsafeRawBufferPointer, key: UnsafeRawBufferPointer, into output: UnsafeMutableRawBufferPointer) {
-        var cryptor: CCCryptorRef?
-        let status = unsafe CCCryptorCreate(
-            CCOperation(kCCEncrypt), CCAlgorithm(kCCAlgorithmAES), CCOptions(kCCOptionECBMode),
-            key.baseAddress, key.count, nil, &cryptor
-        )
-        precondition(status == kCCSuccess, "AES setup failed: \(status)")
-        defer { unsafe CCCryptorRelease(cryptor) }
+    var cipher: Cipher
+    /// The ciphertext's place in the payload.
+    let ciphertext: Range<Int>
+    /// Where in the payload the next piece starts.
+    var position: Int
 
-        let batchBlocks = 4096
-        var counters = [UInt64](repeating: 0, count: 2 * batchBlocks)
-        var stream = [UInt8](repeating: 0, count: 16 * batchBlocks)
-        var counter: UInt64 = 1
-        var offset = 0
-        while offset < input.count {
-            let bytes = min(input.count - offset, 16 * batchBlocks)
-            let blocks = (bytes + 15) / 16
-            for block in 0..<blocks {
-                counters[2 * block] = counter.littleEndian
-                counter &+= 1
-            }
-            var moved = 0
-            let status = counters.withUnsafeBytes { counters in
-                stream.withUnsafeMutableBytes { stream in
-                    unsafe CCCryptorUpdate(cryptor, counters.baseAddress, 16 * blocks, stream.baseAddress, stream.count, &moved)
-                }
-            }
-            precondition(status == kCCSuccess && moved == 16 * blocks, "AES failed: \(status)")
-            stream.withUnsafeBytes { stream in
-                for index in 0..<bytes {
-                    unsafe output[offset + index] = input[offset + index] ^ stream[index]
-                }
-            }
-            offset += bytes
+    /// Whether all the ciphertext has been decrypted.
+    var isFinished: Bool { position == ciphertext.upperBound }
+
+    /// Decrypts the next piece of the payload's ciphertext into the start of `output`, as much as fits.
+    ///
+    /// - Returns: The number of bytes decrypted.
+    mutating func decryptNext(from payload: RawSpan, into output: inout MutableRawSpan) -> Int {
+        let count = min(output.byteCount, ciphertext.upperBound - position)
+        let piece = payload.extracting(position..<(position + count))
+        switch cipher {
+        case .traditional(var traditional):
+            traditional.decrypt(piece, into: &output)
+            cipher = .traditional(traditional)
+        case .aes(let aes, var counter):
+            aes.counterMode(piece, into: &output, counter: &counter)
+            cipher = .aes(aes, counter)
         }
+        position += count
+        return count
     }
 }

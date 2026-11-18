@@ -168,8 +168,10 @@ public extension GenericBytesReader {
     ///
     /// - Parameter byteCount: The section's length in bytes.
     /// - Returns: A cursor over the section, borrowing the same memory.
-    /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain, consuming nothing.
-    /// - Precondition: `byteCount` isn't negative, and the cursor is byte-aligned.
+    /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain; ``BytesError/invalidValue`` if
+    ///   `byteCount` is negative (a length computed from the data, such as a block's length less its header).
+    ///   Nothing is consumed either way.
+    /// - Precondition: The cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
@@ -301,6 +303,16 @@ public extension GenericBytesReader {
     /// record's tag and length are left unread, as `forEach` leaves a partial value. To stop quietly at an
     /// incomplete record instead, loop with ``readSectionIfComplete(prefixedBy:_:)``.
     ///
+    /// Formats that pad each value to a multiple of some size, after a length that doesn't count the padding,
+    /// pass that size as `alignment`: PCAPNG's options (4), RIFF's chunks (2). The cursor `body` gets covers
+    /// the value only; the padding is skipped, unchecked.
+    ///
+    /// ```swift
+    /// try options.forEachRecord(tag: Byte2.self, length: Byte2.self, .littleEndian, paddedTo: 4) { (code, value) throws(BytesError) in
+    ///     …
+    /// }
+    /// ```
+    ///
     /// Annotate the closure's error type, as in the example: an unannotated closure that throws is inferred
     /// to throw `any Error`, which doesn't convert.
     ///
@@ -308,17 +320,19 @@ public extension GenericBytesReader {
     ///   - tagType: The byte group each tag is stored as, such as `Byte2.self`.
     ///   - lengthType: The byte group each length is stored as, such as `Byte2.self`.
     ///   - byteOrder: The byte order of the tags and lengths.
+    ///   - alignment: The multiple each value is padded to, a power of two: 1 (the default) for no padding.
     ///   - body: Called with each record's tag and a cursor over its value.
-    /// - Throws: ``BytesError/insufficientData`` if a record's value isn't all there;
+    /// - Throws: ``BytesError/insufficientData`` if a record's value or its padding isn't all there;
     ///   ``BytesError/invalidValue`` if its length doesn't fit in an `Int`; or whatever `body` throws.
-    /// - Precondition: The cursor is byte-aligned.
+    /// - Precondition: `alignment` is a power of two, and the cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func forEachRecord<Tag: ByteGroup, Length: ByteGroup>(
-        tag tagType: Tag.Type, length lengthType: Length.Type, _ byteOrder: ByteOrder,
+        tag tagType: Tag.Type, length lengthType: Length.Type, _ byteOrder: ByteOrder, paddedTo alignment: Int = 1,
         _ body: (Tag.Integer, inout Self) throws(BytesError) -> Void
     ) throws(BytesError) {
         precondition(_bitOffset == 0, "Reading records requires byte alignment: call alignToByte() first")
+        precondition(alignment > 0 && alignment & (alignment &- 1) == 0, "The alignment must be a power of two")
         let headerByteCount = Tag.byteCount &+ Length.byteCount
         // No closures (`atomically`) inside: the loop keeps the cursor in registers.
         while true {
@@ -329,11 +343,14 @@ public extension GenericBytesReader {
             let tag = unsafe Load.group(Tag.self, from: span, at: recordStart).integer(byteOrder)
             let length = unsafe Load.group(Length.self, from: span, at: recordStart &+ Tag.byteCount).integer(byteOrder)
             guard let count = Int(exactly: length) else { throw .invalidValue }
+            // With the default alignment of 1 this is `count`, and the padding checks fold away.
+            let paddedCount = (count &+ (alignment &- 1)) & ~(alignment &- 1)
+            guard paddedCount >= count else { throw .invalidValue } // Wrapped: a length near `Int.max`.
             let start = recordStart &+ headerByteCount
-            guard likely(span.byteCount &- start >= count) else { throw .insufficientData }
-            _byteOffset = start &+ count
-            // Unsafe: unchecked extracting. Safe: `start + count <= span.byteCount`, checked above.
-            var value = Self(unsafe span.extracting(unchecked: start..<_byteOffset), byteOffset: 0, bitOffset: 0, bitOrder: bitOrder)
+            guard likely(span.byteCount &- start >= paddedCount) else { throw .insufficientData }
+            _byteOffset = start &+ paddedCount
+            // Unsafe: unchecked extracting. Safe: `start + count <= start + paddedCount <= span.byteCount`, checked above.
+            var value = Self(unsafe span.extracting(unchecked: start..<(start &+ count)), byteOffset: 0, bitOffset: 0, bitOrder: bitOrder)
             do throws(BytesError) {
                 try body(tag, &value)
             } catch {
@@ -396,8 +413,8 @@ public extension GenericBytesReader {
     /// - Parameter byteCount: The length of the text in bytes.
     /// - Returns: A UTF-8 view of the bytes.
     /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain; ``BytesError/invalidValue`` if they
-    ///   aren't valid UTF-8. Nothing is consumed.
-    /// - Precondition: `byteCount` isn't negative, and the cursor is byte-aligned.
+    ///   aren't valid UTF-8, or `byteCount` is negative. Nothing is consumed.
+    /// - Precondition: The cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
@@ -414,8 +431,8 @@ public extension GenericBytesReader {
     ///   - excluded: Given 16 bytes at a time, matches the bytes that aren't allowed.
     /// - Returns: A UTF-8 view of the bytes.
     /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain; ``BytesError/invalidValue`` if they
-    ///   aren't valid UTF-8 or one matches `excluded`. Nothing is consumed.
-    /// - Precondition: `byteCount` isn't negative, and the cursor is byte-aligned.
+    ///   aren't valid UTF-8, one matches `excluded`, or `byteCount` is negative. Nothing is consumed.
+    /// - Precondition: The cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
@@ -481,6 +498,59 @@ public extension GenericBytesReader {
         }
         return text
     }
+
+    /// Reads the bytes before the next `terminator`, viewing the same memory, and consumes the terminator
+    /// too: a C string's bytes (`terminatedBy: 0`), a line (`terminatedBy: 0x0A`).
+    ///
+    /// ```swift
+    /// let name = try reader.read(bytesTerminatedBy: 0)
+    /// ```
+    ///
+    /// Finds the terminator 16 bytes at a time (`RawSpan.firstByteOffset(where:)`).
+    ///
+    /// - Parameter terminator: The byte that ends the bytes.
+    /// - Returns: A span of the bytes, not including the terminator.
+    /// - Throws: ``BytesError/insufficientData`` if no terminator follows, consuming nothing.
+    /// - Precondition: The cursor is byte-aligned.
+    @inlinable @inline(__always)
+    @_lifetime(copy self)
+    @_lifetime(self: copy self)
+    mutating func read(bytesTerminatedBy terminator: UInt8) throws(BytesError) -> RawSpan {
+        precondition(_bitOffset == 0, "Reading a span requires byte alignment: call alignToByte() first")
+        _assumeInvariant()
+        let start = _byteOffset
+        // Unsafe: unchecked extracting. Safe: `start <= span.byteCount` (the invariant).
+        let rest = unsafe span.extracting(unchecked: start..<span.byteCount)
+        guard let length = rest.firstByteOffset(where: { $0.matching(terminator) }) else { throw .insufficientData }
+        _byteOffset = start &+ length &+ 1
+        // Unsafe: unchecked extracting. Safe: `length < rest.byteCount`: it's the offset of a byte in `rest`.
+        return unsafe rest.extracting(unchecked: 0..<length)
+    }
+
+    /// Reads UTF-8 before the next `terminator`, viewing the same memory, and consumes the terminator too: a
+    /// C string (`terminatedBy: 0`), as ELF's section names and PE's resource names are stored.
+    ///
+    /// ```swift
+    /// let name = try reader.read(utf8TerminatedBy: 0)
+    /// ```
+    ///
+    /// - Parameter terminator: The byte that ends the text.
+    /// - Returns: A UTF-8 view of the text, not including the terminator.
+    /// - Throws: ``BytesError/insufficientData`` if no terminator follows; ``BytesError/invalidValue`` if the
+    ///   bytes before it aren't valid UTF-8. Nothing is consumed either way.
+    /// - Precondition: The cursor is byte-aligned.
+    @inlinable @inline(__always)
+    @_lifetime(copy self)
+    @_lifetime(self: copy self)
+    mutating func read(utf8TerminatedBy terminator: UInt8) throws(BytesError) -> UTF8Span {
+        let start = _byteOffset
+        let bytes = try read(bytesTerminatedBy: terminator)
+        guard let text = UTF8Span(validating: bytes, excluding: { _ in .none }) else {
+            _byteOffset = start
+            throw .invalidValue
+        }
+        return text
+    }
 }
 
 // MARK: - Writing sections
@@ -522,6 +592,42 @@ public extension GenericBytesWriter {
     @_lifetime(self: copy self)
     mutating func write<L: ByteGroup>(_ text: UTF8Span, prefixedBy lengthType: L.Type, _ byteOrder: ByteOrder) throws(BytesError) {
         try write(text.span.bytes, prefixedBy: L.self, byteOrder)
+    }
+
+    /// Writes `bytes` followed by `terminator`: a C string's bytes (`terminatedBy: 0`).
+    ///
+    /// - Parameters:
+    ///   - bytes: The bytes to write.
+    ///   - terminator: The byte to end them with.
+    /// - Throws: ``BytesError/invalidValue`` if `bytes` contains `terminator` (a reader would stop there);
+    ///   ``BytesError/insufficientCapacity`` if there isn't room. Nothing is written either way.
+    /// - Precondition: The cursor is byte-aligned.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write(_ bytes: RawSpan, terminatedBy terminator: UInt8) throws(BytesError) {
+        precondition(_bitOffset == 0, "Writing a span requires byte alignment: call alignToByte() first")
+        guard !bytes.containsByte(where: { $0.matching(terminator) }) else { throw .invalidValue }
+        guard likely(remainingByteCount > bytes.byteCount) else { throw .insufficientCapacity }
+        try write(bytes)
+        try write(terminator)
+    }
+
+    /// Writes `text`'s UTF-8 followed by `terminator`: a C string (`terminatedBy: 0`).
+    ///
+    /// ```swift
+    /// try writer.write(name.utf8Span, terminatedBy: 0)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - text: The text to write.
+    ///   - terminator: The byte to end it with.
+    /// - Throws: ``BytesError/invalidValue`` if `text` contains `terminator`;
+    ///   ``BytesError/insufficientCapacity`` if there isn't room. Nothing is written either way.
+    /// - Precondition: The cursor is byte-aligned.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write(_ text: UTF8Span, terminatedBy terminator: UInt8) throws(BytesError) {
+        try write(text.span.bytes, terminatedBy: terminator)
     }
 
     /// Writes `bytes` preceded by their byte count as LEB128.

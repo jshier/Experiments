@@ -507,3 +507,53 @@ Parsing costs about 575 instructions more per entry for the larger `ZipEntry` (e
 the shared `makeEntry` is inlined into both parsers, hence the reference parser's rise too) and the new extra fields.
 Reading Info-ZIP's 4-byte UID/GID directly, not byte by byte, took back 300 per entry (6,644 → 6,038 K). That's
 0.6 ms to open a 2,000-entry archive.
+
+## step16 (2026-11-18): parsing cost recovered, native encryption, streamed decryption, Zstandard (baselines `d2-start` → `d2-zip3`, Swift 6.4.4)
+
+- **Parsing:** `ZipEntry` stores the DOS time as a `Double` (NaN for none) and the permission bits as a `UInt16`;
+  `modificationDate` and `posixPermissions` are computed. The time conversion is out of line; `makeEntry` builds
+  file types from octal constants. 6,062 → 4,297 K instructions for 2,000 entries (−29%), 342 → 189 µs.
+- **Encryption in Swift, no CommonCrypto:** ZipCrypto (`TraditionalCipher`), WinZip AES (`WinZipAES`: PBKDF2-SHA1,
+  HMAC-SHA1, AES-CTR with WinZip's little-endian counter) on BytesCrypto's AES (ARM's `aese`/`aesmc` through a C
+  header, constant-time bitsliced S-box otherwise), SHA-1, HMAC, and PBKDF2. PBKDF2 runs 2.6x CommonCrypto's speed;
+  AES-CTR equals it (`../Bytes/Benchmarks/RESULTS.md`).
+- **Streamed decryption:** encrypted entries decrypt in pieces into a 256 KB staging buffer as the decompressor takes
+  input (DEFLATE through BytesCompression's streaming decoder, bzip2, xz, Zstandard), or straight into the output
+  buffer (stored): no entry is held whole in memory. AES checks the whole payload's MAC before any output. (Deflate64
+  and LZMA, whose decoders read their whole input, still decrypt into one buffer.) The staging buffer and streaming
+  decoder are made on the first encrypted entry: workers that never see one don't allocate them.
+- **Zstandard (method 93):** BytesCompression's `ZstdDecoder` (1.12–1.45x libzstd 1.5.7's speed on Silesia; see
+  `../Bytes/Benchmarks/RESULTS.md`). Entries up to 1 MB decode in one call straight into the output buffer (no window,
+  no copy); larger or encrypted ones stream through the decoder's window. Tests: `zstd.zip`, a 5 MB entry, and the
+  same ZipCrypto-encrypted (made by `make-fixtures.py`, which now writes ZipCrypto itself); `ppmd.zip` (method 98) is
+  the unsupported method now.
+- **Extraction:** `relativePath` has a fast path for clean names; claimed names hash ASCII case-folded without making
+  strings (`ClaimKey`); a file's parent directory isn't re-created for consecutive files; the job queue and chunk
+  hand-off use unsafe continuations behind a `Mutex`, one consumer task per entry instead of one per chunk.
+
+Instructions and mallocs (exact); times are one run while other builds ran (±10%):
+
+| Benchmark | d2-start | d2-zip3 | Change |
+|---|---|---|---|
+| Parse central directory (2,000 entries), instructions | 6,062 K | 4,297 K | −29% |
+| Parse central directory, time | 342 µs | 189 µs | −45% |
+| Locate 2,000 payloads, instructions | 3,377 K | 3,293 K | −2.5% |
+| Verify 2,000 small files (parallel), instructions | 314 M | 266 M | −15% |
+| Verify 2,000 small files (parallel), time | 6.0 ms | 2.7 ms | −56% |
+| Extract 2,000 small files, mallocs | 38 K | 15 K | −61% (19 → 7.5 per file) |
+| Open + extract 2,000 small files, instructions | 3,035 M | 2,907 M | −4.2% |
+| Extract 32 MB text, mallocs | 400 | 267 | −33% (setup only) |
+| Inflate + CRC (any), mallocs per iteration | 0 | 0 | — |
+
+Zstandard against DEFLATE on the same 32 MB (the `zstd` command at level 3; DEFLATE from `/usr/bin/zip`, level 6):
+
+| 32 MB | Inflate + CRC (Bytes) | Inflate + CRC (zlib) | Zstd + CRC |
+|---|---|---|---|
+| Text, instructions / time | 240 M / 13 ms | 218 M / 13 ms | 379 M / 18 ms |
+| Raster, instructions / time | 138 M / 9.3 ms | 91 M / 11 ms | 141 M / 10 ms |
+
+The synthetic text (30 words in random order) inflates unusually cheaply, 7.5 instructions a byte; zstd's 11.8 is in
+line with its Silesia figures (dickens L3: 13.4, against libzstd's 14.9). Not measured here: zstd against DEFLATE on
+real corpora; these fixtures may favor DEFLATE. `Zstd + CRC`'s 3 mallocs are the decoder's tables, window, and
+input stash, made on the first zstd entry inside each measured sample (the benchmark creates its `ZipDecoder` there);
+a probe decoding the entry 2 and 4 times in one process counted the same allocations (`Tools/runtime-count`).

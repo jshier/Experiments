@@ -153,19 +153,19 @@ struct DiagnosticTests {
         }
     }
 
-    @Test func storageWithoutAByteOrder() {
+    @Test func unsupportedStorage() {
         assertMacro {
             """
-            @BitFields(UInt16.self)
+            @BitFields(UInt128.self)
             struct Flags {
                 @Flag(bit: 1) var one: Bool
             }
             """
         } diagnostics: {
             """
-            @BitFields(UInt16.self)
-            ┬──────────────────────
-            ╰─ 🛑 @BitFields(UInt16.self, …) needs a byte order: .bigEndian or .littleEndian
+            @BitFields(UInt128.self)
+            ┬───────────────────────
+            ╰─ 🛑 @BitFields stores its fields in Byte, UInt8, UInt16, UInt32, or UInt64, not UInt128
             struct Flags {
                 @Flag(bit: 1) var one: Bool
             }
@@ -187,7 +187,7 @@ struct DiagnosticTests {
             struct Record {
                 @Field(bits: 0...3) var nibble: Int
                 ┬──────────────────────────────────
-                ╰─ 🛑 @Field in a @BinaryRecord names its width: @Field(Byte2.self)
+                ╰─ 🛑 @Field in a @BinaryRecord names its width: @Field(Byte2.self), or @Field(Byte.self) for one byte
             }
             """
         }

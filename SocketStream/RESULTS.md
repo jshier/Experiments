@@ -7,6 +7,40 @@ Bandwidth counts every byte on the wire, MQTT headers included; the timing runs 
 the last receiver's end of stream. Every packet is checked on arrival. The package now also measures
 compressed and TLS-encrypted streams through Bytes pipelines (2026-11-15 below).
 
+## 2026-11-18: TLS records sealed in parallel; AES-128-GCM records
+
+Bytes' TLS layer is now its own (no CryptoKit: RFC 8446's key schedule, KeyUpdate, alerts, record limits, the
+RFC 8448 traces as tests), and `TLSRecordSealer.sealingLanes` seals the full records of a large input on several
+cores, each straight into its place in the output (same bytes as one lane: tested). `Protection` gains
+`sealingLanes` and `cipher` (`--seal-lanes`, `--cipher chacha20|aes128gcm|aes256gcm`).
+
+In memory (`../Bytes`, `TLS seal 4 MB …`, p50 of 4 MB calls; instructions unchanged at 13 M and 36 M):
+
+| Sealing 4 MB | 1 lane | 4 lanes | 8 lanes |
+|---|---|---|---|
+| AES-128-GCM | 5.7 GB/s | 20.3 GB/s (3.6x) | 32.7 GB/s (5.8x) |
+| ChaCha20-Poly1305 | 2.0 GB/s | 7.6 GB/s (3.8x) | 13.9 GB/s (6.9x) |
+
+Loopback, one connection, 16 KB payloads, ~1 GB, interleaved runs (two rounds of two runs each):
+
+| Records | 1 sealing lane | 4 lanes | 8 lanes |
+|---|---|---|---|
+| ChaCha20-Poly1305 | 1.35–1.54 GB/s | 1.77–1.87 GB/s (+25%) | 1.57–1.85 GB/s |
+| AES-128-GCM | 2.79–3.16 GB/s | 3.63–3.80 GB/s (+22%) | — |
+| (plain, no records) | 4.62–5.84 GB/s | | |
+
+The receiver is now the limit: it opens records one after another (ChaCha20-Poly1305 at about 2 GB/s on one
+core), so more sealing lanes add nothing past four. Opening in parallel is harder than sealing: a record's
+plaintext length, and so its place in the output, is known only once it's decrypted (the inner content type and
+padding are at its end), and the type byte of each record lands where the next one's content starts. It needs a
+split decrypt in both AEADs (content to the output, the last byte apart), or a compaction copy. Moving the
+sender's `sendto` copy off the sealing thread (the plan's item 18) wouldn't show while the receiver limits, so
+it wasn't done.
+
+The TLS layer's rewrite (Bytes' own HKDF and key schedule, RFC 8446's record checks) left every in-memory benchmark
+unchanged in instructions (`trk-final` → `d2-final`: protect 15 M, unprotect 17 M, with Brotli or DEFLATE 41/26 M
+and 44/17 M); times within this machine's drift (−0.3 to +6.2%).
+
 ## 2026-11-17: stitched ChaCha20-Poly1305 (baselines `trk-t0` → `trk-final`, Swift 6.4.4)
 
 Bytes' ChaCha20-Poly1305 now interleaves Poly1305 with ChaCha20's rounds (`../Bytes/Benchmarks/RESULTS.md`,

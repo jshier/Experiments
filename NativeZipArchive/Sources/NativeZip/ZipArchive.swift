@@ -34,24 +34,35 @@ public struct ZipEntry: Sendable {
     public let uncompressedSize: UInt64
     /// The offset of the entry's local file header from the start of the archive (ZIP64-aware).
     public let localHeaderOffset: UInt64
-    /// The Unix permission bits (including setuid, setgid, and sticky) when the archive was made on Unix and
-    /// they're nonzero; `nil` otherwise.
-    public let posixPermissions: Int?
-    /// The modification time: the extended timestamp field's UTC time if present, then the NTFS or old
-    /// Info-ZIP Unix field's, otherwise the MS-DOS date and time read as local time. `nil` if no date can be
-    /// built from the DOS fields.
-    public let modificationDate: Date?
     /// How the entry is encrypted, or `nil` if it isn't. For WinZip AES, ``method`` is the compression
     /// method recorded in the AES extra field, not 99.
     public let encryption: ZipEncryption?
-    /// The Unix user and group IDs from Info-ZIP's Unix extra fields, if recorded.
+    /// The Unix user ID from Info-ZIP's Unix extra fields, if recorded.
     public let ownerID: UInt32?
+    /// The Unix group ID from Info-ZIP's Unix extra fields, if recorded.
     public let groupID: UInt32?
     /// The system that made the entry: the high byte of "version made by" (0 MS-DOS/FAT, 3 Unix, 10 NTFS
     /// as Windows writes it, 19 macOS).
     public let hostSystem: UInt8
     /// The raw MS-DOS time, which the traditional cipher checks when the entry has a data descriptor.
     let dosTime: UInt16
+    /// The Unix permission bits; 0 for none.
+    let permissionBits: UInt16
+    /// The modification time in seconds since 1970; NaN for none.
+    ///
+    /// Stored as a `Double`, not a `Date?`: `Date` is a resilient Foundation type, so a struct holding one is
+    /// copied, moved, and destroyed through value witnesses, and every entry is copied into the array as it's
+    /// parsed (2,000 entries: 6.0 → … M instructions; see `Benchmarks/RESULTS.md`, 2026-11-18).
+    let modificationTime: Double
+
+    /// The Unix permission bits (including setuid, setgid, and sticky) when the archive was made on Unix and
+    /// they're nonzero; `nil` otherwise.
+    public var posixPermissions: Int? { permissionBits == 0 ? nil : Int(permissionBits) }
+
+    /// The modification time: the extended timestamp field's UTC time if present, then the NTFS or old
+    /// Info-ZIP Unix field's, otherwise the MS-DOS date and time read as local time. `nil` if no date can be
+    /// built from the DOS fields.
+    public var modificationDate: Date? { modificationTime.isNaN ? nil : Date(timeIntervalSince1970: modificationTime) }
 
     // Bit 0. (A mask, not `Bytes`' `flags[bit: 0]`: `Bytes` is imported `internal`, so inlinable public code
     // can't use it.)
@@ -100,6 +111,8 @@ public struct ZipArchive: Sendable {
         public static let bzip2: UInt16 = 12
         /// Method 14: LZMA (LZMA1), with a 4-byte zip header and its properties before the stream.
         public static let lzma: UInt16 = 14
+        /// Method 93: Zstandard (RFC 8878), one or more frames.
+        public static let zstd: UInt16 = 93
         /// Method 95: an xz stream.
         public static let xz: UInt16 = 95
         /// Method 99: WinZip AES. The real method is in the entry's AES extra field (``ZipEntry/method``
@@ -108,7 +121,7 @@ public struct ZipArchive: Sendable {
 
         /// Whether entries with `method` can be decompressed.
         public static func isSupported(_ method: UInt16) -> Bool {
-            [stored, deflated, deflate64, bzip2, lzma, xz].contains(method)
+            [stored, deflated, deflate64, bzip2, lzma, zstd, xz].contains(method)
         }
 
         /// A short name for `method`, as listings show it.
@@ -122,7 +135,7 @@ public struct ZipArchive: Sendable {
             case deflate64: "Deflate64"
             case bzip2: "BZip2"
             case lzma: "LZMA"
-            case 93: "Zstd"
+            case zstd: "Zstd"
             case xz: "XZ"
             case 98: "PPMd"
             default: "Unk:\(method)"
@@ -294,8 +307,9 @@ extension ZipArchive {
         var extra = try directory.readSection(byteCount: header.extraLength)
         try directory.skip(byteCount: header.commentLength)
 
-        var modificationTime: Date?
-        var fallbackTime: Date? // From fields that the extended timestamp overrides.
+        // Seconds since 1970, NaN for none (not `Date?`: see `ZipEntry.modificationTime`).
+        var modificationTime = Double.nan
+        var fallbackTime = Double.nan // From fields that the extended timestamp overrides.
         var method = header.method
         var encryption: ZipEncryption? = header.flags & 0x1 == 0 ? nil : header.flags & 0x40 != 0 ? .unsupported : .traditional
         var ownerID: UInt32?
@@ -311,8 +325,7 @@ extension ZipArchive {
                 if localHeaderOffset == UInt32.max { localHeaderOffset = try field.read(UInt64.self) }
             case 0x5455: // Extended timestamp: a flags byte, then a UTC mtime if bit 0 is set.
                 if field.remainingByteCount >= 5, try field.read(ExtendedTimestampFlags.self).modification {
-                    let seconds = try field.read(Int32.self, asSigned: Byte4.self)
-                    modificationTime = Date(timeIntervalSince1970: TimeInterval(seconds))
+                    modificationTime = Double(try field.read(Int32.self, asSigned: Byte4.self))
                 }
             case 0x000A: // NTFS: 4 reserved bytes, then tagged attributes; tag 1 holds three 64-bit FILETIMEs.
                 try field.skip(byteCount: 4)
@@ -322,13 +335,13 @@ extension ZipArchive {
                     if tag == 1, attribute.remainingByteCount >= 8 {
                         // 100-nanosecond intervals since 1601.
                         let ticks = try attribute.read(UInt64.self)
-                        fallbackTime = Date(timeIntervalSince1970: Double(ticks) / 10_000_000 - 11_644_473_600)
+                        fallbackTime = Double(ticks) / 10_000_000 - 11_644_473_600
                     }
                 }
             case 0x5855: // Info-ZIP Unix (old): atime, mtime, then optionally 16-bit UID and GID.
                 if field.remainingByteCount >= 8 {
                     try field.skip(byteCount: 4)
-                    fallbackTime = try Date(timeIntervalSince1970: TimeInterval(field.read(UInt32.self)))
+                    fallbackTime = Double(try field.read(UInt32.self))
                     if field.remainingByteCount >= 4 {
                         ownerID = try UInt32(field.read(UInt16.self))
                         groupID = try UInt32(field.read(UInt16.self))
@@ -368,7 +381,8 @@ extension ZipArchive {
             uncompressedSize: uncompressedSize,
             externalAttributes: header.externalAttributes,
             localHeaderOffset: localHeaderOffset + leading,
-            modificationDate: modificationTime ?? fallbackTime ?? date(header.date, header.time),
+            modificationTime: !modificationTime.isNaN ? modificationTime
+                : !fallbackTime.isNaN ? fallbackTime : time(header.date, header.time),
             encryption: encryption,
             ownerID: ownerID,
             groupID: groupID,
@@ -405,12 +419,13 @@ extension ZipArchive {
     ///   - uncompressedSize: The uncompressed size, after ZIP64 resolution.
     ///   - externalAttributes: The external file attributes.
     ///   - localHeaderOffset: The local header's offset in the file, after ZIP64 resolution.
-    ///   - modificationDate: The entry's modification date, if known.
+    ///   - modificationTime: The entry's modification time in seconds since 1970, or NaN if unknown.
     ///   - encryption: How the entry is encrypted, if it is.
     ///   - ownerID: The Unix UID, if recorded.
     ///   - groupID: The Unix GID, if recorded.
     ///   - dosTime: The raw MS-DOS time.
     /// - Returns: The entry.
+    @inline(__always)
     static func makeEntry(
         name: String,
         versionMadeBy: UInt16,
@@ -421,24 +436,27 @@ extension ZipArchive {
         uncompressedSize: UInt64,
         externalAttributes: UInt32,
         localHeaderOffset: UInt64,
-        modificationDate: Date?,
+        modificationTime: Double,
         encryption: ZipEncryption? = nil,
         ownerID: UInt32? = nil,
         groupID: UInt32? = nil,
         dosTime: UInt16 = 0
     ) -> ZipEntry {
-        // The high byte of "version made by" is the host OS; Unix's st_mode is the high 16 bits.
+        // The high byte of "version made by" is the host OS; Unix's st_mode is the high 16 bits. The `S_IF…`
+        // constants are written out: Darwin's are imported as getters, each an out-of-line call.
         let host = versionMadeBy[ZipAttributes.host]
         let mode = host == 3 || host == 19 ? externalAttributes[ZipAttributes.unixMode] : 0
-        let fileType = mode & Int(S_IFMT)
+        let fileType = mode & 0o170_000 // S_IFMT
         let fromDOS = switch host {
         case 0, 11, 14: true // MS-DOS (FAT), NTFS, VFAT
         default: false
         }
         let path = fromDOS && name.utf8.contains(UInt8(ascii: "\\")) ? name.replacing("\\", with: "/") : name
-        let kind: ZipEntry.Kind = if path.hasSuffix("/") || fileType == Int(S_IFDIR) || externalAttributes[ZipAttributes.dosDirectory] {
+        let isDirectory = path.utf8.last == UInt8(ascii: "/") || fileType == 0o040_000 /* S_IFDIR */
+            || externalAttributes[ZipAttributes.dosDirectory]
+        let kind: ZipEntry.Kind = if isDirectory {
             .directory
-        } else if fileType == Int(S_IFLNK) {
+        } else if fileType == 0o120_000 /* S_IFLNK */ {
             .symlink
         } else {
             .file
@@ -452,13 +470,13 @@ extension ZipArchive {
             compressedSize: compressedSize,
             uncompressedSize: uncompressedSize,
             localHeaderOffset: localHeaderOffset,
-            posixPermissions: mode & 0o7777 != 0 ? mode & 0o7777 : nil,
-            modificationDate: modificationDate,
             encryption: encryption ?? (flags & 0x1 == 0 ? nil : .traditional),
             ownerID: ownerID,
             groupID: groupID,
             hostSystem: UInt8(host),
-            dosTime: dosTime
+            dosTime: dosTime,
+            permissionBits: UInt16(mode & 0o7777),
+            modificationTime: modificationTime
         )
     }
 
@@ -497,6 +515,13 @@ extension ZipArchive {
     static func date(dosDate: UInt16, dosTime: UInt16) -> Date? {
         // Can't throw: neither has reserved bits or enum fields.
         date(try! DOSDate(rawValue: dosDate), try! DOSTime(rawValue: dosTime))
+    }
+
+    /// ``date(_:_:)`` as seconds since 1970, NaN if there's no such date. Out of line: entries with an extended
+    /// timestamp (most) never call it.
+    @inline(never)
+    static func time(_ date: DOSDate, _ time: DOSTime) -> Double {
+        Self.date(date, time)?.timeIntervalSince1970 ?? .nan
     }
 
     static func date(_ date: DOSDate, _ time: DOSTime) -> Date? {

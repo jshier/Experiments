@@ -73,11 +73,15 @@ let package = Package(
             description: "CRC-32 with ARM's CRC32 and carry-less multiply instructions (the CBytesCRC C module)."
         ),
         .trait(
+            name: "HardwareCrypto",
+            description: "AES, SHA-1, SHA-256, and GHASH with ARM's cryptography instructions (the CBytesCrypto C module)."
+        ),
+        .trait(
             name: "Portable",
             description: "Build the C modules as for a CPU without NEON: their portable fallbacks, to measure them here.",
-            enabledTraits: ["NEONShuffle", "HardwareCRC"]
+            enabledTraits: ["NEONShuffle", "HardwareCRC", "HardwareCrypto"]
         ),
-        .default(enabledTraits: ["NEONShuffle", "HardwareCRC"]),
+        .default(enabledTraits: ["NEONShuffle", "HardwareCRC", "HardwareCrypto"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
@@ -89,6 +93,7 @@ let package = Package(
         .target(name: "CBytesNEON", cSettings: portableCSettings),
         // Carry-less multiply and CRC32 instruction wrappers for `CRC32`; empty on CPUs without them.
         .target(name: "CBytesCRC", cSettings: portableCSettings),
+        .target(name: "CBytesCrypto", cSettings: portableCSettings),
         .target(
             name: "Bytes",
             dependencies: [
@@ -106,7 +111,7 @@ let package = Package(
         // DEFLATE (raw, zlib, gzip) and Brotli, compressing and decompressing.
         .target(
             name: "BytesCompression",
-            dependencies: ["Bytes"],
+            dependencies: ["Bytes", .target(name: "CBytesCRC", condition: .when(traits: ["HardwareCRC"]))],
             swiftSettings: strictSettings + portableSwiftSettings + [.enableExperimentalFeature("BuiltinModule")]
         ),
         // The asynchronous parts: `ByteBuffer.receive`, lending spans to tasks, the parallel codecs' `async`
@@ -130,7 +135,10 @@ let package = Package(
         // Authenticated encryption on spans: ChaCha20-Poly1305, and TLS 1.3 record protection.
         .target(
             name: "BytesCrypto",
-            dependencies: ["Bytes", "BytesFoundation"],
+            dependencies: [
+                "Bytes",
+                .target(name: "CBytesCrypto", condition: .when(traits: ["HardwareCrypto"])),
+            ],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         .testTarget(
@@ -140,12 +148,14 @@ let package = Package(
             swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
         ),
         // Reference implementations, for differential tests and comparison benchmarks only. Found through
-        // pkg-config: `brew install libdeflate brotli`. (zlib and Apple's Compression come with the SDK.)
+        // pkg-config: `brew install libdeflate brotli zstd xz`. (zlib and Apple's Compression come with the SDK.)
         .systemLibrary(name: "CLibDeflate", pkgConfig: "libdeflate", providers: [.brew(["libdeflate"])]),
         .systemLibrary(name: "CBrotli", pkgConfig: "libbrotlienc", providers: [.brew(["brotli"])]),
+        .systemLibrary(name: "CZstd", pkgConfig: "libzstd", providers: [.brew(["zstd"])]),
+        .systemLibrary(name: "CLZMA", pkgConfig: "liblzma", providers: [.brew(["xz"])]),
         .testTarget(
             name: "BytesCompressionTests",
-            dependencies: ["Bytes", "BytesCompression", "BytesAsync", "CLibDeflate", "CBrotli"],
+            dependencies: ["Bytes", "BytesCompression", "BytesAsync", "CLibDeflate", "CBrotli", "CZstd", "CLZMA"],
             // Not strict memory safety: the tests call the reference libraries' C APIs.
             swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
         ),
@@ -157,6 +167,8 @@ let package = Package(
                 "BytesCrypto",
                 "CLibDeflate",
                 "CBrotli",
+                "CZstd",
+                "CLZMA",
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/CompressionBenchmarks",

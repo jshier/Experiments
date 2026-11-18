@@ -31,11 +31,17 @@
 ///
 /// Each field compiles to the shift and mask written by hand.
 ///
+/// Over `UInt16`, `UInt32`, or `UInt64` without a byte order, the value is stored in the byte order of the
+/// cursor that reads it, as in a `@BinaryRecord` without one: the conformances are then `ByteOrderedParsable`
+/// and `ByteOrderedWritable`, read from ``BigEndianBytesReader`` and ``LittleEndianBytesReader``.
+///
 /// - Parameters:
-///   - storage: The packed value's type: `Byte.self` or `UInt8.self` for one byte.
+///   - storage: The packed value's type: `Byte.self` or `UInt8.self` for one byte; `UInt16.self`,
+///     `UInt32.self`, or `UInt64.self` for one in the cursor's byte order.
 ///   - reserved: Bit ranges that must be 0.
 @attached(member, names: named(init), named(rawValue))
-@attached(extension, conformances: BinaryParsable, BinaryWritable, FixedSizeBinary, names: named(init(parsing:)), named(write(to:)), named(byteCount))
+@attached(extension, conformances: BinaryParsable, BinaryWritable, ByteOrderedParsable, ByteOrderedWritable, FixedSizeBinary,
+          names: named(init(parsing:)), named(write(to:)), named(byteCount))
 public macro BitFields(_ storage: Any.Type, reserved: ClosedRange<Int>...) =
     #externalMacro(module: "BytesMacrosPlugin", type: "BitFieldsMacro")
 
@@ -100,15 +106,47 @@ public macro Field(bitsFromMostSignificant: ClosedRange<Int>) =
 /// the optimizer knows, so the fields' own checks fold away; a field with an expected value throws
 /// `BytesError.mismatch` for another, and the record consumes nothing when it throws.
 ///
-/// Integer fields: `Int` and the unsigned types read the field's unsigned value (throwing
-/// `BytesError.invalidValue` if it doesn't fit); `Int8` through `Int64` read it as two's complement.
+/// Fields:
+/// - `@Field(Byte4.self)` and the other byte groups, through `Byte16`; `@Field(Byte.self)` for one byte.
+/// - Integers: `Int` and the unsigned types read the field's unsigned value (throwing
+///   `BytesError.invalidValue` if it doesn't fit); `Int8` through `Int64` read it as two's complement.
+/// - Enums with integer raw values, through their raw values.
+/// - Without `@Field`: a nested record, a `@BitFields` type, or anything `BinaryParsable`, `BinaryWritable`, and
+///   `FixedSizeBinary`. `Padding<Byte7>` skips bytes and `Reserved<Byte2>` requires them to be zero; both
+///   store nothing, and default in the initializer.
 ///
 /// - Parameter byteOrder: The byte order of the record's integer fields.
 @attached(member, names: named(init), named(byteCount))
 @attached(extension, conformances: BinaryParsable, BinaryWritable, FixedSizeBinary, names: named(init(parsing:)), named(write(to:)))
 public macro BinaryRecord(_ byteOrder: ByteOrder) = #externalMacro(module: "BytesMacrosPlugin", type: "BinaryRecordMacro")
 
-/// A field of a `@BinaryRecord` stored as `group` (`Byte2.self`, `Byte4.self`, …).
+/// A record of fixed fields in order whose integers are in the byte order of the cursor that reads it: for
+/// formats that name their byte order in their first bytes (ELF, PCAPNG, TIFF), so one declaration serves both.
+///
+/// ```swift
+/// @BinaryRecord
+/// struct ProgramHeader64 {
+///     @Field(Byte4.self) var type: SegmentType
+///     @Field(Byte4.self) var flags: UInt32
+///     @Field(Byte8.self) var offset: UInt64
+///     …
+/// }
+///
+/// static func parse<Mode: ByteOrderedCursorMode>(_ reader: inout GenericBytesReader<Mode>) throws(BytesError) -> … {
+///     let header = try reader.read(ProgramHeader64.self)
+/// }
+/// ```
+///
+/// As `@BinaryRecord(_:)` in every other way, but the conformances are `ByteOrderedParsable` and
+/// `ByteOrderedWritable`: such a record is read from ``BigEndianBytesReader`` or ``LittleEndianBytesReader``
+/// (or generic code over ``ByteOrderedCursorMode``), each specialized with its order a constant. Reading it from
+/// any other cursor doesn't compile. Nested records and `@BitFields` types without a byte order are read in
+/// the same order.
+@attached(member, names: named(init), named(byteCount))
+@attached(extension, conformances: ByteOrderedParsable, ByteOrderedWritable, FixedSizeBinary, names: named(init(parsing:)), named(write(to:)))
+public macro BinaryRecord() = #externalMacro(module: "BytesMacrosPlugin", type: "BinaryRecordMacro")
+
+/// A field of a `@BinaryRecord` stored as `group` (`Byte.self`, `Byte2.self`, `Byte4.self`, …).
 @attached(peer)
 public macro Field(_ group: Any.Type) = #externalMacro(module: "BytesMacrosPlugin", type: "FieldMarkerMacro")
 

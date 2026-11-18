@@ -16,7 +16,7 @@ func registerCryptoBenchmarks() {
     let chachaKey = SymmetricKey(data: key)
     let gcmKey = SymmetricKey(data: key.prefix(16))
     let chachaNonce = try! ChaChaPoly.Nonce(data: nonce)
-    let gcmNonce = try! AES.GCM.Nonce(data: nonce)
+    let gcmNonce = try! CryptoKit.AES.GCM.Nonce(data: nonce)
     for size in [64, 1_024, 16_384, 1 << 20] {
         let label = size >= 1 << 20 ? "1 MB" : size >= 1024 ? "\(size / 1024) KB" : "\(size) B"
         var message = (0..<size).map { UInt8(truncatingIfNeeded: $0) }
@@ -39,10 +39,41 @@ func registerCryptoBenchmarks() {
                 }
             }
         }
+        let gcmKeyBytes = Array(key.prefix(16))
+        let gcm = AESGCM(key: gcmKeyBytes.span.bytes)
+        Benchmark("AES-128-GCM seal \(label) (x\(repeats)): Bytes") { benchmark in
+            for _ in benchmark.scaledIterations {
+                for _ in 0..<repeats {
+                    var span = message.mutableSpan
+                    var raw = MutableRawSpan(mutating: &span)
+                    blackHole(gcm.seal(&raw, nonce: nonce.span.bytes, authenticating: aad.span.bytes))
+                }
+            }
+        }
         Benchmark("AES-128-GCM seal \(label) (x\(repeats)): CryptoKit") { benchmark in
             for _ in benchmark.scaledIterations {
                 for _ in 0..<repeats {
-                    blackHole(try! AES.GCM.seal(data, using: gcmKey, nonce: gcmNonce, authenticating: aad))
+                    blackHole(try! CryptoKit.AES.GCM.seal(data, using: gcmKey, nonce: gcmNonce, authenticating: aad))
+                }
+            }
+        }
+    }
+
+    // TLS records from 4 MB handed to the sealer at once (as a socket writer with a large buffer does): one lane,
+    // then several, each record sealed straight into its place in the output. 4 MB per iteration.
+    for suite in [TLSCipherSuite.aes128GCMSHA256, .chaCha20Poly1305SHA256] {
+        let keys = TLSKeySchedule.applicationKeys(sharedSecret: [UInt8](repeating: 3, count: 32).span.bytes, suite: suite).server
+        let plaintext = (0..<(4 << 20)).map { UInt8(truncatingIfNeeded: $0 &* 7) }
+        var records = [UInt8](repeating: 0, count: plaintext.count + plaintext.count / 128)
+        let name = suite == .aes128GCMSHA256 ? "AES-128-GCM" : "ChaCha20-Poly1305"
+        for lanes in [1, 4, 8] {
+            var sealer = TLSRecordSealer(keys: keys)
+            sealer.sealingLanes = lanes
+            Benchmark("TLS seal 4 MB \(name) (\(lanes) lanes): Bytes") { benchmark in
+                for _ in benchmark.scaledIterations {
+                    blackHole(records.withOutputRawSpan { span in
+                        try! sealer.transform(plaintext.span.bytes, into: &span, flush: .flush)
+                    })
                 }
             }
         }

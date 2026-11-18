@@ -7,7 +7,9 @@
 // MARK: - BytesReader
 
 extension GenericBytesReader: Iterable {
+    /// A byte of the unread data.
     public typealias Element = UInt8
+    /// The iterator: the standard library's, over the unread bytes as one span.
     public typealias BorrowingIterator = Span<UInt8>.BorrowingIterator
 
     /// Iterates the whole unread bytes, without consuming them, as one span of the underlying memory.
@@ -28,6 +30,7 @@ extension GenericBytesReader: Iterable {
         Span<UInt8>.BorrowingIterator(Span(viewing: remainingBytes))
     }
 
+    /// The number of unread bytes, exactly.
     @inlinable
     public var underestimatedCount: Int { remainingByteCount }
 }
@@ -81,6 +84,7 @@ public extension BytesReader {
 
 /// The whole `T` groups from a position in a span, as integers in a byte order. See ``GenericBytesReader/values(of:_:)``.
 public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
+    /// A group's value, as an integer in the view's byte order.
     public typealias Element = T.Integer
 
     @usableFromInline let span: RawSpan
@@ -99,12 +103,16 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
         self.byteOrder = byteOrder
     }
 
+    /// An iterator over the values, from the view's position.
+    ///
+    /// - Returns: The iterator.
     @inlinable
     @_lifetime(borrow self)
     public func makeBorrowingIterator() -> Iterator {
         Iterator(cursor: BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder), byteOrder: byteOrder)
     }
 
+    /// The number of whole groups that remain, exactly.
     @inlinable
     public var underestimatedCount: Int {
         BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder).remainingByteCount / T.byteCount
@@ -112,6 +120,7 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
 
     /// Decodes up to 1,024 values at a time into its own buffer, and hands out a span of them.
     public struct Iterator: BorrowingIteratorProtocol, ~Copyable, ~Escapable {
+        /// A group's value, as an integer in the view's byte order.
         public typealias Element = T.Integer
 
         @usableFromInline var cursor: BytesReader
@@ -128,6 +137,10 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
             self.byteOrder = byteOrder
         }
 
+        /// Decodes the next values into the iterator's buffer and returns them.
+        ///
+        /// - Parameter maxCount: The most values to return; at most 1,024 are, whatever it is.
+        /// - Returns: The next values, valid until the next call; empty at the end.
         @inlinable
         @_lifetime(&self)
         @_lifetime(self: copy self)
@@ -149,6 +162,7 @@ public struct ByteGroupValues<T: ByteGroup>: Iterable, ~Escapable {
 
 /// The whole `Bits<width>` values from a position in a span. See ``GenericBytesReader/values(of:)``.
 public struct BitsValues<let width: Int>: Iterable, ~Escapable {
+    /// A `width`-bit value.
     public typealias Element = Bits<width>
 
     @usableFromInline let span: RawSpan
@@ -165,12 +179,16 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
         self.bitOrder = bitOrder
     }
 
+    /// An iterator over the values, from the view's position.
+    ///
+    /// - Returns: The iterator.
     @inlinable
     @_lifetime(borrow self)
     public func makeBorrowingIterator() -> Iterator {
         Iterator(cursor: BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder))
     }
 
+    /// The number of whole values that remain, exactly.
     @inlinable
     public var underestimatedCount: Int {
         BytesReader(span, byteOffset: byteOffset, bitOffset: bitOffset, bitOrder: bitOrder).remainingBitCount / width
@@ -178,6 +196,7 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
 
     /// Decodes up to 4,096 values at a time into its own buffer, and hands out a span of them.
     public struct Iterator: BorrowingIteratorProtocol, ~Copyable, ~Escapable {
+        /// A `width`-bit value.
         public typealias Element = Bits<width>
 
         @usableFromInline var cursor: BytesReader
@@ -192,6 +211,10 @@ public struct BitsValues<let width: Int>: Iterable, ~Escapable {
             self.cursor = cursor
         }
 
+        /// Decodes the next values into the iterator's buffer and returns them.
+        ///
+        /// - Parameter maxCount: The most values to return; at most 4,096 are, whatever it is.
+        /// - Returns: The next values, valid until the next call; empty at the end.
         @inlinable
         @_lifetime(&self)
         @_lifetime(self: copy self)

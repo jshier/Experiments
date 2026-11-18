@@ -83,9 +83,11 @@ public protocol ByteTransform: ~Copyable {
 }
 
 public extension ByteTransform where Self: ~Copyable {
+    /// 1: by default a stage consumes byte by byte, keeping no partial unit back.
     @inlinable
     static var maximumUnitByteCount: Int { 1 }
 
+    /// 1: by default a stage can write any amount.
     @inlinable
     static var minimumOutputCapacity: Int { 1 }
 
@@ -158,6 +160,7 @@ public protocol InPlaceByteTransform: ~Copyable {
     /// - Parameters:
     ///   - bytes: The bytes to rewrite.
     ///   - flush: The flush the bytes came with.
+    /// - Throws: The stage's `Failure`.
     mutating func transform(inPlace bytes: inout MutableRawSpan, flush: TransformFlush) throws(Failure)
 }
 
@@ -194,6 +197,9 @@ public extension ByteTransform where Self: ~Copyable {
     }
 
     /// This non-throwing stage typed as throwing `failure`, to compose with stages that throw it.
+    ///
+    /// - Parameter failure: The error type to declare, such as `BytesError.self`.
+    /// - Returns: The stage, wrapped: it still never throws.
     @inlinable
     consuming func promoted<E: Error>(to failure: E.Type) -> PromotedTransform<Self, E> where Failure == Never {
         PromotedTransform(self)
@@ -203,6 +209,7 @@ public extension ByteTransform where Self: ~Copyable {
     ///
     /// - Parameter transform: Converts an error; a closure that captures nothing, so storing it allocates
     ///   nothing.
+    /// - Returns: The stage, wrapped.
     @inlinable
     consuming func mapError<E: Error>(_ transform: @escaping @Sendable (Failure) -> E) -> MappedErrorTransform<Self, E> {
         MappedErrorTransform(self, transform)
@@ -245,11 +252,14 @@ public struct Pipeline<First: ByteTransform & ~Copyable, Second: ByteTransform &
 }
 
 extension Pipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
+    /// What both stages throw.
     public typealias Failure = First.Failure
 
+    /// The first stage's: the pipeline's input goes to it.
     @inlinable
     public static var maximumUnitByteCount: Int { First.maximumUnitByteCount }
 
+    /// The second stage's: the pipeline's output comes from it.
     @inlinable
     public static var minimumOutputCapacity: Int { Second.minimumOutputCapacity }
 
@@ -258,6 +268,13 @@ extension Pipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
     /// The first stage fills the buffer and the second empties it, alternately, until the input is used and
     /// the buffer drained (`needsInput`), the output is full (`needsOutput`), or the second stage finishes.
     /// The second stage sees `flush` once the first has finished with this call's input.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append the second stage's output.
+    ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
+    /// - Returns: What the pipeline consumed and produced, and why it returned.
+    /// - Throws: Either stage's `Failure`.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {
         var consumed = 0
@@ -338,6 +355,10 @@ public struct FusedPipeline<First: ByteTransform & ~Copyable, Second: InPlaceByt
     public var second: Second
 
     /// Composes `first` and an in-place `second`.
+    ///
+    /// - Parameters:
+    ///   - first: The first stage.
+    ///   - second: The in-place stage, applied to the first's output where it's written.
     @inlinable
     public init(_ first: consuming First, _ second: consuming Second) {
         self.first = first
@@ -346,16 +367,26 @@ public struct FusedPipeline<First: ByteTransform & ~Copyable, Second: InPlaceByt
 }
 
 extension FusedPipeline: ByteTransform where First: ~Copyable, Second: ~Copyable {
+    /// What both stages throw.
     public typealias Failure = First.Failure
 
+    /// The first stage's.
     @inlinable
     public static var maximumUnitByteCount: Int { First.maximumUnitByteCount }
 
+    /// The first stage's: the in-place stage writes nothing of its own.
     @inlinable
     public static var minimumOutputCapacity: Int { First.minimumOutputCapacity }
 
     /// Runs `input` through the first stage into `output`, then rewrites what it produced in place; the
     /// second stage sees `flush` only when the first has used all its input.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append the output.
+    ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
+    /// - Returns: The first stage's progress.
+    /// - Throws: Either stage's `Failure`.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {
         let before = output.byteCount
@@ -371,6 +402,9 @@ extension FusedPipeline: ByteTransform where First: ~Copyable, Second: ~Copyable
 
 public extension InPlaceByteTransform where Self: ~Copyable {
     /// This non-throwing in-place stage typed as throwing `failure`, to follow stages that throw it.
+    ///
+    /// - Parameter failure: The error type to declare, such as `BytesError.self`.
+    /// - Returns: The stage, wrapped: it still never throws.
     @inlinable
     consuming func promoted<E: Error>(to failure: E.Type) -> PromotedInPlaceTransform<Self, E> where Failure == Never {
         PromotedInPlaceTransform(self)
@@ -384,6 +418,8 @@ public struct PromotedInPlaceTransform<Base: InPlaceByteTransform & ~Copyable, F
     public var base: Base
 
     /// Wraps `base`.
+    ///
+    /// - Parameter base: The stage that can't fail.
     @inlinable
     public init(_ base: consuming Base) {
         self.base = base
@@ -392,6 +428,10 @@ public struct PromotedInPlaceTransform<Base: InPlaceByteTransform & ~Copyable, F
 
 extension PromotedInPlaceTransform: InPlaceByteTransform where Base: ~Copyable {
     /// Rewrites `bytes` with the base stage; never throws.
+    ///
+    /// - Parameters:
+    ///   - bytes: The bytes to rewrite.
+    ///   - flush: The flush the bytes came with.
     @inlinable
     public mutating func transform(inPlace bytes: inout MutableRawSpan, flush: TransformFlush) throws(Failure) {
         base.transform(inPlace: &bytes, flush: flush)
@@ -405,6 +445,8 @@ public struct PromotedTransform<Base: ByteTransform & ~Copyable, Failure: Error>
     public var base: Base
 
     /// Wraps `base`.
+    ///
+    /// - Parameter base: The stage that can't fail.
     @inlinable
     public init(_ base: consuming Base) {
         self.base = base
@@ -412,13 +454,21 @@ public struct PromotedTransform<Base: ByteTransform & ~Copyable, Failure: Error>
 }
 
 extension PromotedTransform: ByteTransform where Base: ~Copyable {
+    /// The base stage's.
     @inlinable
     public static var maximumUnitByteCount: Int { Base.maximumUnitByteCount }
 
+    /// The base stage's.
     @inlinable
     public static var minimumOutputCapacity: Int { Base.minimumOutputCapacity }
 
     /// Transforms with the base stage; never throws.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append transformed bytes.
+    ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
+    /// - Returns: The base stage's progress.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {
         base.transform(input, into: &output, flush: flush)
@@ -426,6 +476,7 @@ extension PromotedTransform: ByteTransform where Base: ~Copyable {
 }
 
 extension PromotedTransform: ResettableByteTransform where Base: ResettableByteTransform & ~Copyable {
+    /// Resets the base stage.
     @inlinable
     public mutating func reset() {
         base.reset()
@@ -440,6 +491,10 @@ public struct MappedErrorTransform<Base: ByteTransform & ~Copyable, Failure: Err
     @usableFromInline let map: @Sendable (Base.Failure) -> Failure
 
     /// Wraps `base`, converting its errors with `map`.
+    ///
+    /// - Parameters:
+    ///   - base: The stage whose errors are converted.
+    ///   - map: Converts an error.
     @inlinable
     public init(_ base: consuming Base, _ map: @escaping @Sendable (Base.Failure) -> Failure) {
         self.base = base
@@ -448,13 +503,22 @@ public struct MappedErrorTransform<Base: ByteTransform & ~Copyable, Failure: Err
 }
 
 extension MappedErrorTransform: ByteTransform where Base: ~Copyable {
+    /// The base stage's.
     @inlinable
     public static var maximumUnitByteCount: Int { Base.maximumUnitByteCount }
 
+    /// The base stage's.
     @inlinable
     public static var minimumOutputCapacity: Int { Base.minimumOutputCapacity }
 
     /// Transforms with the base stage, throwing its errors converted.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append transformed bytes.
+    ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
+    /// - Returns: The base stage's progress.
+    /// - Throws: The base stage's error, converted.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {
         do {
@@ -466,6 +530,7 @@ extension MappedErrorTransform: ByteTransform where Base: ~Copyable {
 }
 
 extension MappedErrorTransform: ResettableByteTransform where Base: ResettableByteTransform & ~Copyable {
+    /// Resets the base stage.
     @inlinable
     public mutating func reset() {
         base.reset()

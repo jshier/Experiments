@@ -14,6 +14,11 @@
 #   swift-binary-parsing  apple/swift-binary-parsing's Sources/TestData/Data (PNG, QOI, ELF, PCAPNG, binary plist
 #                         samples), at the revision BinaryParsingComparison's Package.resolved pins. Used by
 #                         BinaryParsingComparison's tests and benchmarks.
+#   wycheproof            Project Wycheproof's (C2SP/wycheproof) test vectors for AES-GCM, ChaCha20-Poly1305,
+#                         HMAC-SHA1/SHA256, and HKDF-SHA256/SHA384: edge cases and known attacks. Used by
+#                         BytesCrypto's tests.
+#   rfc8448               RFC 8448, "Example Handshake Traces for TLS 1.3": every secret, key, and protected record
+#                         of real handshakes. Used by BytesCrypto's TLS tests.
 # Generated sets (the generator is run with the output directory as its argument):
 #   swift-help-lz4        swift-binary-parsing's ELF/swift-help compressed with `lz4 -9`, for BinaryParsingComparison's
 #                         LZ4 and ELF workloads (BinaryParsingComparison/TestDataGenerators; needs Homebrew's lz4).
@@ -21,6 +26,8 @@
 #                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/formats; needs python3 3.14 or later).
 #   nativezip-lzma        LZMA payloads from liblzma for NativeZip's LZMADecoderTests
 #                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma; needs Homebrew's xz).
+#   nativeaea-synthetic   An Apple Archive laid out like Xcode's (sizes, fields, APFS compression), in a signed `aea`
+#                         container with Xcode's settings, for NativeAEA's benchmarks (NativeAEA/Benchmarks/Fixtures).
 #
 # To add a set: add lines to DOWNLOADS (set, URL, SHA-256, file name) or a line to GENERATED (set, generator
 # script relative to the repository), and describe it above.
@@ -33,6 +40,7 @@ source "$(dirname "$0")/lib/testdata.sh"
 ROOT="$TESTDATA_ROOT"
 
 SBP="https://raw.githubusercontent.com/apple/swift-binary-parsing/8f0f56a795e36eff6d532b01e8e94f640e3443dd/Sources/TestData/Data"
+WP="https://raw.githubusercontent.com/C2SP/wycheproof/65ca494727a52944c204441c860b039e6786b99b/testvectors_v1"
 DOWNLOADS="
 swift-binary-parsing $SBP/PNG/antelope.png 189540d878025975181edfb01f64aa987a644eb3293f8a5b592aa062e86bb52f antelope.png
 swift-binary-parsing $SBP/PNG/tiny.png ee7cccd33c6ba29287f5c5adb34b823f80b757ad0a0680764913eb094c79fda3 tiny.png
@@ -43,11 +51,19 @@ swift-binary-parsing $SBP/ELF/helloworld efef41167b5903dd3627052cd383ec9b8b84f05
 swift-binary-parsing $SBP/PCAP/sample.pcap 0b8b4d49296eef69bf7ed921bb327321572a3b78fcb6823dd160019c70bd1c36 sample.pcap
 swift-binary-parsing $SBP/PList/sample.plist 84c0c06d6e77cc750bf0dffd5f282fe97ddc58d6396610eb010cd3669b6dfe6a sample.plist
 swift-binary-parsing $SBP/QOI/antelope.qoi f5fd4d31e810037d9bf1486def2feecfa4fa1469873cfdb2a7a624d1986aaf19 antelope.qoi
+wycheproof $WP/aes_gcm_test.json 985e5ecc172e181eaf49e89508b9470dcf478002eb7e8559c707eb42dc97dfe7 aes_gcm_test.json
+wycheproof $WP/chacha20_poly1305_test.json fe61d25f90e1bde4461d00eafe61049e5f29bd999f36b766df9cda90906ad53d chacha20_poly1305_test.json
+wycheproof $WP/hmac_sha1_test.json b521c6180a862247986392d3cb49b511fc7fe790e75bee236f84e36ca290c7c0 hmac_sha1_test.json
+wycheproof $WP/hmac_sha256_test.json 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f hmac_sha256_test.json
+wycheproof $WP/hkdf_sha256_test.json bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e hkdf_sha256_test.json
+wycheproof $WP/hkdf_sha384_test.json 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678 hkdf_sha384_test.json
+rfc8448 https://www.rfc-editor.org/rfc/rfc8448.txt 6564d1376d1ec744fc7a9993da15ebc1b9be361908b166091f47ef605c537fba rfc8448.txt
 "
 GENERATED="
 swift-help-lz4 BinaryParsingComparison/TestDataGenerators/make-swift-help-lz4.sh
 nativezip-formats NativeZipArchive/Tests/NativeZipTests/Fixtures/formats/make-fixtures.sh
 nativezip-lzma NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma/make-lzma-vectors.sh
+nativeaea-synthetic NativeAEA/Benchmarks/Fixtures/make-archive.sh
 "
 STAMP=".generator"
 

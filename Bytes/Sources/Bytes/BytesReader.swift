@@ -290,13 +290,14 @@ public extension GenericBytesReader {
     ///
     /// Offsets usually come from the data itself, so a bad one throws, leaving the cursor where it was.
     ///
-    /// - Parameter offset: The byte offset, 0 through `span.byteCount`.
+    /// - Parameter offset: The byte offset, 0 through `span.byteCount`: any integer type, as offsets read from the
+    ///   data come (a `UInt64` from an ELF header needs no conversion).
     /// - Throws: ``BytesError/insufficientData`` if `offset` is past the end; ``BytesError/invalidValue`` if it's
-    ///   negative.
+    ///   negative or doesn't fit an `Int`.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    mutating func seek(toByteOffset offset: Int) throws(BytesError) {
-        guard offset >= 0 else { throw .invalidValue }
+    mutating func seek(toByteOffset offset: some BinaryInteger) throws(BytesError) {
+        guard let offset = Int(exactly: offset), offset >= 0 else { throw .invalidValue }
         guard offset <= span.byteCount else { throw .insufficientData }
         _byteOffset = offset
         _bitOffset = 0
@@ -391,14 +392,14 @@ public extension GenericBytesReader {
     /// Skips the next `byteCount` bytes (`8 × byteCount` bits, if not byte-aligned).
     ///
     /// - Parameter byteCount: The number of bytes to skip.
-    /// - Throws: ``BytesError/insufficientData`` if fewer whole bytes remain, consuming nothing.
-    /// - Precondition: `byteCount` isn't negative.
+    /// - Throws: ``BytesError/insufficientData`` if fewer whole bytes remain; ``BytesError/invalidValue`` if
+    ///   `byteCount` is negative (a length computed from the data). Nothing is consumed either way.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func skip(byteCount: Int) throws(BytesError) {
-        precondition(byteCount >= 0, "Negative byte count")
         _assumeInvariant()
-        guard likely(remainingByteCount >= byteCount) else { throw .insufficientData }
+        // One unsigned comparison checks both bounds: a negative count is a huge unsigned one.
+        guard likely(UInt(bitPattern: byteCount) <= UInt(bitPattern: remainingByteCount)) else { throw Self._countError(byteCount) }
         _byteOffset &+= byteCount
     }
 
@@ -444,14 +445,13 @@ public extension BytesReader {
     /// Skips the next `bitCount` bits.
     ///
     /// - Parameter bitCount: The number of bits to skip.
-    /// - Throws: ``BytesError/insufficientData`` if fewer bits remain, consuming nothing.
-    /// - Precondition: `bitCount` isn't negative.
+    /// - Throws: ``BytesError/insufficientData`` if fewer bits remain; ``BytesError/invalidValue`` if
+    ///   `bitCount` is negative. Nothing is consumed either way.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func skip(bitCount: Int) throws(BytesError) {
-        precondition(bitCount >= 0, "Negative bit count")
         _assumeInvariant()
-        guard likely(remainingBitCount >= bitCount) else { throw .insufficientData }
+        guard likely(bitCount >= 0 && remainingBitCount >= bitCount) else { throw Self._countError(bitCount) }
         _advance(bitCount: bitCount)
     }
 }
@@ -941,16 +941,20 @@ public extension GenericBytesReader {
     ///
     /// - Parameter byteCount: The number of bytes to read.
     /// - Returns: A span of the bytes.
-    /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain, consuming nothing.
-    /// - Precondition: `byteCount` isn't negative, and the cursor is byte-aligned.
+    /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain; ``BytesError/invalidValue`` if
+    ///   `byteCount` is negative (a length computed from the data). Nothing is consumed either way.
+    /// - Precondition: The cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
     mutating func read(byteCount: Int) throws(BytesError) -> RawSpan {
-        precondition(byteCount >= 0, "Negative byte count")
         precondition(_bitOffset == 0, "Reading a span requires byte alignment: call alignToByte() first")
         _assumeInvariant()
-        guard likely(span.byteCount &- _byteOffset >= byteCount) else { throw .insufficientData }
+        // One unsigned comparison checks both bounds: a negative count is a huge unsigned one. (Two signed ones
+        // cost LZ4's decoder, which reads literals by count, 2% more instructions.)
+        guard likely(UInt(bitPattern: byteCount) <= UInt(bitPattern: span.byteCount &- _byteOffset)) else {
+            throw Self._countError(byteCount)
+        }
         let bytes = span.extracting(_byteOffset..<(_byteOffset &+ byteCount))
         _byteOffset &+= byteCount
         return bytes

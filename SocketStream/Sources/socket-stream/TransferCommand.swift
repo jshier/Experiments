@@ -26,6 +26,12 @@ struct TransferCommand: AsyncParsableCommand {
     @Option(help: ArgumentHelp("Cores compressing each sender's DEFLATE stream (ParallelDeflateEncoder above 1).", valueName: "count"))
     var lanes = 1
 
+    @Option(help: "The TLS records' cipher (with --encrypted).")
+    var cipher: RecordCipher = .chacha20
+
+    @Option(name: .customLong("seal-lanes"), help: ArgumentHelp("Cores sealing each sender's TLS records (with --encrypted).", valueName: "count"))
+    var sealLanes = 1
+
     @Option(help: ArgumentHelp("Bytes of application payload per PUBLISH.", valueName: "bytes"))
     var payload = 1_024
 
@@ -56,7 +62,7 @@ struct TransferCommand: AsyncParsableCommand {
     func validate() throws {
         guard payload >= 0 else { throw ValidationError("--payload must not be negative.") }
         for (name, value) in [("packets", packets), ("connections", connections), ("batch", batch),
-                              ("buffer", buffer), ("pool", pool), ("runs", runs), ("lanes", lanes)] {
+                              ("buffer", buffer), ("pool", pool), ("runs", runs), ("lanes", lanes), ("seal-lanes", sealLanes)] {
             if let value, value < 1 { throw ValidationError("--\(name) must be at least 1.") }
         }
     }
@@ -73,7 +79,8 @@ struct TransferCommand: AsyncParsableCommand {
             receiveCapacity: buffer,
             poolSize: pool
         )
-        let protection = Protection(compression: compression, encrypted: encrypted, compressionLanes: lanes)
+        var protection = Protection(compression: compression, encrypted: encrypted, compressionLanes: lanes, sealingLanes: sealLanes)
+        protection.cipher = cipher
         print("\(mode), \(protection), \(placement): \(workload), batches of \(workload.batchSize) B")
         for _ in 0..<runs {
             try await print("  " + String(describing: Transfer.run(workload, mode: mode, placement: placement, protection: protection)))
@@ -84,3 +91,4 @@ struct TransferCommand: AsyncParsableCommand {
 extension TransferMode: ExpressibleByArgument {}
 extension Placement: ExpressibleByArgument {}
 extension StreamCompression: ExpressibleByArgument {}
+extension RecordCipher: ExpressibleByArgument {}

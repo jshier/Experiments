@@ -274,15 +274,15 @@ public extension GenericBytesReader {
     ///   - count: The number of values, each `MemoryLayout<T>.stride` bytes.
     /// - Returns: A span of the values, borrowing the same memory.
     /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain; ``BytesError/misaligned`` if the bytes
-    ///   aren't aligned for `T`. Nothing is consumed either way.
-    /// - Precondition: `count` isn't negative, and the cursor is byte-aligned.
+    ///   aren't aligned for `T`; ``BytesError/invalidValue`` if `count` is negative. Nothing is consumed.
+    /// - Precondition: The cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
     mutating func read<T: ConvertibleFromBytes>(_ type: T.Type, count: Int) throws(BytesError) -> Span<T> {
-        precondition(count >= 0, "Negative count")
         precondition(_bitOffset == 0, "Reading a span requires byte alignment: call alignToByte() first")
         _assumeInvariant()
+        guard count >= 0 else { throw .invalidValue }
         let (byteCount, overflow) = count.multipliedReportingOverflow(by: MemoryLayout<T>.stride)
         guard !overflow, likely(span.byteCount &- _byteOffset >= byteCount) else { throw .insufficientData }
         let bytes = span.extracting(_byteOffset..<(_byteOffset &+ byteCount))

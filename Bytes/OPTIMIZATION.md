@@ -19,11 +19,20 @@ the generated code is instruction for instruction what was written by hand (199 
 zip directory entries, both ways). Every change in that pass was benchmarked in every package that uses
 Bytes, which caught five regressions before they stayed (section 2, section 10).
 
+The day after added what that pass had left as proposals and the next performance list: records in the cursor's
+byte order, padding and reserved fields, run-time integer widths, terminated strings, and counts that throw; a
+Zstandard decoder faster than libzstd (1.12–1.45x on Silesia, with 7–22% fewer instructions per byte); AES-GCM,
+SHA-1/2, HMAC, PBKDF2, and HKDF in Swift on the CPU's AES, SHA, and carry-less multiply instructions (AES-128-GCM sealing 1 KB messages at 4.3x CryptoKit's speed, and one 1 MB message at 7.9 GB/s, 83% of it);
+TLS 1.3's key schedule, key updates, alerts, and record limits, tested against RFC 8448's traces, with records
+sealed on several cores at once (32.7 GB/s on 8); and NativeZip's encryption moved onto it from CommonCrypto,
+decrypted as it streams.
+
 The library is split into modules: `Bytes` (cursors, field types, bit fields, `BitBuffer`, `HuffmanTable`,
-CRC-32 and Adler-32, `ByteBuffer`, pipelines), `BytesCompression` (DEFLATE, zlib, gzip, Brotli, the
-parallel codecs), `BytesCrypto` (ChaCha20-Poly1305, TLS 1.3 records), `BytesAsync` (async pipeline stages,
-and the codecs' async entry points), `BytesMacros` (with its plugin, `BytesMacrosPlugin`), and
-`BytesFoundation` (`Data` conversions).
+CRC-32 and Adler-32, `ByteBuffer`, pipelines, ASCII tags and digits), `BytesCompression` (DEFLATE, zlib, gzip,
+Brotli, the parallel codecs, Zstandard decoding), `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR, the SHA
+family, HMAC, PBKDF2, HKDF, TLS 1.3's key schedule and record layer), `BytesAsync` (async pipeline stages, and the
+codecs' async entry points), `BytesMacros` (with its plugin, `BytesMacrosPlugin`), and `BytesFoundation` (`Data`
+conversions).
 
 This document covers the design and optimization techniques that got it there, with before-and-after code
 and the measurements behind each. It's for experienced Swift programmers who know CPUs only at the
@@ -32,12 +41,13 @@ surface: section 1 covers the hardware basics, terms are glossed where they firs
 [Benchmarks/RESULTS.md](Benchmarks/RESULTS.md) and each project's RESULTS.md.
 
 All numbers are from one machine: an Apple M3 Ultra (24 performance and 8 efficiency cores), macOS 27.2,
-Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 measurements), release builds, medians from the [ordo-one benchmark
+Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 and later measurements), release builds, medians from the [ordo-one benchmark
 package](https://github.com/ordo-one/benchmark). "GB/s" is bytes processed per second. "x% faster" means
 x% less time unless it says "throughput". Where a number was taken while other jobs loaded the machine,
 the text says so, and the claim rests on instruction counts, which don't depend on load. Numbers from the
-2026-11-17 pass come from its tracking log (baselines `trk-t0` through `trk-t5` in each package); older
-ones from the RESULTS.md files named in the text.
+2026-11-17 pass come from its tracking log (baselines `trk-t0` through `trk-t5` in each package); the
+2026-11-18 ones from baselines `d2-start` through `d2-final` and `zstd-1`; older ones from the RESULTS.md files
+named in the text.
 
 ## Contents
 
@@ -50,7 +60,7 @@ ones from the RESULTS.md files named in the text.
 7. [Let LLVM vectorize your loops](#7-let-llvm-vectorize-your-loops)
 8. [Write SIMD yourself with `SIMD16`](#8-write-simd-yourself-with-simd16)
 9. [Reach instructions Swift can't express](#9-reach-instructions-swift-cant-express)
-10. [Case studies: Base64, CRC-32, DEFLATE, three builds, compression, ChaCha20-Poly1305 stitched, pipelines, macros, parsing values once, what tracking caught, swift-binary-parsing's examples](#10-case-studies)
+10. [Case studies: Base64, CRC-32, DEFLATE, three builds, compression, Zstandard, ChaCha20-Poly1305 stitched, AES-GCM and TLS 1.3, sealing in parallel, pipelines, macros, parsing values once, what tracking caught, swift-binary-parsing's examples](#10-case-studies)
 11. [Smaller lessons](#11-smaller-lessons)
 12. [Limitations and bugs found in Swift and LLVM](#12-limitations-and-bugs-found-in-swift-and-llvm)
 13. [Glossary](#13-glossary)
@@ -842,20 +852,20 @@ streaming (zlib's model: input span, output span, consumed and produced counts, 
 `~Copyable`, allocated once, and reset per stream; nothing allocates after that, in any of the three
 builds. The encoder follows [libdeflate](https://github.com/ebiggers/libdeflate)'s levels (a 2-entry hash
 table at level 1, hash chains above, lazy parsing from 5, block splitting from statistics) and the Brotli
-encoder Google's scoring and distance coding. Times in µs (`final-1`; the Brotli decode and quality 1
-rows from `p2-optimized`, a later run, against `final-1`'s Google):
+encoder Google's scoring and distance coding. Times in µs (`d2-final`, 2026-11-18, all in one run; Apple's
+Compression framework for comparison where it decodes the format):
 
-| | Bytes | libdeflate | zlib | Google brotli |
-|---|---|---|---|---|
-| DEFLATE level 1, Main.js (3.8 MB) | 9,011 | **8,045** | 17,000 | |
-| DEFLATE level 6, dickens (9.7 MB) | 119,000 | **105,000** | 315,000 | |
-| DEFLATE level 9, Main.js | **56,000** | 59,000 | 82,000 | |
-| Inflate, Main.js | 1,894 | **1,673** | 2,092 | |
-| Brotli quality 1, x-ray (8.1 MB) | **21,000** | | | 27,000 |
-| Brotli quality 5, Main.js | 34,000 | | | **33,000** |
-| Brotli quality 9, dickens | **318,000** | | | 522,000 |
-| Brotli decode (quality 11), Main.js | 3,826 | | | **3,666** |
-| Brotli decode (quality 11), dickens | **14,000** | | | 15,000 |
+| | Bytes | libdeflate | zlib | Google brotli | Apple Compression |
+|---|---|---|---|---|---|
+| DEFLATE level 1, Main.js (3.8 MB) | 9,011 | **8,057** | 17,000 | | |
+| DEFLATE level 6, dickens (9.7 MB) | 127,000 (119,000 streaming) | **105,000** | 336,000 | | |
+| DEFLATE level 9, Main.js | **56,000** | 59,000 | 83,000 | | |
+| Inflate, Main.js | 1,864 | **1,674** | 2,058 | | 3,600 |
+| Brotli quality 1, x-ray (8.1 MB) | **21,000** | | | 28,000 | |
+| Brotli quality 5, Main.js | 33,000 | | | **32,000** | |
+| Brotli quality 9, dickens | **323,000** | | | 522,000 | |
+| Brotli decode (quality 11), Main.js | 3,799 | | | 4,104 | **3,568** |
+| Brotli decode (quality 11), dickens | 14,000 | | | 14,000 | **13,000** |
 
 Level 1's output is the same size as libdeflate's; Brotli's is within 3–6% of Google's at quality 5 (7% at
 9, without context modeling). What made the difference, in order of payoff:
@@ -930,10 +940,58 @@ chunk's first byte, it matched, and the stream decoded one byte long. Each searc
 own limit, and a test builds the input that forces two delays at a chunk's end: random and text inputs
 never reached it.
 
+### Zstandard: faster than libzstd
+
+`ZstdDecoder` (RFC 8878) decodes every frame and block form: raw, RLE, and compressed blocks; raw, RLE, Huffman
+(one and four streams, single- and double-symbol tables), and treeless literals; predefined, RLE, FSE, and repeat
+sequence tables; skippable and concatenated frames; content checksums (XXH64, verified). In one call
+(`decompressAll`) the output is the history, so there's no window and no copy; streaming (`decompress`) keeps a
+window of its own that wraps, resumable at any input or output boundary. It's NativeZip's method 93. Against
+Homebrew's libzstd 1.5.7 with a reused context, one thread (`zstd-1`, p50; another agent's builds were running, so
+times are ±10%; instructions exact):
+
+| Silesia file, level | Bytes MB/s | libzstd MB/s | Speed-up | Bytes / libzstd instructions per byte |
+|---|---|---|---|---|
+| dickens, 3 | 1,536 | 1,092 | **1.41x** | 13.44 / 14.91 |
+| dickens, 19 | 1,959 | 1,352 | **1.45x** | 10.60 / 11.68 |
+| mozilla, 1 | 1,707 | 1,384 | **1.23x** | 8.47 / 9.39 |
+| mozilla, `--long=27 -19` | 1,220 | 1,004 | **1.21x** | 10.41 / 11.99 |
+| samba, 19 | 2,207 | 1,964 | **1.12x** | 6.39 / 6.99 |
+| x-ray, 1 | 1,497 | 1,328 | **1.13x** | 7.79 / 10.03 |
+| xml, 19 | 3,916 | 3,101 | **1.26x** | 4.12 / 4.49 |
+
+Every Silesia file at levels 1, 3, and 19 is faster: one call 1.12–1.45x, streamed 1.11–1.57x, with 7–22% fewer
+instructions per byte. Of 32 small inputs (the first 1–64 KB of four files, two levels), 31 are faster (1.02–1.56x)
+and none takes more instructions; mozilla's first 1 KB at level 19 measured 0.93x in this run and 1.16x in a harness
+that interleaves the two. Nothing allocates after the first frame. The full tables are in
+[Benchmarks/RESULTS.md](Benchmarks/RESULTS.md).
+
+The first complete version followed libzstd's loops (a four-stream Huffman loop with sentinel bits, sequences
+executed one at a time with 16- and 32-byte wild copies, the careful path out of line) and was already 5–28% faster
+on large inputs, but 1–24% slower on 1–4 KB ones. Four changes got it the rest of the way, each section 5's or 6's
+advice in a new place:
+
+1. **Tables in memory the decoder owns, not `InlineArray`s.** FSE table building read a 256-entry `InlineArray`
+   passed `borrowing`, and each subscript copied the whole array (512 bytes, a `memmove`): 16,000 copies for a
+   4 KB frame, 22% of its time. In a raw workspace allocated with the decoder: 18–35% fewer instructions on small
+   inputs, now 10–24% faster than libzstd there.
+2. **A cold path that takes values.** The bit reader's reload near the start of the input was a `mutating` method
+   out of line, so the reader's address escaped and it lived in memory through the whole sequence loop. As a
+   static function taking and returning values: −1 to −1.5%.
+3. **One base pointer, fewer live values.** The three FSE states became absolute indices into one workspace (one
+   table pointer instead of three), and the output and literal positions pointers: stack accesses per sequence
+   21 → 10, 3–5% fewer instructions, 10–20% faster.
+4. **Double-symbol Huffman tables, chosen by measurement.** libzstd's own cost model picked them for x-ray's
+   literals, where they cost 6%; the rule used here (literals compressing below 10/16, at least 8 KB of them) gave
+   dickens −8% and moved nothing else by more than 0.1%.
+
+Prefetching each match's source as soon as its offset is decoded (libzstd does on AArch64) added 0.7% instructions
+and no speed in an interleaved comparison; it was removed.
+
 ### ChaCha20-Poly1305: 1.0 → 2.50 GB/s
 
-`BytesCrypto`'s AEAD seals and opens in place, allocating nothing, for TLS 1.3 records (keys from
-CryptoKit's X25519 and HKDF). ChaCha20 holds one block per vector lane, 16 state words; Poly1305 is scalar.
+`BytesCrypto`'s AEAD seals and opens in place, allocating nothing, for TLS 1.3 records (keys from its own
+HKDF since 2026-11-18; SocketStream's X25519 exchange is still CryptoKit's). ChaCha20 holds one block per vector lane, 16 state words; Poly1305 is scalar.
 Sealing 1 MB took 1.0 ms, ChaCha20 two thirds of it. Three changes, in the order they paid:
 
 1. **Independent work, not just lanes.** Each quarter-round step depends on the one before. Four blocks in
@@ -994,9 +1052,100 @@ key), which removes the multiplier chain. It wasn't pursued: in the stitched loo
 ChaCha20 for the vector pipes that eight-block ChaCha20 already fills, while the scalar chain now runs in
 ChaCha20's shadow for free.
 
-CryptoKit allocates per call, which dominates short messages. Nothing in Swift matches AES-GCM on hardware
-AES instructions (9 GB/s in `ck-final`), still about 4x ahead of Bytes at 1 MB; at 1 KB and below Bytes' ChaCha20
-is faster even than AES-GCM (668 against 899 µs at 1 KB).
+CryptoKit allocates per call, which dominates short messages. In the 2026-11-18 run (`d2-final`), the stitched code
+measured the same (1 MB 420 µs, 2.95x CryptoKit's ChaChaPoly's 1,240). Hardware AES-GCM is still faster for large
+messages, and Bytes now has its own (next).
+
+### AES-GCM and TLS 1.3 in Swift
+
+Since 2026-11-18 BytesCrypto has its own AES (128 and 256), counter mode, GCM, SHA-1, SHA-256, SHA-384, SHA-512, HMAC,
+PBKDF2, and HKDF, and TLS 1.3's key schedule and record layer on them: no CryptoKit or CommonCrypto. Swift can't
+name the CPU's AES, SHA, and carry-less multiply instructions, so a C header (`CBytesCrypto`) wraps each as a
+`static inline` function (`bytes_aese`, `bytes_aesmc`, `bytes_sha256h`, `bytes_pmull_low`, `bytes_xor3`, …),
+section 9's pattern again, and everything else is Swift. Without the instructions (the `Portable` trait, other
+CPUs), AES substitutes bytes by arithmetic in GF(2⁸) rather than a table, which would leak its index through the
+cache, and GHASH multiplies bit by bit in constant time.
+
+**GCM.** Counter mode encrypts eight blocks at a time (eight independent `aese`/`aesmc` chains, as ChaCha20 needed
+eight blocks to fill the pipes). GHASH multiplies by the hash key with three `pmull`s (Karatsuba), sums eight
+blocks' products against the key's first eight powers before reducing once, and reduces with two more `pmull`s by
+the field's constant (0xC2 shifted) instead of shifts and XORs. Sealing stitches the two: each batch's GHASH runs
+over the previous batch's ciphertext among the AES rounds of the next, as ChaCha20-Poly1305's seal does. Opening
+checks the tag before decrypting anything, so a forged record never produces plaintext, then decrypts in place.
+
+| Sealing 1 MB, as messages of | Bytes AES-128-GCM | CryptoKit `AES.GCM` | Bytes ChaCha20-Poly1305 |
+|---|---|---|---|
+| 1 MB × 1 | 133 µs (7.9 GB/s) | **111** | 420 |
+| 16 KB × 64 | **124** | 154 | 433 |
+| 1 KB × 1,024 | **212** | 919 | 698 |
+| 64 B × 16,384 | **3,686** | 13,000 | 4,452 |
+
+(`d2-final`, p50, one run.) CryptoKit's per-call setup and allocation dominate below 16 KB; for one large message
+its hand-written assembly keeps 17% on Bytes' Swift. The primitives against Apple's, in the same run:
+
+| 1 MB, or as stated | Bytes | Apple | Relative speed |
+|---|---|---|---|
+| PBKDF2-HMAC-SHA1, 1,000 iterations | 118 µs | 343 (CommonCrypto) | **2.91x** |
+| HMAC-SHA1 | 362 | 379 (CryptoKit) | 1.05x |
+| SHA-1 | 362 | 377 (CryptoKit) | 1.04x |
+| AES-128-CTR | 62 | 56 (CommonCrypto) | 0.90x |
+| SHA-256 | 400 | 337 (CryptoKit) | 0.84x |
+
+PBKDF2's iterations each start from a copy of the keyed HMAC, whose inner and outer hash states already hold the
+key's pads, so an iteration is two block compressions: 1.4 M instructions for 1,000 iterations against
+CommonCrypto's 2.8 M. SHA-256 runs on the same instructions as CryptoKit's (`sha256h`, `sha256h2`, `sha256su0`,
+`sha256su1`) in 6% more instructions and 16% more time; where the rest goes wasn't found.
+
+**TLS 1.3 to the standard** (RFC 8446): the key schedule (HKDF-Extract and Expand-Label, Derive-Secret through the
+early, handshake, and master secrets), traffic keys, the inner content type and padding, record-size limits
+(`record_overflow`), alerts with their levels, `change_cipher_spec` tolerated only during a handshake, and key
+updates. A sealer made from a traffic secret updates its keys before the suite's record limit (2^24.5 records for
+AES-GCM), sending the KeyUpdate itself; an opener follows a peer's KeyUpdate and reports `update_requested`. Tests
+run RFC 8448's handshake traces (every secret, all seven protected records, the Finished verify data and the
+transcript hash) and Wycheproof's AES-GCM, ChaCha20-Poly1305, HMAC, and HKDF vectors. The ChaCha20-Poly1305 AEAD
+gained what a shipping one needs: its message limit (2^38 − 64 bytes, RFC 8439) enforced, and malformed tags and
+lengths rejected by throwing.
+
+NativeZip's WinZip AES moved onto these (PBKDF2-SHA1, HMAC-SHA1, AES-CTR with WinZip's little-endian counter),
+dropping CommonCrypto: entries decrypt in 256 KB pieces as the decompressor takes input, after the whole payload's
+MAC is checked, as WinZip's specification requires before any output.
+
+### Sealing records in parallel
+
+A TLS record's nonce is the IV XORed with its sequence number, and nothing else ties records together, so once each
+record's sequence number is fixed they can be sealed in any order. Full records (16 KB of content less padding)
+also have a known size, so each one's place in the output is known before any is sealed. `TLSRecordSealer` with
+`sealingLanes` above 1 uses both: given several full records of input and room for them, it seals them on
+`concurrentPerform` lanes, each lane writing straight into its records' places in the output. No copy, no
+reordering, and the same bytes as one lane (tested, including batches that end at the key's record limit, where
+the sealer sends a KeyUpdate and switches keys; batches never cross one).
+
+```swift
+// Lanes share raw pointers to the input and output in an `@unchecked Sendable` wrapper. Safe: each lane touches
+// only its own records' ranges, disjoint and inside bounds checked before, and `concurrentPerform` returns only
+// when every lane is done, inside the closures that lend the pointers.
+DispatchQueue.concurrentPerform(iterations: min(lanes, count)) { lane in
+    var record = lane
+    while record < count {
+        var protection = template
+        protection.sequence &+= UInt64(record)
+        // … seal record `record` from `source + record * content` into `target + record * size`
+        record &+= lanes
+    }
+}
+```
+
+| Sealing 4 MB per call (p50) | 1 lane | 4 lanes | 8 lanes |
+|---|---|---|---|
+| AES-128-GCM | 5.7 GB/s | 20.3 GB/s (3.6x) | 32.7 GB/s (5.8x) |
+| ChaCha20-Poly1305 | 2.0 GB/s | 7.6 GB/s (3.8x) | 13.9 GB/s (6.9x) |
+
+Over loopback (SocketStream, one connection, 16 KB payloads), four sealing lanes took ChaCha20-Poly1305 records from
+1.35–1.54 to 1.77–1.87 GB/s and AES-128-GCM records from 2.79–3.16 to 3.63–3.80 GB/s, against 4.6–5.8 GB/s
+unencrypted. Eight lanes added nothing: the receiver opens records one at a time, and it's now the limit. Opening
+in parallel is harder than sealing. A record's plaintext length, so its place in the output, is known only after
+it's decrypted (the content type and padding are at its end), and each record's type byte falls where the next
+record's content starts.
 
 ### Pipelines: composing stages for free
 
@@ -1163,15 +1312,17 @@ parsers: ELF, PNG, PCAPNG, and Apple's binary property list. Each was ported to 
 builds (the example's own result types, through their memberwise initializers, so both sides allocate the
 same arrays and strings and only the parsing differs), checked against the example on every test file, and
 benchmarked by instruction count and malloc count (the machine was loaded, so no times). An MQTT PUBLISH
-parser was ported both ways. Ratios of the example's instructions to Bytes':
+parser was ported both ways. Ratios of the example's instructions to Bytes' (baseline `d2-api2`, after the
+2026-11-18 API below):
 
 | Workload | Example (`ParserSpan`) | Bytes | Ratio |
 |---|---|---|---|
-| ELF, helloworld (352 B, 5 headers) | 7,819 | 4,023 | 1.94 |
-| ELF, swift-help (64-bit, 65 headers) | 28 K | 9,095 | 3.08 |
+| ELF, helloworld (352 B, 5 headers) | 7,667 | 3,977 | 1.93 |
+| ELF, swift-help (64-bit, 65 headers) | 28 K | 8,647 | 3.24 |
+| ELF, swift-help's 56 section names | 35 K | 19 K | 1.84 |
 | PNG, tiny.png (7 chunks) | 26 K | 18 K | 1.44 |
-| PNG, antelope.png (4.6 MB, 288 chunks) | 1,410 K | 1,389 K | 1.02 |
-| PCAPNG, 1,000 packets | 4,854 K | 4,094 K | 1.19 |
+| PNG, antelope.png (4.6 MB, 288 chunks) | 1,410 K | 1,388 K | 1.02 |
+| PCAPNG, 1,000 packets | 4,850 K | 4,082 K | 1.19 |
 | Property list, 1,000 records (8,990 objects) | 30.0 M | 25.0 M | 1.20 |
 | MQTT PUBLISH, 10,000 packets | 4,198 K | 3,265 K | 1.29 |
 
@@ -1186,7 +1337,7 @@ run-time value) and has its own throw path: a section header's initializer is 27
 calls. The Bytes port decides once, from the identification record, and calls a parser generic over the
 cursor's byte order (`parse<Mode: ByteOrderedCursorMode>`), specialized for each order. A 64-bit section
 header is then 87 or 93 instructions (one check for its 64-byte section, the fields folded). The example's
-cost is per field, so it grows with the headers: 1.94x with 5 headers, 3.08x with 65. This is the reason
+cost is per field, so it grows with the headers: 1.93x with 5 headers, 3.24x with 65. This is the reason
 byte-ordered cursors are types (section 4): the order is a constant by the time the reads compile.
 
 The rest are smaller and have the same flavor of out-of-line, per-site code. PNG tracked chunk order in a
@@ -1199,11 +1350,23 @@ or more takes it).
 
 What the ports taught about Bytes: `@BitFields` with enum fields worked well for ELF's identification and
 MQTT's fixed header, and `read(sectionPrefixedBy:)`, `read(utf8PrefixedBy:)`, and `read(_:as:)` for the
-example's `RawRepresentable` types and `OptionSet`s matched what they needed. What was awkward is recorded as
-proposals, not added: `@BinaryRecord` always bakes in one byte order, so ELF's and PCAPNG's records had to be
-hand-written as fixed-size sections; single-byte and padding fields; integers of a run-time width;
-NUL-terminated strings; 4-byte-aligned tag-length-value records; and `readSection(byteCount:)` trapping on
-a negative count computed from untrusted lengths (`ParserSpan` throws). Where the examples depart from
+example's `RawRepresentable` types and `OptionSet`s matched what they needed. What was awkward became API on
+2026-11-18, and the ports use it:
+
+- **Records in the cursor's byte order.** `@BinaryRecord()` with no order generates `ByteOrderedParsable` and
+  `ByteOrderedWritable` conformances, read by `BigEndianBytesReader` or `LittleEndianBytesReader` alike: ELF's
+  headers are one record type each, used by both orders' parsers.
+- **Single-byte, padding, and reserved fields**: `@Field(Byte.self)`, `Padding<Byte4>` (skipped), and
+  `Reserved<Byte2>` (must be zero, or the read throws).
+- **Integers of a run-time width**: `read(Int64.self, signedByteCount: width)` (BPList's object references).
+- **Terminated strings**: `read(utf8TerminatedBy: 0)` scans 16 bytes at a time (`RawSpan.firstByteOffset(where:)`).
+- **Aligned records**: `forEachRecord(tag:length:paddedTo: 4)` (PCAPNG's blocks).
+- **Counts from untrusted data throw** instead of trapping: `read(byteCount:)`, `skip(byteCount:)`, and
+  `read(_:count:)` throw `invalidValue` for a negative count, with one unsigned compare (a first version with
+  two compares cost the LZ4 port 2%).
+
+Instructions moved with them (`d2-start` → `d2-api2`): ELF's section names −24% (25 → 19 K, the 16-byte scan),
+ELF swift-help −4.9% (9,095 → 8,647), ELF helloworld −1.9%, BPList −1.1%; the rest unchanged. Where the examples depart from
 their formats (sign-extended 1-, 2-, and 4-byte property-list integers, a MAC address option that can't
 parse), the ports reproduce them, so the comparison stays of like with like. Earlier comparisons: Bytes'
 zip directory and 24-bit values against `ParserSpan` (11 / 7 µs against 23 / 13), and the QOI and LZ4 examples
@@ -1323,6 +1486,42 @@ through `Builtin`), bit-field parsing took 14% more instructions (689 K → 787 
 hints were kept. `@frozen` changed nothing outside a binary framework, so it was removed. Spacing the CRC
 tables apart in memory, in case they evicted each other from the cache, changed nothing.
 
+**A count check is one unsigned compare.** `read(byteCount:)` now throws for a negative count. Written as
+`n >= 0 && n <= remaining`, the LZ4 port ran 2% more instructions; as `UInt(bitPattern: n) <= UInt(bitPattern:
+remaining)` (a negative `n` becomes a huge unsigned number), nothing changed. One compare covers both bounds.
+
+**Lane tricks need varied test data.** `ByteMatches.nibbleMask` shifted each byte right before narrowing it to a
+nibble, so the odd lanes reported bit 3 instead of bit 7: a byte like `0x70` counted as a match. The tests used one
+filler byte, which never has bit 3 set alone. The fix spreads the high bit first (an arithmetic shift by 7), and
+the test fills around each match with varied bytes.
+
+**Register pressure beats instruction choice.** ChaCha20's rotate by 8 can be one `tbl` byte shuffle instead of a
+shift and an insert. In the eight-block loop, which already uses all 32 vector registers, the shuffle's table
+needed a register, and the double round went from 264 to 323 instructions in spills. Reverted.
+
+**A fast kernel for one ISA isn't one for another.** The SSE and AVX Base64 encoders reshuffle each 3-byte group into
+its 4 output bytes, then extract the 6-bit values with multiplies or shifts per 32-bit lane, so no interleave is
+needed. On NEON that was 75 instructions per 48-byte block against 32 for the deinterleaving kernel (section 10),
+where each 6-bit value is a shift or two shared by 16 groups and LLVM folds the interleave into `st2` stores.
+
+**Make rarely used `~Copyable` members on first use.** NativeZip's decoder held a 256 KB staging buffer and a
+streaming DEFLATE decoder for encrypted entries, made with every decoder: one per core when verifying, so
+verification allocated 46% more. As `Optional`s made on the first encrypted entry, back to within 5% of before.
+Mutation works through `x!.mutate()`, but reading `x!.property` consumes the optional; borrow it with
+`switch x { case let .some(y): … }` (SE-0432).
+
+**Give the trick a name.** Fast parsing of text inside binary formats meant knowing `byte &- 0x30 < 10` for a digit,
+`| 0x20` to fold case, tags as hex in memory order, and SWAR digit parsing. Bytes now spells them:
+`Byte4(ascii: "IHDR")` compiles to the same code as `0x49_48_44_52` (LLVM merged the two benchmark functions),
+`read(Int.self, asciiDigits: 4)` reads digits with one 8-byte load and three multiplies (20,000 log lines −11.5%
+instructions against a digit loop), and `ByteLanes.asciiDigits` counts digits 2.7x faster than a byte loop that
+auto-vectorizes. Measuring them found two things to avoid: `pointwiseMin` on `SIMD16<UInt8>` is a call, and a
+generic out-of-line helper on the cursor takes type metadata at every call. And their tests found an
+out-of-bounds load that only input ending exactly at the field's end could reach.
+
+**Name clashes with CryptoKit.** BytesCrypto's `SHA256`, `HMAC`, `HKDF`, `AES`, and `HashFunction` share
+CryptoKit's names. Code importing both qualifies them (`CryptoKit.AES.GCM`); the tests use typealiases.
+
 ## 12. Limitations and bugs found in Swift and LLVM
 
 A summary; most of it is covered above. Swift 6.4.2 (Xcode 27.2–27.3) unless noted (the
@@ -1365,6 +1564,7 @@ swiftlang/swift#90291.
 | **Spans can't be captured through nested closures**, nor borrowed from one stored property while a closure mutates another ("lifetime-dependent variable escapes its scope") | Doesn't compile | Pass the buffers as parameters to a `static` function (section 11) |
 | **`try parse(make().span.bytes)` where `make()` throws and returns an array** fails LLVM verification at `-Onone` ("Instruction does not dominate all uses": a `swift_bridgeObjectRelease` of the temporary). Swift 6.4.4. `-O` compiles; a non-throwing `make()` compiles. The same bug as swiftlang/swift#94359 (a delegating-init shape); report 28 adds this one as a comment | Debug builds crash the compiler | Bind the array to a local first |
 | **`SIMD16<UInt16>(truncatingIfNeeded:)`** isn't inlined | A call per vector | Bit casts, masks, and shifts |
+| **Per-lane shift amounts on `SIMD8<UInt16>`** (`v &>> SIMD8(10, 6, 10, 6, …)`) compiled to 64-bit halves with lane reversals (`ushl.4h`, `rev32`, `trn2`), and lane picks from two vectors to byte inserts unless they're one contiguous run (`ext`) | Base64's reshuffling kernel 143 and 243 instructions per block | Uniform shifts on 32-bit lanes; contiguous picks |
 | **package-benchmark's thresholds** for names with spaces or `/` are written under one name and looked up under another ([ordo-one/benchmark#301](https://github.com/ordo-one/benchmark/issues/301), [#373](https://github.com/ordo-one/benchmark/issues/373)) | A check that silently doesn't run | Names without spaces |
 
 ## 13. Glossary

@@ -4,8 +4,17 @@ public import Bytes
 // ended, and throw `insufficientData` if their stream hasn't.
 
 extension DeflateEncoder: ByteTransform {
+    /// What compressing throws: `insufficientCapacity` and nothing else in practice.
     public typealias Failure = BytesError
 
+    /// Compresses as much of `input` as it can into `output`: ``compress(_:into:flush:)`` as a pipeline stage.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append the stream.
+    ///   - flush: `.flush` ends the output so far on a byte boundary (a sync flush); `.finish` ends the stream.
+    /// - Returns: What was consumed and produced, and why it returned.
+    /// - Throws: ``BytesError`` as ``compress(_:into:flush:)`` does.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         try compress(input, into: &output, flush: flush)
@@ -13,8 +22,18 @@ extension DeflateEncoder: ByteTransform {
 }
 
 extension DeflateDecoder: ByteTransform {
+    /// What decoding throws: a malformed or cut-short stream.
     public typealias Failure = BytesError
 
+    /// Decodes as much of `input` as it can into `output`: ``decompress(_:into:)`` as a pipeline stage.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes of the stream, starting with any not consumed last time.
+    ///   - output: Where to append the decoded bytes.
+    ///   - flush: `.finish` when the input has ended: a stream that hasn't is then an error.
+    /// - Returns: What was consumed and produced, and why it returned.
+    /// - Throws: ``BytesError`` for a malformed stream; ``BytesError/insufficientData`` if `flush` is `.finish`
+    ///   and the stream doesn't end in `input`.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         let progress = try decompress(input, into: &output)
@@ -26,8 +45,17 @@ extension DeflateDecoder: ByteTransform {
 }
 
 extension BrotliEncoder: ByteTransform {
+    /// What compressing throws: `insufficientCapacity` and nothing else in practice.
     public typealias Failure = BytesError
 
+    /// Compresses as much of `input` as it can into `output`: ``compress(_:into:flush:)`` as a pipeline stage.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append the stream.
+    ///   - flush: `.flush` ends the output so far on a byte boundary; `.finish` ends the stream.
+    /// - Returns: What was consumed and produced, and why it returned.
+    /// - Throws: ``BytesError`` as ``compress(_:into:flush:)`` does.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         try compress(input, into: &output, flush: flush)
@@ -35,8 +63,18 @@ extension BrotliEncoder: ByteTransform {
 }
 
 extension BrotliDecoder: ByteTransform {
+    /// What decoding throws: a malformed or cut-short stream.
     public typealias Failure = BytesError
 
+    /// Decodes as much of `input` as it can into `output`: ``decompress(_:into:)`` as a pipeline stage.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes of the stream, starting with any not consumed last time.
+    ///   - output: Where to append the decoded bytes.
+    ///   - flush: `.finish` when the input has ended: a stream that hasn't is then an error.
+    /// - Returns: What was consumed and produced, and why it returned.
+    /// - Throws: ``BytesError`` for a malformed stream; ``BytesError/insufficientData`` if `flush` is `.finish`
+    ///   and the stream doesn't end in `input`.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         let progress = try decompress(input, into: &output)

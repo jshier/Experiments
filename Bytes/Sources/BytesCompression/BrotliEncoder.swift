@@ -66,12 +66,18 @@ public struct BrotliEncoder: ~Copyable {
 
     /// An upper bound on the compressed size of `byteCount` bytes, for one ``compressAll(_:into:)`` call:
     /// the input in uncompressed meta-blocks, with their headers.
+    ///
+    /// - Parameter byteCount: The input's size.
+    /// - Returns: A size no stream of that input exceeds.
     public static func maximumCompressedSize(forByteCount byteCount: Int) -> Int {
         byteCount &+ (byteCount &>> 14) &* 8 &+ 32
     }
 
     /// Encodes `input` as one whole stream, appending it to `output`.
     ///
+    /// - Parameters:
+    ///   - input: All the data.
+    ///   - output: Where to append the stream.
     /// - Throws: ``BytesError/insufficientCapacity`` if the stream doesn't fit (`output` then holds part of
     ///   it). ``maximumCompressedSize(forByteCount:)`` bytes of free capacity are always enough.
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {

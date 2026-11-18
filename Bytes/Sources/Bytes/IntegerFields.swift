@@ -248,6 +248,14 @@ public extension BytesWriter {
 // narrower than `Int`, the checks fold away.
 
 public extension GenericBytesReader {
+    /// The error for a count that failed a bounds check: a negative count is invalid, a positive one asks for
+    /// more than remains. Only called once a check has failed, so the hot path tests the sign once, in the
+    /// check itself (a constant count folds it away).
+    @inlinable
+    internal static func _countError(_ count: Int) -> BytesError {
+        count < 0 ? .invalidValue : .insufficientData
+    }
+
     /// The count as an `Int`.
     ///
     /// - Throws: ``BytesError/insufficientData`` if it's beyond `Int`; ``BytesError/invalidValue`` if it's
@@ -302,5 +310,210 @@ public extension GenericBytesReader {
     @_lifetime(self: copy self)
     mutating func skip(byteCount: some BinaryInteger) throws(BytesError) {
         try skip(byteCount: Self._byteCount(byteCount))
+    }
+}
+
+// MARK: - Integers of a run-time width
+
+// Fields whose width is data: a binary property list's offset and reference sizes (1, 2, 4, or 8 bytes, named
+// in its trailer), DWARF's address size, a codec's variable-width fields. The width comes from the data, so a
+// width outside 1 through 8 throws rather than traps.
+
+public extension GenericBytesReader {
+    /// Reads the unsigned value of the next `byteCount` bytes in `byteOrder`. Consumes nothing if it throws.
+    ///
+    /// With 8 bytes left (and the cursor on a byte boundary), one 8-byte load, shifted: no loop over a width the
+    /// compiler doesn't know. Otherwise a byte at a time.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    internal mutating func _readUnsigned(byteCount: Int, _ byteOrder: ByteOrder) throws(BytesError) -> UInt64 {
+        guard byteCount >= 1 && byteCount <= 8 else { throw .invalidValue }
+        _assumeInvariant()
+        let unusedBits = UInt64(64 &- 8 &* byteCount)
+        if _bitOffset == 0, likely(span.byteCount &- _byteOffset >= 8) {
+            // Unsafe: an unchecked load. Safe: 8 bytes remain (just checked).
+            let raw = unsafe Load.rawBytes(UInt64.self, from: span, at: _byteOffset)
+            _byteOffset &+= byteCount
+            return switch byteOrder {
+            case .bigEndian: UInt64(bigEndian: raw) &>> unusedBits
+            case .littleEndian: (UInt64(littleEndian: raw) &<< unusedBits) &>> unusedBits
+            }
+        }
+        guard remainingByteCount >= byteCount else { throw .insufficientData }
+        var value: UInt64 = 0
+        for index in 0..<byteCount {
+            let byte = UInt64(try read(UInt8.self)) // Can't throw: `byteCount` bytes remain.
+            switch byteOrder {
+            case .bigEndian: value = value &<< 8 | byte
+            case .littleEndian: value |= byte &<< UInt64(8 &* index)
+            }
+        }
+        return value
+    }
+
+    /// Reads an unsigned integer of `byteCount` bytes in `byteOrder`: a width known only at run time, such as a
+    /// binary property list's offsets, whose size its trailer names.
+    ///
+    /// ```swift
+    /// let offset = try table.read(Int.self, byteCount: trailer.offsetSize, .bigEndian)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - type: The integer type to read, such as `Int.self`.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    ///   - byteOrder: The byte order of the field.
+    /// - Returns: The value.
+    /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain; ``BytesError/invalidValue`` if
+    ///   `byteCount` isn't 1 through 8 or `I` can't represent the value. Nothing is consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<I: FixedWidthInteger>(_ type: I.Type, byteCount: Int, _ byteOrder: ByteOrder) throws(BytesError) -> I {
+        let start = position
+        guard let value = I(exactly: try _readUnsigned(byteCount: byteCount, byteOrder)) else {
+            rewind(to: start)
+            throw .invalidValue
+        }
+        return value
+    }
+
+    /// Reads a two's complement integer of `byteCount` bytes in `byteOrder`, sign-extended to `I`: the signed
+    /// counterpart of ``read(_:byteCount:_:)``.
+    ///
+    /// - Parameters:
+    ///   - type: The signed integer type to read, such as `Int64.self`.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    ///   - byteOrder: The byte order of the field.
+    /// - Returns: The value.
+    /// - Throws: ``BytesError/insufficientData`` if fewer bytes remain; ``BytesError/invalidValue`` if
+    ///   `byteCount` isn't 1 through 8 or `I` can't represent the value. Nothing is consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<I: FixedWidthInteger & SignedInteger>(
+        _ type: I.Type, signedByteCount byteCount: Int, _ byteOrder: ByteOrder
+    ) throws(BytesError) -> I {
+        let start = position
+        let unsigned = try _readUnsigned(byteCount: byteCount, byteOrder)
+        let unusedBits = Int64(64 &- 8 &* byteCount)
+        guard let value = I(exactly: Int64(bitPattern: unsigned &<< UInt64(unusedBits)) &>> unusedBits) else {
+            rewind(to: start)
+            throw .invalidValue
+        }
+        return value
+    }
+}
+
+public extension GenericBytesReader where Mode: ByteOrderedCursorMode {
+    /// Reads an unsigned integer of `byteCount` bytes in the cursor's byte order, as ``read(_:byteCount:_:)``.
+    ///
+    /// - Parameters:
+    ///   - type: The integer type to read, such as `Int.self`.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    /// - Returns: The value.
+    /// - Throws: As ``read(_:byteCount:_:)``.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<I: FixedWidthInteger>(_ type: I.Type, byteCount: Int) throws(BytesError) -> I {
+        try read(I.self, byteCount: byteCount, Mode.byteOrder)
+    }
+
+    /// Reads a two's complement integer of `byteCount` bytes in the cursor's byte order, as
+    /// ``read(_:signedByteCount:_:)``.
+    ///
+    /// - Parameters:
+    ///   - type: The signed integer type to read, such as `Int64.self`.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    /// - Returns: The value.
+    /// - Throws: As ``read(_:signedByteCount:_:)``.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<I: FixedWidthInteger & SignedInteger>(_ type: I.Type, signedByteCount byteCount: Int) throws(BytesError) -> I {
+        try read(I.self, signedByteCount: byteCount, Mode.byteOrder)
+    }
+}
+
+public extension GenericBytesWriter {
+    /// Writes `bits`' low `byteCount` bytes in `byteOrder`.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    internal mutating func _write(lowBytesOf bits: UInt64, byteCount: Int, _ byteOrder: ByteOrder) throws(BytesError) {
+        let word = switch byteOrder {
+        case .bigEndian: (bits &<< UInt64(64 &- 8 &* byteCount)).byteSwapped // The field's first byte lowest.
+        case .littleEndian: bits
+        }
+        try write(word, byteCount: byteCount, allowingOverrun: false)
+    }
+
+    /// Writes `value` as an unsigned integer of `byteCount` bytes in `byteOrder`: the counterpart of
+    /// ``GenericBytesReader/read(_:byteCount:_:)``.
+    ///
+    /// ```swift
+    /// try writer.write(offset, byteCount: offsetSize, .bigEndian)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - value: The value to write.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    ///   - byteOrder: The byte order of the field.
+    /// - Throws: ``BytesError/invalidValue`` if `value` is negative or doesn't fit in `byteCount` bytes;
+    ///   ``BytesError/insufficientCapacity`` if there isn't room. Nothing is written either way.
+    /// - Precondition: `byteCount` is 1 through 8, and the writer is byte-aligned.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write<I: FixedWidthInteger>(_ value: I, byteCount: Int, _ byteOrder: ByteOrder) throws(BytesError) {
+        precondition(byteCount >= 1 && byteCount <= 8, "Byte count must be 1 through 8")
+        guard let bits = UInt64(exactly: value), byteCount == 8 || bits &>> UInt64(8 &* byteCount) == 0 else {
+            throw .invalidValue
+        }
+        try _write(lowBytesOf: bits, byteCount: byteCount, byteOrder)
+    }
+
+    /// Writes `value` as a two's complement integer of `byteCount` bytes in `byteOrder`: the counterpart of
+    /// ``GenericBytesReader/read(_:signedByteCount:_:)``.
+    ///
+    /// - Parameters:
+    ///   - value: The value to write.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    ///   - byteOrder: The byte order of the field.
+    /// - Throws: ``BytesError/invalidValue`` if `value` doesn't fit in `byteCount` bytes;
+    ///   ``BytesError/insufficientCapacity`` if there isn't room. Nothing is written either way.
+    /// - Precondition: `byteCount` is 1 through 8, and the writer is byte-aligned.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write<I: FixedWidthInteger & SignedInteger>(_ value: I, signedByteCount byteCount: Int, _ byteOrder: ByteOrder) throws(BytesError) {
+        precondition(byteCount >= 1 && byteCount <= 8, "Byte count must be 1 through 8")
+        let unusedBits = Int64(64 &- 8 &* byteCount)
+        // It fits if sign-extending its low bytes gives it back.
+        guard let wide = Int64(exactly: value), (wide &<< unusedBits) &>> unusedBits == wide else { throw .invalidValue }
+        try _write(lowBytesOf: UInt64(bitPattern: wide), byteCount: byteCount, byteOrder)
+    }
+}
+
+public extension GenericBytesWriter where Mode: ByteOrderedCursorMode {
+    /// Writes `value` as an unsigned integer of `byteCount` bytes in the writer's byte order, as
+    /// ``write(_:byteCount:_:)``.
+    ///
+    /// - Parameters:
+    ///   - value: The value to write.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    /// - Throws: As ``write(_:byteCount:_:)``.
+    /// - Precondition: `byteCount` is 1 through 8.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write<I: FixedWidthInteger>(_ value: I, byteCount: Int) throws(BytesError) {
+        try write(value, byteCount: byteCount, Mode.byteOrder)
+    }
+
+    /// Writes `value` as a two's complement integer of `byteCount` bytes in the writer's byte order, as
+    /// ``write(_:signedByteCount:_:)``.
+    ///
+    /// - Parameters:
+    ///   - value: The value to write.
+    ///   - byteCount: The field's width in bytes, 1 through 8.
+    /// - Throws: As ``write(_:signedByteCount:_:)``.
+    /// - Precondition: `byteCount` is 1 through 8.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func write<I: FixedWidthInteger & SignedInteger>(_ value: I, signedByteCount byteCount: Int) throws(BytesError) {
+        try write(value, signedByteCount: byteCount, Mode.byteOrder)
     }
 }

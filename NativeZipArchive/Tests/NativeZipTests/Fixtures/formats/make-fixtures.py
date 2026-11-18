@@ -57,25 +57,62 @@ zip_with(os.path.join(out, "bzip2-large.zip"), zipfile.ZIP_BZIP2, [("large.txt",
 
 
 # --- Methods written by patching a stored entry's headers -----------------------------------------------
-def patched(path, name, payload, data, method):
-    """A one-entry archive whose payload is `payload`, recorded as `method` decompressing to `data`."""
+def patched(path, name, payload, data, method, flags=0):
+    """A one-entry archive whose payload is `payload`, recorded as `method` decompressing to `data`, with `flags`
+    ORed into its general-purpose flags."""
     zip_with(path, zipfile.ZIP_STORED, [(name, payload)])
     raw = bytearray(open(path, "rb").read())
     crc = zlib.crc32(data)
-    # Local header: method at 8, CRC at 14, uncompressed size at 22.
+    # Local header: flags at 6, method at 8, CRC at 14, uncompressed size at 22.
     assert raw[0:4] == b"PK\x03\x04"
+    struct.pack_into("<H", raw, 6, struct.unpack_from("<H", raw, 6)[0] | flags)
     struct.pack_into("<H", raw, 8, method)
     struct.pack_into("<I", raw, 14, crc)
     struct.pack_into("<I", raw, 22, len(data))
-    # Central header: method at 10, CRC at 16, uncompressed size at 24.
+    # Central header: flags at 8, method at 10, CRC at 16, uncompressed size at 24.
     central = raw.rfind(b"PK\x01\x02")
+    struct.pack_into("<H", raw, central + 8, struct.unpack_from("<H", raw, central + 8)[0] | flags)
     struct.pack_into("<H", raw, central + 10, method)
     struct.pack_into("<I", raw, central + 16, crc)
     struct.pack_into("<I", raw, central + 24, len(data))
     open(path, "wb").write(raw)
 
 
+def zipcrypto(payload, password, check):
+    """`payload` encrypted with the traditional PKWARE cipher (APPNOTE 6.1), after its 12-byte header ending in
+    `check` (the CRC's high byte). The header's random bytes are fixed, so the fixture is reproducible."""
+    def crc(value, byte):
+        return zlib.crc32(bytes([byte]), value ^ 0xFFFFFFFF) ^ 0xFFFFFFFF
+
+    keys = [0x12345678, 0x23456789, 0x34567890]
+
+    def update(byte):
+        keys[0] = crc(keys[0], byte)
+        keys[1] = ((keys[1] + (keys[0] & 0xFF)) * 134775813 + 1) & 0xFFFFFFFF
+        keys[2] = crc(keys[2], keys[1] >> 24)
+
+    for byte in password:
+        update(byte)
+    out = bytearray()
+    for byte in bytes(range(11)) + bytes([check]) + payload:
+        t = (keys[2] | 2) & 0xFFFF
+        out.append(byte ^ (((t * (t ^ 1)) >> 8) & 0xFF))
+        update(byte)
+    return bytes(out)
+
+
 patched(os.path.join(out, "xz.zip"), "sample.txt", lzma.compress(sample, format=lzma.FORMAT_XZ), sample, 95)
+
+# Zstandard over several of the decoder's 1 MB chunks (streamed through its window), and the same encrypted with
+# the traditional cipher (decrypted in pieces as the decoder takes them).
+from compression import zstd
+
+large = text(5_000_000, 3)
+zip_with(os.path.join(out, "zstd-large.zip"), zipfile.ZIP_ZSTANDARD, [("large.txt", large)])
+patched(os.path.join(out, "zstd-zipcrypto.zip"), "large.txt",
+        zipcrypto(zstd.compress(large), b"secret", zlib.crc32(large) >> 24), large, 93, flags=1)
+# A method NativeZip doesn't read: PPMd (98), its payload not a real stream.
+patched(os.path.join(out, "ppmd.zip"), "sample.txt", b"\x07" * 64, sample, 98)
 
 
 class BitWriter:

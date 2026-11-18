@@ -5,6 +5,297 @@ Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (r
 other benchmarks running); the 2026-11-12 sections have newer full runs. Compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
+## 2026-11-18, LZMA, LZMA2, and .xz decoding: `LZMA2Decoder` against Compression and liblzma 5.8.4 (baselines `lzma-1`, `lzma-2`; Swift 6.4.4)
+
+A decoder in BytesCompression for `.xz` files (`decompressXZ`), raw LZMA2 chunk streams (`decompressLZMA2`), and raw
+LZMA (`decompressLZMA`, and `decompressLZMAFile` for `.lzma`), with `LZMAProperties` and `CRC64` (CRC-64/XZ). Made
+for Apple's `.aea` archives, whose payload (Xcode's) is 624 xz streams of 16 MB: one block each, LZMA2 with an 8 MB
+dictionary, no check. Apple's `aea decrypt` decodes them at about 165 MB/s per core.
+
+`.xz`: stream header and footer (CRC-32s, flags, backward size), block headers (CRC-32, sizes, the LZMA2 filter
+alone: BCJ, delta, and chains throw `invalidValue`), block padding, the index checked against the blocks (count,
+both sums, and a CRC-32 of the records, as liblzma's `index_hash`, so nothing is allocated), several blocks, and
+concatenated streams with stream padding. Checks: none, CRC-32, and CRC-64 verified; SHA-256 read but not verified;
+reserved check types throw. LZMA2: control bytes 0x00, 0x01, 0x02, and 0x80–0xFF with the four reset levels; the
+range decoder starts again per chunk; each chunk must fill its unpacked size, consume its packed size exactly, and
+end with the code at 0; a match past a chunk is rejected (as liblzma does). LZMA: lc up to 8, lp and pb up to 4,
+an end marker, a known size, or both. Each call decodes a whole stream into the caller's buffer, which is the
+dictionary. The probability model (28 KB) is allocated at creation, and nothing after:
+`Allocations:LZMA_decode_xz_0` and `_6` (JSON, 120 KB, CRC-64) pass zero-malloc thresholds.
+
+References: Apple's Compression (`compression_decode_buffer`, `COMPRESSION_LZMA`, scratch buffer allocated once)
+and Homebrew's liblzma 5.8.4 (`CLZMA`, a `.systemLibrary` via pkg-config, tests and benchmarks only;
+`lzma_stream_buffer_decode`): one call each, whole file into a whole buffer, one thread. Inputs: Silesia files
+through liblzma's preset encoder as `xz -6` and `xz -9e` write them (CRC-64, which all three verify; cached as
+`CORPUS/cache/NAME-SIZE.xz-5.8-PRESET`), and five of Xcode's `.aea` segments (local only: registered when
+`CORPUS/aea/seg*.xz` exist; seg0 is headers and text, the rest mostly binaries).
+
+### Results (`lzma-2`, p50)
+
+One run under the shared benchmark lock, each row's three decoders seconds apart, with other agents' builds on
+the machine: times are ±10%. MB/s is the decompressed size over p50 wall-clock time; "×" is the other decoder's time
+over Bytes'. Instructions are exact (in millions, so to about 0.1/B here).
+
+| Input | Bytes MB/s | liblzma MB/s | Compression MB/s | × liblzma | × Compression | Bytes ins/B | liblzma ins/B | Compression ins/B |
+|---|---|---|---|---|---|---|---|---|
+| -6 dickens (9.7 MB) | 192 | 136 | 167 | **1.42x** | **1.15x** | 60.5 | 61.9 | 50.5 |
+| -6 mozilla (48.8 MB) | 153 | 105 | 126 | **1.46x** | **1.21x** | 72.4 | 70.9 | 58.3 |
+| -6 samba (20.6 MB) | 254 | 171 | 210 | **1.48x** | **1.21x** | 45.1 | 45.4 | 36.7 |
+| -6 x-ray (8.1 MB) | 76 | 56 | 60 | **1.35x** | **1.27x** | 173.0 | 151.4 | 139.2 |
+| -6 xml (5.1 MB) | 486 | 297 | 445 | **1.64x** | **1.09x** | 22.8 | 25.3 | 18.5 |
+| -9e dickens (9.7 MB) | 200 | 142 | 164 | **1.41x** | **1.22x** | 60.4 | 61.9 | 50.5 |
+| -9e mozilla (48.8 MB) | 155 | 112 | 122 | **1.38x** | **1.27x** | 71.3 | 70.0 | 57.4 |
+| -9e samba (20.6 MB) | 257 | 170 | 212 | **1.51x** | **1.21x** | 44.6 | 44.9 | 36.3 |
+| -9e x-ray (8.1 MB) | 77 | 55 | 60 | **1.39x** | **1.28x** | 173.0 | 151.4 | 139.2 |
+| -9e xml (5.1 MB) | 535 | 314 | 445 | **1.70x** | **1.20x** | 22.4 | 24.9 | 18.3 |
+| Apple seg0 (16.0 MB) | 104 | 88 | 90 | **1.18x** | **1.15x** | 99.5 | 86.8 | 78.6 |
+| Apple seg130 (16.0 MB) | 212 | 177 | 186 | **1.20x** | **1.14x** | 49.3 | 46.0 | 40.2 |
+| Apple seg200 (16.0 MB) | 430 | 336 | 365 | **1.28x** | **1.18x** | 25.5 | 23.6 | 21.0 |
+| Apple seg255 (16.0 MB) | 160 | 124 | 129 | **1.29x** | **1.24x** | 70.8 | 65.1 | 58.9 |
+| Apple seg60 (16.0 MB) | 430 | 323 | 357 | **1.33x** | **1.21x** | 26.0 | 23.5 | 21.0 |
+
+
+Faster than both on every input: 1.09–1.28x Compression and 1.18–1.70x liblzma. On the Apple segments, 1.14–1.24x
+Compression in this run; the interleaved harness below, which alternates the decoders in one process, measures
+1.21–1.24x on all five (seg0 112 against 90 MB/s, seg60 435 against 357, seg130 226 against 186, seg200 431 against
+357, seg255 160 against 131). At Compression's 165 MB/s average per core for Xcode's 624 segments, that's about
+200 MB/s: 63 CPU-seconds becomes about 52.
+
+Bytes runs more instructions per byte than Compression (99.5 against 78.6 on seg0) and still finishes first: the
+work is a chain of dependent steps per bit, and the instructions added take steps off that chain (below).
+
+`lzma-1` → `lzma-2` is the CRC-64: slicing-by-8 tables (2.2 GB/s, already twice liblzma's) took 18% of xml's
+decode time, behind Compression on xml `-6` (0.92x) and samba `-9e` (0.99x). Folded with `pmull` through
+CBytesCRC's `bytes_crc_fold` (the CRC-32's helper), four 16-byte lanes 64 bytes per step, it runs 24–41 GB/s:
+Silesia rows −2 to −13% instructions, the Apple segments (no check) unchanged.
+
+### How it got there (scratch harness: the three decoders interleaved in one process; cycles and instructions per output byte from `proc_pid_rusage`, so clock changes don't move them)
+
+| Step | cycles/B seg0 / seg60 / seg255 | ins/B seg0 / seg60 / seg255 |
+|---|---|---|
+| Compression (reference) | 44.9 / 11.3 / 30.9 | 78.6 / 21.0 / 58.9 |
+| liblzma 5.8.4 (reference) | 46.0 / 11.9 / 32.4 | 86.8 / 23.5 / 65.1 |
+| 1. First version (`LzmaDec.c`'s structure, careful/fast loops, lc3/lp0/pb2 copy) | 60.8 / 13.3 / 36.7 | 93.5 / 23.8 / 63.7 |
+| 2. `@inline(always)` on the range decoder's methods (`length`, `distance` were calls) | 60.9 / 12.9 / 35.1 | 87.3 / 22.0 / 58.3 |
+| 3. Tree bits computed arithmetically, literal loops of 8 | 48.9 / 12.2 / 33.1 | 104.9 / 26.2 / 69.6 |
+| 4. Plain literal: both children loaded while the parent decodes | 41.9 / 11.2 / 31.9 | 115.6 / 27.4 / 71.4 |
+| 5. Matched literal: both candidates loaded ahead | 40.4 / 10.7 / 28.8 | 119.5 / 28.9 / 80.7 |
+| 6. Normalization threshold in a register (`cmp` instead of `lsr` + `cmp`) | 38.3 / 10.4 / 28.4 | 111.9 / 27.3 / 76.4 |
+| 7. Normalization deferred into the next bit (shift chosen before the multiply) | 37.6 / 10.3 / 28.0 | 107.7 / 26.8 / 75.7 |
+| 8. Children loaded ahead in every tree (lengths, slots, reverse trees) | 36.7 / 9.4 / 25.8 | 108.8 / 27.5 / 76.4 |
+| 9. Literal and matched-literal trees written out | 36.1 / 9.3 / 25.3 | 99.7 / 26.0 / 71.1 |
+
+
+Not kept:
+
+| Variant | cycles/B seg0 / seg60 / seg255 |
+|---|---|
+| Tree bits with branches, as `LzmaDec.c`'s C (after step 2) | 60.7 / 13.1 / 34.3 (ins/B 73.3 / 19.0 / 51.9) |
+| Branch for each tree bit's normalization (after step 3) | 51.4 / 12.7 / 34.4 |
+| Deferred normalization with masks instead of selects (after step 7) | 41.7 / 10.8 / 28.4 |
+| Normalization with selects in the direct bits (after step 8) | 36.8 / 9.6 / 26.2 |
+| Normalization with selects after decisions (after step 9) | 36.2 / 9.35 / 25.4 (neutral) |
+| Deferred normalization from constant selects only, no branch (after step 9) | 39.8 / 10.1 / 27.5 |
+
+The first version had `LzmaDec.c`'s structure and was 0.73–0.88x Compression. `Tools/counters` showed why: 52% of
+its cycles discarded (mispredictions) and 32% lost in the front end, against Compression's 34% and 8%, with 67%
+more branches per byte (13.5 against 8.1). LLVM had made the tree bits' `one ? 1 : 0` a branch, so every literal
+bit was a coin-flip branch. After step 7, seg0 was 27% discarded, 40% back-end latency, and 3% front end (seg60
+after step 8: 34% discarded, as Compression's 34%: the literal-or-match and repeat decisions). What bounds it now
+is the chain from one tree bit to the next: pick the probability, multiply, compare, select. The steps shortened it
+from about 11 cycles (index, load, multiply, compare) to about 6: the load is off the chain (both children are
+loaded while the parent decodes, one 32-bit load), the normalization compare is one `cmp` against a register, and
+the normalization's shift is chosen alongside it instead of after it. Normalization stays a branch: it predicts
+well, and every branchless form measured slower.
+
+## 2026-11-18, ASCII without tricks (baseline `d2-ascii`)
+
+`ASCII.swift`: tags and signatures as text (`Byte4(ascii: "IHDR")`, `Byte(ascii: "-")`), magic numbers in a byte order
+(`expect(_:_:)`), numbers written as digits (`read(_:asciiDigits:)`, `write(_:asciiDigits:)`), character classes on
+`UInt8` and `ByteLanes`. Each new API against what a careful user writes by hand (`ASCII.swift` benchmarks):
+
+| Workload | API | By hand | Change |
+|---|---|---|---|
+| 20,000 PNG-style chunk types | `Byte4(ascii:)`: 524 K instructions, 36 µs | hex literals: 524 K, 36 µs | identical (merged) |
+| 20,000 log lines, 8 fixed-width numbers each | `read(_:asciiDigits:)`: 5,063 K, 151 µs | a digit at a time: 5,722 K, 177 µs | −11.5% / −15% |
+| Counting digits in 620 KB | `ByteLanes.asciiDigits`: 854 K, 29 µs | `isASCIIDigit` per byte (auto-vectorized): 1,319 K, 78 µs | 2.7x faster |
+
+Up to 8 digits are one 8-byte load, validated in two word operations and combined in three multiplies (pairs,
+fours, eight); 9–16 digits two loads. Two bugs caught by the tests before anything shipped: validating the two
+words ORed together (two digit values ORed can exceed 9), and the two-word path taken for fewer than 9 digits, which
+loaded past the end of the data (only a test reading digits that end exactly at the data's end found it). Codegen:
+`pointwiseMin` was a call per vector (replaced by a vector comparison, one `cmhi`), and the slow path, a generic
+method on the cursor, took type metadata at every call site (now a non-generic static function over the digits'
+span). BinaryParsingComparison's PNG, QOI, and LZ4 ports use `init(ascii:)` and `expect(_:_:)` at no change in
+instructions. Review and remaining proposals: `../Proposals/NonNumericValues.md`.
+
+## 2026-11-18, crypto in Swift, TLS 1.3, parallel sealing, parsing API (baselines `d2-start` → `d2-final`; Swift 6.4.4)
+
+**BytesCrypto without CryptoKit or CommonCrypto.** AES-128/256 (`aese`/`aesmc` through `CBytesCrypto`'s `static
+inline` wrappers; a constant-time portable path that computes the S-box in GF(2⁸)), counter mode with WinZip's
+little-endian and GCM's big-endian counters, AES-GCM (GHASH by `pmull` Karatsuba, eight blocks aggregated per
+reduction, reduction by two `pmull`s; stitched seal; tag checked before decrypting), SHA-1 and SHA-256 on the SHA
+instructions, SHA-384/512, and HMAC, PBKDF2, HKDF over a `HashFunction` protocol. Tests: Wycheproof (C2SP) for both
+AEADs, HMAC, and HKDF; CryptoKit differentially at every length. `d2-final`, p50, one run:
+
+| Benchmark | Bytes | Apple | Relative |
+|---|---|---|---|
+| AES-128-GCM seal 1 MB × 1 | 133 µs | 111 (CryptoKit) | 0.83x |
+| AES-128-GCM seal 16 KB × 64 | 124 µs | 154 | 1.24x |
+| AES-128-GCM seal 1 KB × 1,024 | 212 µs | 919 | 4.33x |
+| AES-128-GCM seal 64 B × 16,384 | 3,686 µs | 13,000 | 3.53x |
+| AES-128-CTR 1 MB | 62 µs | 56 (CommonCrypto) | 0.90x |
+| PBKDF2-HMAC-SHA1 × 1,000 | 118 µs | 343 (CommonCrypto) | 2.91x |
+| SHA-1 1 MB | 362 µs | 377 (CryptoKit) | 1.04x |
+| HMAC-SHA1 1 MB | 362 µs | 379 (CryptoKit) | 1.05x |
+| SHA-256 1 MB | 400 µs | 337 (CryptoKit) | 0.84x |
+| ChaCha20-Poly1305 seal 1 MB | 420 µs | 1,240 (CryptoKit) | 2.95x |
+
+Instructions: AES-GCM 1 MB 2,902 K against CryptoKit's 2,980 K; SHA-256 2,065 K against 1,955 K; AES-CTR 1,779 K
+against 1,669 K. Along the way: AES-CTR 453 → 80 → 62 µs (unrolled eight-block batches), SHA-256 5.5 M → 2.07 M
+instructions (round constants as vector literals), GHASH 191 → 168 µs per MB before stitching, 133 after.
+
+**TLS 1.3 (RFC 8446).** `TLSKeySchedule`, `TLSSecret` (Expand-Label, Derive-Secret, KeyUpdate's next secret,
+Finished keys), `TLSTrafficKeys`, `TLSTranscript`, `TLSAlert`; records with inner type and padding, record-size and
+record-count limits, automatic KeyUpdate before the limit (opener follows, answers `update_requested`), alerts,
+`change_cipher_spec` only during a handshake. Tested against RFC 8448's traces. ChaCha20-Poly1305 enforces its
+2^38 − 64-byte limit and rejects malformed tags by throwing.
+
+**Parallel sealing** (`TLSRecordSealer.sealingLanes`): full records sealed on `concurrentPerform` lanes, each into its
+place in the output. Its own run (p50, 4 MB per call): AES-128-GCM 5.7 / 20.3 / 32.7 GB/s on 1 / 4 / 8 lanes,
+ChaCha20-Poly1305 2.0 / 7.6 / 13.9; `d2-final` measured AES-128-GCM 6.4 / 21.4 / 35.2. Instructions equal for any
+lane count. Loopback numbers: `../SocketStream/RESULTS.md`.
+
+**Tried and reverted:** ChaCha20's rotate by 8 as a `tbl` (double round 264 → 323 instructions: the table's
+register forced spills). **Resolved:** Brotli's `BitBuffer.rewind` now measures equal to making a new buffer (54 K
+instructions for the 1.6 KB stream, every quality and size equal; a scratch copy built both ways).
+
+**Parsing API** (items 9–14 from the swift-binary-parsing ports): `@BinaryRecord` in the cursor's byte order,
+`Byte`/`Padding`/`Reserved` fields, run-time integer widths, `read(utf8TerminatedBy:)` (a 16-byte scan,
+`RawSpan.firstByteOffset(where:)`), `forEachRecord(… paddedTo:)`, and counts that throw (one unsigned compare: two
+compares had cost LZ4 2%). `ByteMatches.nibbleMask` fixed (odd lanes reported bit 3). Effects in
+`../BinaryParsingComparison/RESULTS.md`.
+
+Everything else, `d2-start` → `d2-final` in instructions: within ±0.5%, except costs the standards require and
+reference rows. ChaCha20-Poly1305 seal 64 B × 16,384 74 → 76 M (+2.7%: the message-length precondition and checks,
+per call); TLS open on 1.6 KB streams +1 K (41 → 42 K, 57 → 58 K: the opener's RFC 8446 checks); `Byte7`
+`read(_:_:into:)` +1.0%; the `Literals … (before)` reference rows +1.4 to +3.0% and libdeflate's 1.6 KB inflate −5.6%,
+code that didn't change (layout).
+
+## 2026-11-18, Zstandard decoding: `ZstdDecoder` against libzstd 1.5.7 (baseline `zstd-1`; Swift 6.4.4)
+
+A Zstandard (RFC 8878) decoder in BytesCompression (`ZstdDecoder`, `ZstdFrameHeader`, `XXHash64`), for
+NativeZip's method 93. Every frame form, raw/RLE/compressed blocks, raw/RLE/Huffman (1 and 4 streams,
+single- and double-symbol tables)/treeless literals, predefined/RLE/FSE/repeat sequence tables, repeat offsets,
+skippable and concatenated frames, content checksums (verified). Dictionaries are rejected. `decompressAll`
+decodes into the caller's buffer (no window); `decompress` streams through a window of its own that wraps
+(libzstd's "external dictionary" segment), up to `maximumWindowSize` (default 128 MB), resumable at any input or
+output boundary.
+
+Reference: Homebrew's libzstd 1.5.7 (`CZstd`, a `.systemLibrary` via pkg-config, linked by the tests and
+benchmarks only), one thread, a reused `ZSTD_DCtx` (`ZSTD_decompressDCtx`) or `ZSTD_DStream`. Inputs: Silesia
+files through the `zstd` CLI 1.5.7 (`-1`, `-3`, `-19`, `--long=27 -19`; checksums on, as the CLI writes them,
+and both decoders verify them), and the first 1–64 KB of dickens, xml, mozilla, and Web Inspector's Main.js at
+`-3` and `-19`. Cached as `~/Library/Caches/Experiments/corpus/cache/{,small/}NAME-SIZE.zstd-1.5.7-LEVEL`.
+
+One full run (`zstd-1`, p50) under the shared benchmark lock; another agent's builds were running, so times are
+±10% (each row's two decoders ran minutes apart). Instructions are exact, except that the tool prints
+instructions in thousands: the 1 KB rows' values are at that resolution (19.53/B is 20 K). MB/s is the input's
+decompressed size over p50 wall-clock time; "×" is libzstd's time over ours.
+
+### Silesia, one call and streamed (64 KB input pieces into a 64 KB output buffer, both decoders)
+
+| Input | Bytes MB/s | libzstd MB/s | × | Bytes ins/B | libzstd ins/B | Bytes streamed MB/s | libzstd streamed MB/s | × | Bytes ins/B | libzstd ins/B |
+|---|---|---|---|---|---|---|---|---|---|---|
+| L1 dickens (9.7 MB) | 1781 | 1504 | **1.18x** | 9.91 | 11.09 | 1760 | 1391 | **1.27x** | 10.01 | 11.38 |
+| L1 mozilla (48.8 MB) | 1707 | 1384 | **1.23x** | 8.47 | 9.39 | 1652 | 1249 | **1.32x** | 8.69 | 9.64 |
+| L1 samba (20.6 MB) | 2460 | 1964 | **1.25x** | 6.57 | 7.13 | 2396 | 1964 | **1.22x** | 6.76 | 7.36 |
+| L1 x-ray (8.1 MB) | 1497 | 1328 | **1.13x** | 7.79 | 10.03 | 1399 | 1258 | **1.11x** | 8.14 | 10.38 |
+| L1 xml (5.1 MB) | 3197 | 2505 | **1.28x** | 5.05 | 5.61 | 3086 | 2345 | **1.32x** | 5.24 | 5.80 |
+| L19 dickens (9.7 MB) | 1959 | 1352 | **1.45x** | 10.60 | 11.68 | 1973 | 1268 | **1.56x** | 10.79 | 11.97 |
+| L19 mozilla (48.8 MB) | 1313 | 1113 | **1.18x** | 10.48 | 11.48 | 1423 | 1113 | **1.28x** | 10.70 | 11.71 |
+| L19 samba (20.6 MB) | 2207 | 1964 | **1.12x** | 6.39 | 6.99 | 2161 | 1662 | **1.30x** | 6.62 | 7.22 |
+| L19 x-ray (8.1 MB) | 889 | 706 | **1.26x** | 19.47 | 21.48 | 892 | 706 | **1.26x** | 19.71 | 21.83 |
+| L19 xml (5.1 MB) | 3916 | 3101 | **1.26x** | 4.12 | 4.49 | 3494 | 3015 | **1.16x** | 4.30 | 4.68 |
+| L3 dickens (9.7 MB) | 1536 | 1092 | **1.41x** | 13.44 | 14.91 | 1627 | 1033 | **1.57x** | 13.64 | 15.11 |
+| L3 mozilla (48.8 MB) | 1652 | 1313 | **1.26x** | 9.31 | 10.25 | 1652 | 1220 | **1.35x** | 9.53 | 10.48 |
+| L3 samba (20.6 MB) | 2488 | 1801 | **1.38x** | 7.13 | 7.87 | 2422 | 1801 | **1.35x** | 7.31 | 8.05 |
+| L3 x-ray (8.1 MB) | 1196 | 917 | **1.30x** | 12.98 | 15.46 | 1196 | 921 | **1.30x** | 13.33 | 15.93 |
+| L3 xml (5.1 MB) | 3165 | 2414 | **1.31x** | 5.43 | 5.99 | 3005 | 2291 | **1.31x** | 5.61 | 6.17 |
+| long=27 L19 mozilla (48.8 MB) | 1220 | 1004 | **1.21x** | 10.41 | 11.99 | 1348 | 1090 | **1.24x** | 10.62 | 12.22 |
+
+Faster on every Silesia input and level: one call 1.12–1.45x, streamed 1.11–1.57x, with 7–22% fewer
+instructions per byte (x-ray L1 22%: libzstd picks double-symbol Huffman tables for its literals; see below).
+The narrowest are x-ray L1 (Huffman-bound: 85% of the time in the four-stream loop) and samba L19.
+
+### Small inputs, one call
+
+| Input | Bytes MB/s | libzstd MB/s | × | Bytes ins/B | libzstd ins/B |
+|---|---|---|---|---|---|
+| L19 dickens 1 KB | 384 | 311 | **1.23x** | 29.30 | 30.27 |
+| L19 dickens 4 KB | 812 | 692 | **1.17x** | 20.02 | 21.48 |
+| L19 dickens 16 KB | 1024 | 655 | **1.56x** | 18.92 | 20.63 |
+| L19 dickens 64 KB | 1311 | 923 | **1.42x** | 16.28 | 17.96 |
+| L3 dickens 1 KB | 447 | 409 | **1.09x** | 23.44 | 24.41 |
+| L3 dickens 4 KB | 826 | 697 | **1.18x** | 18.80 | 20.26 |
+| L3 dickens 16 KB | 1092 | 780 | **1.40x** | 16.91 | 18.62 |
+| L3 dickens 64 KB | 1394 | 1192 | **1.17x** | 14.02 | 15.20 |
+| L19 Main.js 1 KB | 464 | 455 | **1.02x** | 20.51 | 20.51 |
+| L19 Main.js 4 KB | 833 | 812 | **1.03x** | 16.60 | 17.58 |
+| L19 Main.js 16 KB | 1365 | 1170 | **1.17x** | 11.60 | 12.70 |
+| L19 Main.js 64 KB | 1680 | 1237 | **1.36x** | 11.12 | 12.22 |
+| L3 Main.js 1 KB | 491 | 455 | **1.08x** | 19.53 | 19.53 |
+| L3 Main.js 4 KB | 910 | 806 | **1.13x** | 14.89 | 15.87 |
+| L3 Main.js 16 KB | 1489 | 1260 | **1.18x** | 10.99 | 12.15 |
+| L3 Main.js 64 KB | 1928 | 1524 | **1.26x** | 10.10 | 11.11 |
+| L19 mozilla 1 KB | 431 | 464 | **0.93x** | 14.65 | 15.62 |
+| L19 mozilla 4 KB | 799 | 664 | **1.20x** | 17.09 | 17.82 |
+| L19 mozilla 16 KB | 1260 | 1092 | **1.15x** | 13.37 | 14.47 |
+| L19 mozilla 64 KB | 1986 | 1725 | **1.15x** | 9.32 | 10.13 |
+| L3 mozilla 1 KB | 512 | 424 | **1.21x** | 13.67 | 13.67 |
+| L3 mozilla 4 KB | 902 | 669 | **1.35x** | 17.09 | 18.07 |
+| L3 mozilla 16 KB | 1365 | 1092 | **1.25x** | 13.43 | 14.53 |
+| L3 mozilla 64 KB | 2341 | 1725 | **1.36x** | 7.83 | 8.53 |
+| L19 xml 1 KB | 447 | 431 | **1.04x** | 19.53 | 19.53 |
+| L19 xml 4 KB | 1311 | 1229 | **1.07x** | 9.28 | 10.01 |
+| L19 xml 16 KB | 3094 | 2674 | **1.16x** | 5.00 | 5.37 |
+| L19 xml 64 KB | 5041 | 4096 | **1.23x** | 3.45 | 3.83 |
+| L3 xml 1 KB | 501 | 473 | **1.06x** | 19.53 | 19.53 |
+| L3 xml 4 KB | 1199 | 1057 | **1.13x** | 11.23 | 11.72 |
+| L3 xml 16 KB | 2829 | 2246 | **1.26x** | 5.92 | 6.41 |
+| L3 xml 64 KB | 4369 | 3449 | **1.27x** | 4.33 | 4.81 |
+
+31 of 32 faster by time (1.02–1.56x), and none takes more instructions. The exception is mozilla's first 1 KB at
+L19: 0.93x in time (2.4 against 2.2 µs) with 6% fewer instructions; the scratch harness, interleaving the two
+decoders, had it at 1.16x. At 1 KB a frame is one block and per-frame setup dominates (table builds, the
+checksum's init and digest), so these rows are the most sensitive to the machine's state.
+
+### Allocations
+
+`Allocations:Zstd_decode_L1`, `_L19`, and their `_streaming` forms (JSON, 120 KB): zero, after a first frame,
+one call or streamed in 1,000-byte pieces (`Thresholds/CompressionBenchmarks.Allocations:Zstd_*`, checked with
+`benchmark thresholds check --filter 'Allocations:Zstd.*'`). The decoder allocates its tables and literal buffer
+(160 KB) at creation; streaming adds the window (window size + 128 KB + 64) and an input stash (128 KB) on its
+first frame, growing only for a larger window.
+
+### How it got there (instructions per byte from a scratch harness that interleaves the two decoders)
+
+| Step | Effect |
+|---|---|
+| First complete decoder (libzstd's loops: X1 four-stream fast loop with sentinel bits, sequences executed one at a time with 16/32-byte wild copies, careful path out of line) | Already 5–28% faster than libzstd on every Silesia input; 1–4 KB inputs 1–24% slower, with ~25 K extra instructions per frame |
+| Table-building scratch in raw workspace memory instead of `InlineArray`s | 1–4 KB inputs: 18–35% fewer instructions, now 10–24% faster than libzstd. An `InlineArray<256, Int16>` passed `borrowing` was copied (512 bytes, `memmove`) at every subscript in the FSE spreading loop: 16,000 copies per 4 KB frame, 22% of its time |
+| Near-start bit reload as a static function taking values, not a `mutating` method | −1 to −1.5%: the reader had been spilled for the whole sequence loop (its address escaped to the out-of-line call) |
+| FSE states as absolute entry indices in the workspace (one table pointer for all three) and pointer positions for output and literals | −3 to −5% instructions, 10–20% faster: spills in the loop 21 → 10 stack accesses per sequence |
+| Double-symbol (X2) Huffman tables, chosen by a measured rule | dickens L1 −8% instructions, 1.08x → 1.23x libzstd; nothing else moves by more than 0.1% |
+
+Kept out, with the measurement:
+
+| Change | Measured | Outcome |
+|---|---|---|
+| libzstd's `HUF_selectDecoder` cost model for X1/X2 | picks X2 for x-ray's literals (compressing to 12–13/16): x-ray L1 +6% instructions, 1.12x → 1.07x libzstd; mozilla, xml +0.3–4% | replaced by "X2 when literals compress to under 10/16 and there are 8 KB or more" |
+| Prefetching each match's source when its offset is decoded (libzstd does on AArch64; `Builtin.int_prefetch` gives `prfm pldl1keep`) | +0.7% instructions; interleaved A/B, 3 rounds: mozilla L19 1,315 against 1,411 MB/s, long=27 1,391 against 1,423, x-ray and dickens unchanged | removed |
+| libzstd's long-offset decoder (8 sequences decoded ahead, matches prefetched) | not built: the `--long=27` case is already 1.2–1.3x libzstd | — |
+
 ## 2026-11-17, the proposals pass: named fields, byte-ordered cursors, macros, BytesAsync, stitched ChaCha20-Poly1305 (baselines `trk-t0` … `trk-t5`, `trk-final`, each also `-portable` and `-portable-no-c` where run; Swift 6.4.4)
 
 Every proposal from the 2026-11-16 review, implemented one step at a time, each step benchmarked across every

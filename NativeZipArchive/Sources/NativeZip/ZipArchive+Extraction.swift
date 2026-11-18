@@ -148,11 +148,13 @@ public struct ZipExtractor: ~Copyable {
     private var directoryMetadata: [DirectoryJob] = []
     private var failures: [ExtractionFailure] = []
     /// Planned items by destination (case-folded on case-insensitive volumes): which job writes each.
-    private var claims: [String: Claim] = [:]
+    private var claims: [ClaimKey: Claim] = [:]
     /// Each destination root: a number for claim keys, and whether its volume distinguishes case.
     private var roots: [FilePath: (index: Int, caseSensitive: Bool)] = [:]
     /// Decodes symbolic links' destinations during planning.
     private var linkDecoder: ZipDecoder?
+    /// The last file's parent directory, already created: its root's number and relative name.
+    private var lastParent: (root: Int, name: String) = (-1, "")
 
     private enum Claim {
         case file(Int), link(Int)
@@ -230,7 +232,7 @@ public struct ZipExtractor: ~Copyable {
         for entry in entries ?? archive.entries {
             if queue.isAborted { throw CancellationError() }
             if options.junkPaths, entry.kind == .directory { continue }
-            guard let (relative, adjusted) = Self.relativePath(for: entry, options: options) else {
+            guard let (relative, name, adjusted) = Self.relativePath(for: entry, options: options) else {
                 options.onEvent?(.pathAdjusted(entry, path: FilePath()))
                 continue
             }
@@ -238,7 +240,7 @@ public struct ZipExtractor: ~Copyable {
             do {
                 // `relative` has no `..` and isn't absolute, so this can't leave `root`; checked anyway.
                 guard let target = root.lexicallyResolving(relative), target != root else { throw ZipError.unsafePath(entry.path) }
-                try plan(entry, relative: relative, target: target, archive: archive, rootKey: rootKey, options: options)
+                try plan(entry, relative: relative, name: name, target: target, archive: archive, rootKey: rootKey, options: options)
             } catch {
                 if stopOnFirstError { throw error }
                 failures.append(ExtractionFailure(archive: archive.url, entry: entry, path: relative, error: error))
@@ -248,8 +250,8 @@ public struct ZipExtractor: ~Copyable {
     }
 
     private mutating func plan(
-        _ entry: ZipEntry, relative: FilePath, target: FilePath, archive: ZipArchive, rootKey: (index: Int, caseSensitive: Bool),
-        options: ExtractionOptions
+        _ entry: ZipEntry, relative: FilePath, name: String, target: FilePath, archive: ZipArchive,
+        rootKey: (index: Int, caseSensitive: Bool), options: ExtractionOptions
     ) throws {
         let mask = options.keepSetIDBits ? 0o7777 : 0o777
         let metadata = ItemMetadata(
@@ -273,12 +275,17 @@ public struct ZipExtractor: ~Copyable {
         if case .unsupported = entry.encryption { throw ZipError.unsupportedEncryption(entry.path) }
         if entry.isEncrypted, options.password == nil { throw ZipError.passwordRequired(entry.path) }
 
-        try directories.create(target.removingLastComponent())
+        // The parent directory, unless it's the last file's: comparing the names' prefixes allocates nothing, where
+        // the parent's `FilePath` is a new one each time.
+        let parent = name.utf8.lastIndex(of: UInt8(ascii: "/")).map { name.utf8[..<$0] } ?? name.utf8[name.utf8.startIndex..<name.utf8.startIndex]
+        if rootKey.index != lastParent.root || !parent.elementsEqual(lastParent.name.utf8) {
+            try directories.create(target.removingLastComponent())
+            lastParent = (rootKey.index, String(Substring(parent)))
+        }
         guard try shouldUpdate(entry, at: target, mode: options.update) else { return }
         // The short relative path, not the absolute one: cheaper to hash. (Destinations nested inside one
         // another aren't matched up.)
-        let relativeKey = relative.string
-        let key = "\(rootKey.index)/" + (rootKey.caseSensitive ? relativeKey : relativeKey.lowercased())
+        let key = ClaimKey(root: rootKey.index, path: name, caseSensitive: rootKey.caseSensitive)
         guard let decision = try resolveConflict(entry, relative: relative, target: target, key: key, options: options) else { return }
 
         var fileMetadata = metadata
@@ -339,7 +346,7 @@ public struct ZipExtractor: ~Copyable {
     /// - Returns: `nil` if the entry is to be skipped (after reporting it).
     /// - Throws: `CocoaError` if an existing item can't be removed.
     private mutating func resolveConflict(
-        _ entry: ZipEntry, relative: FilePath, target: FilePath, key: String, options: ExtractionOptions
+        _ entry: ZipEntry, relative: FilePath, target: FilePath, key: ClaimKey, options: ExtractionOptions
     ) throws -> Decision? {
         func shouldReplace() -> Bool {
             switch options.overwrite {
@@ -372,14 +379,18 @@ public struct ZipExtractor: ~Copyable {
     /// The path an entry is extracted to, relative to the destination: with a leading `/`, `.`, and `..`
     /// components removed (Info-ZIP's behavior), flattened or lowercased per `options`.
     ///
-    /// - Returns: The path, and whether anything unsafe was removed; `nil` if nothing is left.
-    private static func relativePath(for entry: ZipEntry, options: ExtractionOptions) -> (FilePath, adjusted: Bool)? {
+    /// - Returns: The path, the same as a string (for a clean name, the entry's own: no copy), and whether
+    ///   anything unsafe was removed; `nil` if nothing is left.
+    private static func relativePath(for entry: ZipEntry, options: ExtractionOptions) -> (FilePath, name: String, adjusted: Bool)? {
         var name = entry.path
         switch options.lowercaseNames {
         case .none: break
         case .fromUppercaseHosts: if entry.hostSystem == 0, name.uppercased() == name { name = name.lowercased() }
         case .all: name = name.lowercased()
         }
+        // Most names are already clean: no leading `/`, no empty, `.`, or `..` components. Those become the
+        // path as they are, without splitting and rejoining (an array and a string per entry).
+        if !options.junkPaths, Self.isClean(name.utf8) { return (FilePath(name), name, false) }
         var adjusted = name.hasPrefix("/")
         var components: [Substring] = []
         for component in name.split(separator: "/", omittingEmptySubsequences: true) {
@@ -391,7 +402,26 @@ public struct ZipExtractor: ~Copyable {
         }
         if options.junkPaths, let last = components.last { components = [last] }
         guard !components.isEmpty else { return nil }
-        return (FilePath(components.joined(separator: "/")), adjusted)
+        let joined = components.joined(separator: "/")
+        return (FilePath(joined), joined, adjusted)
+    }
+
+    /// Whether `name` needs no cleaning: not empty, and no component empty, `.`, or `..` (which also rules out a
+    /// leading or trailing `/`, and `//`).
+    private static func isClean(_ name: String.UTF8View) -> Bool {
+        var componentLength = 0
+        var dots = 0
+        for byte in name {
+            if byte == UInt8(ascii: "/") {
+                if componentLength == 0 || componentLength == dots && dots <= 2 { return false }
+                componentLength = 0
+                dots = 0
+            } else {
+                componentLength &+= 1
+                if byte == UInt8(ascii: ".") { dots &+= 1 }
+            }
+        }
+        return componentLength > 0 && !(componentLength == dots && dots <= 2)
     }
 
     // MARK: Running
@@ -577,6 +607,56 @@ public struct ZipExtractor: ~Copyable {
 
 /// A file to write. A class: jobs are queued and handed to workers, and copying a struct's fields (some
 /// resilient, like `Date?`) went through value witnesses.
+/// A destination, as its volume compares names: its root's number and its path relative to the root, with case
+/// ignored where the volume ignores it (APFS's default).
+///
+/// Compared and hashed in place, ASCII case folded byte by byte: building a `"\(root)/\(path.lowercased())"` key
+/// was two or three allocations per entry. A non-ASCII name on a case-insensitive volume falls back to
+/// `lowercased()`, as before.
+struct ClaimKey: Hashable {
+    let root: Int
+    let path: String
+    let caseSensitive: Bool
+
+    /// Whether every byte of `path` is ASCII.
+    private var isASCII: Bool { path.utf8.allSatisfy { $0 < 0x80 } }
+
+    /// An ASCII letter in lowercase; any other byte as it is.
+    @inline(__always)
+    private static func folded(_ byte: UInt8) -> UInt8 {
+        byte &- UInt8(ascii: "A") < 26 ? byte | 0x20 : byte
+    }
+
+    static func == (lhs: ClaimKey, rhs: ClaimKey) -> Bool {
+        guard lhs.root == rhs.root else { return false }
+        if lhs.caseSensitive { return lhs.path == rhs.path }
+        guard lhs.isASCII, rhs.isASCII else { return lhs.path.lowercased() == rhs.path.lowercased() }
+        return lhs.path.utf8.elementsEqual(rhs.path.utf8) { folded($0) == folded($1) }
+    }
+
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(root)
+        if caseSensitive {
+            hasher.combine(path)
+            return
+        }
+        // Case-folded bytes, 8 at a time. A non-ASCII name hashes its lowercased form the same way, so names
+        // equal under `lowercased()` hash alike.
+        func combine(_ bytes: some Sequence<UInt8>) {
+            var word: UInt64 = 0
+            var count = 0
+            for byte in bytes {
+                word = word &<< 8 | UInt64(Self.folded(byte))
+                count &+= 1
+                if count & 7 == 0 { hasher.combine(word); word = 0 }
+            }
+            hasher.combine(word)
+            hasher.combine(count)
+        }
+        if isASCII { combine(path.utf8) } else { combine(path.lowercased().utf8) }
+    }
+}
+
 final class FileJob: Sendable {
     /// 0 waiting, 1 started, 2 cancelled (replaced by a later entry before it started).
     private let state = Atomic<UInt8>(0)
@@ -681,14 +761,17 @@ private final class FailureLog: Sendable {
 /// more) are handed out largest first, so a big one doesn't start last and leave the other workers idle while
 /// it finishes; small files in plan order. Workers that don't take small files wait for large ones.
 final class JobQueue: Sendable {
-    private struct State {
+    // Safe to use despite holding unsafe continuations: each is resumed exactly once (see below).
+    @safe private struct State {
         var large: [FileJob] = []
         var small: [FileJob] = []
         var smallHead = 0
         var finished = false
         var aborted = false
-        var anyWaiters: [CheckedContinuation<FileJob?, Never>] = []
-        var largeWaiters: [CheckedContinuation<FileJob?, Never>] = []
+        // Unsafe continuations: a checked one allocates its checker each time a worker waits. Each is resumed
+        // exactly once: immediately in `next`, or by `push` or `finish`, which remove it as they resume it.
+        var anyWaiters: [UnsafeContinuation<FileJob?, Never>] = unsafe []
+        var largeWaiters: [UnsafeContinuation<FileJob?, Never>] = unsafe []
 
         enum Take {
             case job(FileJob), done, wait
@@ -715,10 +798,11 @@ final class JobQueue: Sendable {
     func push(_ job: FileJob) {
         let isLarge = job.entry.uncompressedSize >= ZipExtractor.largeEntrySize
         state.withLock { state in
-            if isLarge, let waiter = state.largeWaiters.popLast() {
-                waiter.resume(returning: job)
-            } else if let waiter = state.anyWaiters.popLast() {
-                waiter.resume(returning: job)
+            // Unsafe: resuming an unchecked continuation. Safe: popped as it's resumed, so only once.
+            if isLarge, let waiter = unsafe state.largeWaiters.popLast() {
+                unsafe waiter.resume(returning: job)
+            } else if let waiter = unsafe state.anyWaiters.popLast() {
+                unsafe waiter.resume(returning: job)
             } else if isLarge {
                 state.large.append(job)
             } else {
@@ -730,13 +814,14 @@ final class JobQueue: Sendable {
     /// The next job for a worker, waiting for planning if none is ready; `nil` once everything is done.
     func next(takingSmallFiles: Bool) async -> FileJob? {
         if case let .job(job) = state.withLock({ $0.take(smallFiles: takingSmallFiles) }) { return job }
-        return await withCheckedContinuation { continuation in
+        // Unsafe: an unchecked continuation. Safe: resumed exactly once, as the waiter lists' comment explains.
+        return await unsafe withUnsafeContinuation { continuation in
             state.withLock { state in
                 switch state.take(smallFiles: takingSmallFiles) {
-                case let .job(job): continuation.resume(returning: job)
-                case .done: continuation.resume(returning: nil)
+                case let .job(job): unsafe continuation.resume(returning: job)
+                case .done: unsafe continuation.resume(returning: nil)
                 case .wait:
-                    if takingSmallFiles { state.anyWaiters.append(continuation) } else { state.largeWaiters.append(continuation) }
+                    if takingSmallFiles { unsafe state.anyWaiters.append(continuation) } else { unsafe state.largeWaiters.append(continuation) }
                 }
             }
         }
@@ -746,11 +831,9 @@ final class JobQueue: Sendable {
     func finish() {
         state.withLock { state in
             state.finished = true
-            for waiter in state.anyWaiters + state.largeWaiters {
-                waiter.resume(returning: nil)
-            }
-            state.anyWaiters = []
-            state.largeWaiters = []
+            // Unsafe: resuming unchecked continuations. Safe: each is popped as it's resumed, so only once.
+            while let waiter = unsafe state.anyWaiters.popLast() { unsafe waiter.resume(returning: nil) }
+            while let waiter = unsafe state.largeWaiters.popLast() { unsafe waiter.resume(returning: nil) }
         }
     }
 

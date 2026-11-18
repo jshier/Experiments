@@ -114,14 +114,25 @@ public struct SynchronousTransform<Base: ByteTransform & ~Copyable>: ~Copyable {
     public var base: Base
 
     /// Wraps `base`.
+    ///
+    /// - Parameter base: The stage.
     public init(_ base: consuming Base) {
         self.base = base
     }
 }
 
 extension SynchronousTransform: AsyncByteTransform where Base: ~Copyable {
+    /// The stage's error type.
     public typealias Failure = Base.Failure
 
+    /// Runs the stage's `transform` where the caller is, without suspending.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append transformed bytes.
+    ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
+    /// - Returns: The stage's progress.
+    /// - Throws: The stage's `Failure`.
     public nonisolated(nonsending) mutating func transform(
         _ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush
     ) async throws(Failure) -> TransformProgress {
@@ -138,6 +149,10 @@ public struct OffloadedTransform<Base: ByteTransform & ~Copyable & SendableMetat
     public let queue: DispatchQueue
 
     /// Wraps `base`, to run on `queue`.
+    ///
+    /// - Parameters:
+    ///   - base: The stage.
+    ///   - queue: Where its calls run.
     public init(_ base: consuming Base, queue: DispatchQueue) {
         self.base = base
         self.queue = queue
@@ -151,8 +166,17 @@ struct UnsafeStage<Base: ~Copyable>: @unchecked Sendable {
 }
 
 extension OffloadedTransform: AsyncByteTransform where Base: ~Copyable & SendableMetatype {
+    /// The stage's error type.
     public typealias Failure = Base.Failure
 
+    /// Runs the stage's `transform` on ``queue``, suspending until it returns.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append transformed bytes.
+    ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
+    /// - Returns: The stage's progress.
+    /// - Throws: The stage's `Failure`.
     public nonisolated(nonsending) mutating func transform(
         _ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush
     ) async throws(Failure) -> TransformProgress {

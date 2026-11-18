@@ -239,6 +239,11 @@ public enum Base64 {
     static func encodeBlock(
         _ block: InlineArray<48, UInt8>, table: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>)
     ) -> InlineArray<64, UInt8> {
+        // Tried (2026-11-18): reshuffling each 3-byte group into its 4 output bytes (one-register `tbl`s, then
+        // shifts and masks in 32-bit lanes, no interleave), as SSE/AVX encoders do. 75 instructions per block
+        // against this one's 32: the field extraction alone is 44 vector operations, where deinterleaved bytes take
+        // 10, and LLVM folds this kernel's `zip`s into `st2` stores. Per-lane shift amounts on 16-bit lanes were
+        // worse (143), and lane picks from two vectors became byte inserts until written as `ext`.
         let source = bitCast(block, to: InlineArray<3, SIMD16<UInt8>>.self)
         let (first, second, third) = ByteLanes.deinterleave(source[0], source[1], source[2])
         let (c0, c1, c2, c3) = ByteLanes.interleave(

@@ -50,11 +50,11 @@ public extension ZipArchive {
         switch encryption {
         case .traditional:
             guard payload.byteCount >= TraditionalCipher.headerSize else { return false }
-            var cipher = TraditionalCipher(password: key)
+            var cipher = TraditionalCipher(password: key.span.bytes)
             let expected = entry.flags & 0x8 != 0 ? UInt8(truncatingIfNeeded: entry.dosTime >> 8) : UInt8(truncatingIfNeeded: entry.crc32 >> 24)
             return cipher.checkByte(payload.extracting(0..<TraditionalCipher.headerSize)) == expected
         case let .aes(bits, _):
-            return WinZipAES.verify(payload, bits: bits, password: key)
+            return WinZipAES.verify(payload, bits: bits, password: key.span.bytes)
         case .unsupported:
             return false
         }

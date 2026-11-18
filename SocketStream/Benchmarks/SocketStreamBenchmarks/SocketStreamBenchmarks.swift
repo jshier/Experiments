@@ -87,6 +87,7 @@ let benchmarks: @Sendable () -> Void = {
     // Compressed, encrypted, both: the same packets through Bytes pipelines on the way.
     let protections = [
         Protection(compression: .deflate), Protection(compression: .brotli), Protection(encrypted: true),
+        Protection(encrypted: true, sealingLanes: 4),
         Protection(compression: .deflate, encrypted: true), Protection(compression: .brotli, encrypted: true),
     ]
     for protection in protections {

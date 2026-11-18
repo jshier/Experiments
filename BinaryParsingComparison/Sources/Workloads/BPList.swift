@@ -1,4 +1,5 @@
 import Bytes
+import BytesMacros
 import Foundation // `PropertyListSerialization`, for synthetic property lists.
 
 // Binary property lists: swift-binary-parsing's BPListParser example (`ExampleBPList`), ported to `Bytes`. It
@@ -9,9 +10,11 @@ import Foundation // `PropertyListSerialization`, for synthetic property lists.
 // - Big-endian throughout: `BigEndianBytesReader`s, one per object, at the offset the table gives.
 // - Each object's marker byte is two named 4-bit fields: its type, and a size or count.
 // - Arrays' and dictionaries' references are sections of `count × reference size` bytes, read in a loop.
-// - The trailer is a fixed-size section, so its fields' checks fold to one.
+// - The trailer is a `@BinaryRecord` (one-byte fields, and `Padding` for its first six bytes), so its fields'
+//   checks fold to one.
 // - The format's integers have widths known only at run time (the trailer's offset and reference sizes, and 2^n
-//   bytes for an integer object): `read(UInt64.self, byteCount:)` (`PortSupport.swift`) reads one with one load.
+//   bytes for an integer object): `read(UInt64.self, byteCount:)` and `read(Int64.self, signedByteCount:)` read
+//   one with one load.
 //
 // Results match the example's, including where it departs from Apple's format: 1-, 2-, and 4-byte integers are
 // sign-extended (the format's are unsigned), 4-byte reals are taken as the low bits of a `Double`, dates as an
@@ -20,6 +23,17 @@ import Foundation // `PropertyListSerialization`, for synthetic property lists.
 //
 // An object referenced from several places (a shared dictionary key) is parsed at each reference, in both: the
 // example's model has no identity to share, and caching parsed objects would allocate a table.
+
+/// The trailer: the last 32 bytes.
+@BinaryRecord(.bigEndian)
+struct BPListTrailer {
+    var unused: Padding<Byte6> // Unused, and the sort version.
+    @Field(Byte.self) var offsetSize: Int
+    @Field(Byte.self) var objectReferenceSize: Int
+    @Field(Byte8.self) var objectCount: Int
+    @Field(Byte8.self) var topObjectIndex: Int
+    @Field(Byte8.self) var offsetTableStart: Int
+}
 
 /// A binary property list's object marker byte, by name.
 enum BPListMarker {
@@ -45,15 +59,11 @@ public enum BPList {
 
     static func readTrailer(_ data: RawSpan) throws(BytesError) -> ExampleBPList.Trailer {
         var reader = try BigEndianBytesReader(data, atByteOffset: data.byteCount &- 32)
-        var fields = try reader.readSection(byteCount: 32)
-        try fields.skip(byteCount: 6) // Unused, and the sort version.
-        let offsetSize = Int(try fields.read(UInt8.self))
-        let objectReferenceSize = Int(try fields.read(UInt8.self))
-        let objectCount = try fields.read(Int.self, as: Byte8.self)
-        let topObjectIndex = try fields.read(Int.self, as: Byte8.self)
-        let offsetTableStart = try fields.read(Int.self, as: Byte8.self)
+        let fields = try reader.read(BPListTrailer.self)
+        let (offsetSize, objectReferenceSize) = (fields.offsetSize, fields.objectReferenceSize)
+        let (topObjectIndex, offsetTableStart) = (fields.topObjectIndex, fields.offsetTableStart)
 
-        let (tableSize, overflow) = offsetSize.multipliedReportingOverflow(by: objectCount)
+        let (tableSize, overflow) = offsetSize.multipliedReportingOverflow(by: fields.objectCount)
         guard !overflow else { throw .invalidValue }
         var table = try BigEndianBytesReader(data, atByteOffset: offsetTableStart)
         var entries = try table.readSection(byteCount: tableSize)
@@ -173,10 +183,7 @@ public enum BPList {
     @inline(__always)
     static func readSigned(_ reader: inout BigEndianBytesReader, byteCount: Int) throws(BytesError) -> Int64 {
         guard byteCount > 0 else { throw .invalidValue }
-        if byteCount <= 8 {
-            let unusedBits = 64 &- 8 &* byteCount
-            return Int64(bitPattern: try reader.read(UInt64.self, byteCount: byteCount) &<< UInt64(unusedBits)) &>> Int64(unusedBits)
-        }
+        if byteCount <= 8 { return try reader.read(Int64.self, signedByteCount: byteCount) }
         let value = try readWide(&reader, byteCount: byteCount) { fill, value in
             fill == 0xFF || (fill == 0 && Int64(bitPattern: value) >= 0)
         }

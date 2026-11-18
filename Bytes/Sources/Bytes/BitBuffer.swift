@@ -128,9 +128,11 @@ public struct BitBuffer: ~Copyable, ~Escapable {
     /// }
     /// ```
     ///
-    /// Brotli's decoder doesn't use it: in its command loop, rewinding at its six "input ran out" sites in
-    /// place of making a new buffer at the unit's bit position ran 2–3% more instructions on 1.6 KB streams
-    /// (decoded entirely near the input's end, where those sites are), inlined or not.
+    /// Brotli's decoder makes a new buffer at the unit's bit position instead, at its six "input ran out" sites.
+    /// Rewinding there once ran 2–3% more instructions on 1.6 KB streams; with the decoder's state in locals
+    /// (2026-11-18), the two measure the same on every stream (54 K instructions for the 1.6 KB one), and the
+    /// only static difference is in those cold sites (about 10% more stack accesses in the function, the inner
+    /// loops unchanged).
     ///
     /// - Parameter position: A position this buffer reported.
     /// - Precondition: `position` is within the data.

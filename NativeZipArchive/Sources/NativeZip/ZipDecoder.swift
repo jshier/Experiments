@@ -1,14 +1,18 @@
 internal import Bytes
+internal import BytesCompression
 internal import CBZip2
 import Compression
+import Synchronization
 import zlib
 
 /// Reusable decompression state: decoders for every supported method plus output buffers.
 ///
 /// Create one per worker and pass it to ``ZipArchive/contents(of:using:password:_:)``. Its buffers are
-/// allocated once, so steady-state DEFLATE decoding performs no allocations (bzip2, xz, and LZMA set up
-/// their libraries' or decoder's state per entry; encrypted entries are decrypted into a buffer that grows
-/// to the largest payload). It's `~Copyable` because it uniquely owns its buffers.
+/// allocated once, so steady-state decoding performs no allocations (bzip2 and xz set up their libraries' state
+/// per entry). Encrypted entries are decrypted in pieces into a staging buffer the decoder owns, as their
+/// decompressor takes input: no entry is held whole in memory. (Deflate64 and LZMA, whose decoders here read
+/// the whole stream at once, are the exception: their encrypted entries are decrypted into a buffer that
+/// grows to the largest such payload.) It's `~Copyable` because it uniquely owns its buffers.
 @safe
 public struct ZipDecoder: ~Copyable {
     /// Which DEFLATE implementation decodes.
@@ -29,10 +33,16 @@ public struct ZipDecoder: ~Copyable {
     /// it). The `Inflater` keeps that much of the previous output at the front of each buffer.
     static let historySize = 64 << 10
 
-    /// What decodes the current entry.
+    /// What decodes the current entry. `streamingInflate` is DEFLATE for encrypted entries: `BytesCompression`'s
+    /// decoder, which takes its input in pieces, as they're decrypted. `zstdWhole` is a Zstandard entry that fits
+    /// one chunk, decoded in one call straight into the output buffer (no window); `zstd` streams the others through
+    /// the decoder's window.
     private enum Codec {
-        case inflate(window: Int), zlib, bzip2, lzma, xz
+        case inflate(window: Int), streamingInflate, zlib, bzip2, lzma, xz, zstd, zstdWhole
     }
+
+    /// Decrypted input waiting for a decompressor, 256 KB: decryption fills it as the decompressor drains it.
+    static let stagingSize = 256 << 10
 
     // zlib, bzip2, and Compression keep back-pointers to their stream structures, so those live at stable
     // heap addresses rather than inline in this (movable) struct. zlib's is created with the decoder (for the
@@ -42,11 +52,23 @@ public struct ZipDecoder: ~Copyable {
     private var xzStream: UnsafeMutablePointer<compression_stream>?
     private var inflater: Inflater
     private var lzma = LZMADecoder()
+    /// DEFLATE for encrypted entries, whose input arrives in pieces.
+    /// Made on the first encrypted DEFLATE entry.
+    private var streamingInflater: DeflateDecoder?
+    /// Zstandard, made on the first such entry (its tables are 160 KB; streaming adds a window).
+    private var zstd: ZstdDecoder?
+    /// Decrypted input for the decompressors, refilled as they consume it. Made on the first encrypted entry, so
+    /// decoders that never see one (a worker per core, verifying) don't allocate it.
+    private var staging: ByteBuffer?
+    /// The current encrypted entry's decryption, and its payload (in the mapped file), which it reads.
+    private var decryptor: PayloadDecryptor?
+    private var payload = unsafe UnsafeRawBufferPointer(start: nil, count: 0)
     /// Two output buffers, each history plus a chunk. The second is used only by the pipelined path; its
     /// pages are untouched otherwise. Raw allocations rather than arrays because the pipelined path sends
     /// chunks of them to child tasks (see ``Chunk``); freed in `deinit`, never reallocated.
     private let buffers: (UnsafeMutableRawBufferPointer, UnsafeMutableRawBufferPointer)
-    /// Decrypted payloads, grown as needed (and released after a large one).
+    /// Whole decrypted payloads, for the decoders that read their whole input at once (Deflate64, LZMA): grown
+    /// as needed, and released after a large one.
     private var decrypted = unsafe UnsafeMutableRawBufferPointer(start: nil, count: 0)
     /// The current entry's compressed input and how much of it has been handed to a C library.
     private var input = unsafe UnsafeRawBufferPointer(start: nil, count: 0)
@@ -132,13 +154,22 @@ public struct ZipDecoder: ~Copyable {
     ///   ``ZipError/corruptData(_:)`` for invalid or truncated data; whatever `body` throws.
     @usableFromInline
     mutating func decode(_ payload: RawSpan, entry: ZipEntry, password: String?, _ body: (RawSpan) throws -> Void) throws {
-        defer { releaseLargeDecryption() }
+        defer { endDecryption() }
         try payload.withUnsafeBytes { payload in
-            let input = try unsafe decryptIfNeeded(payload, entry: entry, password: password)
+            let input = try unsafe prepareInput(payload, entry: entry, password: password)
             if entry.method == ZipArchive.Method.stored {
-                // Unsafe: a span over the decrypted buffer. Safe: it's this decoder's and isn't touched
-                // until the next entry; the span ends with the call.
-                if unsafe !input.isEmpty { try body(unsafe RawSpan(_unsafeBytes: input)) }
+                if decryptor != nil {
+                    // Decrypted straight into the output buffer, a chunk at a time.
+                    while decryptor?.isFinished == false {
+                        // Unsafe: a span over the decoder's buffer. Safe: as for decoded chunks, valid for the call.
+                        let chunk = unsafe decryptStored(into: 0)
+                        try body(unsafe RawSpan(_unsafeBytes: chunk.bytes))
+                    }
+                } else if unsafe !input.isEmpty {
+                    // Unsafe: a span over the decrypted buffer. Safe: it's this decoder's and isn't touched
+                    // until the next entry; the span ends with the call.
+                    try body(unsafe RawSpan(_unsafeBytes: input))
+                }
                 return
             }
             try unsafe begin(input, method: entry.method, size: entry.uncompressedSize, endMarker: entry.flags & 0x2 != 0, path: entry.path)
@@ -156,10 +187,11 @@ public struct ZipDecoder: ~Copyable {
         }
     }
 
-    /// A chunk of decoder output handed to a concurrent consumer. Valid until that consumer returns.
-    /// Not `Sendable`: each chunk is created fresh and *sent* to exactly one child task.
+    /// A chunk of decoder output handed to a concurrent consumer. Valid until that consumer asks for the next.
+    /// `@unchecked Sendable`: a pointer into the decoder's buffer, handed to exactly one consumer task, and the
+    /// buffer isn't written again until that consumer is done with it (``ChunkHandoff``'s protocol).
     @unsafe
-    struct Chunk {
+    struct Chunk: @unchecked Sendable {
         let bytes: UnsafeRawBufferPointer
     }
 
@@ -182,70 +214,85 @@ public struct ZipDecoder: ~Copyable {
         password: String?,
         consume: @escaping @Sendable (Chunk) throws -> Void
     ) async throws {
-        defer { releaseLargeDecryption() }
-        let input = try unsafe decryptIfNeeded(payload, entry: entry, password: password)
+        defer { endDecryption() }
+        let input = try unsafe prepareInput(payload, entry: entry, password: password)
         if entry.method == ZipArchive.Method.stored {
-            try unsafe consume(Chunk(bytes: input))
+            if decryptor != nil {
+                // Decrypted a chunk at a time; consumed in order, one at a time (the buffer is reused).
+                while decryptor?.isFinished == false {
+                    try unsafe consume(decryptStored(into: 0))
+                }
+            } else {
+                try unsafe consume(Chunk(bytes: input))
+            }
             return
         }
         try unsafe begin(input, method: entry.method, size: entry.uncompressedSize, endMarker: entry.flags & 0x2 != 0, path: entry.path)
         defer { closeStream() }
+        // One consumer task for the whole entry, handed each chunk in turn: no allocation per chunk (a child task
+        // per chunk was one each).
+        let handoff = ChunkHandoff()
         try await withThrowingTaskGroup(of: Void.self) { group in
+            group.addTask {
+                do {
+                    while let chunk = await unsafe handoff.receive() { try unsafe consume(chunk) }
+                } catch {
+                    handoff.fail()
+                    throw error
+                }
+            }
+            // A decoding error ends the consumer's loop before the group waits for it.
+            defer { handoff.close() }
             var target = 0
-            var consumerRunning = false
             while true {
                 let (output, finished) = try unsafe step(into: target, path: entry.path)
                 if unsafe !output.isEmpty {
-                    // Region isolation (rightly) sees this chunk as part of `self`, since it points into our
-                    // buffer. Sending it is still race-free because of the hand-off protocol below: this
-                    // buffer isn't written again until its consumer has finished.
-                    nonisolated(unsafe) let chunk = unsafe Chunk(bytes: output)
-                    // The previous consumer must finish before the next starts (ordering), and before
-                    // its buffer is decoded into again (which happens on the following iteration).
-                    if consumerRunning { try await group.next() }
-                    group.addTask { try unsafe consume(chunk) }
-                    consumerRunning = true
+                    // `send` returns once the consumer has finished the previous chunk and taken this one: so the
+                    // buffer decoded into next (the other one) is free. `false`: the consumer failed; stop.
+                    guard await unsafe handoff.send(Chunk(bytes: output)) else { break }
                     target ^= 1
                 }
                 if finished { break }
             }
+            handoff.close()
             try await group.waitForAll()
         }
     }
 
     // MARK: Decryption
 
-    /// The payload's compressed data: `payload` itself, or for an encrypted entry, its decryption in
-    /// ``decrypted``.
+    /// Prepares the entry's input: for an unencrypted entry, `payload` itself. For an encrypted one, checks the
+    /// password (and for AES the whole payload's authentication code), then sets up ``decryptor`` to decrypt in
+    /// pieces as the decompressor takes input, and returns an empty buffer; or, for Deflate64 and LZMA, whose
+    /// decoders read their whole input at once, decrypts it all into ``decrypted`` and returns that.
     ///
     /// - Throws: ``ZipError/passwordRequired(_:)`` without a password; ``ZipError/incorrectPassword(_:)``
     ///   when its check fails; ``ZipError/authenticationFailed(_:)`` for an AES entry whose authentication
     ///   code doesn't match; ``ZipError/unsupportedEncryption(_:)``; ``ZipError/truncated(_:)``.
-    private mutating func decryptIfNeeded(_ payload: UnsafeRawBufferPointer, entry: ZipEntry, password: String?) throws -> UnsafeRawBufferPointer {
+    private mutating func prepareInput(_ payload: UnsafeRawBufferPointer, entry: ZipEntry, password: String?) throws -> UnsafeRawBufferPointer {
         guard let encryption = entry.encryption else { return unsafe payload }
         if case .unsupported = encryption { throw ZipError.unsupportedEncryption(entry.path) }
         guard let password else { throw ZipError.passwordRequired(entry.path) }
-        let key = Array(password.utf8)
-        // Unsafe: spans over `payload` (valid for this call) and over `decrypted`, which this decoder owns.
+        var key = password
+        // Unsafe: a span over `payload`, valid for this call (it's in the mapped archive).
         let source = unsafe RawSpan(_unsafeBytes: payload)
+        let decryptor: PayloadDecryptor
         switch encryption {
         case .traditional:
             let header = TraditionalCipher.headerSize
             guard source.byteCount >= header else { throw ZipError.truncated("encryption header for '\(entry.path)'") }
-            var cipher = TraditionalCipher(password: key)
+            var cipher = key.withUTF8 { unsafe TraditionalCipher(password: RawSpan(_unsafeBytes: UnsafeRawBufferPointer($0))) }
             // With a data descriptor the CRC wasn't known when the header was made: it checks the time instead.
             let expected = entry.flags & 0x8 != 0 ? UInt8(truncatingIfNeeded: entry.dosTime >> 8) : UInt8(truncatingIfNeeded: entry.crc32 >> 24)
             guard cipher.checkByte(source.extracting(0..<header)) == expected else { throw ZipError.incorrectPassword(entry.path) }
-            let count = source.byteCount - header
-            reserveDecrypted(count)
-            var output = unsafe MutableSpan<UInt8>(_unsafeStart: decrypted.baseAddress!.assumingMemoryBound(to: UInt8.self), count: count)
-            cipher.decrypt(Span(viewing: source.extracting(header...)), into: &output)
-            return unsafe UnsafeRawBufferPointer(rebasing: decrypted[..<count])
+            decryptor = PayloadDecryptor(cipher: .traditional(cipher), ciphertext: header..<source.byteCount, position: header)
         case let .aes(bits, _):
-            let count = WinZipAES.plaintextSize(payloadSize: source.byteCount, bits: bits)
-            reserveDecrypted(count)
             do {
-                _ = try unsafe WinZipAES.decrypt(source, bits: bits, password: key, into: decrypted)
+                // Unsafe: the password's UTF-8 as a span, valid inside `withUTF8`'s closure, which it doesn't outlive.
+                let (aes, counter, ciphertext) = try key.withUTF8 { (utf8) throws(WinZipAES.Failure) in
+                    try unsafe WinZipAES.open(source, bits: bits, password: RawSpan(_unsafeBytes: UnsafeRawBufferPointer(utf8)))
+                }
+                decryptor = PayloadDecryptor(cipher: .aes(aes, counter), ciphertext: ciphertext, position: ciphertext.lowerBound)
             } catch {
                 switch error {
                 case .badPassword: throw ZipError.incorrectPassword(entry.path)
@@ -253,10 +300,60 @@ public struct ZipDecoder: ~Copyable {
                 case .truncated: throw ZipError.truncated("encryption header for '\(entry.path)'")
                 }
             }
-            return unsafe UnsafeRawBufferPointer(rebasing: decrypted[..<count])
         case .unsupported:
             throw ZipError.unsupportedEncryption(entry.path)
         }
+        unsafe self.payload = payload
+        self.decryptor = decryptor
+        guard entry.method == ZipArchive.Method.deflate64 || entry.method == ZipArchive.Method.lzma else {
+            if staging == nil { staging = ByteBuffer(capacity: Self.stagingSize) }
+            return unsafe UnsafeRawBufferPointer(start: nil, count: 0)
+        }
+        // Decoders that read their whole input: decrypt it all, once.
+        let count = decryptor.ciphertext.count
+        reserveDecrypted(count)
+        // Unsafe: a span over `decrypted`, which this decoder owns and which holds `count` bytes (just reserved).
+        var whole = unsafe MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(rebasing: decrypted[..<count]))
+        _ = self.decryptor!.decryptNext(from: source, into: &whole)
+        self.decryptor = nil
+        return unsafe UnsafeRawBufferPointer(rebasing: decrypted[..<count])
+    }
+
+    /// Decrypts the next chunk of a stored entry into buffer `index`.
+    private mutating func decryptStored(into index: Int) -> Chunk {
+        let output = unsafe UnsafeMutableRawBufferPointer(rebasing: (index == 0 ? buffers.0 : buffers.1)[..<Self.chunkSize])
+        // Unsafe: spans over the payload (in the mapped archive, valid for the entry) and over this decoder's
+        // buffer; neither outlives the call.
+        var span = unsafe MutableRawSpan(_unsafeBytes: output)
+        let count = unsafe decryptor!.decryptNext(from: RawSpan(_unsafeBytes: payload), into: &span)
+        return unsafe Chunk(bytes: UnsafeRawBufferPointer(rebasing: output[..<count]))
+    }
+
+    /// Decrypts the next piece of ciphertext into the staging buffer's free space, after compacting what the
+    /// decompressor hasn't consumed to its front.
+    ///
+    /// - Returns: The number of bytes decrypted: 0 once all the ciphertext has been.
+    private mutating func refillStaging() -> Int {
+        guard var decryptor, !decryptor.isFinished else { return 0 }
+        _ = staging!.compact()
+        // Unsafe: a span over the payload, in the mapped archive and valid for the entry.
+        let source = unsafe RawSpan(_unsafeBytes: payload)
+        let count = staging!.fill { output in
+            output.withFreeCapacity { span, written in
+                written = decryptor.decryptNext(from: source, into: &span)
+                return written
+            }
+        }
+        self.decryptor = decryptor
+        return count
+    }
+
+    /// Forgets the entry's decryption, and frees a large whole-payload buffer.
+    private mutating func endDecryption() {
+        decryptor = nil
+        unsafe payload = UnsafeRawBufferPointer(start: nil, count: 0)
+        if staging != nil { staging!.removeAll() }
+        releaseLargeDecryption()
     }
 
     /// Makes ``decrypted`` hold at least `count` bytes (at least one, so its base address isn't `nil`).
@@ -283,6 +380,13 @@ public struct ZipDecoder: ~Copyable {
         consumed = 0
         lastEnd = 0
         switch method {
+        case ZipArchive.Method.deflated where decryptor != nil && backend == .bytes:
+            // Its input arrives in pieces, as it's decrypted: the streaming decoder.
+            codec = .streamingInflate
+            if streamingInflater == nil { streamingInflater = DeflateDecoder(format: .raw) }
+            streamingInflater!.reset()
+            // `prepareInput` made the staging buffer for the encrypted entry.
+            staging!.removeAll()
         case ZipArchive.Method.deflated where backend == .zlib:
             codec = .zlib
             guard unsafe inflateReset(stream!) == Z_OK else { throw ZipError.corruptData(path) }
@@ -306,6 +410,13 @@ public struct ZipDecoder: ~Copyable {
                 throw ZipError.corruptData(path)
             }
             streamOpen = true
+        case ZipArchive.Method.zstd:
+            if zstd == nil { zstd = ZstdDecoder() }
+            zstd!.reset()
+            if staging != nil { staging!.removeAll() }
+            // Small and unencrypted: one call into the output buffer, which is the history. (A wrong size in the
+            // header makes it throw for lack of room, as corrupt data.)
+            codec = decryptor == nil && size <= UInt64(Self.chunkSize) ? .zstdWhole : .zstd
         case ZipArchive.Method.lzma:
             codec = .lzma
             do {
@@ -361,6 +472,10 @@ public struct ZipDecoder: ~Copyable {
             lastBuffer = index
             lastEnd = end
             return unsafe (UnsafeRawBufferPointer(rebasing: output[history..<end]), finished)
+        case .streamingInflate:
+            let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
+            let (produced, finished) = try unsafe streamingInflateStep(into: chunk, path: path)
+            return unsafe (UnsafeRawBufferPointer(rebasing: chunk[..<produced]), finished)
         case .zlib:
             let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
             let (produced, finished) = try unsafe zlibStep(into: chunk, path: path)
@@ -373,6 +488,21 @@ public struct ZipDecoder: ~Copyable {
             let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
             let (produced, finished) = try unsafe xzStep(into: chunk, path: path)
             return unsafe (UnsafeRawBufferPointer(rebasing: chunk[..<produced]), finished)
+        case .zstd:
+            let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
+            let (produced, finished) = try unsafe zstdStep(into: chunk, path: path)
+            return unsafe (UnsafeRawBufferPointer(rebasing: chunk[..<produced]), finished)
+        case .zstdWhole:
+            do throws(BytesError) {
+                // Unsafe: spans over this decoder's buffer (all of it: the decoder may write past the content, into
+                // free capacity) and the entry's input, as for `.inflate`; the output span is finalized before return.
+                var span = unsafe OutputRawSpan(buffer: output, initializedCount: 0)
+                _ = try unsafe zstd!.decompressAll(RawSpan(_unsafeBytes: input), into: &span)
+                let produced = unsafe span.finalize(for: output)
+                return unsafe (UnsafeRawBufferPointer(rebasing: output[..<produced]), true)
+            } catch {
+                throw ZipError.corruptData(path)
+            }
         case .lzma:
             let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
             do {
@@ -386,11 +516,29 @@ public struct ZipDecoder: ~Copyable {
         }
     }
 
-    /// The next piece of input for a C library whose counts are 32 bits: payloads over 4 GB go in pieces.
+    /// The next piece of input for a C library whose counts are 32 bits: payloads over 4 GB go in pieces. For an
+    /// encrypted entry, the next piece decrypted into the staging buffer (the library has consumed the last).
     private mutating func nextInput() -> (UnsafeRawPointer?, Int) {
+        if decryptor != nil {
+            staging!.removeAll()
+            let count = refillStaging()
+            // Unsafe: a pointer to the staging buffer's bytes, which outlives the closure. Safe: the buffer is
+            // this decoder's, allocated once, and isn't written again until the library has consumed these bytes
+            // and asks for more.
+            switch staging {
+            case let .some(buffer): return buffer.unread.withUnsafeBytes { ($0.baseAddress, count) }
+            case .none: preconditionFailure("An encrypted entry has a staging buffer")
+            }
+        }
         let count = unsafe min(input.count - consumed, Int(UInt32.max))
         defer { consumed += count }
         return unsafe (input.baseAddress.map { unsafe $0 + consumed }, count)
+    }
+
+    /// Whether input remains for the library beyond what it has: undecrypted ciphertext, or unread payload.
+    private var hasMoreInput: Bool {
+        if let decryptor { return !decryptor.isFinished }
+        return unsafe consumed < input.count
     }
 
     /// Runs zlib until `output` is full or the stream ends. Unsafe: zlib's C API takes raw pointers and
@@ -403,7 +551,7 @@ public struct ZipDecoder: ~Copyable {
     /// - Throws: ``ZipError/corruptData(_:)`` on a zlib error or if no progress is possible (truncated input).
     private mutating func zlibStep(into output: UnsafeMutableRawBufferPointer, path: String) throws -> (produced: Int, finished: Bool) {
         let stream = unsafe stream!
-        if unsafe stream.pointee.avail_in == 0, unsafe consumed < input.count {
+        if unsafe stream.pointee.avail_in == 0, hasMoreInput {
             let (start, count) = unsafe nextInput()
             unsafe stream.pointee.next_in = UnsafeMutablePointer(mutating: start?.assumingMemoryBound(to: Bytef.self))
             unsafe stream.pointee.avail_in = uInt(count)
@@ -412,12 +560,74 @@ public struct ZipDecoder: ~Copyable {
         unsafe stream.pointee.avail_out = uInt(output.count)
         let status = unsafe zlib.inflate(stream, Z_NO_FLUSH)
         let produced = unsafe output.count - Int(stream.pointee.avail_out)
-        let pendingInput = unsafe stream.pointee.avail_in > 0 || consumed < input.count
+        let pendingInput = unsafe stream.pointee.avail_in > 0 || hasMoreInput
         switch status {
         case Z_STREAM_END: return (produced, true)
         case Z_OK where produced > 0 || pendingInput: return (produced, false)
         default: throw ZipError.corruptData(path) // Errors, or no progress possible (truncated input).
         }
+    }
+
+    /// Runs the streaming DEFLATE decoder until `output` is full or the stream ends, decrypting more input into
+    /// the staging buffer whenever it has used what's there.
+    ///
+    /// - Throws: ``ZipError/corruptData(_:)`` for an invalid stream, or one that needs input after all the
+    ///   ciphertext has been decrypted (truncated).
+    private mutating func streamingInflateStep(into output: UnsafeMutableRawBufferPointer, path: String) throws -> (produced: Int, finished: Bool) {
+        // Unsafe: an output span over this decoder's buffer. Safe: it covers exactly `output`, which the decoder
+        // owns, and is finalized before the call returns.
+        var span = unsafe OutputRawSpan(buffer: output, initializedCount: 0)
+        var finished = false
+        do throws(BytesError) {
+            while span.freeCapacity > 0 {
+                let progress: TransformProgress
+                switch staging {
+                case let .some(buffer): progress = try streamingInflater!.decompress(buffer.unread, into: &span)
+                case .none: preconditionFailure("An encrypted entry has a staging buffer")
+                }
+                staging!.consume(progress.consumed)
+                if progress.status == .finished { finished = true; break }
+                if progress.status == .needsOutput { break }
+                // Needs input: decrypt more, or the stream was cut short.
+                guard refillStaging() > 0 else { throw BytesError.insufficientData }
+            }
+        } catch {
+            throw ZipError.corruptData(path)
+        }
+        return unsafe (span.finalize(for: output), finished)
+    }
+
+    /// Runs the Zstandard decoder until `output` is full or the entry's frames end: from the payload, or for an
+    /// encrypted entry from the staging buffer, refilled as it's consumed.
+    private mutating func zstdStep(into output: UnsafeMutableRawBufferPointer, path: String) throws -> (produced: Int, finished: Bool) {
+        // Unsafe: an output span over this decoder's buffer. Safe: it covers exactly `output`, which the decoder
+        // owns, and is finalized before the call returns.
+        var span = unsafe OutputRawSpan(buffer: output, initializedCount: 0)
+        var finished = false
+        do throws(BytesError) {
+            while span.freeCapacity > 0 {
+                let progress: TransformProgress
+                if decryptor != nil {
+                    switch staging {
+                    case let .some(buffer): progress = try zstd!.decompress(buffer.unread, into: &span)
+                    case .none: preconditionFailure("An encrypted entry has a staging buffer")
+                    }
+                    staging!.consume(progress.consumed)
+                } else {
+                    // Unsafe: a span over the rest of the payload, in the mapped archive and valid for the entry.
+                    let rest = unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: input[consumed...]))
+                    progress = try zstd!.decompress(rest, into: &span)
+                    consumed &+= progress.consumed
+                }
+                if progress.status == .finished { finished = true; break }
+                if progress.status == .needsOutput { break }
+                // Needs input: decrypt more, or the stream was cut short.
+                guard decryptor != nil, refillStaging() > 0 else { throw BytesError.insufficientData }
+            }
+        } catch {
+            throw ZipError.corruptData(path)
+        }
+        return unsafe (span.finalize(for: output), finished)
     }
 
     /// Runs libbz2 until `output` is full or the stream ends. Unsafe: its C API takes raw pointers and
@@ -427,7 +637,7 @@ public struct ZipDecoder: ~Copyable {
         unsafe stream.pointee.next_out = output.baseAddress!.assumingMemoryBound(to: CChar.self)
         unsafe stream.pointee.avail_out = UInt32(output.count)
         while unsafe stream.pointee.avail_out > 0 {
-            if unsafe stream.pointee.avail_in == 0, unsafe consumed < input.count {
+            if unsafe stream.pointee.avail_in == 0, hasMoreInput {
                 let (start, count) = unsafe nextInput()
                 unsafe stream.pointee.next_in = UnsafeMutablePointer(mutating: start?.assumingMemoryBound(to: CChar.self))
                 unsafe stream.pointee.avail_in = UInt32(count)
@@ -438,7 +648,7 @@ public struct ZipDecoder: ~Copyable {
             if status == BZ_STREAM_END { return (produced, true) }
             guard status == BZ_OK else { throw ZipError.corruptData(path) }
             // No output and no input left: truncated.
-            if unsafe stream.pointee.avail_out == before, unsafe stream.pointee.avail_in == 0, unsafe consumed >= input.count {
+            if unsafe stream.pointee.avail_out == before, unsafe stream.pointee.avail_in == 0, !hasMoreInput {
                 throw ZipError.corruptData(path)
             }
         }
@@ -452,21 +662,101 @@ public struct ZipDecoder: ~Copyable {
         unsafe stream.pointee.dst_ptr = output.baseAddress!.assumingMemoryBound(to: UInt8.self)
         unsafe stream.pointee.dst_size = output.count
         while unsafe stream.pointee.dst_size > 0 {
-            if unsafe stream.pointee.src_size == 0, unsafe consumed < input.count {
-                // Compression's counts are full-width: hand over the rest at once.
-                let count = unsafe input.count - consumed
-                unsafe stream.pointee.src_ptr = input.baseAddress!.advanced(by: consumed).assumingMemoryBound(to: UInt8.self)
+            if unsafe stream.pointee.src_size == 0, hasMoreInput {
+                let (start, count) = unsafe nextInput()
+                unsafe stream.pointee.src_ptr = start!.assumingMemoryBound(to: UInt8.self)
                 unsafe stream.pointee.src_size = count
-                consumed += count
             }
             let before = unsafe stream.pointee.dst_size
             let status = unsafe compression_stream_process(stream, Int32(COMPRESSION_STREAM_FINALIZE.rawValue))
             let produced = unsafe output.count - stream.pointee.dst_size
             if status == COMPRESSION_STATUS_END { return (produced, true) }
             guard status == COMPRESSION_STATUS_OK else { throw ZipError.corruptData(path) }
-            if unsafe stream.pointee.dst_size == before, unsafe stream.pointee.src_size == 0 { throw ZipError.corruptData(path) }
+            if unsafe stream.pointee.dst_size == before, unsafe stream.pointee.src_size == 0, !hasMoreInput { throw ZipError.corruptData(path) }
         }
         return (output.count, false)
+    }
+}
+
+/// A rendezvous between a decoder making chunks and the one task consuming them, in order: the decoder's `send`
+/// returns once the consumer has finished the previous chunk and taken the new one. Nothing is allocated per
+/// chunk: waits are unchecked continuations, which live in the waiting task.
+@safe
+final class ChunkHandoff: Sendable {
+    // Unsafe: chunks and unchecked continuations in the state. Safe: each continuation is resumed exactly once
+    // (taken out of the state as it's resumed), and a chunk is used by one consumer at a time (see `send`).
+    @safe private struct State: @unchecked Sendable {
+        /// The consumer, waiting for a chunk.
+        var consumer: UnsafeContinuation<ZipDecoder.Chunk?, Never>?
+        /// The decoder, waiting for the consumer to take its chunk.
+        var producer: (continuation: UnsafeContinuation<Bool, Never>, chunk: ZipDecoder.Chunk)?
+        /// No more chunks are coming.
+        var closed = false
+        /// The consumer threw: chunks are refused.
+        var failed = false
+    }
+
+    private let state = Mutex(State())
+
+    /// Hands `chunk` to the consumer, waiting until it's free.
+    ///
+    /// - Returns: `false` if the consumer failed (the chunk wasn't taken).
+    @unsafe
+    func send(_ chunk: ZipDecoder.Chunk) async -> Bool {
+        await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<Bool, Never>) in
+            state.withLock { state in
+                if state.failed {
+                    unsafe continuation.resume(returning: false)
+                } else if let consumer = unsafe state.consumer {
+                    unsafe state.consumer = nil
+                    unsafe consumer.resume(returning: chunk)
+                    unsafe continuation.resume(returning: true)
+                } else {
+                    unsafe state.producer = (continuation, chunk)
+                }
+            }
+        }
+    }
+
+    /// The next chunk, waiting for one; `nil` once the decoder is done. Calling it again means the previous
+    /// chunk is finished with.
+    @unsafe
+    func receive() async -> ZipDecoder.Chunk? {
+        await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<ZipDecoder.Chunk?, Never>) in
+            state.withLock { state in
+                if let (producer, chunk) = unsafe state.producer {
+                    unsafe state.producer = nil
+                    unsafe continuation.resume(returning: chunk)
+                    unsafe producer.resume(returning: true)
+                } else if state.closed {
+                    unsafe continuation.resume(returning: nil)
+                } else {
+                    unsafe state.consumer = continuation
+                }
+            }
+        }
+    }
+
+    /// No more chunks: a waiting consumer gets `nil`.
+    func close() {
+        state.withLock { state in
+            state.closed = true
+            if let consumer = unsafe state.consumer {
+                unsafe state.consumer = nil
+                unsafe consumer.resume(returning: nil)
+            }
+        }
+    }
+
+    /// The consumer failed: a waiting decoder gets `false`, and so does every later `send`.
+    func fail() {
+        state.withLock { state in
+            state.failed = true
+            if let (producer, _) = unsafe state.producer {
+                unsafe state.producer = nil
+                unsafe producer.resume(returning: false)
+            }
+        }
     }
 }
 

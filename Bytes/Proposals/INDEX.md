@@ -1,5 +1,7 @@
 # Bytes API proposals (2026-11-09)
 
+(Later: `NonNumericValues.md`, 2026-11-18: ASCII tags, characters, and digits; implemented in part.)
+
 Gathered while updating every package built on Bytes (MQTT, MQTTSocketStream, NativeZipArchive, Base64,
 BinaryParsingComparison) and reviewing Bytes itself. Every proposal was prototyped outside Bytes, used at a
 real call site, and measured: instruction counts, or machine code compared with the code it replaces.

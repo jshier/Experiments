@@ -29,6 +29,10 @@ let package = Package(
                 .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BytesMacros", package: "Bytes"),
                 .product(name: "BytesFoundation", package: "Bytes"),
+                // Streaming DEFLATE for encrypted entries, and zstd.
+                .product(name: "BytesCompression", package: "Bytes"),
+                // WinZip AES: AES, HMAC-SHA1, PBKDF2.
+                .product(name: "BytesCrypto", package: "Bytes"),
             ],
             swiftSettings: strictSettings
         ),

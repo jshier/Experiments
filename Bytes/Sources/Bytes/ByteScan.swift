@@ -1,7 +1,7 @@
 // MARK: - Testing 16 bytes at once
 
 /// Sixteen bytes of a span, tested together in `RawSpan.containsByte(where:)`: build a
-/// ``ByteMatches`` from ``matching(_:)`` and ``nonASCII``, combined with `|` (matches any) and `&`
+/// ``ByteMatches`` from ``matching(_:)-(UInt8)`` and ``nonASCII``, combined with `|` (matches any) and `&`
 /// (matches all).
 ///
 /// ```swift
@@ -15,6 +15,7 @@
 /// out-of-line call in others. Swift 6.5 compiles all of them to vector instructions.
 @frozen
 public struct ByteLanes: Sendable {
+    /// The 16 bytes, lane 0 first.
     public var vector: SIMD16<UInt8>
 
     /// Wraps 16 bytes for testing.
@@ -116,13 +117,17 @@ public struct ByteMatches: Sendable {
     /// }
     /// ```
     ///
-    /// Three instructions on ARM64 (`shrn`, `fmov`, `and`: each 16-bit pair of lanes shifted right by 4 and
-    /// narrowed to a byte), against ``bitmask``'s dozen: the form to use when lanes are found by counting
-    /// zero bits, as ``firstIndex`` does.
+    /// Four instructions on ARM64 (`sshr` spreading each lane's high bit through the lane, then `shrn`, `fmov`,
+    /// `and`: each 16-bit pair of lanes shifted right by 4 and narrowed to a byte), against ``bitmask``'s dozen:
+    /// the form to use when lanes are found by counting zero bits, as ``firstIndex`` does.
     @inlinable @inline(__always)
     public var nibbleMask: UInt64 {
         #if _endian(little)
-        let pairs = bitCast(highBits, to: SIMD8<UInt16>.self)
+        // The narrowing takes the high half of even lanes and the low half of odd ones, so every bit of a lane
+        // must say whether it matched: only its high bit does until it's spread. (Without this, an odd lane
+        // whose bit 3 happened to be set, as `matching(_:)` leaves 'p' (0x70), read as a match.)
+        let full = bitCast(bitCast(highBits, to: SIMD16<Int8>.self) &>> 7, to: SIMD16<UInt8>.self)
+        let pairs = bitCast(full, to: SIMD8<UInt16>.self)
         let narrowed = SIMD8<UInt8>(truncatingIfNeeded: pairs &>> 4)
         return bitCast(narrowed, to: UInt64.self) & 0x8888_8888_8888_8888
         #else
@@ -153,7 +158,7 @@ public extension RawSpan {
     /// `count / 2`, and `count - 1`), which repeats some bytes but leaves none out, so they take one test
     /// too.
     ///
-    /// - Parameter test: Builds the matches for one block of 16 bytes, from ``ByteLanes/matching(_:)`` and
+    /// - Parameter test: Builds the matches for one block of 16 bytes, from ``ByteLanes/matching(_:)-(UInt8)`` and
     ///   ``ByteLanes/nonASCII``. It may see some bytes more than once.
     /// - Returns: `true` if `test` matched any byte; `false` for an empty span.
     @inlinable @inline(__always)
@@ -188,6 +193,66 @@ public extension RawSpan {
         }
         found = found | test(ByteLanes(load(fromByteOffset: count &- 16, as: SIMD16<UInt8>.self)))
         return found.any
+    }
+
+    /// The offset of the first byte that matches `test`, or `nil`: a terminator, a delimiter, the first byte
+    /// that isn't ASCII.
+    ///
+    /// ```swift
+    /// let end = bytes.firstByteOffset { $0.matching(0) }   // a C string's NUL
+    /// ```
+    ///
+    /// Scans 16 bytes per test, as ``containsByte(where:)`` does, and stops at the first block with a match.
+    /// The last block overlaps the one before it, and spans shorter than 16 bytes are tested in one block of
+    /// overlapping loads; bytes seen twice were already known not to match, so the first match found is the
+    /// first in the span.
+    ///
+    /// - Parameter test: Builds the matches for one block of 16 bytes, from ``ByteLanes/matching(_:)-(UInt8)`` and
+    ///   ``ByteLanes/nonASCII``. It may see some bytes more than once.
+    /// - Returns: The offset of the first matching byte, or `nil` if none matches.
+    @inlinable @inline(__always)
+    func firstByteOffset(where test: (ByteLanes) -> ByteMatches) -> Int? {
+        // Checked loads: the offsets are in bounds by construction, and the checks fold away.
+        let count = byteCount
+        guard count >= 16 else {
+            switch count {
+            case 8...:
+                // Lanes 0–7 are offsets 0–7; lanes 8–15, offsets `count - 8` on.
+                let block = bitCast(SIMD2(load(fromByteOffset: 0, as: UInt64.self), load(fromByteOffset: count &- 8, as: UInt64.self)),
+                                    to: SIMD16<UInt8>.self)
+                guard let lane = test(ByteLanes(block)).firstIndex else { return nil }
+                return lane < 8 ? lane : count &- 16 &+ lane
+            case 4...:
+                // Lanes 0–3 are offsets 0–3; lanes 4–7, offsets `count - 4` on (8–15 repeat them).
+                let (first, last) = (load(fromByteOffset: 0, as: UInt32.self), load(fromByteOffset: count &- 4, as: UInt32.self))
+                guard let lane = test(ByteLanes(bitCast(SIMD4(first, last, first, last), to: SIMD16<UInt8>.self))).firstIndex else {
+                    return nil
+                }
+                return lane < 4 ? lane : count &- 8 &+ lane
+            case 1...:
+                // Lanes 0, 1, 2 are offsets 0, `count / 2`, `count - 1`, in order (3 repeats offset 0).
+                let middle = count / 2
+                let word = UInt32(load(fromByteOffset: 0, as: UInt8.self))
+                    | UInt32(load(fromByteOffset: middle, as: UInt8.self)) &<< 8
+                    | UInt32(load(fromByteOffset: count &- 1, as: UInt8.self)) &<< 16
+                    | UInt32(load(fromByteOffset: 0, as: UInt8.self)) &<< 24
+                guard let lane = test(ByteLanes(bitCast(SIMD4(repeating: word), to: SIMD16<UInt8>.self))).firstIndex else {
+                    return nil
+                }
+                return switch lane & 3 { case 1: middle; case 2: count &- 1; default: 0 }
+            default:
+                return nil
+            }
+        }
+        var offset = 0
+        while offset < count &- 16 {
+            if let lane = test(ByteLanes(load(fromByteOffset: offset, as: SIMD16<UInt8>.self))).firstIndex {
+                return offset &+ lane
+            }
+            offset += 16 // Not `&+=`: a non-wrapping add tells the optimizer `offset` stays non-negative.
+        }
+        guard let lane = test(ByteLanes(load(fromByteOffset: count &- 16, as: SIMD16<UInt8>.self))).firstIndex else { return nil }
+        return count &- 16 &+ lane
     }
 
     /// Compares two spans' bytes 16 at a time, as ``containsByte(where:)`` scans: XOR each pair of

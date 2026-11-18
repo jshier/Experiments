@@ -8,12 +8,32 @@ import BytesMacros
 //
 // - The file is big-endian throughout: a `BigEndianBytesReader`, with integers read by type.
 // - Each chunk's length and type are a `@BinaryRecord` (one bounds check); its data is a section, so nothing
-//   in a chunk reads past it. IHDR and pHYs are fixed-size sections of that, so their fields' checks fold.
-//   (`@BinaryRecord` has no single-byte fields, which both have: they're read by hand.)
+//   in a chunk reads past it. IHDR and pHYs are records too (one-byte fields, and `Padding` for the two IHDR
+//   bytes the example discards), so their fields' checks fold.
+// - iTXt's keywords are NUL-terminated (`read(utf8TerminatedBy: 0)`).
 // - The chunk-order rules are the example's, with the chunk kinds seen so far in a bit mask instead of a
 //   `Set` (which allocates).
 //
 // Every value is read once. The CRC is skipped unchecked, as the example reads and discards it.
+
+/// The IHDR chunk's 13 bytes.
+@BinaryRecord(.bigEndian)
+struct PNGImageHeader {
+    @Field(Byte4.self) var width: Int
+    @Field(Byte4.self) var height: Int
+    @Field(Byte.self) var bitDepth: UInt8
+    @Field(Byte.self) var colorType: ExampleChunk.Header.ColorType
+    var methods: Padding<Byte2> // The compression and filter methods, discarded as in the example.
+    @Field(Byte.self) var interlace: UInt8
+}
+
+/// The pHYs chunk's 9 bytes.
+@BinaryRecord(.bigEndian)
+struct PNGPixelDimensions {
+    @Field(Byte4.self) var width: UInt32
+    @Field(Byte4.self) var height: UInt32
+    @Field(Byte.self) var unitSpecifier: UInt8
+}
 
 /// A chunk's length and type: the 8 bytes before its data.
 @BinaryRecord(.bigEndian)
@@ -73,11 +93,12 @@ public enum PNG {
         let header = try reader.read(PNGChunkHeader.self)
         var body = try reader.readSection(byteCount: header.length)
         let chunk: ExampleChunk = switch header.type {
-        case 0x4948_4452: try .header(readHeader(&body)) // IHDR
-        case 0x6954_5874: try .text(readText(&body)) // iTXt
-        case 0x7048_5973: try .pixelDimensions(readPixelDimensions(&body)) // pHYs
-        case 0x4944_4154: .data([UInt8](copying: body.remainingBytes)) // IDAT
-        case 0x4945_4E44: .end // IEND
+        // The type as the big-endian integer the header read it as (the example's own type is a `UInt32`).
+        case Byte4(ascii: "IHDR").bigEndian: try .header(readHeader(&body))
+        case Byte4(ascii: "iTXt").bigEndian: try .text(readText(&body))
+        case Byte4(ascii: "pHYs").bigEndian: try .pixelDimensions(readPixelDimensions(&body))
+        case Byte4(ascii: "IDAT").bigEndian: .data([UInt8](copying: body.remainingBytes))
+        case Byte4(ascii: "IEND").bigEndian: .end
         // The type's 4 bytes again, as text: they were read once, as a number to switch on.
         default: .other(header.type.utf8, [UInt8](copying: body.remainingBytes))
         }
@@ -87,40 +108,34 @@ public enum PNG {
 
     @inline(__always)
     static func readHeader(_ body: inout BigEndianBytesReader) throws(BytesError) -> ExampleChunk.Header {
-        var fields = try body.readSection(byteCount: 13)
-        let width = try fields.read(Int.self, as: Byte4.self)
-        let height = try fields.read(Int.self, as: Byte4.self)
-        let bitDepth = try fields.read(UInt8.self)
-        let colorType = try fields.read(ExampleChunk.Header.ColorType.self, as: Byte.self)
-        try fields.skip(byteCount: 2) // The compression and filter methods, discarded as in the example.
-        let interlaced = switch try fields.read(UInt8.self) {
+        let fields = try body.read(PNGImageHeader.self)
+        let interlaced = switch fields.interlace {
         case 0: false
         case 1: true
         default: throw .invalidValue
         }
         return ExampleChunk.Header(
-            width: width, height: height, bitDepth: bitDepth, colorType: colorType, interlaced: interlaced
+            width: fields.width, height: fields.height, bitDepth: fields.bitDepth, colorType: fields.colorType,
+            interlaced: interlaced
         )
     }
 
     @inline(__always)
     static func readPixelDimensions(_ body: inout BigEndianBytesReader) throws(BytesError) -> ExampleChunk.PixelDimensions {
-        var fields = try body.readSection(byteCount: 9)
-        return try ExampleChunk.PixelDimensions(
-            width: fields.read(UInt32.self), height: fields.read(UInt32.self), unitSpecifier: fields.read(UInt8.self)
-        )
+        let fields = try body.read(PNGPixelDimensions.self)
+        return ExampleChunk.PixelDimensions(width: fields.width, height: fields.height, unitSpecifier: fields.unitSpecifier)
     }
 
     @inline(__always)
     static func readText(_ body: inout BigEndianBytesReader) throws(BytesError) -> ExampleChunk.InternationalText {
-        let keyword = String(copying: try body.readNulTerminatedUTF8())
+        let keyword = String(copying: try body.read(utf8TerminatedBy: 0))
         guard keyword.count < 80 else { throw .invalidValue }
         let compressionFlag = try body.read(UInt8.self)
         guard compressionFlag <= 1 else { throw .invalidValue }
         let compressionMethod = try body.read(UInt8.self)
         guard compressionMethod == 0 else { throw .invalidValue }
-        let languageTag = String(copying: try body.readNulTerminatedUTF8())
-        let translatedKeyword = String(copying: try body.readNulTerminatedUTF8())
+        let languageTag = String(copying: try body.read(utf8TerminatedBy: 0))
+        let translatedKeyword = String(copying: try body.read(utf8TerminatedBy: 0))
         // Validated, where the example repairs invalid UTF-8 (`String(parsingUTF8:)`): the same for valid text.
         let text = String(copying: try body.readUTF8(byteCount: body.remainingByteCount))
         return ExampleChunk.InternationalText(
