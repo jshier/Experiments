@@ -1,6 +1,7 @@
 internal import Bytes
 internal import BytesFoundation
 import Foundation
+import Synchronization
 import System
 
 // MARK: - Model
@@ -36,13 +37,25 @@ public struct ZipEntry: Sendable {
     /// The Unix permission bits (including setuid, setgid, and sticky) when the archive was made on Unix and
     /// they're nonzero; `nil` otherwise.
     public let posixPermissions: Int?
-    /// The modification time: the extended timestamp field's UTC time if present, otherwise the MS-DOS
-    /// date and time read as local time. `nil` if no date can be built from the DOS fields.
+    /// The modification time: the extended timestamp field's UTC time if present, then the NTFS or old
+    /// Info-ZIP Unix field's, otherwise the MS-DOS date and time read as local time. `nil` if no date can be
+    /// built from the DOS fields.
     public let modificationDate: Date?
+    /// How the entry is encrypted, or `nil` if it isn't. For WinZip AES, ``method`` is the compression
+    /// method recorded in the AES extra field, not 99.
+    public let encryption: ZipEncryption?
+    /// The Unix user and group IDs from Info-ZIP's Unix extra fields, if recorded.
+    public let ownerID: UInt32?
+    public let groupID: UInt32?
+    /// The system that made the entry: the high byte of "version made by" (0 MS-DOS/FAT, 3 Unix, 10 NTFS
+    /// as Windows writes it, 19 macOS).
+    public let hostSystem: UInt8
+    /// The raw MS-DOS time, which the traditional cipher checks when the entry has a data descriptor.
+    let dosTime: UInt16
 
     // Bit 0. (A mask, not `Bytes`' `flags[bit: 0]`: `Bytes` is imported `internal`, so inlinable public code
     // can't use it.)
-    /// Whether the entry is encrypted (flag bit 0). Encrypted entries can't be read.
+    /// Whether the entry is encrypted (flag bit 0). See ``encryption`` for how.
     @inlinable public var isEncrypted: Bool { flags & 0x1 != 0 }
 }
 
@@ -62,8 +75,9 @@ enum ZipAttributes {
 
 /// A zip archive, memory-mapped and indexed by its central directory.
 ///
-/// Supports stored and deflated entries and ZIP64; encrypted entries and multi-disk archives are rejected.
-/// It's `Sendable`: the mapping is immutable, so entries can be read from several tasks at once.
+/// Reads stored, deflated, Deflate64, bzip2, LZMA, and xz entries, ZIP64, traditional and WinZip AES
+/// encryption, and archives with data before them (self-extracting archives). Multi-disk archives are
+/// rejected. It's `Sendable`: the mapping is immutable, so entries can be read from several tasks at once.
 public struct ZipArchive: Sendable {
     /// Record signatures, in file order. Computed, so each use folds to a 32-bit constant.
     enum Signature {
@@ -80,12 +94,51 @@ public struct ZipArchive: Sendable {
         public static let stored: UInt16 = 0
         /// Method 8: raw DEFLATE (RFC 1951).
         public static let deflated: UInt16 = 8
+        /// Method 9: Deflate64 ("enhanced deflating"): a 64 KB window and matches up to 65,538 bytes.
+        public static let deflate64: UInt16 = 9
+        /// Method 12: bzip2.
+        public static let bzip2: UInt16 = 12
+        /// Method 14: LZMA (LZMA1), with a 4-byte zip header and its properties before the stream.
+        public static let lzma: UInt16 = 14
+        /// Method 95: an xz stream.
+        public static let xz: UInt16 = 95
+        /// Method 99: WinZip AES. The real method is in the entry's AES extra field (``ZipEntry/method``
+        /// reports that one).
+        public static let aes: UInt16 = 99
+
+        /// Whether entries with `method` can be decompressed.
+        public static func isSupported(_ method: UInt16) -> Bool {
+            [stored, deflated, deflate64, bzip2, lzma, xz].contains(method)
+        }
+
+        /// A short name for `method`, as listings show it.
+        public static func name(_ method: UInt16) -> String {
+            switch method {
+            case stored: "Stored"
+            case 1: "Shrunk"
+            case 2...5: "Reduced"
+            case 6: "Imploded"
+            case deflated: "Deflated"
+            case deflate64: "Deflate64"
+            case bzip2: "BZip2"
+            case lzma: "LZMA"
+            case 93: "Zstd"
+            case xz: "XZ"
+            case 98: "PPMd"
+            default: "Unk:\(method)"
+            }
+        }
     }
 
     /// The archive's file URL.
     public let url: URL
     /// Every entry in the central directory, in archive order.
     public let entries: [ZipEntry]
+    /// The archive comment, decoded like entry names.
+    public let comment: String
+    /// Bytes before the archive proper, which offsets don't count: a self-extractor's program, or data
+    /// prepended later. Offsets in ``entries`` are already adjusted for them.
+    public let leadingByteCount: UInt64
     @usableFromInline let file: MappedFile
 
     /// Opens and indexes an archive.
@@ -103,41 +156,68 @@ public struct ZipArchive: Sendable {
         // parses `file.bytes` (a RawSpan) in place.
         let file = try MappedFile(path: FilePath(url.path(percentEncoded: false)))
         self.file = file
-        entries = try Self.readEntries(file.bytes)
+        (entries, comment, leadingByteCount) = try Self.readDirectory(file.bytes)
     }
 }
 
 // MARK: - Central directory
+
 
 extension ZipArchive {
     private struct CentralDirectoryLocation {
         var entryCount: UInt64
         var size: UInt64
         var offset: UInt64
+        /// Where the record after the directory starts (the ZIP64 or classic end record): the directory
+        /// should end there, which reveals data prepended to the archive.
+        var followingRecord: UInt64
 
         var isSaturated: Bool { entryCount == UInt16.max || size == UInt32.max || offset == UInt32.max }
     }
 
-    private static func readEntries(_ archive: RawSpan) throws(ZipError) -> [ZipEntry] {
-        let location = try readCentralDirectoryLocation(archive)
+    private static func readDirectory(_ archive: RawSpan) throws(ZipError) -> (entries: [ZipEntry], comment: String, leading: UInt64) {
+        let eocdOffset = try findEndOfCentralDirectory(archive)
+        let (location, comment) = try readCentralDirectoryLocation(archive, eocdOffset: eocdOffset)
+
+        // Data before the archive (a self-extractor's program) shifts everything: offsets count from the
+        // archive's own start. The directory really starts `size` bytes before the record after it.
+        var leading: UInt64 = 0
+        if location.followingRecord >= location.size {
+            let actual = location.followingRecord - location.size
+            if actual > location.offset, location.entryCount == 0 || hasSignature(archive, Signature.centralDirectory, at: actual) {
+                leading = actual - location.offset
+            }
+        }
+
         var entries: [ZipEntry] = []
         entries.reserveCapacity(Int(min(location.entryCount, 1 << 20)))
         do throws(BytesError) {
-            var reader = try LittleEndianBytesReader(archive, atByteOffset: location.offset)
+            var reader = try LittleEndianBytesReader(archive, atByteOffset: location.offset + leading)
             var directory = try reader.readSection(byteCount: location.size)
             for _ in 0..<location.entryCount {
-                try entries.append(readCentralDirectoryEntry(&directory))
+                try entries.append(readCentralDirectoryEntry(&directory, leading: leading))
+            }
+            // More entries than recorded: a count that wrapped past 65,535 in an archive without ZIP64 records.
+            while directory.remainingByteCount >= 46, try directory.peek(Byte4.self) == Signature.centralDirectory {
+                try entries.append(readCentralDirectoryEntry(&directory, leading: leading))
             }
         } catch {
             throw error.zipError("central directory entry \(entries.count)")
         }
-        return entries
+        return (entries, comment, leading)
     }
 
-    private static func readCentralDirectoryLocation(_ archive: RawSpan) throws(ZipError) -> CentralDirectoryLocation {
-        let eocdOffset = try findEndOfCentralDirectory(archive)
+    private static func hasSignature(_ archive: RawSpan, _ signature: Byte4, at offset: UInt64) -> Bool {
+        guard var reader = try? LittleEndianBytesReader(archive, atByteOffset: offset) else { return false }
+        return (try? reader.read(Byte4.self)) == signature
+    }
+
+    private static func readCentralDirectoryLocation(
+        _ archive: RawSpan, eocdOffset: Int
+    ) throws(ZipError) -> (CentralDirectoryLocation, comment: String) {
         var location: CentralDirectoryLocation
         var spansDisks = false
+        var comment = ""
         do throws(BytesError) {
             var eocd = try LittleEndianBytesReader(archive, atByteOffset: eocdOffset)
             var record = try eocd.readSection(byteCount: 22)
@@ -148,8 +228,12 @@ extension ZipArchive {
             location = try CentralDirectoryLocation(
                 entryCount: UInt64(record.read(UInt16.self)),
                 size: UInt64(record.read(UInt32.self)),
-                offset: UInt64(record.read(UInt32.self))
+                offset: UInt64(record.read(UInt32.self)),
+                followingRecord: UInt64(eocdOffset)
             )
+            // The comment, or as much of it as there is.
+            let commentLength = try Int(record.read(UInt16.self))
+            comment = try decodeName(Span(viewing: eocd.read(byteCount: min(commentLength, eocd.remainingByteCount))))
 
             // ZIP64: saturated fields mean the real values live in the ZIP64 EOCD record, which a
             // fixed-size locator immediately before the classic EOCD points to.
@@ -157,13 +241,22 @@ extension ZipArchive {
                 var locator = try LittleEndianBytesReader(archive, atByteOffset: eocdOffset - 20)
                 if try locator.read(Byte4.self) == Signature.zip64Locator {
                     try locator.skip(byteCount: 4) // disk containing the ZIP64 EOCD
-                    var zip64 = try LittleEndianBytesReader(archive, atByteOffset: locator.read(UInt64.self))
+                    // The recorded offset doesn't count prepended data; the record usually sits right before
+                    // the locator (56 bytes, without extensible data).
+                    var recordOffset = try locator.read(UInt64.self)
+                    let usual = UInt64(eocdOffset - 20) &- 56
+                    if !hasSignature(archive, Signature.zip64EndOfCentralDirectory, at: recordOffset),
+                       eocdOffset >= 76, hasSignature(archive, Signature.zip64EndOfCentralDirectory, at: usual) {
+                        recordOffset = usual
+                    }
+                    var zip64 = try LittleEndianBytesReader(archive, atByteOffset: recordOffset)
                     try zip64.expect(Signature.zip64EndOfCentralDirectory)
                     try zip64.skip(byteCount: 8 + 2 + 2 + 4 + 4 + 8) // record size, versions, disks, entries on disk
                     location.entryCount = try zip64.read(UInt64.self)
                     location.size = try zip64.read(UInt64.self)
                     location.offset = try zip64.read(UInt64.self)
-                    return location
+                    location.followingRecord = recordOffset
+                    return (location, comment)
                 }
             }
             spansDisks = diskNumber != 0 || directoryDisk != 0
@@ -171,7 +264,7 @@ extension ZipArchive {
             throw error.zipError("end of central directory")
         }
         guard !spansDisks else { throw .multiDiskUnsupported }
-        return location
+        return (location, comment)
     }
 
     private static func findEndOfCentralDirectory(_ archive: RawSpan) throws(ZipError) -> Int {
@@ -187,18 +280,26 @@ extension ZipArchive {
     }
 
     @_lifetime(directory: copy directory)
-    private static func readCentralDirectoryEntry(_ directory: inout LittleEndianBytesReader) throws(BytesError) -> ZipEntry {
+    private static func readCentralDirectoryEntry(
+        _ directory: inout LittleEndianBytesReader, leading: UInt64
+    ) throws(BytesError) -> ZipEntry {
         // The fixed part in one read (`CentralDirectoryHeader`): one bounds check, each field read once.
         let header = try directory.read(CentralDirectoryHeader.self)
         var compressedSize = UInt64(header.compressedSize)
         var uncompressedSize = UInt64(header.uncompressedSize)
         var localHeaderOffset = UInt64(header.localHeaderOffset)
 
-        let name = try decodeName(Span(viewing: directory.read(byteCount: header.nameLength)))
+        let nameBytes = try directory.read(byteCount: header.nameLength)
+        var name = decodeName(Span(viewing: nameBytes))
         var extra = try directory.readSection(byteCount: header.extraLength)
         try directory.skip(byteCount: header.commentLength)
 
-        var unixModificationTime: Date?
+        var modificationTime: Date?
+        var fallbackTime: Date? // From fields that the extended timestamp overrides.
+        var method = header.method
+        var encryption: ZipEncryption? = header.flags & 0x1 == 0 ? nil : header.flags & 0x40 != 0 ? .unsupported : .traditional
+        var ownerID: UInt32?
+        var groupID: UInt32?
         while extra.remainingByteCount >= 4 {
             let id = try extra.read(UInt16.self)
             // Tolerate malformed trailing padding: a field that isn't all there ends the list.
@@ -211,7 +312,46 @@ extension ZipArchive {
             case 0x5455: // Extended timestamp: a flags byte, then a UTC mtime if bit 0 is set.
                 if field.remainingByteCount >= 5, try field.read(ExtendedTimestampFlags.self).modification {
                     let seconds = try field.read(Int32.self, asSigned: Byte4.self)
-                    unixModificationTime = Date(timeIntervalSince1970: TimeInterval(seconds))
+                    modificationTime = Date(timeIntervalSince1970: TimeInterval(seconds))
+                }
+            case 0x000A: // NTFS: 4 reserved bytes, then tagged attributes; tag 1 holds three 64-bit FILETIMEs.
+                try field.skip(byteCount: 4)
+                while field.remainingByteCount >= 4 {
+                    let tag = try field.read(UInt16.self)
+                    guard var attribute = field.readSectionIfComplete(prefixedBy: Byte2.self) else { break }
+                    if tag == 1, attribute.remainingByteCount >= 8 {
+                        // 100-nanosecond intervals since 1601.
+                        let ticks = try attribute.read(UInt64.self)
+                        fallbackTime = Date(timeIntervalSince1970: Double(ticks) / 10_000_000 - 11_644_473_600)
+                    }
+                }
+            case 0x5855: // Info-ZIP Unix (old): atime, mtime, then optionally 16-bit UID and GID.
+                if field.remainingByteCount >= 8 {
+                    try field.skip(byteCount: 4)
+                    fallbackTime = try Date(timeIntervalSince1970: TimeInterval(field.read(UInt32.self)))
+                    if field.remainingByteCount >= 4 {
+                        ownerID = try UInt32(field.read(UInt16.self))
+                        groupID = try UInt32(field.read(UInt16.self))
+                    }
+                }
+            case 0x7875: // Info-ZIP Unix (new): version 1, then sized little-endian UID and GID.
+                if try field.read(UInt8.self) == 1 {
+                    ownerID = try readSizedID(&field)
+                    groupID = try readSizedID(&field)
+                }
+            case 0x7075: // Info-ZIP Unicode path: version 1, the CRC-32 of the header's name, then UTF-8.
+                if try field.read(UInt8.self) == 1,
+                   try field.read(UInt32.self) == CRC32.checksum(nameBytes),
+                   let utf8 = try? UTF8Span(validating: Span(viewing: field.read(byteCount: field.remainingByteCount))) {
+                    name = String(copying: utf8)
+                }
+            case 0x9901: // WinZip AES: vendor version (1 or 2), "AE", key strength, the real method.
+                if header.method == Method.aes, field.remainingByteCount >= 7 {
+                    let version = try field.read(UInt16.self)
+                    try field.skip(byteCount: 2)
+                    let strength = try field.read(UInt8.self)
+                    method = try field.read(UInt16.self)
+                    encryption = (1...3).contains(strength) ? .aes(bits: 64 + 64 * Int(strength), authenticatesCRC: version == 1) : .unsupported
                 }
             default:
                 break
@@ -222,33 +362,54 @@ extension ZipArchive {
             name: name,
             versionMadeBy: header.versionMadeBy,
             flags: header.flags,
-            method: header.method,
+            method: method,
             crc: header.crc32,
             compressedSize: compressedSize,
             uncompressedSize: uncompressedSize,
             externalAttributes: header.externalAttributes,
-            localHeaderOffset: localHeaderOffset,
-            modificationDate: unixModificationTime ?? date(header.date, header.time)
+            localHeaderOffset: localHeaderOffset + leading,
+            modificationDate: modificationTime ?? fallbackTime ?? date(header.date, header.time),
+            encryption: encryption,
+            ownerID: ownerID,
+            groupID: groupID,
+            dosTime: header.time.rawValue
         )
+    }
+
+    /// A UID or GID in Info-ZIP's new Unix field: a size byte, then that many little-endian bytes.
+    private static func readSizedID(_ field: inout LittleEndianBytesReader) throws(BytesError) -> UInt32? {
+        let size = try Int(field.read(UInt8.self))
+        if size == 4 { return try field.read(UInt32.self) } // What Info-ZIP writes.
+        var value: UInt64 = 0
+        for index in 0..<size {
+            let byte = try field.read(UInt8.self)
+            if index < 8 { value |= UInt64(byte) << (8 * index) }
+        }
+        return value <= UInt32.max ? UInt32(value) : nil
     }
 
     /// Builds an entry from central directory fields, deriving its kind and permissions.
     ///
     /// The kind is a directory if the name ends in `/`, the Unix mode says so, or the MS-DOS directory bit is
     /// set; otherwise a symlink if the Unix mode says so; otherwise a file. The Unix mode is the high 16 bits
-    /// of `externalAttributes`, used only when `versionMadeBy`'s host byte is 3 (Unix).
+    /// of `externalAttributes`, used only when `versionMadeBy`'s host byte is 3 (Unix) or 19 (macOS). Names
+    /// from MS-DOS, NTFS, and VFAT hosts have their backslashes turned into slashes, as Info-ZIP does.
     ///
     /// - Parameters:
     ///   - name: The decoded entry name.
     ///   - versionMadeBy: The "version made by" field; its high byte is the host system.
     ///   - flags: The general purpose bit flags.
-    ///   - method: The compression method.
+    ///   - method: The compression method (for AES entries, the real one).
     ///   - crc: The CRC-32 of the uncompressed contents.
     ///   - compressedSize: The compressed size, after ZIP64 resolution.
     ///   - uncompressedSize: The uncompressed size, after ZIP64 resolution.
     ///   - externalAttributes: The external file attributes.
-    ///   - localHeaderOffset: The local header's offset, after ZIP64 resolution.
+    ///   - localHeaderOffset: The local header's offset in the file, after ZIP64 resolution.
     ///   - modificationDate: The entry's modification date, if known.
+    ///   - encryption: How the entry is encrypted, if it is.
+    ///   - ownerID: The Unix UID, if recorded.
+    ///   - groupID: The Unix GID, if recorded.
+    ///   - dosTime: The raw MS-DOS time.
     /// - Returns: The entry.
     static func makeEntry(
         name: String,
@@ -260,12 +421,22 @@ extension ZipArchive {
         uncompressedSize: UInt64,
         externalAttributes: UInt32,
         localHeaderOffset: UInt64,
-        modificationDate: Date?
+        modificationDate: Date?,
+        encryption: ZipEncryption? = nil,
+        ownerID: UInt32? = nil,
+        groupID: UInt32? = nil,
+        dosTime: UInt16 = 0
     ) -> ZipEntry {
-        // The high byte of "version made by" is the host OS; 3 is Unix, whose st_mode is the high 16 bits.
-        let mode = versionMadeBy[ZipAttributes.host] == 3 ? externalAttributes[ZipAttributes.unixMode] : 0
+        // The high byte of "version made by" is the host OS; Unix's st_mode is the high 16 bits.
+        let host = versionMadeBy[ZipAttributes.host]
+        let mode = host == 3 || host == 19 ? externalAttributes[ZipAttributes.unixMode] : 0
         let fileType = mode & Int(S_IFMT)
-        let kind: ZipEntry.Kind = if name.hasSuffix("/") || fileType == Int(S_IFDIR) || externalAttributes[ZipAttributes.dosDirectory] {
+        let fromDOS = switch host {
+        case 0, 11, 14: true // MS-DOS (FAT), NTFS, VFAT
+        default: false
+        }
+        let path = fromDOS && name.utf8.contains(UInt8(ascii: "\\")) ? name.replacing("\\", with: "/") : name
+        let kind: ZipEntry.Kind = if path.hasSuffix("/") || fileType == Int(S_IFDIR) || externalAttributes[ZipAttributes.dosDirectory] {
             .directory
         } else if fileType == Int(S_IFLNK) {
             .symlink
@@ -273,7 +444,7 @@ extension ZipArchive {
             .file
         }
         return ZipEntry(
-            path: name,
+            path: path,
             kind: kind,
             method: method,
             flags: flags,
@@ -282,9 +453,15 @@ extension ZipArchive {
             uncompressedSize: uncompressedSize,
             localHeaderOffset: localHeaderOffset,
             posixPermissions: mode & 0o7777 != 0 ? mode & 0o7777 : nil,
-            modificationDate: modificationDate
+            modificationDate: modificationDate,
+            encryption: encryption ?? (flags & 0x1 == 0 ? nil : .traditional),
+            ownerID: ownerID,
+            groupID: groupID,
+            hostSystem: UInt8(host),
+            dosTime: dosTime
         )
     }
+
 
     /// Decodes an entry name as UTF-8 if it validates, otherwise as code page 437.
     ///
@@ -337,29 +514,38 @@ extension ZipArchive {
 
 // MARK: - Entry contents
 
+extension ZipEntry {
+    /// Whether the recorded CRC-32 is checked: AE-2 AES entries record 0 and rely on their HMAC.
+    @inlinable var checksCRC: Bool {
+        if case .aes(_, authenticatesCRC: false) = encryption { false } else { true }
+    }
+}
+
 public extension ZipArchive {
     /// Calls `body` with successive chunks of the entry's decompressed contents, verifying size and CRC-32.
     ///
-    /// The spans borrow `decoder`'s buffer (or, for stored entries, the mapped archive), so nothing is
-    /// copied or allocated, and they're valid only during each call to `body`. Reuse one decoder for many
-    /// entries; a decoder serves one call at a time. `body` may already have run for some chunks when an
-    /// integrity error is thrown: the size and CRC-32 checks come after the last chunk.
+    /// The spans borrow `decoder`'s buffer (or, for unencrypted stored entries, the mapped archive), so
+    /// nothing is copied or allocated, and they're valid only during each call to `body`. Reuse one decoder
+    /// for many entries; a decoder serves one call at a time. `body` may already have run for some chunks when
+    /// an integrity error is thrown: the size and CRC-32 checks come after the last chunk. (An AES entry's
+    /// authentication code is checked before any.)
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
-    ///   - decoder: The decoder to inflate with. Its ``ZipDecoder/backend`` also picks the CRC-32 implementation.
-    ///   - body: Called with each chunk, in order. Chunks are at most about 1 MB for deflated entries; a stored
+    ///   - decoder: The decoder to use. Its ``ZipDecoder/backend`` picks the DEFLATE and CRC-32 implementations.
+    ///   - password: The password, for encrypted entries.
+    ///   - body: Called with each chunk, in order. Chunks are at most about 1 MB for compressed entries; a stored
     ///     entry arrives as one chunk.
-    /// - Throws: ``ZipError/encryptedEntry(_:)`` if the entry is encrypted;
-    ///   ``ZipError/unsupportedMethod(_:_:)`` for a method other than stored or deflated;
-    ///   ``ZipError/truncated(_:)`` or ``ZipError/badSignature(_:)`` if the local header is damaged or the payload
-    ///   runs past the archive's end; ``ZipError/corruptData(_:)`` if deflated data is invalid or its output
-    ///   isn't `uncompressedSize` bytes; ``ZipError/sizeMismatch(_:expected:actual:)`` if a stored entry's
-    ///   size is wrong; ``ZipError/crcMismatch(_:expected:actual:)`` if the CRC-32 doesn't match; and
-    ///   whatever `body` throws.
+    /// - Throws: ``ZipError/unsupportedMethod(_:_:)`` for a method ``ZipArchive/Method`` can't read;
+    ///   ``ZipError/passwordRequired(_:)``, ``ZipError/incorrectPassword(_:)``,
+    ///   ``ZipError/authenticationFailed(_:)``, or ``ZipError/unsupportedEncryption(_:)`` for encrypted
+    ///   entries; ``ZipError/truncated(_:)`` or ``ZipError/badSignature(_:)`` if the local header is damaged or
+    ///   the payload runs past the archive's end; ``ZipError/corruptData(_:)`` if compressed data is invalid
+    ///   or its output isn't `uncompressedSize` bytes; ``ZipError/sizeMismatch(_:expected:actual:)`` if a
+    ///   stored entry's size is wrong; ``ZipError/crcMismatch(_:expected:actual:)`` if the CRC-32 doesn't
+    ///   match; and whatever `body` throws.
     @inlinable
-    func contents(of entry: ZipEntry, using decoder: inout ZipDecoder, _ body: (RawSpan) throws -> Void) throws {
-        guard !entry.isEncrypted else { throw ZipError.encryptedEntry(entry.path) }
+    func contents(of entry: ZipEntry, using decoder: inout ZipDecoder, password: String? = nil, _ body: (RawSpan) throws -> Void) throws {
         let archive = file.bytes
         let payload = try Self.payload(of: entry, in: archive)
 
@@ -369,102 +555,114 @@ public extension ZipArchive {
         let backend = decoder.backend
         var crc: UInt = 0
         var written: UInt64 = 0
-        switch entry.method {
-        case Method.stored:
+        if entry.method == Method.stored, !entry.isEncrypted {
             crc = ZipDecoder.crc32(0, payload, backend: backend)
             written = UInt64(payload.byteCount)
             try body(payload)
-        case Method.deflated:
-            try decoder.inflate(payload, path: entry.path) { chunk in
+        } else {
+            try decoder.decode(payload, entry: entry, password: password) { chunk in
                 crc = ZipDecoder.crc32(crc, chunk, backend: backend)
                 written += UInt64(chunk.byteCount)
                 try body(chunk)
             }
-        default:
-            throw ZipError.unsupportedMethod(entry.method, entry.path)
         }
-
-        guard written == entry.uncompressedSize else {
-            throw entry.method == Method.deflated
-                ? ZipError.corruptData(entry.path)
-                : ZipError.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written)
-        }
-        guard crc == UInt(entry.crc32) else {
-            throw ZipError.crcMismatch(entry.path, expected: entry.crc32, actual: UInt32(truncatingIfNeeded: crc))
-        }
+        try Self.check(entry, written: written, crc: crc)
     }
 
-    /// Like ``contents(of:using:_:)``, with a temporary decoder.
+    /// Like ``contents(of:using:password:_:)``, with a temporary decoder.
     ///
-    /// Creating a decoder allocates its buffers, so prefer ``contents(of:using:_:)`` in loops.
+    /// Creating a decoder allocates its buffers, so prefer ``contents(of:using:password:_:)`` in loops.
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
     ///   - backend: Which DEFLATE and CRC-32 implementation to use.
+    ///   - password: The password, for encrypted entries.
     ///   - body: Called with each chunk of decompressed contents, in order.
-    /// - Throws: The errors of ``contents(of:using:_:)``.
+    /// - Throws: The errors of ``contents(of:using:password:_:)``.
     @inlinable
-    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, _ body: (RawSpan) throws -> Void) throws {
+    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, password: String? = nil, _ body: (RawSpan) throws -> Void) throws {
         var decoder = ZipDecoder(backend: backend)
-        try contents(of: entry, using: &decoder, body)
+        try contents(of: entry, using: &decoder, password: password, body)
     }
 
-    /// Like ``contents(of:using:_:)``, but `consume` runs in a child task, concurrently with decoding the
-    /// next chunk.
+    /// Checks an entry's output size and CRC-32 after its last chunk.
     ///
-    /// Chunks are consumed one at a time, in order. Only worth it for large deflated entries.
+    /// - Throws: ``ZipError/sizeMismatch(_:expected:actual:)`` for a stored entry of the wrong size,
+    ///   ``ZipError/corruptData(_:)`` for a compressed one; ``ZipError/crcMismatch(_:expected:actual:)``.
+    @inlinable
+    internal static func check(_ entry: ZipEntry, written: UInt64, crc: UInt) throws {
+        guard written == entry.uncompressedSize else {
+            throw entry.method == Method.stored
+                ? ZipError.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written)
+                : ZipError.corruptData(entry.path)
+        }
+        guard crc == UInt(entry.crc32) || !entry.checksCRC else {
+            throw ZipError.crcMismatch(entry.path, expected: entry.crc32, actual: UInt32(truncatingIfNeeded: crc))
+        }
+    }
+
+    /// Like ``contents(of:using:password:_:)``, but `consume` runs in a child task, concurrently with
+    /// decoding the next chunk. The CRC-32 is computed there too, off the decoding task.
+    ///
+    /// Chunks are consumed one at a time, in order. Only worth it for large compressed entries.
     ///
     /// - Parameters:
-    ///   - entry: The deflated entry to read.
-    ///   - decoder: The decoder to inflate with.
+    ///   - entry: The entry to read.
+    ///   - decoder: The decoder to use.
+    ///   - password: The password, for encrypted entries.
     ///   - consume: Called with each chunk, in order, in a child task. The chunk is valid until it returns.
-    /// - Throws: ``ZipError/encryptedEntry(_:)`` if the entry is encrypted;
-    ///   ``ZipError/unsupportedMethod(_:_:)`` unless it's deflated; ``ZipError/truncated(_:)`` or
-    ///   ``ZipError/badSignature(_:)`` if its local header or payload is damaged;
-    ///   ``ZipError/corruptData(_:)`` if the data is invalid or its size is wrong;
-    ///   ``ZipError/crcMismatch(_:expected:actual:)`` if the CRC-32 doesn't match; and whatever `consume` throws.
+    /// - Throws: The errors of ``contents(of:using:password:_:)``.
     internal func contentsPipelined(
         of entry: ZipEntry,
         using decoder: inout ZipDecoder,
+        password: String?,
         consume: @escaping @Sendable (ZipDecoder.Chunk) throws -> Void
     ) async throws {
-        guard !entry.isEncrypted else { throw ZipError.encryptedEntry(entry.path) }
-        guard entry.method == Method.deflated else { throw ZipError.unsupportedMethod(entry.method, entry.path) }
         let archive = file.bytes
         guard let range = try archive.byteOffsets(of: Self.payload(of: entry, in: archive)) else {
             throw ZipError.truncated("payload for '\(entry.path)'")
         }
-
-        var crc: UInt = 0
-        var written: UInt64 = 0
+        // Consumers run one at a time, in order, so the running CRC needs no more than a lock to cross tasks.
+        let progress = Mutex<(crc: UInt, written: UInt64)>((0, 0))
         let backend = decoder.backend
         // The mapping outlives this call (`self` holds it), so its address is stable across suspensions.
-        try await unsafe decoder.inflatePipelined(file.stableBuffer(range), path: entry.path, observe: { chunk in
-            crc = ZipDecoder.crc32(crc, chunk, backend: backend)
-            written += UInt64(chunk.byteCount)
-        }, consume: consume)
-
-        guard written == entry.uncompressedSize else { throw ZipError.corruptData(entry.path) }
-        guard crc == UInt(entry.crc32) else {
-            throw ZipError.crcMismatch(entry.path, expected: entry.crc32, actual: UInt32(truncatingIfNeeded: crc))
+        try await unsafe decoder.decodePipelined(file.stableBuffer(range), entry: entry, password: password) { chunk in
+            progress.withLock { progress in
+                let bytes = unsafe RawSpan(_unsafeBytes: chunk.bytes)
+                progress.crc = ZipDecoder.crc32(progress.crc, bytes, backend: backend)
+                progress.written += UInt64(bytes.byteCount)
+            }
+            try unsafe consume(chunk)
         }
+        let (crc, written) = progress.withLock { $0 }
+        try Self.check(entry, written: written, crc: crc)
     }
 
     /// The entry's full decompressed contents, verified.
     ///
-    /// Holds the whole entry in memory; use ``contents(of:using:_:)`` to stream large entries.
+    /// Holds the whole entry in memory; use ``contents(of:using:password:_:)`` to stream large entries.
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
     ///   - backend: Which DEFLATE and CRC-32 implementation to use.
+    ///   - password: The password, for encrypted entries.
     /// - Returns: The decompressed bytes.
-    /// - Throws: The errors of ``contents(of:using:_:)``.
-    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes) throws -> Data {
+    /// - Throws: The errors of ``contents(of:using:password:_:)``.
+    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, password: String? = nil) throws -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
-        try contents(of: entry, backend: backend) { chunk in
+        try contents(of: entry, backend: backend, password: password) { chunk in
             result.append(chunk)
         }
         return result
+    }
+
+    /// The range of the entry's payload (compressed, possibly encrypted) in the archive file.
+    internal func payloadRange(of entry: ZipEntry) throws -> Range<Int> {
+        let archive = file.bytes
+        guard let range = try archive.byteOffsets(of: Self.payload(of: entry, in: archive)) else {
+            throw ZipError.truncated("payload for '\(entry.path)'")
+        }
+        return range
     }
 
     /// Walks the entry's local file header to its payload and returns the payload's span.

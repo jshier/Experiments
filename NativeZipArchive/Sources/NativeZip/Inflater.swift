@@ -78,13 +78,17 @@ enum Alphabet {
     /// - Parameters:
     ///   - symbol: The symbol the code stands for.
     ///   - codeLength: The code's length in bits.
+    ///   - deflate64: Whether the stream is Deflate64, where length symbol 285 takes 16 extra bits (lengths 3
+    ///     to 65,538) and distance symbols 30 and 31 are valid (14 extra bits each, up to 65,536 back).
     /// - Returns: A literal, end-of-block, or length or distance entry; `invalid` for reserved symbols
-    ///   (literal/length 286 and 287, distance 30 and 31).
+    ///   (literal/length 286 and 287, and in DEFLATE distance 30 and 31).
     @inline(__always)
-    func entry(_ symbol: Int, codeLength: Int) -> HuffmanEntry {
+    func entry(_ symbol: Int, codeLength: Int, deflate64: Bool) -> HuffmanEntry {
         switch self {
         case .literalLength:
             switch symbol {
+            case 285 where deflate64:
+                return HuffmanEntry(codeLength: codeLength, kind: .lengthOrDistance, value: 3, extraBits: 16)
             case 0..<256: return HuffmanEntry(codeLength: codeLength, kind: .literal, value: symbol)
             case 256: return HuffmanEntry(codeLength: codeLength, kind: .endOfBlock, value: 0)
             case 257..<286:
@@ -96,6 +100,11 @@ enum Alphabet {
             default: return HuffmanEntry(codeLength: codeLength, kind: .invalid, value: 0) // 286, 287
             }
         case .distance:
+            if deflate64, symbol >= 30, symbol <= 31 {
+                return HuffmanEntry(
+                    codeLength: codeLength, kind: .lengthOrDistance, value: symbol == 30 ? 32769 : 49153, extraBits: 14
+                )
+            }
             guard symbol < 30 else { return HuffmanEntry(codeLength: codeLength, kind: .invalid, value: 0) }
             return HuffmanEntry(
                 codeLength: codeLength, kind: .lengthOrDistance,
@@ -136,6 +145,8 @@ struct Inflater: ~Copyable {
 
     /// The longest match, and so the room to keep free before decoding a symbol.
     static var maximumMatch: Int { 258 }
+    /// Deflate64's longest match.
+    static var maximumMatch64: Int { 65538 }
 
     // Tables, in one array: the fixed code's two (built once) and the current dynamic block's two. The
     // sizes cover the largest tables any valid code can need (from zlib's `enough`: 2,342 entries for
@@ -165,9 +176,16 @@ struct Inflater: ~Copyable {
     private var isFinalBlock = false
     /// The next bit to read, from the start of the input.
     private var bitPosition = 0
+    /// Whether the stream is Deflate64 (zip method 9) rather than DEFLATE: see ``Alphabet/entry(_:codeLength:deflate64:)``.
+    private(set) var isDeflate64 = false
 
     init() {
-        // The fixed code (RFC 1951, 3.2.6): literal/lengths 8, 9, 7, and 8 bits; 32 distance codes of 5 bits.
+        buildFixedTables()
+    }
+
+    /// Builds the fixed code's tables (RFC 1951, 3.2.6) for the current mode: literal/lengths 8, 9, 7, and 8
+    /// bits; 32 distance codes of 5 bits.
+    private mutating func buildFixedTables() {
         var literalLengths = InlineArray<288, UInt8>(repeating: 8)
         for symbol in 144..<256 {
             literalLengths[symbol] = 9
@@ -181,11 +199,17 @@ struct Inflater: ~Copyable {
         try! buildTable(distanceLengths.span, .distance, at: Self.fixedDistances, rootBits: Self.distanceRootBits)
     }
 
-    /// Prepares to decode a new stream. The fixed tables are kept.
-    mutating func reset() {
+    /// Prepares to decode a new stream. The fixed tables are kept unless the mode changes.
+    ///
+    /// - Parameter deflate64: Whether the stream is Deflate64.
+    mutating func reset(deflate64: Bool = false) {
         state = .blockHeader
         isFinalBlock = false
         bitPosition = 0
+        if deflate64 != isDeflate64 {
+            isDeflate64 = deflate64
+            buildFixedTables()
+        }
     }
 
     /// Decodes from `input` (the whole compressed stream, the same on every call) into `output`, writing
@@ -238,12 +262,13 @@ struct Inflater: ~Copyable {
                 let literals = fixed ? Self.fixedLiterals : Self.dynamicLiterals
                 let distances = fixed ? Self.fixedDistances : Self.dynamicDistances
                 let tables = tables.span
-                let result = try Self.decodeSymbols(
-                    input, from: bitPosition,
-                    literals: tables.extracting(literals..<(literals &+ Self.tableSize)),
-                    distances: tables.extracting(distances..<(distances &+ Self.distanceTableSize)),
-                    into: &output, at: position
-                )
+                let literalTable = tables.extracting(literals..<(literals &+ Self.tableSize))
+                let distanceTable = tables.extracting(distances..<(distances &+ Self.distanceTableSize))
+                let result = if isDeflate64 {
+                    try Self.decodeSymbols64(input, from: bitPosition, literals: literalTable, distances: distanceTable, into: &output, at: position)
+                } else {
+                    try Self.decodeSymbols(input, from: bitPosition, literals: literalTable, distances: distanceTable, into: &output, at: position)
+                }
                 bitPosition = result.bitPosition
                 position = result.end
                 guard result.endOfBlock else { return (position, false) } // Output full.
@@ -302,12 +327,35 @@ struct Inflater: ~Copyable {
     /// - Throws: `BytesError.insufficientData` if the stream is truncated; `BytesError.invalidValue` for an
     ///   invalid code or a distance reaching before the output's start.
     /// - Precondition: The tables have exactly those sizes.
+    @inline(never)
     private static func decodeSymbols(
         _ input: RawSpan, from bitPosition: Int,
         literals: Span<UInt32>, distances: Span<UInt32>,
         into output: inout MutableRawSpan, at end: Int
     ) throws(BytesError) -> (bitPosition: Int, end: Int, endOfBlock: Bool) {
+        try decodeSymbols(input, from: bitPosition, literals: literals, distances: distances, into: &output, at: end, deflate64: false)
+    }
+
+    /// ``decodeSymbols(_:from:literals:distances:into:at:)`` for Deflate64: its own copy of the loop, so
+    /// DEFLATE's doesn't carry the longer matches' extra refill and room.
+    @inline(never)
+    private static func decodeSymbols64(
+        _ input: RawSpan, from bitPosition: Int,
+        literals: Span<UInt32>, distances: Span<UInt32>,
+        into output: inout MutableRawSpan, at end: Int
+    ) throws(BytesError) -> (bitPosition: Int, end: Int, endOfBlock: Bool) {
+        try decodeSymbols(input, from: bitPosition, literals: literals, distances: distances, into: &output, at: end, deflate64: true)
+    }
+
+    /// The symbol loop, specialized by the two wrappers above on a constant `deflate64`.
+    @inline(__always)
+    private static func decodeSymbols(
+        _ input: RawSpan, from bitPosition: Int,
+        literals: Span<UInt32>, distances: Span<UInt32>,
+        into output: inout MutableRawSpan, at end: Int, deflate64: Bool
+    ) throws(BytesError) -> (bitPosition: Int, end: Int, endOfBlock: Bool) {
         precondition(literals.count == tableSize && distances.count == distanceTableSize)
+        let maximumMatch = deflate64 ? maximumMatch64 : maximumMatch
         var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
         var writer = try AlignedBytesWriter(&output, atByteOffset: end)
         var endOfBlock = false
@@ -361,10 +409,18 @@ struct Inflater: ~Copyable {
                 // from a copy of them, so the refill started here overlaps it instead of delaying it. After
                 // the distance, 28 or more remain: enough for the next root lookup, made before a second
                 // refill (which the next symbol needs, if it's another match) for the same reason.
+                // Deflate64 needs up to 60: 15 + 16 for the length, 15 + 14 for the distance, so it refills
+                // between them instead.
                 let length = entry.value &+ entry.extra(bits.bits)
                 bits.consume(bitCount: entry.totalBits)
-                let window = bits.bits
-                bits.refill()
+                let window: UInt64
+                if deflate64 {
+                    bits.refill()
+                    window = bits.bits
+                } else {
+                    window = bits.bits
+                    bits.refill()
+                }
                 let distanceEntry = lookup(distances, window, rootBits: distanceRootBits)
                 guard distanceEntry.kind == .lengthOrDistance else { throw .invalidValue }
                 let distance = distanceEntry.value &+ distanceEntry.extra(window)
@@ -446,7 +502,7 @@ struct Inflater: ~Copyable {
         let literalCount = Int(bits.read(Bits<5>.self)) &+ 257 // HLIT
         let distanceCount = Int(bits.read(Bits<5>.self)) &+ 1 // HDIST
         let codeLengthCount = Int(bits.read(Nibble.self)) &+ 4 // HCLEN
-        guard literalCount <= 286, distanceCount <= 30 else { throw .invalidValue }
+        guard literalCount <= 286, distanceCount <= (isDeflate64 ? 32 : 30) else { throw .invalidValue }
 
         // The code-length code: 3 bits per length, in a fixed order.
         var codeLengthLengths = InlineArray<19, UInt8>(repeating: 0)
@@ -515,10 +571,11 @@ struct Inflater: ~Copyable {
         let size = alphabet == .literalLength ? Self.tableSize : Self.distanceTableSize
         var all = tables.mutableSpan
         var table = all._mutatingExtracting(offset..<(offset &+ size))
+        let deflate64 = isDeflate64
         _ = try HuffmanTable.build(
             codeLengths: lengths, bitOrder: .leastSignificantFirst, rootBits: rootBits, maximumCodeLength: 15,
             into: &table, invalid: HuffmanEntry.invalid.raw,
-            symbol: { symbol, length in alphabet.entry(symbol, codeLength: length).raw },
+            symbol: { symbol, length in alphabet.entry(symbol, codeLength: length, deflate64: deflate64).raw },
             subtable: { offset, bits in HuffmanEntry(codeLength: bits, kind: .subtable, value: offset).raw }
         )
     }

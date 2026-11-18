@@ -14,7 +14,7 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
 | `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
 | `Base64` | Vectorized Base64 encoder on Bytes (`tbl` kernel, auto-vectorized `ld3`/`st4` kernel) | `Benchmarks/RESULTS.md` |
-| `NativeZipArchive` | ZIP/DEFLATE | `Benchmarks/RESULTS.md` |
+| `NativeZipArchive` | ZIP: stored, DEFLATE, Deflate64, bzip2, LZMA, xz; ZipCrypto and WinZip AES; `ZipExtractor` (many archives, one worker pool); `nunzip` (Info-ZIP unzip's options) | `Benchmarks/RESULTS.md` |
 | `BinaryParsingComparison` | Bytes vs swift-binary-parsing | `RESULTS.md` |
 | `NativeISO8601`, `*Benchmark` | Smaller benchmarks | READMEs |
 
@@ -54,6 +54,8 @@ reproducers live outside the repo, in `~/Downloads/swift-bugs/` (numbered `NN-sw
   (package-benchmark parses their arguments) are the exception.
 - Use Edit/Write for file changes rather than `sed -i`/scripts; jq for JSON, yq for XML/YAML/TOML (no inline
   Python); never `rm -rf "$VAR"` without checking the variable is set and points where you expect.
+- Test files aren't checked in, only the scripts that make them: `Tools/test-data` downloads or generates them
+  into the ignored `TestData/`, and nothing that writes test data writes or deletes outside it (below).
 - Temporary files go in the session scratchpad (or `mktemp -d`), never the workspace root. SwiftPM runs
   `swiftc` from the workspace root, so relative output paths passed with `-Xswiftc` land in `Experiments/`:
   always pass absolute paths.
@@ -202,6 +204,24 @@ the ceiling to compare networking benchmarks against (SocketStream's transfers r
 
 **`Tools/toolchain …`** — non-Xcode toolchains: `list`, `install`, `register`, and running commands,
 programs (`--runtime`), and tests (`test`) with one. See Toolchains below.
+
+**`Tools/test-data [fetch [SET...]|path [SET]|list]`** — test and benchmark files that aren't checked in, in
+`TestData/SET/` at the repository root (ignored by git). Run `Tools/test-data fetch` on a fresh clone; tests that
+need a missing set fail saying which `fetch` to run. Two kinds of set:
+- **Downloaded**, pinned to a revision and checked by SHA-256: `swift-binary-parsing` (its PNG, QOI, ELF, PCAPNG,
+  and binary plist samples, read by BinaryParsingComparison after its own `Data/`).
+- **Generated** by a checked-in script, run with the output directory as its argument and made again when any
+  file in the script's directory changes: `swift-help-lz4` (`BinaryParsingComparison/TestDataGenerators`:
+  swift-binary-parsing's `ELF/swift-help` through `lz4 -9`; lz4 1.11.1 reproduces the benchmarked file byte for
+  byte, and the script warns when another version doesn't), `nativezip-formats` and `nativezip-lzma`
+  (`NativeZipArchive/Tests/NativeZipTests/Fixtures/{formats,lzma}`, read through the tests' `testDataFile`). When
+  a generated file is what benchmarks measure, the generator checks its SHA-256 against the measured one.
+
+Don't check in archives, images, or other test binaries: add a download line or a generator to the script.
+Scripts that write test data source `Tools/lib/testdata.sh` and call `in_testdata PATH` before every write or
+delete (it resolves `..` and symbolic links, and refuses anything outside `TestData/`); Python generators have the
+same check (`in_testdata` in each). Temporary work goes inside the output directory too (`OUTPUT/.work`).
+(`Tools/corpus` is the compression corpus, cached outside the repository.)
 
 ## Toolchains
 
@@ -476,6 +496,16 @@ Compression and crypto (details: `Bytes/Benchmarks/RESULTS.md`, `SocketStream/RE
   number per lane (39 chunks on 24 lanes take as long as 48). State reused across calls must be reset per call: a slot still naming chunk 0 from the last call
   looked ready. Task groups beat `concurrentPerform` by up to 10% here; async APIs that take `inout`
   storage are `nonisolated(nonsending)` (otherwise `@concurrent`, and callers must send `self`).
+- **Extracting files: the kernel is the limit** (`NativeZipArchive/Benchmarks/RESULTS.md`, step15). Small files
+  cost `open`, `write`, `close`, and metadata syscalls (decoding was 2%), and APFS creation contends beyond about 8
+  writers (12 or more got slower, 24 took 3x as long). Writes to one file are serialized: parallel `pwrite`s of a
+  1 GB file gained nothing, and parallel copies into a shared mapping of it were 1.4–3x slower. What helped:
+  overlapping serial planning with the writes (a queue filled while planning, −17% on 20,000 files), one pool
+  for several archives (8 archives of one large entry each, 4.6x), working in cache-sized pieces (checksum
+  8 MB, then write it: −29% for 1 GB stored), and setting times and mode in one `fsetattrlist`. Put benchmark
+  output in a `*.noindex` directory: Spotlight indexing what you extract loads the machine.
+- **Payload structs with resilient fields (`Date?`) copy through value witnesses** (`swift_cvw_initWithCopyImpl`
+  in profiles): jobs that are queued, sorted, and handed between tasks are cheaper as final classes.
 
 API design and code generation (the 2026-11-17 proposals pass; numbers in `Bytes/Benchmarks/RESULTS.md`):
 

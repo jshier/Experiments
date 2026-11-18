@@ -11,12 +11,14 @@ public extension ZipArchive {
     ///   - entries: The entries to check; all of the archive's by default.
     ///   - maxConcurrency: The most entries to decompress at once.
     ///   - backend: Which DEFLATE and CRC-32 implementation to use.
-    /// - Returns: The entries that failed and why (the errors of ``contents(of:using:_:)``), in the order given.
-    ///   Empty means every entry is intact.
+    ///   - password: The password, for encrypted entries.
+    /// - Returns: The entries that failed and why (the errors of ``contents(of:using:password:_:)``), in the
+    ///   order given. Empty means every entry is intact.
     func verify(
         _ entries: [ZipEntry]? = nil,
         maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount,
-        backend: ZipDecoder.Backend = .bytes
+        backend: ZipDecoder.Backend = .bytes,
+        password: String? = nil
     ) async -> [(entry: ZipEntry, error: any Error)] {
         let indexed = Array((entries ?? self.entries).filter { $0.kind != .directory }.enumerated())
         let failures = FailureLog()
@@ -24,12 +26,38 @@ public extension ZipArchive {
         try? await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, backend: backend, weight: \.element.uncompressedSize) {
             [self] item, decoder in
             do {
-                try contents(of: item.element, using: &decoder) { _ in }
+                try contents(of: item.element, using: &decoder, password: password) { _ in }
             } catch {
                 failures.record(index: item.offset, entry: item.element, error: error)
             }
         }
         return failures.sorted()
+    }
+
+    /// Whether `password` passes `entry`'s password check: the traditional cipher's check byte, or AES's
+    /// verifier. A wrong password passes the traditional check about once in 256 tries (decryption then
+    /// fails its CRC-32); AES's, once in 65,536 (then its authentication code).
+    ///
+    /// - Parameters:
+    ///   - password: The password to try.
+    ///   - entry: An encrypted entry.
+    /// - Returns: `false` if the check fails or the entry's header can't be read; `true` for an entry that
+    ///   isn't encrypted.
+    func passwordMatches(_ password: String, for entry: ZipEntry) -> Bool {
+        guard let encryption = entry.encryption else { return true }
+        guard let payload = try? Self.payload(of: entry, in: file.bytes) else { return false }
+        let key = Array(password.utf8)
+        switch encryption {
+        case .traditional:
+            guard payload.byteCount >= TraditionalCipher.headerSize else { return false }
+            var cipher = TraditionalCipher(password: key)
+            let expected = entry.flags & 0x8 != 0 ? UInt8(truncatingIfNeeded: entry.dosTime >> 8) : UInt8(truncatingIfNeeded: entry.crc32 >> 24)
+            return cipher.checkByte(payload.extracting(0..<TraditionalCipher.headerSize)) == expected
+        case let .aes(bits, _):
+            return WinZipAES.verify(payload, bits: bits, password: key)
+        case .unsupported:
+            return false
+        }
     }
 }
 

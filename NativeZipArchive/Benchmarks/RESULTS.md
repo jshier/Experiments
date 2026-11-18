@@ -402,3 +402,108 @@ controls.
   move as "Locate 2,000 payloads", whose code didn't change (layout). Name decoding dominates this parse.
 - `LittleEndianBytesReader` throughout, `read(byteCount:)` taking the `UInt64` sizes directly (no `Int(clamping:)`),
   and `contents(of:)` appending chunks with Bytes' new `Data.append(_: RawSpan)` (BytesFoundation): unchanged.
+
+## step15 (2026-11-17): arbitrary archives, unzip's options, one pool for every archive (baselines `nz-before` → `nz-after3`)
+
+`nunzip` now reads what other tools write, takes Info-ZIP unzip's options, and extracts any number of archives
+with one pool of workers that starts writing while the archives are still being planned.
+
+**Formats** (`TestData/nativezip-formats`, made by `Tests/NativeZipTests/Fixtures/formats/make-fixtures.sh`
+through `Tools/test-data fetch` with Python's `zipfile`, Info-ZIP `zip`, and `bsdtar`; every entry's CRC-32 comes
+from the tool that wrote it):
+
+- Methods: stored, deflated, **Deflate64** (`Inflater` in a second mode: a 64 KB window, length symbol 285 with 16
+  extra bits, distance codes 30 and 31; its own `@inline(never)` copy of the symbol loop, which refills between the
+  length and the distance), **bzip2** (the SDK's libbz2, `CBZip2` system-library target), **LZMA** (a decoder in
+  Swift, `LZMADecoder.swift`, no `unsafe`, ~115 MB/s on text, level with `xz -d`), **xz** (Compression's
+  `COMPRESSION_LZMA` stream). zstd (93), PPMd (98), and the 1980s methods (shrink, reduce, implode) are reported as
+  unsupported (exit 81).
+- Encryption: traditional PKWARE ("ZipCrypto", checked against the CRC's or, with a data descriptor, the time's high
+  byte) and **WinZip AES** 128/192/256, AE-1 and AE-2 (CommonCrypto: PBKDF2-HMAC-SHA1, AES-ECB over little-endian
+  counter blocks, the HMAC checked before anything is decrypted). Payloads are decrypted whole into a buffer the
+  decoder owns (freed after entries over 64 MB). PKWARE's strong encryption is unsupported.
+- Archives with data before them (self-extractors, `cat stub a.zip`): offsets are corrected by where the directory
+  really is (`leadingByteCount`, Info-ZIP's "extra bytes at beginning" warning), also for ZIP64 records.
+- Central directories holding more entries than their 16-bit count (wrapped past 65,535 without ZIP64 records).
+- Names: Info-ZIP's Unicode path field (0x7075, used when its CRC matches the header's name), backslashes from
+  MS-DOS/NTFS/VFAT hosts, macOS hosts' (19) Unix modes. Timestamps from the NTFS (0x000A) and old Info-ZIP Unix
+  (0x5855) fields when there's no extended timestamp; UID/GID (0x7875, 0x5855) for `-X`.
+
+**Extraction** (`ZipExtractor`):
+
+- Unsafe names are made safe as Info-ZIP does instead of failing the whole extraction: a leading `/` and `..`
+  components are removed, with its warnings.
+- Entries that land on one item (the same name twice, or names a case-insensitive volume folds together) follow
+  the overwrite policy against the earlier entry: the later replaces it (`-o`), or is skipped (`-n`), or the user is
+  asked. Before, both were written concurrently.
+- A failing entry no longer stops the others; failures are reported at the end with Info-ZIP's exit codes (2, 81
+  unsupported, 82 password). Unreadable entries (unsupported method or encryption, no password) fail during planning,
+  before they're announced.
+- Setuid, setgid, and sticky bits are cleared unless `-K` (Info-ZIP's default; they were applied before).
+
+**Options**: `-l -v -t -p -c -z -T`, `-f -u`, `-o -n`, `-j -C -L/-LL -D/-DD -X -K -q/-qq`, `-P` (or a prompt,
+three tries, checked against the first encrypted entry), `-x`, `-d`; the archive may be a quoted wildcard, and
+`.zip`/`.ZIP` are tried; `--jobs N`; `--zlib`. Several archives get Info-ZIP's per-archive headers and summary.
+
+### Parallelism
+
+`ZipExtractor.extract(maxConcurrency:stopOnFirstError:_:)` starts the workers, then runs the planning closure
+(open archives, select entries, prompt, create directories, resolve collisions, report events). Each planned file
+is queued at once: large ones (1 MB or more) largest first, small ones in order. Eight workers take anything; the
+rest (up to `--jobs`, default all cores) take only large files, which keeps the measured width rule (8 for file
+creation, one per large entry beyond that) without knowing the counts in advance. A file replacing one that's
+already being written waits until the pool is done. Symbolic links follow every file, then directory metadata,
+deepest level first, each level in parallel.
+
+What was measured on the way (hyperfine, warm cache, output in a `.noindex` directory so Spotlight doesn't index
+it, M3 Ultra, macOS 27.2.1):
+
+- **Pool width** for small files (20,000 files of 1–8 KB): 4 workers 708 ms, 8 728 ms, 12 891 ms, 16 1,386 ms,
+  24 2,192 ms; CPU time 2.3, 4.1, 6.1, 9.2, 12.9 s. For 2,000 files of 256 KB: 152, 115, 115, 129, 151 ms. File
+  creation still caps out at about 8; kept.
+- **Where small-file time goes** (Time Profiler, worker threads): `open` 45%, `write` 19%, `close` 13%, `futimens`
+  11%, `fchmod` 7%, decoding about 2%. The times and mode now go in one `fsetattrlist` call: −6% CPU, wall within
+  noise. Skipping timestamps entirely (`-DD`) saves 3%.
+- **One large stored file** (1 GB): checksumming it whole and then writing it whole read it from memory twice
+  (253 ms). In 8 MB pieces, each checksummed and then written while in cache: 180 ms. Writing the pieces in
+  parallel gained nothing (1, 4, and 24 writers: 178–180 ms; the kernel serializes writes to one file), and copying
+  into a shared mapping of the destination was slower (4 threads 246 ms, 24 threads 571 ms). Pieces, sequential.
+- **Planning was serial and ahead of every write**: 60–73 ms for 20,000 entries. `FileJob` as a class (copies of the
+  struct, which holds resilient `Date?`s, went through value witnesses), collision keys from the short relative
+  path, and the directory cache remembering the last directory: 46–57 ms. Then overlapping it with the writes
+  (above) took the rest off the wall clock.
+- The CRC-32 of pipelined entries (compressed, 4 MB or more) moved from the decoding task to the writing task.
+
+| Job | unzip | ditto | nunzip before | nunzip now | change |
+|---|---|---|---|---|---|
+| SDK headers (3,700 items) | 520 ms | 700 ms | 156 ms | **130 ms** | −17% |
+| 20,000 files of 1–8 KB | 2,170 ms | 3,416 ms | 656 ms | **542 ms** | −17% |
+| 2,000 files of 256 KB | 2,485 ms | 686 ms | 125 ms | **112 ms** | −10% |
+| 512 MB of text, one entry | 2,282 ms | 324 ms | 272 ms | **259 ms** | −5% |
+| 1 GB stored, one entry | 3,990 ms | 174 ms | 254 ms | **209 ms** | −18% |
+| 16 archives, 1,000 files each | 3,973 ms | — | 953 ms (in turn) | **731 ms** | −23% |
+| 8 archives, one 64 MB text file each | 2,285 ms | — | 339 ms (in turn) | **73 ms** | 4.6x |
+
+(Means of 5–7 runs; run-to-run noise ±2–20 ms, more with the machine's load average of 3–4 at the time. "Before"
+handled one archive per run, so several archives ran in a shell loop.) Trees match Info-ZIP's byte for byte,
+with the same permissions and modification times.
+
+What stays serial: one DEFLATE stream decodes on one core (the 512 MB entry: ~2 GB/s), and planning (now overlapped).
+Splitting a single DEFLATE stream across cores (finding block boundaries and resolving back-references across
+chunks, as rapidgzip does) is the next step for archives of one huge entry.
+
+**Package benchmarks** (instructions; decoding unchanged):
+
+| Benchmark | nz-before | nz-after3 | change |
+|---|---|---|---|
+| Inflate + CRC 32 MB text / raster (Bytes, zlib) | — | — | ±0.0% |
+| Inflate + CRC 2,000 small files: Bytes | 232 M | 233 M | +0.4% (dispatch by method per entry) |
+| Verify 2,000 small files (parallel) | 309 M | 315 M | +1.9% |
+| Stored + CRC, Locate 2,000 payloads | — | — | ±0.0% |
+| Parse central directory (2,000 entries) | 4,887 K | 6,038 K | +24% |
+| Parse central directory: original ByteReader | 5,857 K | 6,390 K | +9% |
+
+Parsing costs about 575 instructions more per entry for the larger `ZipEntry` (encryption, owner, host, DOS time;
+the shared `makeEntry` is inlined into both parsers, hence the reference parser's rise too) and the new extra fields.
+Reading Info-ZIP's 4-byte UID/GID directly, not byte by byte, took back 300 per entry (6,644 → 6,038 K). That's
+0.6 ms to open a 2,000-entry archive.

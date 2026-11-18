@@ -2,9 +2,19 @@ import Foundation
 import Testing
 import Workloads
 
+/// A test file: from the package's Data/, or from the repository's TestData/ (swift-binary-parsing's samples and
+/// swift-help.lz4, made by `Tools/test-data fetch swift-binary-parsing swift-help-lz4`).
 func dataFile(_ name: String) throws -> [UInt8] {
-    let url = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../Data/\(name)")
-    return try Array(Data(contentsOf: url))
+    let package = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../..")
+    for directory in ["Data", "../TestData/swift-binary-parsing", "../TestData/swift-help-lz4"] {
+        if let data = try? Data(contentsOf: package.appending(path: "\(directory)/\(name)")) { return Array(data) }
+    }
+    throw MissingTestFile(name: name)
+}
+
+struct MissingTestFile: Error, CustomStringConvertible {
+    let name: String
+    var description: String { "\(name) is missing: run Tools/test-data fetch swift-binary-parsing swift-help-lz4" }
 }
 
 /// Every variant of a workload produces the same result, so the benchmarks compare equal work.

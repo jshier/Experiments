@@ -1,0 +1,156 @@
+#!/bin/bash
+# Usage: Tools/test-data [fetch [SET...]|path [SET]|list]
+#
+# Test and benchmark files that aren't checked in: downloaded from other projects, or made by generator scripts
+# that are, into TestData/SET/ at the repository root (ignored by git).
+#
+#   fetch [SET...]  Download or generate the sets named (default: all). Idempotent: downloaded files already
+#                   there with the right SHA-256 are kept, and a generated set is made again only when its
+#                   generator's files have changed (or its directory is gone).
+#   path [SET]      Print TestData/ (or TestData/SET), the directory tests and benchmarks read.
+#   list            Print each set and its files with their sizes (or "missing"), tab-separated.
+#
+# Downloaded sets (pinned to a revision, checked by SHA-256):
+#   swift-binary-parsing  apple/swift-binary-parsing's Sources/TestData/Data (PNG, QOI, ELF, PCAPNG, binary plist
+#                         samples), at the revision BinaryParsingComparison's Package.resolved pins. Used by
+#                         BinaryParsingComparison's tests and benchmarks.
+# Generated sets (the generator is run with the output directory as its argument):
+#   swift-help-lz4        swift-binary-parsing's ELF/swift-help compressed with `lz4 -9`, for BinaryParsingComparison's
+#                         LZ4 and ELF workloads (BinaryParsingComparison/TestDataGenerators; needs Homebrew's lz4).
+#   nativezip-formats     Archives from Python's zipfile, Info-ZIP zip, and bsdtar for NativeZip's FormatTests
+#                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/formats; needs python3 3.14 or later).
+#   nativezip-lzma        LZMA payloads from liblzma for NativeZip's LZMADecoderTests
+#                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma; needs Homebrew's xz).
+#
+# To add a set: add lines to DOWNLOADS (set, URL, SHA-256, file name) or a line to GENERATED (set, generator
+# script relative to the repository), and describe it above.
+#
+# Everything this script and the generators write or delete is checked to be inside TestData/ first
+# (`in_testdata` in Tools/lib/testdata.sh).
+source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/testdata.sh"
+
+ROOT="$TESTDATA_ROOT"
+
+SBP="https://raw.githubusercontent.com/apple/swift-binary-parsing/8f0f56a795e36eff6d532b01e8e94f640e3443dd/Sources/TestData/Data"
+DOWNLOADS="
+swift-binary-parsing $SBP/PNG/antelope.png 189540d878025975181edfb01f64aa987a644eb3293f8a5b592aa062e86bb52f antelope.png
+swift-binary-parsing $SBP/PNG/tiny.png ee7cccd33c6ba29287f5c5adb34b823f80b757ad0a0680764913eb094c79fda3 tiny.png
+swift-binary-parsing $SBP/PNG/tiny-bad-truncated.png 2b010f3670dac606a0c93d354a41e3953e834c087f3074ab696fb03c0ccb562a tiny-bad-truncated.png
+swift-binary-parsing $SBP/PNG/tiny-bad-chunkorder.png 5c8d78a49b6733c34e0228d5bf1b2545ccb9dd823e39f8b6ac0d987089758540 tiny-bad-chunkorder.png
+swift-binary-parsing $SBP/PNG/tricolor.png 93f65c1ada46fe3bc58bdea6fdb68cddd62d2b7254592c02cb76b4a1196546d6 tricolor.png
+swift-binary-parsing $SBP/ELF/helloworld efef41167b5903dd3627052cd383ec9b8b84f05afeed815db29205c99a69385c helloworld
+swift-binary-parsing $SBP/PCAP/sample.pcap 0b8b4d49296eef69bf7ed921bb327321572a3b78fcb6823dd160019c70bd1c36 sample.pcap
+swift-binary-parsing $SBP/PList/sample.plist 84c0c06d6e77cc750bf0dffd5f282fe97ddc58d6396610eb010cd3669b6dfe6a sample.plist
+swift-binary-parsing $SBP/QOI/antelope.qoi f5fd4d31e810037d9bf1486def2feecfa4fa1469873cfdb2a7a624d1986aaf19 antelope.qoi
+"
+GENERATED="
+swift-help-lz4 BinaryParsingComparison/TestDataGenerators/make-swift-help-lz4.sh
+nativezip-formats NativeZipArchive/Tests/NativeZipTests/Fixtures/formats/make-fixtures.sh
+nativezip-lzma NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma/make-lzma-vectors.sh
+"
+STAMP=".generator"
+
+sets() { printf '%s\n%s\n' "$DOWNLOADS" "$GENERATED" | perl -ane 'print "$F[0]\n" if @F' | sort -u; }
+
+sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
+
+check_set() { sets | grep -qx "$1" || die "unknown set '$1' (sets: $(sets | tr '\n' ' '))"; }
+
+generator_of() { echo "$GENERATED" | perl -sane 'print "$F[1]\n" if @F && $F[0] eq $set' -- -set="$1"; }
+
+# A hash of every file in the generator's directory: its scripts, and whatever they read.
+generator_hash() {
+    local dir
+    dir="$(dirname "$EXPERIMENTS_DIR/$1")"
+    (cd "$dir" && find . -type f ! -name '.*' | sort | while read -r file; do shasum -a 256 "$file"; done) | shasum -a 256 | cut -d' ' -f1
+}
+
+fetch_downloads() {
+    local wanted="$1" set url sum file target failed=0
+    while read -r set url sum file; do
+        [[ -n "$set" ]] || continue
+        grep -qx "$set" <<< "$wanted" || continue
+        target="$ROOT/$set/$file"
+        [[ -f "$target" && "$(sha256 "$target")" == "$sum" ]] && continue
+        in_testdata "$ROOT/$set"; in_testdata "$target"; in_testdata "$target.partial"
+        mkdir -p "$ROOT/$set"
+        note "Downloading $set/$file"
+        if ! curl -fsSL --retry 3 -o "$target.partial" "$url"; then
+            rm -f "$target.partial"; note "error: download of $url failed"; failed=1; continue
+        fi
+        if [[ "$(sha256 "$target.partial")" != "$sum" ]]; then
+            rm -f "$target.partial"; note "error: $set/$file doesn't match its SHA-256"; failed=1; continue
+        fi
+        mv "$target.partial" "$target"
+    done <<< "$DOWNLOADS"
+    return "$failed"
+}
+
+# Runs the generator into a staging directory, then replaces the set's directory with it.
+generate() {
+    local set="$1" generator hash staging
+    generator="$(generator_of "$set")"
+    [[ -x "$EXPERIMENTS_DIR/$generator" ]] || { note "error: $generator isn't there or isn't executable"; return 1; }
+    hash="$(generator_hash "$generator")"
+    if [[ -f "$ROOT/$set/$STAMP" && "$(cat "$ROOT/$set/$STAMP")" == "$hash" ]]; then return 0; fi
+    note "Generating $set with $generator"
+    staging="$ROOT/.$set.partial"
+    [[ -n "$set" ]] || die "no set named"
+    in_testdata "$staging"; in_testdata "$ROOT/$set"
+    rm -rf "$staging"
+    mkdir "$staging"
+    if ! "$EXPERIMENTS_DIR/$generator" "$staging" >&2; then
+        rm -rf "$staging"; note "error: $generator failed"; return 1
+    fi
+    echo "$hash" > "$staging/$STAMP"
+    rm -rf "${ROOT:?}/$set"
+    mv "$staging" "$ROOT/$set"
+}
+
+fetch() {
+    local wanted name failed=0
+    if (( $# )); then
+        for name in "$@"; do check_set "$name"; done
+        wanted="$(printf '%s\n' "$@")"
+    else
+        wanted="$(sets)"
+    fi
+    fetch_downloads "$wanted" || failed=1
+    for name in $(echo "$GENERATED" | perl -ane 'print "$F[0]\n" if @F'); do
+        grep -qx "$name" <<< "$wanted" || continue
+        generate "$name" || failed=1
+    done
+    (( failed == 0 )) || fail "some sets weren't fetched"
+    list
+}
+
+list() {
+    local set url sum file
+    while read -r set url sum file; do
+        [[ -n "$set" ]] || continue
+        if [[ -f "$ROOT/$set/$file" ]]; then
+            printf '%s\t%s\t%s\n' "$set" "$file" "$(stat -f %z "$ROOT/$set/$file")"
+        else
+            printf '%s\t%s\tmissing\n' "$set" "$file"
+        fi
+    done <<< "$DOWNLOADS"
+    while read -r set file; do
+        [[ -n "$set" ]] || continue
+        if [[ -f "$ROOT/$set/$STAMP" ]]; then
+            (cd "$ROOT/$set" && find . -type f ! -name '.*' | sort | while read -r file; do
+                printf '%s\t%s\t%s\n' "$set" "${file#./}" "$(stat -f %z "$file")"
+            done)
+        else
+            printf '%s\t*\tmissing\n' "$set"
+        fi
+    done <<< "$GENERATED"
+}
+
+case "${1:-}" in
+    fetch) shift; fetch "$@" ;;
+    path) if [[ -n "${2:-}" ]]; then check_set "$2"; echo "$ROOT/$2"; else echo "$ROOT"; fi ;;
+    list) list ;;
+    -h|--help|"") usage ;;
+    *) usage 2 ;;
+esac

@@ -24,9 +24,16 @@ let package = Package(
     targets: [
         .target(
             name: "NativeZip",
-            dependencies: [.product(name: "Bytes", package: "Bytes"), .product(name: "BytesMacros", package: "Bytes"), .product(name: "BytesFoundation", package: "Bytes")],
+            dependencies: [
+                "CBZip2",
+                .product(name: "Bytes", package: "Bytes"),
+                .product(name: "BytesMacros", package: "Bytes"),
+                .product(name: "BytesFoundation", package: "Bytes"),
+            ],
             swiftSettings: strictSettings
         ),
+        // libbz2 from the SDK, for bzip2 entries (method 12).
+        .systemLibrary(name: "CBZip2", path: "Sources/CBZip2"),
         .executableTarget(
             name: "nunzip",
             dependencies: [
@@ -38,6 +45,8 @@ let package = Package(
         .testTarget(
             name: "NativeZipTests",
             dependencies: ["NativeZip"],
+            // Archives and vectors the tests load from their own directory (#filePath).
+            exclude: ["Fixtures"],
             // Not strict memory safety: the tests call zlib's C API directly to make reference streams.
             swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")]
         ),

@@ -2,9 +2,14 @@ import Benchmark
 import Foundation
 import Workloads
 
+/// A test file: from the package's Data/, or from the repository's TestData/ (swift-binary-parsing's samples and
+/// swift-help.lz4, made by `Tools/test-data fetch swift-binary-parsing swift-help-lz4`).
 func dataFile(_ name: String) -> [UInt8] {
-    let url = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../Data/\(name)")
-    return Array(try! Data(contentsOf: url))
+    let package = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../..")
+    for directory in ["Data", "../TestData/swift-binary-parsing", "../TestData/swift-help-lz4"] {
+        if let data = try? Data(contentsOf: package.appending(path: "\(directory)/\(name)")) { return Array(data) }
+    }
+    fatalError("\(name) is missing: run Tools/test-data fetch swift-binary-parsing swift-help-lz4")
 }
 
 let benchmarks: @Sendable () -> Void = {
