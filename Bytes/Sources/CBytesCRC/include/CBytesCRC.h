@@ -10,7 +10,7 @@
 
 #include <stdint.h>
 
-#if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32) && defined(__ARM_FEATURE_AES) && !defined(BYTES_PORTABLE)
+#if defined(__aarch64__) && defined(__ARM_FEATURE_CRC32) && defined(__ARM_FEATURE_AES) && defined(__ARM_FEATURE_DOTPROD) && !defined(BYTES_PORTABLE)
 #define BYTES_HAS_HARDWARE_CRC 1
 #include <arm_acle.h>
 #include <arm_neon.h>
@@ -32,6 +32,27 @@ BYTES_CRC_INLINE bytes_crc_u8x16 bytes_crc_fold(bytes_crc_u8x16 x, bytes_crc_u8x
 #else
     return (bytes_crc_u8x16)veorq_u8(veorq_u8(low, high), (uint8x16_t)data);
 #endif
+}
+
+/// Four 32-bit lanes, imported into Swift as `SIMD4<UInt32>`.
+typedef uint32_t bytes_crc_u32x4 __attribute__((ext_vector_type(4)));
+
+/// `acc` plus, in each 32-bit lane, the dot product of that lane's four bytes of `a` and of `b` (UDOT, `FEAT_DotProd`:
+/// every Apple silicon CPU from the M1 on). Swift's SIMD types have no widening dot product: Adler-32 uses it for
+/// the byte sums (against ones) and the position-weighted sums (against weights), 16 bytes in one instruction.
+BYTES_CRC_INLINE bytes_crc_u32x4 bytes_crc_udot(bytes_crc_u32x4 acc, bytes_crc_u8x16 a, bytes_crc_u8x16 b) {
+    return (bytes_crc_u32x4)vdotq_u32((uint32x4_t)acc, (uint8x16_t)a, (uint8x16_t)b);
+}
+
+/// The weights 64, 63, …, 1 for a 64-byte Adler-32 block, as four vectors (`k` 0 through 3, constant after inlining):
+/// the weight of the byte at position `j` in the block is `64 - j`.
+BYTES_CRC_INLINE bytes_crc_u8x16 bytes_adler_weights(int k) {
+    static const uint8_t weights[64] = {
+        64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43,
+        42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21,
+        20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+    };
+    return (bytes_crc_u8x16)vld1q_u8(weights + 16 * k);
 }
 
 /// The CRC32 instructions: `crc` updated with 8 bytes (little-endian) or one byte, unconditioned.

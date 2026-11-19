@@ -40,7 +40,7 @@ surface: section 1 covers the hardware basics, terms are glossed where they firs
 [glossary](#13-glossary) collects them. Full records are in
 [Benchmarks/RESULTS.md](Benchmarks/RESULTS.md) and each project's RESULTS.md.
 
-All numbers are from one machine: an Apple M3 Ultra (24 performance and 8 efficiency cores), macOS 27.2,
+All numbers are from one machine, except section 15's: an Apple M3 Ultra (24 performance and 8 efficiency cores), macOS 27.2,
 Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 and later measurements), release builds, medians from the [ordo-one benchmark
 package](https://github.com/ordo-one/benchmark). "GB/s" is bytes processed per second. "x% faster" means
 x% less time unless it says "throughput". Where a number was taken while other jobs loaded the machine,
@@ -65,6 +65,7 @@ named in the text.
 12. [Limitations and bugs found in Swift and LLVM](#12-limitations-and-bugs-found-in-swift-and-llvm)
 13. [Glossary](#13-glossary)
 14. [Further reading](#14-further-reading)
+15. [The same code on another CPU: M1 Max against M3 Ultra](#15-the-same-code-on-another-cpu-m1-max-against-m3-ultra)
 
 ## 1. How the CPU sees your loop
 
@@ -1671,3 +1672,68 @@ swiftlang/swift#90291.
   (Keiser, Lemire): the SIMD techniques behind fast Base64 and text validation.
 - [Dougall Johnson's Apple M1 instruction tables](https://dougallj.github.io/applecpu/firestorm.html):
   latency and throughput of each instruction on Apple's cores.
+
+## 15. The same code on another CPU: M1 Max against M3 Ultra
+
+Everything above was measured on an M3 Ultra. On 2026-11-19 the repository moved to an Apple M1 Max (8 performance and 2
+efficiency cores, 64 GB, macOS 27.2.1, the same Swift 6.4.4), and every package's benchmarks were run again from the same
+commit family. Same compiler, same code, a different CPU: the cheapest way to separate what the code does from what the
+chip does. Full tables: [Benchmarks/RESULTS.md](Benchmarks/RESULTS.md), 2026-11-19, and each project's RESULTS.md.
+
+| | M3 Ultra | M1 Max |
+|---|---|---|
+| Cores | 24 P + 8 E | 8 P + 2 E |
+| P-core clock | ~4.05 GHz | ~3.23 GHz |
+| Memory | 819 GB/s (shared by CPU, GPU, Neural Engine) | 400 GB/s |
+| Same ISA features used here | NEON, AES, PMULL, SHA, CRC32, DotProd | yes (no I8MM/BF16; the M3 has no SME either) |
+
+**One core: 1.3x slower, which is the clock.** Over 773 Bytes benchmarks whose instruction counts are the same on both
+machines, an M1 Max core takes 1.31x as long as an M3 Ultra core (geometric mean of the time ratio); the clock ratio is
+1.25, so the M3 gets about 4% more done per clock. The other packages say the same: Base64 1.27, MQTT 1.34, NativeZip 1.33,
+BinaryParsingComparison 1.30, SocketStream 1.32. The three builds (NEON, portable C, Swift only) stay within 1.4% of each
+other on both chips, so the section 10 conclusion (the portable builds cost about nothing) is not an M3 artifact, and the
+Bytes-versus-reference standings hold: Zstd's lead over libzstd shrinks from 1.29x to 1.09x on large inputs, the rest
+move by a few percent, and the one flip (LZ4 swift-help, Bytes 0.93x → 1.05x of swift-binary-parsing's ParserSpan,
+same instructions) wasn't investigated. A ratio isn't one number: about 1.06 at 1 KB, about 1.5 for 100–400 KB inputs (an L2-sized
+working set; cause not found), 1.3 for multi-MB inputs.
+
+**Many cores: the core count is the difference.** With the lane count following the chip (24 lanes against 8), the parallel
+codecs are 2.4x apart (geometric mean over 60 pairs, 1.2–3.8x): three times the lanes at 1.25 times the clock would be 3.75.
+Memory-bound many-core reads are 1.9x apart for 10 against 32 cores (the bandwidth ratio is 2.05). File-system work is
+the exception that shows what the extra cores are for: extracting a 2,000-file archive is fastest with 4 workers on the
+M3 Ultra (64 ms) and with 8 on the M1 Max (81 ms; 4 workers: 106 ms), and NativeAEA's threaded rows are 3.1x apart
+against 1.2 for its single-threaded ones. A rule found on one chip ("APFS contends beyond about four writers") has a
+different knee on the other; derive worker counts from the machine.
+
+**What the M1 Max measured (one P core).** Vector latency and throughput, from probes: simple vector operations (`add`,
+`eor`, `eor3`, `zip`, `uzp`, `ext`, one- and two-register `tbl`) are 4 a cycle with 2 cycles of latency; `udot`, `pmull`,
+`aese`, `mul` and `usra` 2.7 a cycle with 3 of latency; a three- or four-register `tbl` costs two or three of those slots
+and a four-register `tbx` four, with 8 cycles of latency; `sha256h` and `sha512h` half a cycle. Memory: L1 3 cycles, L2
+(12 MB per cluster) 17–18 cycles, system-level cache 35–52 ns, DRAM 121–124 ns; one core reads 61 GB/s and two already reach
+the 115 GB/s that a read-only loop gets from all ten. AES-128-CTR (12 GB/s) runs at about 90% of the `aese`+`aesmc` bound,
+CRC-32's `pmull` fold (58–62 GB/s) at the memory rate, and neither can be improved on this core.
+
+**What changed in the code for the M1 Max.**
+
+- *Adler-32 with `udot`, 2x faster* (`Adler32._updateDotProduct`): `udot` adds four bytes times four weights into each lane,
+  which is exactly Adler-32's two sums, so the byte sum and the position-weighted sum are two dot products against ones and
+  against 64, 63, …, 1. 29.8 → 58.0 GB/s on 1 MB, instructions −51%, 64-byte inputs −12%; the loop is bound by `udot`
+  throughput and reaches libdeflate's 64 GB/s. Swift's SIMD types have no widening dot product, so it joined `pmull` and
+  `tbl` in section 9: a `static inline` C wrapper, the loop in Swift. (Every Apple silicon Mac has `udot`; the M3 gain is
+  likely but unmeasured.) Technique, as always: a probe in C first against the references, then the library, then the
+  repository's benchmarks with the unchanged zlib and libdeflate rows as controls.
+- *Lane counts per direction.* The two efficiency cores add 10–13% to the parallel DEFLATE encoder (workers pull chunks
+  from a queue, so a slow core costs nothing at the end) and cost the decoder 20–35% (its segments are split evenly across
+  the lanes, so one lands on an E core and everyone waits). Finer segments (16 lanes: 4–12% faster than 8) are the other
+  fix for the decoder. "Lanes = performance cores" is a rule for statically divided work; a queue can use every core.
+
+**What did not help.** Software prefetch on CRC-32 (the fold already runs at the memory rate; a distance of 8 KB hurt),
+interleaving two halves, buffer alignment. Not tried, and the places to look next: store-heavy and short-copy code (back-references
+at distances 1–7 are 1.6–1.85x slower than on the M3 at identical instruction counts, stores 1.8x), and the Base64
+decoder's lookups, which were tuned around the M3's micro-op counts for `tbl` and `tbx`.
+
+**Method note.** The first runs overlapped Spotlight and photo analysis indexing the new files. One memory-bound row
+(CRC-32 over 32 MB, NativeZip) came out 2.2x too slow and was caught by a standalone probe disagreeing with it; re-runs of
+the other packages and of a 200-benchmark subset of Bytes on the idle machine agreed with the first runs to 1% (geometric
+mean). After moving to new hardware, re-run something unchanged on an idle machine before trusting a ratio, and keep
+instruction counts next to the times: they proved both machines ran the same code.

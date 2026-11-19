@@ -8,7 +8,131 @@ cores), macOS 27.2, Swift 6.4.2. Single-core times vary about ±10% from run to 
 - a 10,000-packet session-like mix of every packet type.
 
 One core parses the same 1.25 MB again and again, from cache. All 32 cores each parse their own copies
-(4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput.
+(4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput. Numbers
+are M3 Ultra unless a heading says otherwise; the 2026-11-19 section runs the same benchmarks on an M1 Max.
+
+## 2026-11-19: the same suite on an M1 Max (baselines `d2-final` → `m1max`)
+
+Every benchmark, run unchanged on a new machine and compared with the M3 Ultra's `d2-final` (2026-11-18). The
+existing M3 numbers aren't touched.
+
+| | M3 Ultra | M1 Max |
+|---|---|---|
+| Cores | 24 P + 8 E (32 threads in the all-core runs) | 8 P + 2 E (10 threads) |
+| P-core clock (max) | ~4.05 GHz | ~3.23 GHz (the M3's is 1.25x) |
+| Memory | 256 GB LPDDR5-6400, 819 GB/s | 64 GB LPDDR5-6400, 400 GB/s |
+| P-cluster L2 | not measured | 12 MB |
+| OS, toolchain | macOS 27.2, Swift 6.4.4 (Xcode 27.3) | macOS 27.2.1, Swift 6.4.4 (Xcode 27.3, same compiler) |
+
+- **Method:** `swift package --disable-sandbox benchmark baseline update m1max --no-progress`, one package at a
+  time, nothing else benchmarking. `corespotlightd` used about one core of the M1 Max during the Bytes runs (it
+  couldn't be stopped); single-thread medians weren't noticeably affected there.
+- **Reading the tables:** the ratio is **M1 Max time / M3 Ultra time**, so above 1 is slower and 1.25 is the clock
+  ratio alone. Packet rates are 10,000 packets over the median time (one core), or `copyCount × 10,000` over it
+  (all-core runs: 128 copies on the M3, 40 on the M1 Max, since a copy count is 4 per thread). Median times
+  from 10 ms are rounded to two digits (the conventional and copying all-core rows): ±5% there.
+- **Scope:** the suite parses and encodes PUBLISH packets and parses one session-like mix of every type; there are no
+  other per-type benchmarks, so that is all this section can compare. The all-core runs' names include the thread
+  count (`, 32 cores` and `, 10 cores`), so they don't pair by name; they're compared by packet rate below.
+
+### Headline
+
+**Geometric mean of M1 Max time / M3 Ultra time over the 10 single-core benchmarks: 1.34** (range 1.15–1.68; the
+allocation-free parsers alone, n = 5: 1.20; the two PUBLISH encoders 1.64; the three allocating workloads 1.42).
+Instructions per iteration are the same on both machines in all 10 (identical in the recorded digits), so these
+are hardware ratios. The all-core runs' instructions per copy agree within 0.3% (5.14 M against 5.15 M per
+PUBLISH encode copy, for instance), except the conventional parse, −1.5%, where the M3's total is recorded as
+"11 G", two digits.
+
+### One core
+
+| Benchmark (10,000 packets, 1 core) | M3 Ultra | M1 Max | Ratio | M packets/s (M3 → M1) | Instructions | Mallocs |
+|---|---|---|---|---|---|---|
+| Parse PUBLISH: Bytes views | 392 µs | 496 µs | 1.27x | 25.5 → 20.2 | 9.80 M | 0 |
+| Parse PUBLISH: Bytes views, properties not iterated | 358 µs | 410 µs | 1.15x | 27.9 → 24.4 | 7.93 M | 0 |
+| Parse PUBLISH: frames, MQTTPublish(parsing:) | 350 µs | 415 µs | 1.19x | 28.6 → 24.1 | 8.83 M | 0 |
+| Parse PUBLISH: frames, properties visited while parsing | 281 µs | 333 µs | 1.19x | 35.6 → 30.0 | 7.37 M | 0 |
+| Parse PUBLISH: Bytes views, copying topic, payload, and strings | 1,391 µs | 1,882 µs | 1.35x | 7.2 → 5.3 | 33 M | 20,000 |
+| Parse PUBLISH: conventional (`[UInt8]` indexes, owned values) | 3,389 µs | 4,833 µs | 1.43x | 3.0 → 2.1 | 85 M | 40,000 |
+| Parse mixed stream: Bytes views | 258 µs | 313 µs | 1.21x | 38.8 → 31.9 | 4.69 M | 0 |
+| Encode PUBLISH: Bytes writer | 220 µs | 352 µs | 1.60x | 45.5 → 28.4 | 5.13 M | 0 |
+| Encode PUBLISH: `MQTTPublish.write(to:)` | 215 µs | 362 µs | 1.68x | 46.5 → 27.6 | 5.13 M | 0 |
+| Encode PUBLISH: conventional (`[UInt8]` appends) | 2,826 µs | 4,190 µs | 1.48x | 3.5 → 2.4 | 62 M | 30,000 |
+
+### All cores (the machine's total throughput, from memory)
+
+| Benchmark | M packets/s, 32 threads → 10 threads | M3 / M1 Max total | Per thread (M3 → M1 Max) | Speed-up over 1 core (M3 of 32 → M1 Max of 10) |
+|---|---|---|---|---|
+| Parse PUBLISH: Bytes views | 567 → 153 | 3.71x | 17.7 → 15.3 | 22.2x → 7.6x |
+| Parse PUBLISH: Bytes views, properties not iterated | 645 → 183 | 3.52x | 20.1 → 18.3 | 23.1x → 7.5x |
+| Parse PUBLISH: frames, MQTTPublish(parsing:) | 659 → 182 | 3.63x | 20.6 → 18.2 | 23.1x → 7.5x |
+| Parse PUBLISH: frames, properties visited while parsing | 840 → 221 | 3.80x | 26.2 → 22.1 | 23.6x → 7.4x |
+| Parse PUBLISH: Bytes views, copying topic, payload, and strings | 71 → 29 | 2.49x | 2.2 → 2.9 | 9.9x → 5.4x |
+| Parse PUBLISH: conventional (`[UInt8]` indexes, owned values) | 30 → 13 | 2.36x | 1.0 → 1.3 | 10.3x → 6.2x |
+| Parse mixed stream: Bytes views | 882 → 237 | 3.72x | 27.5 → 23.7 | 22.7x → 7.4x |
+| Encode PUBLISH: Bytes writer | 692 → 152 | 4.54x | 21.6 → 15.2 | 15.2x → 5.4x |
+| Encode PUBLISH: `MQTTPublish.write(to:)` | 695 → 149 | 4.67x | 21.7 → 14.9 | 14.9x → 5.4x |
+| Encode PUBLISH: conventional (`[UInt8]` appends) | 34 → 11 | 2.95x | 1.1 → 1.1 | 9.5x → 4.8x |
+
+Speed-up is `copies × single-core time / all-core time`: the number of cores' worth of single-core work done.
+
+### The views against the conventional code
+
+Reference time / Bytes time, M3 → M1 Max (`d2-final`'s code, so the M3 figures differ from the older "5.5x and 5.9x"
+in `Current`, which predates much of the work above):
+
+| Comparison | 1 core | All cores |
+|---|---|---|
+| Conventional parse / views parse (every field and property) | 8.6x → 9.7x | 18.6x → 11.8x |
+| Conventional parse / views parse (properties not iterated) | 9.5x → 11.8x | 21.1x → 14.2x |
+| Copying parse / views parse | 3.5x → 3.8x | 8.0x → 5.3x |
+| Conventional encode / `BytesWriter` encode | 12.8x → 11.9x | 20.5x → 13.3x |
+
+- **The views and the writer beat the conventional code by about an order of magnitude on one core on both machines.**
+  The M1 Max widens the parse gap (8.6x → 9.7x) and narrows the encode gap (12.8x → 11.9x), which follows from
+  the encoders' 1.60x against the conventional encoder's 1.48x.
+- **On all cores the gap is smaller on the M1 Max** (18.6x → 11.8x parse, 20.5x → 13.3x encode): the allocating code
+  gets 4.8–6.2x of a core's work out of 10 threads, against 9.5–10.3x out of 32, while the allocation-free parsers get 7.4–7.6x and 22–24x.
+  Per thread, the allocating workloads are as fast or faster on the M1 Max (1.3 against 1.0 M packets/s for the
+  conventional parse).
+
+### Allocations
+
+- All 7 `Allocations:*` benchmarks count 0 mallocs on both machines (the zero thresholds in `Thresholds/` hold).
+- The single-core allocating workloads count the same on both: 20,000 (copying parse, 2 per packet), 40,000
+  (conventional parse, 4) and 30,000 (conventional encode, 3). Per copy, the all-core rows agree (20,000 per
+  copy for the copying parse, and so on).
+- The all-core runs of the allocation-free workloads count 35 mallocs on the M3 (32 threads) and 13 on the M1 Max
+  (10 threads): `DispatchQueue.concurrentPerform`'s, not parsing's (as the *Allocation checks* section says for 35); how
+  the count depends on the thread count is not investigated.
+
+### Observations
+
+Measured:
+
+- **Allocation-free parsing costs 1.15–1.27x the M3's time**: four of the five rows are under the 1.25 clock ratio
+  (1.15–1.21x, the mixed stream 1.21x); the views with every property are 1.27x. The allocating parses are
+  1.35x (copying) and 1.43x (conventional).
+- **Encoding is the outlier at 1.60x and 1.68x**, with the same 5.13 M instructions: 22.0 → 35.2 ns per packet. The M3
+  executes 23.3 instructions per ns there and the M1 Max 14.6 (parsing the views: 25.0 against 19.8). Dividing by the maximum
+  clocks assumed above, 5.8 against 4.5 instructions per clock for encoding, against 6.2 and 6.1 for parsing the views.
+  The conventional encoder, 1.48x, is also above the clock ratio.
+- **The M3's whole-machine advantage is 3.5–3.8x for allocation-free parsing**, 4.5–4.7x for encoding and 2.4–3.0x for the
+  allocating code. For parsing, that is near the P-core count ratio (24/8 = 3) times the clock ratio (1.25), 3.75;
+  the all-core runs also use the E-cores, 8 against 2.
+- **Encoding scales worst among the allocation-free workloads on both machines**: 15x of 32 threads and 5.4x of 10,
+  against 22–24x and 7.4–7.6x for parsing.
+
+Interpretation, not investigated:
+
+- Why encoding loses 1.60–1.68x against 1.25x of clock: no counters (`Tools/counters`) were run. The encoder
+  is store-heavy (writes into a buffer), and the M1 Max's lower rate on it might be about stores, but that is a
+  guess; the Base64 encoder, also store-heavy, lost only 1.19–1.22x at large sizes.
+- The weaker scaling of encoding may be write traffic to memory (the encoders write into `encodeBuffers`, 128 or 40
+  copies of the stream, 100–150 MB on the M3); not measured.
+- The allocating workloads' better per-thread rate on the M1 Max is consistent with less allocator contention at 10
+  threads than at 32 (the `Current` section attributes the conventional code's poor scaling to the allocator), but
+  contention wasn't measured on either machine.
 
 ## 2026-11-17: named flags, big-endian cursors, properties parsed once (baselines `trk-t0` … `trk-final`, Swift 6.4.4)
 

@@ -628,6 +628,24 @@ NativeAEA/FORMAT.md):
   the script failed to compile (the `;` ran `cp` anyway), and the new package wasn't in git yet. Chain every step
   with `&&`, or use Edit.
 
+A second machine (M1 Max, 2026-11-19; `Writeups/M1-Max-vs-M3-Ultra.md`, `Bytes/OPTIMIZATION.md` section 15):
+
+- **One core is the clock** (1.31x time for 1.25x clock, over 773 benchmarks with identical instruction counts); more
+  cores change parallel work by the lane count. Keep Instructions beside times when comparing machines: they show whether
+  the same code ran.
+- **After moving to new hardware, re-run something unchanged on an idle machine first.** Spotlight/`mediaanalysisd` were
+  indexing the new files during the first runs; one memory-bound row read 2.2x slow. A standalone probe (a C copy of the
+  kernel, or a plain Swift loop over the API) that disagrees with a benchmark row is the signal. `TestData/` has a
+  `.metadata_never_index` marker for this.
+- **`udot` (FEAT_DotProd) was the unused instruction:** Adler-32's two sums are dot products against ones and against
+  64…1, 2x faster than the 16-bit Swift SIMD version (58 GB/s, libdeflate's rate). Swift SIMD has no widening dot
+  product; a `static inline` C wrapper (`bytes_crc_udot`), loop in Swift.
+- **Efficiency cores:** queue-fed workers (the DEFLATE encoder) gain 10–13% from them; statically split work (the parallel
+  decoder's segments) loses 20–35%, because one segment lands on a slow core. "Lanes = performance cores" suits only the
+  second kind.
+- **Measure a core's instructions rather than assuming:** `tbl` with 3 or 4 table registers is 2–3 vector slots and `tbx`
+  with 4 is 4 (8 cycles of latency) on the M1 Max; 1–2 registers are full speed.
+
 ## Benchmarks (ordo-one/package-benchmark)
 
 - Run: `swift package --disable-sandbox benchmark [--filter REGEX]`; save: `… baseline update NAME`;

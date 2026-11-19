@@ -3,6 +3,144 @@
 Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra (32 cores), macOS 27.2, APFS.
 Each step is saved as a named baseline in `.benchmarkBaselines/` and can be re-compared with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
+The 2026-11-19 section below compares this machine's numbers with an M1 Max's (baseline `m1max`).
+
+## 2026-11-19: M1 Max against M3 Ultra (baselines `d2-zip2` → `m1max`)
+
+Every package's benchmarks were re-run on a new machine, an M1 Max. Same macOS (27.2 / 27.2.1) and
+compiler (Swift 6.4.4, Xcode 27.3); what differs is the hardware:
+
+| | M3 Ultra (`d2-zip2`, 2026-11-18) | M1 Max (`m1max`) |
+|---|---|---|
+| Cores | 24 P + 8 E (`activeProcessorCount` 32) | 8 P + 2 E (10) |
+| P-core clock | ~4.05 GHz | ~3.23 GHz (1.25x lower) |
+| Memory | 256 GB, 819 GB/s | 64 GB, 400 GB/s |
+| P-cluster L2 | not measured | 12 MB |
+
+Method: one full run, `swift package --disable-sandbox benchmark baseline update m1max --no-progress`, nothing else
+benchmarking. `corespotlightd` used about one core during the Bytes runs on this machine (indexing new files; it
+couldn't be stopped), so treat the parallel rows with extra care. The `d2-zip2` baseline was taken at a slightly
+earlier commit than HEAD, so Instructions is the check that both machines ran the same code. Times are the
+framework's p50, many rounded to 1 ms (an 18 ms row is ±3%): small ratios below mean little. Ratios are M1 Max time
+over M3 Ultra time (above 1 = slower; the clock alone is 1.25). Output goes to `NSTemporaryDirectory()` on each
+machine's internal SSD (different SSDs; not measured separately).
+
+### Headline
+
+Geometric mean of the time ratio over the 40 timed benchmarks: **1.34**. By kind:
+
+| Kind | n | Geomean | Range |
+|---|---|---|---|
+| Single-threaded decode, CRC (in cache), parse, locate | 21 | **1.30** | 1.17–1.50 |
+| Extraction and file-system floors (default, 1–8 workers, 32 MB entries) | 15 | 1.28 | 1.08–1.66 |
+| CRC-32 over 32 MB (idle re-run `m1max-2`; the first run was disturbed, see below) | 2 | 1.19 | 1.08–1.32 |
+| Parallel verify | 2 | 1.74 | 1.72–1.76 |
+
+Same-code check: 21 of 40 benchmarks have identical instruction counts (as the baselines report them), 8 more
+differ by less than 2%, and 11 differ by more (listed below). The 29 within 2% have a geomean of 1.34; the 11 have 1.36,
+so they are not far from the rest, but their ratio is not a hardware ratio alone.
+
+### Main benchmarks
+
+| Benchmark | M3 Ultra | M1 Max | Ratio | Instructions (M3 → M1 Max) |
+|---|---|---|---|---|
+| Parse central directory (2,000 entries) | 189 µs | 253 µs | 1.34 | 4.30 M → 4.28 M |
+| Locate 2,000 payloads | 188 µs | 244 µs | 1.30 | 3.29 M → 3.29 M |
+| Inflate + CRC 32 MB text (Bytes / zlib) | 13 / 13 ms | 17 / 18 ms | 1.31 / 1.38 | 240 M / 218 M, identical |
+| Inflate + CRC 32 MB raster (Bytes / zlib) | 9.3 / 11 ms | 12 / 13 ms | 1.29 / 1.18 | 138 M / 91 M, identical |
+| Inflate + CRC 2,000 small files (Bytes / zlib) | 14 / 16 ms | 18 / 20 ms | 1.29 / 1.25 | 232 M / 214 M, identical |
+| Zstd + CRC 32 MB text / raster | 18 / 10 ms | 27 / 13 ms | 1.50 / 1.30 | 379 M / 141 M, identical |
+| Stored + CRC 32 MB random (Bytes / zlib) | 2.1 / 2.5 ms | 3.1 / 3.6 ms | 1.46 / 1.46 | 29 M / 31 M, identical |
+| CRC-32 64 B (Bytes / zlib) | 2.8 / 6.4 ms | 3.3 / 7.5 ms | 1.19 / 1.17 | 46 M / 59 M, identical |
+| CRC-32 1 KB (Bytes / zlib) | 0.54 / 1.4 ms | 0.67 / 1.7 ms | 1.25 / 1.18 | 14 M / 16 M, identical |
+| CRC-32 256 KB, in cache (Bytes / zlib) | 0.45 / 0.80 ms | 0.56 / 1.1 ms | 1.25 / 1.34 | 11 M / 13 M, identical |
+| CRC-32 32 MB (Bytes / zlib), re-run `m1max-2` | 0.57 / 0.84 ms | 0.62 / 1.1 ms | **1.08 / 1.32** (first run: 2.38 / 1.72, disturbed) | 10 M / 13 M, identical |
+| Extract 32 MB text (Bytes / zlib / Zstd) | 14 / 15 / 20 ms | 17 / 18 / 27 ms | 1.21 / 1.20 / 1.35 | 263 M / 241 M / 402 M, −0.4% / −0.4% / 0 |
+| Extract 32 MB random | 3.8 ms | 4.9 ms | 1.28 | 51 M, identical |
+| Extract 2,000 small files, default workers (Bytes / zlib) | 71 / 73 ms | 83 / 83 ms | 1.17 / 1.14 | 2,871 M → 3,345 M (+16.5%); 2,888 M → 3,211 M (+11.2%) |
+| Open + extract 2,000 small files | 72 ms | 79 ms | 1.10 | 2,888 M → 3,202 M (+10.9%) |
+| Floor: create + write 2,000 files | 133 ms | 201 ms | 1.51 | 1,832 M → 2,456 M (+34.1%) |
+| Floor: via `openat` | 123 ms | 171 ms | 1.39 | 1,753 M → 2,008 M (+14.5%) |
+| Verify 2,000 small files (parallel) (Bytes / zlib) | 2.7 / 2.7 ms | 4.6 / 4.8 ms | 1.72 / 1.76 | 274 M → 261 M (−4.7%); 256 M → 243 M (−5.1%) |
+
+### Instruction counts that differ by more than 2% (11)
+
+All are file-system or parallel rows. Not one of the decode, CRC, parse, or locate rows differs.
+
+| Benchmark | M3 → M1 Max |
+|---|---|
+| Extract 2,000 small files (1 worker) | 2,672 M → 3,116 M (+16.6%) |
+| Extract 2,000 small files (2 workers) | 2,707 M → 2,955 M (+9.2%) |
+| Extract 2,000 small files (4 workers) | 2,712 M → 3,349 M (+23.5%) |
+| Extract 2,000 small files (8 workers) | 2,936 M → 3,257 M (+10.9%) |
+| Extract 2,000 small files: Bytes | 2,871 M → 3,345 M (+16.5%) |
+| Extract 2,000 small files: zlib | 2,888 M → 3,211 M (+11.2%) |
+| Open + extract 2,000 small files | 2,888 M → 3,202 M (+10.9%) |
+| Floor: create + write 2,000 files (no decoding) | 1,832 M → 2,456 M (+34.1%) |
+| Floor: create + write 2,000 files via openat | 1,753 M → 2,008 M (+14.5%) |
+| Verify 2,000 small files (parallel): Bytes | 274 M → 261 M (−4.7%) |
+| Verify 2,000 small files (parallel): zlib | 256 M → 243 M (−5.1%) |
+
+What the names and code say, no more: the nine rows that create 2,000 small files all cost more instructions on
+the M1 Max, including the two "Floor" rows, which are one thread opening, writing, and closing 2,000 files with no
+decoding. So the extra instructions are in the file-creation path, not the codecs (whose rows are identical), and not
+in worker contention (the Floor rows and the 1-worker row have none: +34.1%, +14.5%, +16.6%). The Floor loop's
+~1 M instructions a file (1,832 M over 2,000 files) is far more than the user-side code, so the metric evidently
+counts the kernel's side of the system calls (inference). Why the kernel runs more instructions on the M1 Max (a
+different SSD and its driver path, or APFS behaving differently at this speed) and why 4 workers is the largest
+(+23.5%) were not investigated. The two Verify rows go the other way (fewer instructions on the M1 Max) and also
+differ in mallocs (below): they spread over `activeProcessorCount` workers, 32 on the M3 Ultra and 10 on the M1 Max,
+which is consistent with per-worker setup, not investigated. Wall-clock ratios for these 11 are not hardware-only.
+
+Mallocs: identical except in the rows that start a worker per core: the 32 MB extracts go 271–275 → 131–135 (−51%),
+and Verify 449 / 545 → 125 / 155 (−72%). Those rows use the default `maxConcurrency`, the processor count, so they
+start 32 workers on the M3 Ultra and 10 on the M1 Max (fact from `ZipArchive+Extraction.swift`); that per-worker
+allocation scales with it is the consistent reading, not checked.
+
+### Observations
+
+Measured:
+
+- **Single-threaded work is a uniform 1.17–1.50 slower, geomean 1.30**: decoding (Bytes and zlib), CRC in cache,
+  parsing, locating. 1.25 is the clock, so about 4% more per clock on the M3 Ultra. Within the group the spread is
+  larger than rounding for a few rows: Stored + CRC 1.46 (both backends), Zstd text 1.50, parse with the original
+  `ByteReader` 1.44. Interpretation, not checked: these touch more memory per instruction than the rest.
+- **CRC-32 over 32 MB: 1.08 (Bytes), 1.32 (zlib) in the idle re-run `m1max-2`.** The first run (`m1max`) measured
+  2.38 and 1.72 (1,354 and 1,445 µs) while `corespotlightd` and `mediaanalysisd` were using the machine; memory-bound
+  work is the most sensitive to that. Re-run on an idle machine Bytes took 616 µs (53 GB/s; the M3 Ultra
+  569 µs, 59 GB/s), and a standalone probe of `CRC32.checksum` on 32 MB measured 58 GB/s, 4–8 MB 62 GB/s: the
+  PMULL fold is not memory-bound on one M1 Max core at this size. (An earlier reading of this row as a one-core
+  memory bandwidth gap was wrong.) Every other row reproduced within 1% (geomean 0.988 over 40 rows, 5 rows beyond
+  ±10%: the file-creation floors, +15% to +29%, and open + extract +10%).
+- **Small-file extraction scales differently with workers** (extract 2,000 small files, ms):
+
+  | Workers | 1 | 2 | 4 | 8 |
+  |---|---|---|---|---|
+  | M3 Ultra | 192 | 104 | 64 | 75 |
+  | M1 Max | 255 | 138 | 106 | 81 |
+  | Ratio | 1.33 | 1.33 | 1.66 | 1.08 |
+  | Speedup over 1 worker (M3 / M1 Max) | | 1.85 / 1.85 | 3.00 / 2.41 | 2.56 / 3.15 |
+
+  On the M3 Ultra the fastest is 4 workers and 8 is 17% slower (the APFS contention step2 and AGENTS.md describe).
+  On the M1 Max 8 is fastest and 4 is still 31% slower than 8, so no peak shows up by 8; the default
+  (`fileCreationWidth` 8) is the best of the four on this machine too. At 8 the two machines are 1.08 apart: the M3
+  Ultra is at its contended end, the M1 Max isn't there yet. With instruction counts differing in all four rows, treat
+  the 4-worker point (1.66) with the most care.
+- **The single-thread file-creation floor has one of the highest ratios** (above the 1.30 decode group): Floor create + write
+  1.51 (+34% instructions), `openat` 1.39, against 1.10–1.17 for whole extractions at the default workers (8 on
+  both). So the M1 Max loses more on one thread's system calls than on the full pool, where, as measured, the
+  M3 Ultra is the one contending. Floor times are 66 µs a file on the M3 Ultra, 100 µs on the M1 Max.
+- **Parallel verify 1.72–1.76** (decode of 2,000 small files over `activeProcessorCount` workers: 32 and 10). The
+  serial equivalent (Inflate + CRC 2,000 small files, Bytes) takes 14 and 18 ms: the parallel run is 5.3x faster than
+  it on 32 workers and 3.9x on 10 (rounded inputs, ±10%). The ratio sits between the per-core ratio (1.3) and the
+  core ratio (24 P / 8 P = 3.0). Interpretation: with 2.7 to 4.6 ms of wall time a fixed task-start and join cost
+  matters; not measured.
+- **Large entries**: Extract 32 MB text and random are 1.20–1.35 and Open + extract the same: one big entry is a
+  pipelined decode and write and tracks the single-core ratio.
+
+Not done: no per-machine syscall counts (`Tools/runtime-count`, System Call Trace) to explain the instruction
+differences; no run with `maxConcurrency` pinned to the same value on both machines for Verify and the 32 MB extracts;
+the 1 ms rounding of the larger rows limits every ratio above to about ±5%.
 
 ## baseline — the code before any performance work
 

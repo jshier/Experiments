@@ -1,9 +1,364 @@
 # Bytes performance log
 
-Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
+Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2. The
+2026-11-19 section compares these numbers with an Apple M1 Max (baselines `m1max*`); everything else below is M3 Ultra.
 Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (re-run on 2026-11-09 with no
 other benchmarks running); the 2026-11-12 sections have newer full runs. Compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
+
+## 2026-11-19, M1 Max against M3 Ultra (baselines `d2-final` → `m1max`, `trk-final-portable*` → `m1max-portable*`; Swift 6.4.4)
+
+The repository moved to a new machine, and every package's suite was run again there. Same code, same compiler (Xcode
+27.3's Swift 6.4.4), a different CPU: this is the cheapest measurement of what the hardware contributes.
+
+| | M3 Ultra (earlier baselines) | M1 Max (`m1max`, `m1max-portable`, `m1max-portable-no-c`) |
+|---|---|---|
+| Cores | 24 P + 8 E (32 logical) | 8 P + 2 E (10 logical) |
+| P-core max clock | ~4.05 GHz | ~3.23 GHz (1.25x lower) |
+| Memory | 256 GB LPDDR5-6400, 1,024-bit, 819 GB/s | 64 GB LPDDR5-6400, 512-bit, 400 GB/s |
+| P-cluster L2 | not measured here | 12 MB |
+| OS | macOS 27.2 | macOS 27.2.1 |
+| ISA | NEON, AES, PMULL, SHA1/2, SHA512, SHA3, CRC32, DotProd, FHM, LSE, FCMA, FP16 | the same set; no I8MM or BF16 |
+
+Method: one full run per build (`./bench optimized baseline update m1max`; `./bench portable|portable-no-c … --filter`
+the 200 benchmarks the M3 portable baselines had), one package at a time. Caveats: `corespotlightd` used about one
+core during the Bytes runs (indexing new files; couldn't be stopped), so parallel and many-thread rows are less
+trustworthy than single-thread ones. The M3 baselines were taken at slightly earlier commits, so the **Instructions**
+metric is the check that both machines ran the same code (below). Times in `Tools/bench-table` are rounded to 2–4
+significant digits: ratios of rows near 2 µs are good to about ±3% only. "Ratio" is M1 Max time over M3 Ultra time
+(above 1 = M1 Max slower; the clock alone predicts 1.25). 773 Time rows pair; unpaired: 110 M3-only (50 `32 cores`
+bandwidth rows, 60 `24 lanes` parallel rows: benchmark names that follow the machine's core count) and 106
+M1-only (50 `10 cores`, 30 LZMA, 20 `Parallel Brotli … 8 lanes`, 6 ASCII rows: no `d2-final` counterpart).
+
+### Headline
+
+Geometric mean of the time ratio over the 773 pairs: **1.31** (min 0.96, max 2.14). If the clock were the only
+difference it would be 1.25; the rest, 1.31 / 1.25 = 1.045, is about 4% more work per clock on M3 (interpretation:
+a better core, or a faster cache; not separated). By group (groups with at least 4 pairs, by the name's first word;
+Bandwidth is split by working set):
+
+| Group | n | Geomean | Min | Max |
+|---|---|---|---|---|
+| Back-references | 14 | 1.47 | 1.09 | 1.85 |
+| Write | 64 | 1.41 | 1.18 | 2.12 |
+| Brotli | 96 | 1.35 | 1.08 | 1.87 |
+| Pipeline | 12 | 1.34 | 1.15 | 1.65 |
+| Inflate | 64 | 1.33 | 0.96 | 2.14 |
+| Deflate | 98 | 1.33 | 1.04 | 1.87 |
+| TLS | 6 | 1.31 | 1.24 | 1.40 |
+| Parallel | 45 | 1.31 | 1.20 | 1.65 |
+| Two | 6 | 1.31 | 1.17 | 1.41 |
+| ChaCha20-Poly1305 | 8 | 1.31 | 1.24 | 1.38 |
+| Bandwidth, 512 MB, 1 core | 71 | 1.31 | 1.08 | 1.92 |
+| AES-128-GCM | 8 | 1.29 | 1.22 | 1.35 |
+| forEach | 10 | 1.28 | 1.26 | 1.32 |
+| Fields | 7 | 1.28 | 1.19 | 1.41 |
+| Literals | 4 | 1.27 | 1.07 | 1.45 |
+| Adler-32 | 5 | 1.27 | 1.20 | 1.32 |
+| Bandwidth, in cache (4 MB) | 71 | 1.26 | 1.05 | 1.62 |
+| Zstd | 128 | 1.24 | 0.97 | 1.53 |
+| Span | 14 | 1.21 | 1.06 | 1.35 |
+| Bulk | 4 | 1.20 | 1.10 | 1.29 |
+| Runs | 12 | 1.20 | 1.00 | 1.39 |
+| Other (11 groups of 2–3 rows, n = 26) | 26 | 1.25 | 1.08 | 1.46 |
+
+The small groups: CRC-32 1.19, SHA-256 1.21, SHA-1 1.19, HMAC-SHA1 1.19, PBKDF2-HMAC-SHA1 1.14, AES-128-CTR 1.39,
+LEB128 1.21, Prefixed 1.26, Search 1.23, Bits 1.34, Array 1.42. The hash rows (1.14–1.21) are below the clock ratio.
+
+### Absolute numbers
+
+Times are p50 per iteration. Rates are bytes over time in GB/s (10^9), from the file sizes (Silesia's exact sizes, `MB` as
+MiB for the fixed-size rows), so they carry the time's rounding.
+
+| Benchmark | M3 time | M3 GB/s | M1 Max time | M1 Max GB/s | Ratio |
+|---|---|---|---|---|---|
+| Inflate dickens (9.7 MB): Bytes | 8.765 ms | 1.2 | 11 ms | 0.93 | 1.25 |
+| Inflate dickens (9.7 MB): libdeflate | 8.487 ms | 1.2 | 11 ms | 0.93 | 1.30 |
+| Inflate x-ray (8.1 MB): Bytes | 15 ms | 0.56 | 19 ms | 0.45 | 1.27 |
+| Deflate 1 dickens (9.7 MB): Bytes | 38 ms | 0.27 | 49 ms | 0.21 | 1.29 |
+| Deflate 1 dickens (9.7 MB): libdeflate | 35 ms | 0.29 | 44 ms | 0.23 | 1.26 |
+| Deflate 6 dickens (9.7 MB): Bytes | 127 ms | 0.08 | 155 ms | 0.066 | 1.22 |
+| Brotli decode q11 dickens (9.7 MB): Bytes | 14 ms | 0.73 | 21 ms | 0.49 | 1.50 |
+| Brotli decode q11 dickens (9.7 MB): Google | 14 ms | 0.73 | 18 ms | 0.57 | 1.29 |
+| Brotli decode q5 x-ray (8.1 MB): Bytes | 27 ms | 0.31 | 40 ms | 0.21 | 1.48 |
+| Brotli decode q5 x-ray (8.1 MB): Google | 25 ms | 0.34 | 35 ms | 0.24 | 1.40 |
+| Zstd decode L3 dickens (9.7 MB): Bytes | 6.128 ms | 1.7 | 9.142 ms | 1.1 | 1.49 |
+| Zstd decode L3 dickens (9.7 MB): libzstd | 7.877 ms | 1.3 | 10 ms | 1.0 | 1.27 |
+| Zstd decode L3 mozilla (48.8 MB): Bytes | 31 ms | 1.7 | 43 ms | 1.2 | 1.39 |
+| Zstd decode L3 mozilla (48.8 MB): libzstd | 39 ms | 1.3 | 46 ms | 1.1 | 1.18 |
+| Zstd decode L3 x-ray (8.1 MB): Bytes | 6.82 ms | 1.2 | 9.511 ms | 0.89 | 1.39 |
+| ChaCha20-Poly1305 seal 1 MB: Bytes | 420 µs | 2.5 | 551 µs | 1.9 | 1.31 |
+| ChaCha20-Poly1305 seal 1 MB: CryptoKit | 1.24 ms | 0.85 | 1.605 ms | 0.65 | 1.29 |
+| AES-128-GCM seal 1 MB: Bytes | 133 µs | 7.9 | 162 µs | 6.5 | 1.22 |
+| AES-128-GCM seal 1 MB: CryptoKit | 111 µs | 9.4 | 147 µs | 7.1 | 1.32 |
+| AES-128-CTR 1 MB: Bytes | 62 µs | 17 | 85 µs | 12 | 1.37 |
+| SHA-256 1 MB: Bytes | 400 µs | 2.6 | 468 µs | 2.2 | 1.17 |
+| CRC-32 hardware, 256 KB | 485 µs | 0.54 | 557 µs | 0.47 | 1.15 |
+| Adler-32 1 MB: Bytes | 28 µs | 37 | 36 µs | 29 | 1.29 |
+| Adler-32 1 MB: libdeflate | 15 µs | 70 | 18 µs | 58 | 1.20 |
+| TLS seal 4 MB ChaCha20-Poly1305, 1 lane | 1.835 ms | 2.3 | 2.398 ms | 1.7 | 1.31 |
+| TLS seal 4 MB ChaCha20-Poly1305, 8 lanes | 288 µs | 15 | 374 µs | 11 | 1.30 |
+| TLS seal 4 MB AES-128-GCM, 8 lanes | 119 µs | 35 | 167 µs | 25 | 1.40 |
+| Parallel inflate dickens: sequential | 10 ms | 1.0 | 13 ms | 0.78 | 1.30 |
+| Parallel inflate dickens: 8 lanes, sync | 1.782 ms | 5.7 | 2.337 ms | 4.4 | 1.31 |
+| Parallel deflate 6 dickens: 8 lanes, sync | 17 ms | 0.60 | 21 ms | 0.49 | 1.24 |
+| Bandwidth: Byte4, in cache (4 MB) | 43 µs | 98 | 50 µs | 84 | 1.16 |
+| Bandwidth: Byte4, 512 MB, 1 core | 7.102 ms | 76 | 8.897 ms | 60 | 1.25 |
+| Bandwidth: raw SIMD read, 512 MB, 1 core | 6.865 ms | 78 | 8.815 ms | 61 | 1.28 |
+| Write: raw SIMD store, 512 MB, 1 core | 4.755 ms | 113 | 8.618 ms | 62 | 1.81 |
+
+Rows that don't pair, from the same TSVs. Many cores, 512 MB: the 16 `Byte`, `Byte2` … `Byte16` rows take 2.25–2.34 ms
+on the M3 (`32 cores`) and 4.30–4.50 ms on the M1 Max (`10 cores`), a ratio of 1.9 (the memory bandwidth ratio is 2.05), nearly
+the same time whatever the width: memory-bound on both. Lane counts: `Parallel … 24 lanes` on
+M3 against the same `8 lanes` benchmark on M1 Max (60 pairs by name): geomean 2.37, from 1.22 to 3.77; 9.7 MB
+Deflate 6 is 5.8 ms against 21–22 ms (3.4–3.8x; 3 times the lanes and 1.25 times the clock is 3.75). The `8 lanes`
+Parallel inflate dickens is 5.6x faster than sequential on both machines (10 / 1.782 ms; 13 / 2.337 ms).
+
+### Instructions
+
+773 Instructions pairs: 726 print identical, 771 are within 2%, and 2 differ more, both comparator libraries and not
+Bytes: `Brotli decode q11 JSON (1.6 KB): Apple Compression` 50,000 → 49,000 (−2.0%, a rounding step of the printed value)
+and `Zstd decode L3 xml (5.1 MB): libzstd` 32,000,000 → 31,000,000 (−3.1%; libzstd is Homebrew's, system Compression
+is a different macOS point release, 27.2 against 27.2.1: neither checked). The other 45 non-identical rows are under 2%,
+which fits rounding of 2–3 digit values (not checked row by row). So for Bytes' own code the time ratios are hardware
+ratios. Malloc counts: of 664 pairs 11 differ, all `Parallel … 8 lanes, async Dispatch` rows (deflate 13 → 7 on M1 Max,
+inflate 8–12 → 6): not investigated (a guess: Dispatch creates fewer worker threads when the lanes equal the P cores).
+
+### Outliers
+
+Slowest ten (M1 Max / M3; times in µs):
+
+| Ratio | Benchmark | M3 | M1 Max |
+|---|---|---|---|
+| 2.14 | Inflate Main.css (375.7 KB): zlib | 97 | 208 |
+| 2.13 | Write: Byte10, memory (512 MB), 1 core | 16,000 | 34,000 |
+| 2.02 | Write: Byte10, in cache (4 MB) | 129 | 261 |
+| 1.97 | Inflate gzip Main.css (375.7 KB): zlib | 109 | 215 |
+| 1.92 | Bandwidth: read(_:_:into:) Byte5, memory, 1 core | 12,000 | 23,000 |
+| 1.91 | Bandwidth: read(_:_:into:) Byte3, memory, 1 core | 11,000 | 21,000 |
+| 1.91 | Bandwidth: read(_:_:into:) Byte6, memory, 1 core | 11,000 | 21,000 |
+| 1.87 | Brotli decode q5 Main.css (375.7 KB): Apple Compression | 220 | 412 |
+| 1.87 | Deflate 1 JSON (119.0 KB): zlib | 167 | 312 |
+| 1.85 | Back-references: distance 1, 3-32 B | 20 | 37 |
+
+- **Mid-size inputs.** Four of the ten are 119–376 KB inputs. All 31 `Main.css` (375.7 KB) rows average 1.55 and all 37
+  `JSON (119.0 KB)` rows 1.51, in every library (zlib, libdeflate, Bytes, Apple Compression, Google Brotli).
+  Geomean ratio by input size over the Inflate, Deflate, Brotli, Zstd, Pipeline, and Parallel rows: 1.06 at 1 KB, 1.16 at
+  1.6 KB, 1.21 at 4 KB, 1.25 at 16 KB, 1.30 at 64 KB (the 1–64 KB sizes are Zstd rows only), 1.45 at 256 KB, **1.52 at
+  119 KB, 1.55 at 376 KB**, then 1.26–1.33 from 3.8 MB up. Measured; the cause is not investigated (a cache or prefetch
+  difference between the chips is a guess, untested).
+- **`Write: Byte10`** is slow on both the cached and the memory run (2.02 and 2.13; its neighbours `Byte9` and `Byte11`–`Byte16`
+  are 1.18–1.66), so not bandwidth: something about that width on the M1 Max. The `Bandwidth: read(_:_:into:)`
+  `Byte3`/`5`/`6` rows are 1.25–1.47 in cache and 1.9 from memory (`Byte7`: 1.21 and 1.73). Not investigated.
+- **`Write: raw SIMD store, 512 MB`** is 1.81 (and 1.76 in cache), against reads at 1.2–1.3: stores are what the M1 Max does
+  worst here, at 62 GB/s on one core, the same as its reads. Not investigated.
+- The `3-32 B` back-reference rows (1.71–1.85 at distances 1–7; distance 8 is 1.21) are 14–20 µs on M3: short copies,
+  rounded times; not investigated.
+
+Fastest twelve (ratio about 1.05 or below; 8 of them at or below 1.03; times in µs):
+
+| Ratio | Benchmark | M3 | M1 Max |
+|---|---|---|---|
+| 0.96 | Inflate JSON (1.6 KB): libdeflate | 3.293 | 3.167 |
+| 0.97 | Zstd decode L19 mozilla 1 KB: libzstd | 2.501 | 2.417 |
+| 1.00 | Inflate gzip JSON (1.6 KB): Bytes | 3.209 | 3.209 |
+| 1.00 | Runs: bytes, 1000 each, write(repeating:count:) | 1.292 | 1.292 |
+| 1.00 | Zstd decode L3 xml 1 KB: Bytes | 2.167 | 2.167 |
+| 1.02 | Zstd decode L3 dickens 1 KB: libzstd | 2.667 | 2.709 |
+| 1.02 | Zstd decode L3 mozilla 1 KB: Bytes | 2.042 | 2.085 |
+| 1.03 | Runs: bytes, 1000 each, generating write (before) | 1.291 | 1.333 |
+| 1.04 | Deflate 1 JSON (1.6 KB): libdeflate | 6.791 | 7.043 |
+| 1.04 | Zstd decode L3 xml 1 KB: libzstd | 2.209 | 2.291 |
+| 1.05 | Zstd decode L3 dickens 16 KB: libzstd | 22 | 23 |
+| 1.05 | Bandwidth: for-in Byte2, in cache (4 MB) | 103 | 108 |
+
+Ten of the twelve are 1–7 µs benchmarks (timer resolution, about ±3%), mostly 1–1.6 KB inputs, with the same instruction
+counts. That they sit near 1.0 and not 1.25 is measured (the 1 KB Zstd rows average 1.06): a cost that doesn't scale with
+the clock (short dependency chains, memory latency, or fixed harness costs) is a guess; not investigated.
+
+### Zstd against libzstd
+
+Over the 48 Zstd decode rows per implementation (streaming rows left out), Bytes' geomean ratio is 1.31 and libzstd's is
+1.15. For the 16 large files libzstd/Bytes time goes from 1.29 on M3 to 1.09 on M1 Max (all 48 rows: 1.23 → 1.09). So Bytes'
+Zstd decoder's lead over Homebrew's libzstd 1.5.7 shrinks on the M1 Max, from about 29% to about 9% on large inputs. Instruction
+counts match (Bytes' code is the same), so why libzstd holds up better on M1 Max isn't investigated. The other comparators move
+with Bytes (same selection): Deflate Bytes 1.33, libdeflate 1.33, zlib 1.31, Apple Compression 1.34; Inflate Bytes 1.33,
+libdeflate 1.28, zlib 1.39, Apple 1.30; Brotli decode and encode Bytes 1.35, Google 1.30, Apple 1.37.
+
+### The three builds on M1 Max
+
+The 200 benchmarks of the portable baselines (`optimized` from `trk-final` on M3 and `m1max` on M1 Max, `portable`,
+`portable-no-c`; Time, geomean of the second build's time over the first's):
+
+| | M3 Ultra | M1 Max |
+|---|---|---|
+| portable / optimized, time | 0.997 | 1.007 |
+| portable-no-c / optimized, time | 0.995 | 1.014 |
+| portable / optimized, instructions | 1.032 | 1.032 |
+
+The M1 Max / M3 Ultra ratio over the same 200 is 1.316 for the optimized build, 1.330 for portable, and 1.342 for
+portable-no-c.
+
+Measured: the three builds are within 1.4% of each other in time on both machines (+3.2% in instructions for the portable
+builds, identically on both), so the C modules' NEON paths make no difference to this set of 200. It is mostly Bandwidth (71),
+Write (32), Back-references, Span, Runs, with only 2 ChaCha20-Poly1305 and 2 Adler-32 rows and no CRC-32 or SHA, so the set says little about the C modules.
+The differences are in a few groups: Write 1.05 / 1.04 on M3 and 1.09 / 1.11 on M1 Max (portable / no-c; `Write: Byte3, in
+cache` is 2.16x and 2.03x slower in the portable build on M3 and M1 Max alike), Search 0.85 on M3 and 1.00 on M1 Max (2 rows),
+Bits 1.00 against 0.91. The M1 Max penalty over the M3 barely depends on the build (1.316, 1.330, 1.342).
+
+### Observations
+
+- Measured: an M1 Max core takes 1.31x as long as an M3 Ultra core across 773 benchmarks with the same instruction counts,
+  against a clock ratio of 1.25. The large-file rows in the table are 1.22–1.50.
+- Measured: the ratio isn't uniform: about 1.06 for 1 KB inputs, 1.5 for 100–400 KB inputs, 1.3 for multi-MB inputs.
+  A single "M3 is X times faster" figure hides this. Cause open.
+- Measured: memory-bound many-core rows track the memory system: 1.9x for 10 against 32 cores (bandwidth ratio 2.05);
+  one core reads at 78 against 61 GB/s (1.28) and stores at 113 against 62 (1.81, in cache too).
+- Measured: Bytes' Zstd decoder gains less over libzstd on the M1 Max (1.29x → 1.09x on large inputs).
+- Measured: this machine change doesn't change which build is fastest: the three builds stay within 1.4% on this set.
+- Not tested: the code was tuned on the M3 (the `tbl` kernels, eight-block ChaCha20, `pmull` folding). These runs compare
+  one version of the code on two chips, so they can't say whether other variants would rank differently on the M1 Max.
+- Interpretation, untested: the 4% per-clock difference is more likely the memory system than the instruction set,
+  since both chips execute the same instructions here (same counts) and have the same ISA features for these kernels.
+- Measured, after the fact: the first runs overlapped `corespotlightd` and `mediaanalysisd` indexing the new files. The
+  other packages were re-run on the idle machine (`m1max-2`, geomean of re-run over first run: Base64 0.998, MQTT 0.990,
+  NativeZip 0.988, NativeAEA 0.996, BinaryParsingComparison 1.000), and so was a 200-benchmark subset of this suite (the
+  portable list, optimized build, baseline `m1max-2`): geomean **0.999**, 189 rows within ±10%. The exceptions: Adler-32
+  (changed code, next section), six `Write … in cache (4 MB)` rows that were 21–26% *slower* in the re-run (65–68 → 82 µs;
+  M3 38–53 µs, so their ratios of 1.7–2.1 are real and wobble by 25% between runs), and one row each of Literals and
+  Back-references (+11%). The one large disturbance in the first runs was NativeZip's CRC-32 over 32 MB (1,354 µs, then
+  616 µs idle; see that file). The parallel rows of this suite were not re-run.
+
+## 2026-11-19, M1 Max experiments: what the hardware offers beyond the M3-tuned code
+
+Everything above ran one version of the code, tuned on the M3 Ultra. This section asks what the M1 Max could do better,
+with throwaway C probes (scratch, not checked in) and a probe package depending on `Bytes`, all on the idle machine.
+The M1 Max has the same ISA features as the M3 for these kernels (NEON, AES, PMULL, SHA-1/2/3/512, CRC32, DotProd, FHM; no
+I8MM, BF16, SVE, SME), so "M1-specific" here means microarchitecture and core layout, not instructions the M3 lacks.
+
+### Adler-32 with UDOT: 2x faster (changed code)
+
+`Adler32.checksum` was Swift SIMD in 16-bit lanes (32 bytes a step, 30 GB/s on one M1 Max core; libdeflate's was
+64 GB/s). `FEAT_DotProd`'s `udot` adds four bytes times four weights into each 32-bit lane in one instruction, which is
+what Adler-32's two sums are: the byte sum (dot with ones) and the position-weighted sum (dot with 64, 63, …, 1). Swift's
+SIMD has no widening dot product, so, as for `pmull`, the instruction is a `static inline` wrapper in `CBytesCRC.h`
+(`bytes_crc_udot`, `bytes_adler_weights`) and the loop is Swift (`Adler32._updateDotProduct`): 64-byte blocks, four
+independent accumulators per sum, 86 blocks (5,504 bytes) per reduction so no 32-bit lane overflows. It runs only under
+`HardwareCRC` and not `Portable`, as the CRC-32 folding does; the other builds keep the old kernel (the
+`Portable` and `portable-no-c` targets build; those builds' test target does not compile, in `AESGCMTests`
+(`AESGCM.reduce`), unrelated to this change, so the new tests ran in the default build only). Whole 64-byte blocks go through UDOT, then the old 32-byte
+loop and bytes loop finish.
+
+Tests (`AdlerTests`, all passing, debug and release): the existing 82 sizes against zlib, all-`0xFF` worst case, and new
+`adlerAroundDotProductChunks`: 12 sizes around one, two and three reduction chunks, from 5 starts that aren't aligned,
+random bytes and 0xFF bytes with a continuing value near the modulus.
+
+Baselines `m1max` → `m1max-adler` (M1 Max, one run each, back to back on an idle machine; the unchanged zlib and libdeflate
+rows are the control):
+
+| Benchmark | Time before → after | Instructions before → after | Mallocs |
+|---|---|---|---|
+| Adler-32 1 MB: Bytes | 36 → 19 µs (**−47%**, 29 → 55 GB/s) | 555 K → 271 K (−51%) | 0 → 0 |
+| Adler-32 64 B (×16 K): Bytes | 147 → 130 µs (−12%) | 2,345 K → 1,754 K (−25%) | 0 → 0 |
+| Adler-32 1 MB: libdeflate (control) | 18 → 18 µs | 305 K → 305 K | 0 |
+| Adler-32 1 MB: zlib (control) | 64 → 63 µs | 527 K → 527 K | 0 |
+
+A probe (`CRC32`/`Adler32.checksum` in a loop, best of 9): 64 B 7.2 → 8.2 GB/s, 1 KB 29.4 → 56.0, 16 KB 29.9 → 57.2, 1 MB
+29.8 → 58.0, 8 MB 29.7 → 55.7. A C version of the same algorithm ran 58.9 GB/s at 1 MB against libdeflate's 63.6 and zlib's
+17.0. `Tools/loops` on the release object: the inner loop is 16 instructions per 64 bytes (8 `udot.4s`, 4 `add.4s`, 2 `ldp`,
+`subs`, `b.ne`), `vector128`; it is bound by `udot` throughput (below: about 2.7 a cycle, so 8 of them take 3 cycles, 64 bytes
+in about 1.1 ns = 58 GB/s: the measured rate). Fewer `udot`s per byte is the only way past it. Not measured on the M3 Ultra
+(no access): the instruction exists there, so a gain is likely, but its size depends on that core's `udot` rate.
+
+### Parallel lanes: the efficiency cores help the encoder, hurt the decoder
+
+The parallel codecs' benchmarks use `hw.perflevel0.physicalcpu` (8 on the M1 Max) as the lane count, on the belief that
+the efficiency cores finish last. Probe: `ParallelDeflateEncoder`/`ParallelDeflateDecoder`, 256 KB chunks, raw, medians
+of 7 (encode) and 9 (decode) runs, 1–16 lanes (ms; the machine has 8 P and 2 E cores):
+
+| Silesia file, level | Direction | 1 | 2 | 4 | 6 | 7 | **8** | 9 | **10** | 12 | 16 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| dickens 9.7 MB, 1 | encode | 48.9 | 25.3 | 13.2 | 8.8 | 7.6 | **6.7** | 7.0 | **6.6** | 6.6 | 6.6 |
+| dickens, 6 | encode | 154.9 | 77.4 | 41.5 | 27.9 | 23.8 | **21.0** | 21.8 | **20.9** | 20.7 | 20.6 |
+| mozilla 48.8 MB, 1 | encode | 229.8 | 119.1 | 61.6 | 41.1 | 35.8 | **32.8** | 30.4 | **28.5** | 28.4 | 28.5 |
+| mozilla, 6 | encode | 512.3 | 264.9 | 137.4 | 91.4 | 79.8 | **70.1** | 66.3 | **63.3** | 63.5 | 63.7 |
+| dickens, 1 | decode | 13.8 | 7.6 | 4.2 | 3.0 | 2.7 | **2.5** | 3.0 | **2.8** | 2.5 | 2.2 |
+| dickens, 6 | decode | 12.7 | 7.0 | 3.9 | 2.8 | 2.5 | **2.3** | 2.7 | **2.4** | 2.4 | 2.1 |
+| mozilla, 1 | decode | 65.6 | 36.9 | 20.2 | 14.0 | 12.3 | **11.2** | 15.1 | **11.8** | 13.2 | 10.7 |
+| mozilla, 6 | decode | 64.8 | 36.6 | 19.8 | 13.8 | 12.2 | **11.1** | 13.1 | **13.3** | 13.1 | 10.7 |
+
+Measured: encoding scales almost linearly to 8 lanes (7.3x on mozilla level 6), and the two efficiency cores add another
+**10–13%** (70.1 → 63.3 ms, 32.8 → 28.5 ms): workers take the next chunk from a queue (`ChunkScheduler`), so a slow core
+costs nothing at the end, and the E cores are worth about 0.4 of a P core each here. More than 10 lanes changes nothing.
+Decoding is the opposite: its segments are split evenly across the lanes, so 9 or 10 lanes put a segment on an efficiency
+core and the call waits for it (9 lanes: +20% on dickens, +35% on mozilla level 1, against 8); 16 lanes, which split the
+work finer, are 4–12% faster than 8. Interpretation (not tested): decode with more segments than lanes (or the same
+queue) would gain from the E cores the way the encoder does; the encoder should use `activeProcessorCount` lanes on this
+chip. The benchmark's rule ("lanes = P cores") is right for the decoder as written and leaves 10% on the table for the
+encoder. Not run on the M3 Ultra (8 E cores of 32; the rule may differ).
+
+### What the cores can do: instruction and memory measurements (one P core)
+
+Latency and throughput from dependent and eight-way independent chains of inline-asm instructions (scratch probe). The
+probe's calibration loop (a dependent `add`) read 2.82 GHz, below the 3.23 GHz the chip is documented to reach, so the
+numbers are scaled by the one assumption that a vector `add` has 2 cycles of latency and four a cycle (the four
+128-bit NEON pipes): treat cycles as ±15%.
+
+| Instruction | Latency (cycles) | Throughput (per cycle) |
+|---|---|---|
+| `add`, `eor`, `eor3`, `bcax`, `shl`, `zip1`, `uzp1`, `ext`, `rev32` (16 B) | 2 | 4 |
+| `tbl` with 1 or 2 table registers | 2 | 4 |
+| `tbl` with 3 / 4 table registers | 4 | 1.9 / 1.3 |
+| `tbx` with 4 table registers | 8 | 1.0 |
+| `usra`, `mul.4s`, `umull`, `udot` | 3 | 2.7 |
+| `pmull`, `pmull2` (64×64 → 128) | 3 | 2.7 |
+| `aese` / `aesmc` | 3 / 2 | 2.7 / 4 |
+| `aese`+`aesmc` pair (fused) | 6 per pair | 2.6 pairs |
+| `fmla.4s` | 4 | 2.0 |
+| `sha256h`, `sha512h` | 5, 3 | 0.5 |
+
+So a multi-register `tbl` costs roughly one vector slot per table register after the first (2 registers: 1; 3: 2; 4: 3),
+and `tbx` with four, four, with eight cycles of latency: a lookup in a 64-byte table (`tbl` 4) is three slots on this
+core. `eor3` is as cheap as `eor` (the CRC and GHASH XOR trees already use it). AES and carry-less multiply are
+2.7 a cycle: a 10-round AES-128 block is ten `aese` with nine `aesmc` fused, at best 3.9 cycles per 16 bytes, 4.2
+bytes/cycle or 13 GB/s at 3.2 GHz; the measured AES-128-CTR (12 GB/s at 1 MB) runs at about 90% of that bound, so
+there is little left to find in the AES kernels on this core.
+
+Memory (pointer chase, one pointer per 128-byte line; read loop with four `eor` accumulators):
+
+| Working set | Load-to-use latency |
+|---|---|
+| 16–128 KB (L1D) | 0.93–1.2 ns (about 3 cycles) |
+| 256 KB–2 MB (L2) | 5.3–5.6 ns (17–18 cycles) |
+| 4 / 8 MB | 6.3 / 8.5 ns |
+| 16 / 32 MB | 35 / 52 ns (system-level cache) |
+| 64 MB | 100 ns |
+| 128–256 MB (DRAM) | 121–124 ns |
+
+Read bandwidth, 256 MB per thread: 1 thread 61 GB/s; 2 threads 115 GB/s total; 3, 4, 6, 8 threads 114, 113, 102, 115;
+10 threads 126 GB/s. One P core already moves half of everything the CPU cluster can pull (the chip's 400 GB/s is for all
+agents, the GPU included); more than two cores add nothing for a pure read. `Bytes` reads at 60 GB/s on one core (the
+raw SIMD read is 61), at the probe's own ceiling.
+
+### CRC-32: nothing to gain, and the 2.4x was noise
+
+NativeZip's first M1 Max run showed CRC-32 over 32 MB at 2.38x the M3's time. Probes show the PMULL fold running at
+58–62 GB/s on one core from 256 KB through 256 MB (Swift's `CRC32.checksum`: 61.6, 61.6, 58.4, 58.8 GB/s at 256 KB,
+4 MB, 32 MB, 128 MB; the C copy of the loop: the same). The raw load-only loop tops out at 86 GB/s in cache and 62 at 32 MB,
+so the fold is within 5% of the memory rate at 32 MB. Software prefetch (`prfm`) 256 B to 4 KB ahead changed nothing
+(±1%), 8 KB ahead was slower (−7% at 32 MB, −50% at 256 MB); two interleaved halves changed nothing; the buffer's
+alignment (offsets 0–240 bytes) changed nothing. The idle re-run of NativeZip measured 616 µs, the M3's 569.
+
+### Not done
+
+- Back-references at short distances (group ratio 1.47, `distance 1`–`7` rows 1.6–1.85, the largest in the suite for
+  equal instructions) and `Write: Byte10`/stores generally (1.8–2.1): consistent with partial-width loads and stores that
+  can't forward on the M1 Max, but no probe was run; a decoder that keeps the last 8 output bytes in a register would
+  avoid the loads. Raw SIMD stores run 62 GB/s on the M1 Max against 113 on the M3.
+- Base64's decoder, tuned around `tbl`/`tbx` micro-op counts on the M3: on this core a 4-register `tbl` is three slots and
+  a `tbx` four with 8-cycle latency, so a window of 2-register lookups may rank differently; not tried.
+- ChaCha20's eight-block layout, AES-GCM aggregation, Brotli's tag filter: unchanged, ranking on the M1 Max not tested.
+
 
 ## 2026-11-18, LZMA, LZMA2, and .xz decoding: `LZMA2Decoder` against Compression and liblzma 5.8.4 (baselines `lzma-1`, `lzma-2`; Swift 6.4.4)
 

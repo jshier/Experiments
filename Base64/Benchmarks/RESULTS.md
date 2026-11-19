@@ -2,7 +2,159 @@
 
 Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2 (Xcode 27.3),
 one core. Random input; each measured iteration encodes at least 4 MB, repeating short inputs. Throughput
-counts input bytes; output is 4/3 as many.
+counts input bytes; output is 4/3 as many. Everything below is M3 Ultra unless a heading says otherwise; the
+2026-11-19 section re-runs the suite on an M1 Max.
+
+## 2026-11-19: the same suite on an M1 Max (baselines `d2-final` → `m1max`)
+
+Every benchmark, run unchanged on a new machine and compared with the M3 Ultra's `d2-final` (2026-11-18). The M3
+numbers above and below aren't touched.
+
+| | M3 Ultra | M1 Max |
+|---|---|---|
+| Cores | 24 P + 8 E | 8 P + 2 E |
+| P-core clock (max) | ~4.05 GHz | ~3.23 GHz (the M3's is 1.25x) |
+| Memory | 256 GB LPDDR5-6400, 819 GB/s | 64 GB LPDDR5-6400, 400 GB/s |
+| ISA | NEON, AES, PMULL, SHA-3 set, CRC32, DotProd, … | the same, without I8MM and BF16 |
+| OS, toolchain | macOS 27.2, Swift 6.4.4 (Xcode 27.3) | macOS 27.2.1, Swift 6.4.4 (Xcode 27.3, same compiler) |
+
+- **Method:** `swift package --disable-sandbox benchmark baseline update m1max --no-progress`, one package at a
+  time, nothing else benchmarking. The M1 Max had `corespotlightd` using about one core during the Bytes runs
+  (indexing new files; it couldn't be stopped); single-thread medians weren't noticeably affected there. The M3 baseline was taken at a slightly different commit, so **Instructions** is the
+  same-code check, below.
+- **Reading the tables:** "GB/s" is bytes per iteration over the median time, with bytes per iteration =
+  `count × max(1, 4 MiB / count)` (`Fixture`): input bytes for encoding, decoded bytes for decoding. Times are
+  `Time (wall clock)` medians, which are rounded to two digits from 10 ms (the Foundation and scalar rows at
+  40 B, and 64 MB): ±5% there. The ratio is **M1 Max time / M3 Ultra time**, so above 1 is slower, and 1.25 is
+  the clock ratio alone. The framework's `Throughput` rows (iterations per second) carry the same
+  information: Bytes encoding at 1 MB is −17.9% there, 1.22x in time.
+
+### Headline
+
+**Geometric mean of M1 Max time / M3 Ultra time over all 81 timed benchmarks: 1.27** (n = 81: 9 sizes × 4
+encoders + 5 decoders; the 18 `Allocations:*` benchmarks have no time). By group:
+
+| Group | Geomean | n | Range |
+|---|---|---|---|
+| Encode (all) | 1.25 | 36 | 1.02–1.46 |
+| Decode (all) | 1.28 | 45 | 1.11–1.50 |
+| Bytes kernels (encode and decode into a buffer) | 1.26 | 18 | 1.12–1.45 |
+| …at 16 KB and larger | 1.20 | 6 | |
+| …at 95 B and smaller | 1.32 | 8 | |
+| `encodedString`, `decodedBytes` (allocate) | 1.34 | 18 | 1.11–1.48 |
+| Foundation | 1.35 | 18 | 1.18–1.50 |
+| Decode, portable groups (Bytes, no NEON lookups) | 1.23 | 9 | 1.12–1.31 |
+| Scalar table | 1.15 | 18 | 1.02–1.25 |
+
+### Same code on both machines?
+
+80 of the 81 benchmarks' instruction counts per iteration are within 2% of the M3's; 76 are identical in the
+digits recorded (two significant). The five that differ:
+
+| Benchmark | M3 | M1 Max | Change |
+|---|---|---|---|
+| Decode 47 B, portable groups | 110 M | 111 M | +0.9% |
+| Decode 64 B, portable groups | 45 M | 46 M | +2.2% |
+| Decode 64 MB, Foundation | 738 M | 739 M | +0.1% |
+| Decode 64 MB, scalar table | 2,528 M | 2,529 M | +0.0% |
+| Encode 16 KB, `encodedString` | 4,862 K | 4,882 K | +0.4% |
+
+The one above 2% is 45 M against 46 M, two digits: within rounding of the recorded values. So the time ratios
+are hardware ratios, to within what two digits resolve.
+
+### Encoding (GB/s of input: M3 Ultra → M1 Max, ratio)
+
+| Input | Bytes encoder | Instructions | `encodedString` | Foundation | Scalar table |
+|---|---|---|---|---|---|
+| 40 B | **4.10 → 3.08 (1.33x)** | 29.0 M | 0.73 → 0.53 (1.37x) | 0.38 → 0.32 (1.18x) | 0.85 → 0.76 (1.11x) |
+| 47 B | **4.58 → 3.63 (1.26x)** | 24.0 M | 0.74 → 0.58 (1.29x) | 0.51 → 0.38 (1.34x) | 0.85 → 0.77 (1.11x) |
+| 64 B | **5.04 → 4.05 (1.24x)** | 21.0 M | 0.96 → 0.67 (1.43x) | 0.64 → 0.48 (1.33x) | 0.86 → 0.77 (1.13x) |
+| 95 B | **8.74 → 6.04 (1.45x)** | 14.0 M | 1.42 → 0.97 (1.46x) | 0.93 → 0.66 (1.41x) | 0.81 → 0.77 (1.05x) |
+| 1000 B | **17.3 → 15.2 (1.14x)** | 3.9 M | 7.91 → 5.89 (1.34x) | 2.46 → 1.88 (1.31x) | 0.79 → 0.77 (1.02x) |
+| 1 KB | **19.1 → 15.0 (1.27x)** | 3.9 M | 8.08 → 6.03 (1.34x) | 2.54 → 1.89 (1.34x) | 0.88 → 0.77 (1.14x) |
+| 16 KB | **20.9 → 17.5 (1.19x)** | 2.9 M | 15.2 → 12.3 (1.24x) | 3.02 → 2.36 (1.28x) | 0.79 → 0.77 (1.02x) |
+| 1 MB | **21.5 → 17.6 (1.22x)** | 2.8 M | 17.0 → 13.1 (1.30x) | 3.17 → 2.36 (1.34x) | 0.85 → 0.77 (1.10x) |
+| 64 MB | **20.7 → 17.2 (1.20x)** | 45.0 M | 15.7 → 12.3 (1.28x) | 3.36 → 2.31 (1.45x) | 0.88 → 0.77 (1.14x) |
+
+### Decoding (GB/s of decoded bytes)
+
+| Input | Bytes decoder | Instructions | `decodedBytes` | Portable groups | Foundation | Scalar table |
+|---|---|---|---|---|---|---|
+| 40 B | **3.22 → 2.34 (1.37x)** | 36.0 M | 0.70 → 0.48 (1.46x) | 0.76 → 0.64 (1.19x) | 0.47 → 0.32 (1.47x) | 0.25 → 0.20 (1.24x) |
+| 47 B | **4.28 → 3.22 (1.33x)** | 26.0 M | 0.83 → 0.58 (1.43x) | 0.80 → 0.64 (1.25x) | 0.50 → 0.35 (1.43x) | 0.25 → 0.20 (1.24x) |
+| 64 B | **4.06 → 3.31 (1.23x)** | 23.0 M | 1.05 → 0.75 (1.40x) | 1.93 → 1.47 (1.31x) | 0.70 → 0.47 (1.50x) | 0.23 → 0.20 (1.17x) |
+| 95 B | **6.58 → 4.85 (1.36x)** | 16.0 M | 1.66 → 1.12 (1.48x) | 1.38 → 1.08 (1.28x) | 0.87 → 0.63 (1.39x) | 0.23 → 0.20 (1.17x) |
+| 1000 B | **12.1 → 9.53 (1.27x)** | 5.4 M | 7.68 → 5.59 (1.37x) | 3.57 → 2.90 (1.23x) | 2.29 → 1.78 (1.29x) | 0.25 → 0.21 (1.18x) |
+| 1 KB | **11.7 → 9.36 (1.25x)** | 5.5 M | 7.65 → 5.59 (1.37x) | 3.97 → 3.15 (1.26x) | 2.28 → 1.81 (1.26x) | 0.26 → 0.21 (1.25x) |
+| 16 KB | **11.6 → 10.4 (1.12x)** | 4.4 M | 11.0 → 9.87 (1.11x) | 3.78 → 3.37 (1.12x) | 3.01 → 2.29 (1.31x) | 0.26 → 0.21 (1.25x) |
+| 1 MB | **12.9 → 10.4 (1.24x)** | 4.3 M | 12.4 → 10.4 (1.19x) | 4.25 → 3.39 (1.25x) | 3.02 → 2.27 (1.33x) | 0.25 → 0.21 (1.18x) |
+| 64 MB | **12.8 → 10.4 (1.23x)** | 69.0 M | 12.9 → 10.3 (1.24x) | 3.95 → 3.36 (1.18x) | 3.05 → 2.31 (1.32x) | 0.26 → 0.20 (1.25x) |
+
+The Instructions column is per iteration (about 4 MB of work), the same on both machines.
+
+### The Bytes codec against its references
+
+From the same rows (reference time / Bytes kernel time, M3 → M1 Max; the Bytes kernel is the buffer-to-buffer
+`BytesReader → BytesWriter` benchmark):
+
+| Reference | Inputs ≥ 1000 B | 95 B and smaller |
+|---|---|---|
+| Foundation, encode | 6.2–7.5x → 7.4–8.1x | 7.9–10.8x → 8.4–9.5x |
+| Foundation, decode | 3.9–5.3x → 4.5–5.4x | 5.8–8.6x → 7.1–9.2x |
+| Scalar table, encode | 21.7–26.5x → 19.4–22.8x | 4.8–10.9x → 4.0–7.9x |
+| Scalar table, decode | 44.3–52.3x → 44.6–50.8x | 13.0–28.3x → 11.7–24.3x |
+| Portable groups, decode | 3.0–3.4x → 3.0–3.3x | 2.1–5.4x → 2.2–5.0x |
+| `encodedString` (allocates the `String`) | 1.3–2.4x → 1.3–2.6x | 5.3–6.2x → 5.8–6.3x |
+| `decodedBytes` (allocates the array) | 1.0–1.6x → 1.0–1.7x | 3.9–5.1x → 4.3–5.5x |
+
+- **The Bytes kernel is the fastest on the M1 Max at every size and direction.** On the M3 it is too, except
+  `decodedBytes` at 64 MB (5,222 against 5,251 µs: a tie). The order of the others differs between the machines
+  in 4 of the 18 size and direction combinations, always neighbours swapping: portable groups and `decodedBytes`
+  (47 B decode), scalar table and `encodedString` (64 B encode), Foundation and scalar table (95 B encode), and
+  the 64 MB tie.
+- **Foundation's gap to the kernel is a little wider on the M1 Max** (encode at 1 MB 6.8x → 7.5x, decode 4.3x →
+  4.6x); the scalar encoder's is narrower (25.3x → 22.8x at 1 MB), the scalar decoder's level (52.3x → 49.8x).
+- **"93% of the best C kernel" and "99% of C of the same design" are not in this data.** The C kernels were
+  measured in standalone drivers, not the benchmark suite, and I didn't build or run them (no builds while other
+  timing experiments run). So the claim is neither confirmed nor refuted on the M1 Max. What the suite does
+  show: the Swift kernel runs 17.6 GB/s encoding and 10.4 GB/s decoding at 1 MB there, and the C numbers would
+  have to scale by the same 1.22–1.24 for the percentages to hold.
+
+### Allocations
+
+- All 18 `Allocations:Encode_*` and `Allocations:Decode_*` benchmarks count 0 mallocs on both machines (the
+  zero thresholds in `Thresholds/` hold).
+- Of the 81 timed benchmarks, 45 count 0 on both (every Bytes kernel, the portable groups, the scalar table); 36
+  count the same nonzero number on both: `encodedString` and `decodedBytes` allocate one buffer per call, Foundation
+  two (at 1 MB, 4 and 8 mallocs per iteration of 4 calls; at 40 B, 105,000 and 210,000).
+
+### Observations
+
+Measured:
+
+- **The vector kernels at large sizes run at 1.12–1.24x the M3's time**, below the clock ratio. Encoding at 16 KB,
+  1 MB, 64 MB: 1.19, 1.22, 1.20; decoding: 1.12, 1.24, 1.23. With equal instruction counts, that is as much or
+  a little more work per clock than the M3 Ultra, if both ran at their maximum clocks (not measured). Encoding
+  at 1 MB, 17.6 GB/s of input, moves 41 GB/s of input and output together, a tenth of the M1 Max's 400 GB/s,
+  and 64 MB runs at 17.2 GB/s, so memory isn't what limits it.
+- **Short inputs lose more than the clock**: the kernels at 95 B and smaller are 1.32x (geomean, 1.23–1.45 per
+  row), the allocating paths 1.41x, Foundation 1.38x, with the same instructions per iteration. The 95 B encode
+  row, 1.45x, is the largest kernel ratio.
+- **The scalar table encoder barely moved**: 1.02–1.14x, and 0.77 GB/s at every size on the M1 Max (0.79–0.88 on
+  the M3, an 11% spread between sizes with identical instruction counts). The scalar decoder scaled as the clock
+  did: 1.17–1.25x.
+- **Decode at 16 KB is the smallest ratio**: kernel 1.12x, `decodedBytes` 1.11x, portable groups 1.12x, against 1.24x,
+  1.19x, 1.25x at 1 MB. The M1 Max decodes 10.4 GB/s at 16 KB and 1 MB alike; the M3's d2-final is 11.6 GB/s at
+  16 KB and 12.9 at 1 MB (the 2026-11-10 table below has 13.0 and 12.5).
+
+Interpretation, not investigated:
+
+- The scalar encoder's flat ratio is unexplained. No counters (`Tools/counters`) were run on either machine.
+- The M3's lower 16 KB decode in `d2-final` than in the 2026-11-10 baseline may be noise in that run rather than
+  a property of the chip.
+- Why short inputs lose more than the clock is not known: allocation, per-call overhead, or clock behavior on short
+  bursts are all candidates and none is measured. The allocation-free kernel (1.32x at short sizes) and the
+  allocating paths (1.41x) lose similarly, which doesn't point to malloc alone.
 
 ## 2026-11-18: a reshuffling encoder kernel, not kept
 

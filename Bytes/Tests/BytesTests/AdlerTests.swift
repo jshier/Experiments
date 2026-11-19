@@ -31,6 +31,24 @@ import zlib
         }
     }
 
+    /// The UDOT kernel reduces every 86 blocks of 64 bytes (5,504 bytes): sizes around one, two, and three chunks, from
+    /// starts that aren't aligned, with the worst-case bytes and a value that continues from a large checksum.
+    @Test(arguments: [5_439, 5_440, 5_503, 5_504, 5_505, 5_567, 11_007, 11_008, 11_009, 16_511, 16_512, 16_513])
+    func adlerAroundDotProductChunks(count: Int) {
+        for start in [0, 1, 7, 16, 33] {
+            let data = Self.bytes(count + start, seed: UInt64(count))
+            let slice = Array(data[start...])
+            #expect(Adler32.checksum(data.span.bytes.extracting(start...)) == Self.zlibAdler(slice), "\(count) from \(start)")
+            let ones = [UInt8](repeating: 0xFF, count: count + start)
+            let onesSlice = Array(ones[start...])
+            #expect(
+                Adler32.checksum(ones.span.bytes.extracting(start...), continuing: 0xFFF0_FFF0 & 0xFFFE_FFFE)
+                    == Self.zlibAdler(onesSlice, continuing: 0xFFF0_FFF0 & 0xFFFE_FFFE),
+                "ones \(count) from \(start)"
+            )
+        }
+    }
+
     @Test func adlerIncremental() {
         let data = Self.bytes(10_000, seed: 7)
         var adler = Adler32()

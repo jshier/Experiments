@@ -5,7 +5,107 @@ M3 Ultra (24 performance + 8 efficiency cores), macOS 27.2. The swiftlang/swift#
 `../Tools/toolchain . -- swift package --disable-sandbox benchmark`, about 512 MB per connection per iteration (256 MB for the multi-connection runs).
 Bandwidth counts every byte on the wire, MQTT headers included; the timing runs from the first listener to
 the last receiver's end of stream. Every packet is checked on arrival. The package now also measures
-compressed and TLS-encrypted streams through Bytes pipelines (2026-11-15 below).
+compressed and TLS-encrypted streams through Bytes pipelines (2026-11-15 below). The 2026-11-19 section below repeats
+the benchmarks on an M1 Max and compares them with the M3 Ultra's.
+
+## 2026-11-19: M1 Max against M3 Ultra (baselines `d2-final` → `m1max`)
+
+The same toolchain (pr-91981 build 2511, Swift 6.5-dev; installed on the new machine with `Tools/toolchain install`,
+which needed `$url…` changed to `${url}…` for bash 3.2) and swift-platform-executors, on an Apple M1 Max: 8 P + 2 E
+cores at about 3.23 GHz (the M3 Ultra: 24 P + 8 E at about 4.05 GHz, so a clock ratio of 1.25), 64 GB LPDDR5 at 400 GB/s
+(819 GB/s), macOS 27.2.1. A full run of the package's 50 benchmarks (100 results) as `m1max`, nothing else
+benchmarking. `corespotlightd` was seen using about one of the ten cores during the Bytes runs on this machine (it was
+indexing new files); that is a larger share than on 32 cores, and nothing checked it during these transfers, the
+numbers it could touch most.
+
+**Only 8 timed benchmarks pair.** `d2-final` has 20 results: the 8 in-memory benchmarks and 2 `Allocations:` ones.
+The other 40 of `m1max`'s 50 benchmarks (32 socket transfers, 6 `Allocations:` rows for protect and unprotect, 2
+`Transfer allocations:` rows) have no M3 value in `d2-final`; their M1 Max numbers are in the second and third tables,
+beside figures from the older M3 sections below (different code, so indicative only).
+
+**Headline.** In-memory benchmarks, M1 Max time over M3 Ultra time, geometric mean over **n = 8**: **1.32** (1.25 to
+1.48); the throughput rows give the same 1.32. Instructions are identical in all 8 and mallocs are 0 on both, so these
+are hardware ratios. Per 10,000 packets of 64 B, µs:
+
+| In-memory benchmark | M3 | M1 Max | Ratio | Instructions |
+|---|---|---|---|---|
+| Encode | 177 | 231 | 1.31 | 4.69 M |
+| Check | 241 | 310 | 1.29 | 6.67 M |
+| Protect, TLS | 737 | 919 | 1.25 | 15 M |
+| Protect, deflate + TLS | 2,259 | 3,144 | 1.39 | 44 M |
+| Protect, brotli + TLS | 2,726 | 3,582 | 1.31 | 41 M |
+| Unprotect, TLS | 764 | 989 | 1.29 | 17 M |
+| Unprotect, deflate + TLS | 886 | 1,114 | 1.26 | 17 M |
+| Unprotect, brotli + TLS | 1,382 | 2,050 | **1.48** | 26 M |
+
+Unprotect with Brotli is the one above the rest (the next is 1.39); not investigated.
+
+**Transfers, one connection**, MB/s on the wire (M1 Max `m1max`; M3 `protected-1`, 2026-11-15, in parentheses). The
+M3 figures predate the stitched ChaCha20-Poly1305 and the Brotli speedups (in memory, TLS alone −38% time and Brotli
+protect 54 M → 41 M instructions since), so only the plain and deflate columns compare with code that is close:
+
+| Payload | plain | TLS | TLS, 4 sealing lanes | deflate | deflate + TLS | brotli | brotli + TLS |
+|---|---|---|---|---|---|---|---|
+| 64 B | 3,387 (3,411) | 1,162 (840) | 1,122 | 400 (516) | 384 (493) | 343 (386) | 332 (350) |
+| 1 KB | 7,343 (6,299) | 1,414 (1,003) | 1,493 | 481 (628) | 463 (601) | 465 (499) | 443 (464) |
+| 16 KB | 9,047 (7,359) | 1,453 (1,036) | 1,573 | 845 (1,121) | 815 (1,133) | 2,631 (1,570) | 2,567 (1,549) |
+
+64 KB plain: 9,047 (the same figure and time, 59 ms, as 16 KB). Raw (no MQTT, the 1 KB stream's bytes): 11,567
+(M3 `frames`: 7.4–7.5 GB/s).
+
+**Transfers, several connections**, MB/s (M3 from the `frames` table below, ranges over its runs), with the M1 Max's
+wall time, total CPU time, the cores that implies, and packets per second:
+
+| Workload | M1 Max MB/s | M3 | Wall ms | CPU ms | Cores | M packets/s |
+|---|---|---|---|---|---|---|
+| 64 B, 1 connection | 3,387 | | 155 | 295 | 1.90 | 27.0 |
+| 64 B, 2 | 5,675 | 4,300 | 90 | 349 | 3.88 | 45.2 |
+| 64 B, 4 | 5,891 | 4,400–4,900 | 177 | 977 | 5.52 | 47.0 |
+| 64 B, 8 | 4,763 | 3,700 | 441 | 2,343 | 5.31 | 38.0 |
+| 1 KB, 1 | 7,343 | 6,350 | 73 | 128 | 1.75 | 6.8 |
+| 1 KB, 4, thread per task / shared pool | 5,543 / 5,295 | 4,300–4,700 / 4,200–4,800 | 194 / 201 | 660 / 677 | 3.40 / 3.37 | 5.1 / 4.9 |
+| 16 KB, 1 | 9,047 | 7,300 | 59 | 100 | 1.69 | 0.55 |
+| 16 KB, 2 | 6,671 | 5,900–6,500 | 79 | 202 | 2.56 | 0.41 |
+| 16 KB, 4 | 5,307 | 4,100–4,500 | 203 | 607 | 2.99 | 0.32 |
+| Raw (16 KB stream), 2 | 6,211 | 6,000–6,200 | 86 | 189 | 2.20 | 0.38 |
+| Raw (16 KB stream), 4 | 5,251 | 3,600–4,400 | 205 | 546 | 2.66 | 0.32 |
+
+Compressed and TLS single-connection rows, wall ms / cores (M1 Max): TLS 226 / 1.97 (64 B), 189 / 1.94 (1 KB), 184 /
+1.93 (16 KB); 4 sealing lanes 234 / 2.18, 180 / 2.34, 171 / 2.35; deflate 656 / 1.36, 557 / 1.30, 318 / 1.20; brotli
+766 / 1.57, 577 / 1.55, 102 / 1.54 (the + TLS rows within 0.1 cores of these). Allocations: the 6 `Allocations:` rows without a
+`d2-final` value (protect and unprotect, TLS, deflate + TLS, brotli + TLS) are 0, and a transfer's setup is 132 mallocs for both 100,000
+and 1,000,000 packets of 64 B (120 and 325 in the `frames` and `protected-1` sections; code changed since, not compared).
+
+**Measured**
+- **Compute-bound rows follow the compute ratio; the socket rows don't.** The in-memory rows are 1.32x slower on the
+  M1 Max, and the compressors' transfers are about that slow (deflate −22 to −25%, 1.32x is −24%; deflate + TLS −22
+  to −28%). The plain transfers, which the M3 section calls loopback-bound, are faster on the M1 Max: 64 B equal
+  (3,387 against 3,411), 1 KB +17%, 16 KB +23%, raw +55%, and with 2 to 8 connections 0% to +46% (64 B: +32%, +20 to
+  +34%, +29% at 2, 4, 8; the smallest are raw and 16 KB at 2 connections). A 9 GB/s stream is a small share of 400 GB/s of memory bandwidth.
+- **The shape past four connections matches.** At 64 B 8 connections carry 19% less than 4 (4,763 against 5,891 MB/s);
+  the M3's 3.7 against 4.4–4.9 GB/s is 16–24% less. The M1 Max uses 5.3 of its 10 cores then, so cores are not
+  what ran out. 16 KB: 4 connections carry 41% less than 1 (5,307 against 9,047).
+- **One connection keeps about two threads busy.** CPU time is 1.64–1.90 times wall for plain transfers, 1.93–1.97
+  for TLS, and 1.20–1.57 for deflate and brotli (the sender compressing is busy and the receiver mostly idle, as the
+  M3's profiles below showed; not profiled here).
+- **Sealing lanes help less here.** 4 lanes: +8.3% at 16 KB (1,453 → 1,573), +5.6% at 1 KB, −3.4% at 64 B; the M3's
+  interleaved runs gave +25% for ChaCha20-Poly1305 (1.35–1.54 → 1.77–1.87 GB/s, 16 KB, CLI; AES-128-GCM +22%). One lane at 16 KB, 1,453, is inside the
+  M3's 1.35–1.54 range. 4 lanes add 0.4 cores (1.93 → 2.35).
+- **M3's own plain ceiling varies with the method:** 7.3 GB/s in these benchmarks, 4.62–5.84 in the 2026-11-18 CLI
+  runs (about 1 GB, 16 KB payloads). The M3 ratios above are against the benchmark figures.
+
+**Interpretation, not measured**
+- The plain and raw transfers are limited by the kernel's loopback path and the cores' copy rate there, not by the
+  MQTT code (in memory, encode and check cost 18–24 ns per packet on the M3 and 23–31 on the M1 Max). Why a 10-core chip gets more
+  than a 32-core one through it (two ends in one cache domain on the M1 Max, against a spread over two dies, or kernel
+  or scheduler differences) wasn't investigated. Neither machine's `Tools/socket-ceiling` was run, so the C
+  ceiling here is unknown: the only M3 figure is the earlier C probe (8 pairs, 3.4 GB/s).
+- Sealing in parallel stops helping once the receiver is the limit: it opens records one after another, at about
+  2 GB/s on the M3 (2026-11-18, below); the M1 Max's in-memory unprotect is 1.29x slower, which puts its receiver near 1.5 GB/s,
+  where 4 lanes arrive (1,573). Not tested with other lane counts.
+- The M3 columns come from baselines with older code (TLS before stitched ChaCha, Brotli before its speedups, plain
+  with earlier enum and receive-buffer code): a paired rerun of the transfers on the M3 Ultra, at the current commit,
+  would settle the transfer ratios.
 
 ## 2026-11-18: TLS records sealed in parallel; AES-128-GCM records
 

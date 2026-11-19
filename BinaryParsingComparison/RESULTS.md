@@ -10,7 +10,88 @@ The example parsers are also measured as published (`Sources/Workloads/Example*.
 their types renamed). Every variant of a workload produces identical output (`swift test`): the LZ4
 decoders reproduce the original files, and the QOI decoders match the example's pixels.
 
-Medians from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2.
+Medians from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2. (The 2026-11-19 section
+below repeats every benchmark on an M1 Max and checks which of the speedups survive; the sections under it are M3 Ultra.)
+
+## 2026-11-19: M1 Max against M3 Ultra (baselines `trk-final` → `m1max`)
+
+A new machine, an Apple M1 Max (8 P + 2 E cores, P cores about 3.23 GHz, 12 MB P-cluster L2, 64 GB LPDDR5, 400
+GB/s), against the M3 Ultra of the sections below (24 P + 8 E, about 4.05 GHz, 819 GB/s): clock ratio 1.25. Same compiler (Swift
+6.4.4, Xcode 27.3), macOS 27.2.1 on the M1 Max. The M1 Max lacks I8MM, BF16, and SME (the M3 has no SME either). Full run of the
+49 timed benchmarks (all single-threaded) with `baseline update m1max`, nothing else benchmarking. The M3 side is
+`trk-final` (2026-11-17), which predates the 2026-11-18 ELF work (below), so the M3 baseline and this checkout are
+not quite the same code (see "Same code?"). Times are p50 in µs, "speedup" is the other library's time over Bytes'
+(above 1: Bytes is faster), and each cell is M3 / M1 Max.
+
+**Headline.** M1 Max time over M3 Ultra time, geometric mean over 49 benchmarks: **1.30** (1.295; Bytes' 26 rows
+1.28, the other library's 23 rows 1.31). Clock alone is 1.25, so about 4% per clock is the M3's. Mallocs are
+identical in all 49.
+
+**Same code?** Instructions agree within 2% in 45 of 49. Four differ more:
+
+| Benchmark | M3 | M1 Max | Change | Reason |
+|---|---|---|---|---|
+| ELF swift-help, section names, Bytes | 25 K | 19 K | −24% | the 2026-11-18 NUL-terminated string read (below: 25 K → 19 K), after `trk-final` |
+| ELF swift-help, Bytes | 9,097 | 8,703 | −4.3% | same change (below: 9,095 → 8,647) |
+| ELF helloworld, Bytes | 3,869 | 4,103 | +6.0% | below: 4,053 → 3,977 after the change, so +3.2% unexplained; the example moved +2.0% too (7,667 → 7,819). Not investigated |
+| PNG tiny.png, Bytes | 18 K | 17 K | −5.6% | printed in K: one K is the resolution |
+
+Time ratios for those four aren't hardware alone. Everything else is the same instructions on both.
+
+**Do the Bytes speedups hold?** Yes. Speedups over the same work, M3 / M1 Max (instructions, identical on both
+unless noted, in the last column):
+
+| Pair | Bytes µs | Other µs | Speedup | Instr. ratio |
+|---|---|---|---|---|
+| ELF helloworld vs example | 0.75 / 0.79 | 0.96 / 1.08 | 1.28 / 1.37 | 1.98 / 1.91 |
+| ELF swift-help vs example | 1.0 / 1.0 | 2.09 / 2.50 | 2.08 / 2.50 | 3.08 / 3.22 |
+| ELF swift-help, section names vs example | 1.71 / 1.71 | 2.38 / 3.13 | 1.39 / 1.83 | 1.40 / 1.84 |
+| PNG tiny.png vs example | 1.50 / 1.71 | 1.96 / 2.29 | 1.31 / 1.34 | 1.44 / 1.53 |
+| PNG tricolor.png vs example | 1.83 / 2.17 | 2.21 / 2.79 | 1.20 / 1.29 | 1.39 |
+| PNG antelope.png vs example | 80 / 120 | 81 / 122 | 1.01 / 1.02 | 1.02 |
+| PCAPNG sample.pcap vs example | 1.13 / 1.33 | 1.67 / 1.50 | 1.48 / 1.12 | 1.17 |
+| PCAPNG 1,000 packets vs example | 194 / 274 | 235 / 326 | 1.21 / 1.19 | 1.19 |
+| BPList sample.plist vs example | 5.17 / 6.58 | 6.34 / 8.75 | 1.23 / 1.33 | 1.20 / 1.22 |
+| BPList 1,000 records vs example | 1,304 / 1,830 | 1,649 / 2,372 | 1.26 / 1.30 | 1.20 |
+| QOI tricolor.qoi, run fills vs example | 74 / 87 | 4,387 / 5,661 | 59 / 65 | 79 |
+| QOI antelope.qoi, run fills vs example | 7,160 / 9,708 | 35,000 / 45,000 | 4.89 / 4.64 | 6.88 |
+| QOI tricolor.qoi, pixel runs vs ParserSpan | 174 / 243 | 176 / 243 | 1.01 / 1.00 | 1.00 |
+| QOI antelope.qoi, pixel runs vs ParserSpan | 7,909 / 11,000 | 7,766 / 11,000 | 0.98 / 1.00 | 1.07 |
+| LZ4 tricolor.qoi.lz4 vs example | 6.54 / 8.34 | 380 / 512 | 58 / 61 | 46 |
+| LZ4 swift-help.lz4 vs example | 2,513 / 3,295 | 171,000 / 244,000 | 68 / 74 | 67 |
+| LZ4 tricolor, exact literal copies vs ParserSpan | 6.80 / 9.17 | 7.33 / 11.0 | 1.08 / 1.20 | 1.10 / 1.11 |
+| LZ4 swift-help, exact literal copies vs ParserSpan | 4,028 / 4,878 | 3,746 / 5,145 | **0.93 / 1.05** | 1.10 |
+| MQTT PUBLISH stream vs ParserSpan | 170 / 232 | 244 / 310 | 1.44 / 1.34 | 1.29 |
+| Zip directory, fields vs ParserSpan | 9.8 / 12 | 23 / 34 | 2.35 / 2.83 | 1.62 |
+| Zip directory, fixed-size records vs ParserSpan | 7.3 / 11 | 15 / 19 | 2.06 / 1.73 | 1.63 |
+| 24-bit big-endian, per value vs ParserSpan | 56 / 78 | 177 / 230 | 3.16 / 2.95 | 3.13 |
+| 24-bit big-endian, `forEach` vs ParserSpan per value | 49 / 62 | 177 / 230 | 3.61 / 3.71 | 5.79 |
+| UInt32 big-endian, per value vs ParserSpan | 9.92 / 13 | 9.92 / 13 | 1.00 / 1.00 | 1.00 |
+
+Not in the table (no counterpart): Zip directory with macro records, Bytes 7.3 / 11 µs, 199 K instructions;
+UInt32 `forEach`, 9.9 / 13 µs, 197 K.
+
+- **Measured.** Bytes is faster than the other library, or tied, in every pair on both machines but one (below). The
+  instruction ratios in the 2026-11-17 table are the same on the M1 Max (3.08 → 3.22 for ELF swift-help only because
+  of the 2026-11-18 change). For the 18 pairs with Bytes' times at or above 5 µs on both machines and identical
+  instructions (the rest are 1–2 µs medians, at the framework's resolution, or one of the four listed), the speedup
+  changed by +2% on average (geometric mean; −16% to +21%). LZ4 and QOI against the example: 59–74x on both, 4.9x →
+  4.6x for QOI antelope. The large movers are all small: Zip directory 2.35 → 2.83 (+21%) and fixed-size records 2.06 →
+  1.73 (−16%) are 7–34 µs with a 1 µs resolution (e.g. 7.3 → 11 µs is a 50% step in the Bytes column), and the
+  M1 Max's PCAPNG sample.pcap speedup, 1.48 → 1.12, is the example getting faster (1.67 → 1.50 µs) while Bytes slowed.
+- **The one flip:** LZ4 `swift-help`, exact literal copies against the `ParserSpan` port of the same algorithm. On
+  the M3 Ultra Bytes was 7.5% slower (4,028 against 3,746 µs) with 10% fewer instructions (49 M against 54 M); on
+  the M1 Max it is 5.5% faster (4,878 against 5,145). Going to the M1 Max the `ParserSpan` decoder slowed 37% and
+  Bytes' 21%: the M3 ran the `ParserSpan` loop at a relatively higher rate. Why wasn't investigated (instruction
+  counts are identical on both machines, so it is a difference in how the two loops execute, not in the code). The
+  tricolor.qoi.lz4 version of the same pair went 1.08 → 1.20. The two "same algorithm" QOI rows tie on both machines
+  (1.01 and 0.98 on the M3, 1.00 and 1.00 on the M1 Max).
+- **Slowdowns by row.** Most rows take 1.2–1.5x as long on the M1 Max. PNG antelope.png slowed most among the long
+  rows, 1.50x for both parsers (80 → 120 µs, 81 → 122 µs; it copies 281 16 KB chunks, same instructions), more than
+  the clock ratio. Whether it is memory-system bound (400 against 819 GB/s, 12 MB cluster L2) wasn't checked.
+- **Throughput rows** (the framework's iterations per second) mostly move by −17 to −34% (large rates are printed
+  rounded to thousands): the same information as the times (a 1.3x slowdown is −23%).
+- The M1 Max baselines are `m1max`, in `.benchmarkBaselines/ComparisonBenchmarks/`; no parser changed for this.
 
 ## 2026-11-18: cursor-order records, NUL-terminated strings, padded records (baselines `d2-start` → `d2-api2`, Swift 6.4.4)
 

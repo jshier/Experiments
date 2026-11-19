@@ -151,7 +151,7 @@ case "$1" in
             swiftly install "$spec" --assume-yes >&2 || die "swiftly install $spec failed"
         elif [[ -n "$url" ]]; then
             scratch_dir
-            note "downloading $url…"
+            note "downloading ${url}…"
             curl -fL --progress-bar -o "$SCRATCH/toolchain.tar.gz" "$url" ||
                 fail "download failed: PR builds on download.swift.org/tmp expire; look for a newer build number of the PR and register it"
             # Extracted into ~ only if every path is inside Library/Developer/Toolchains.

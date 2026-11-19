@@ -4,7 +4,115 @@ M3 Ultra (24 performance and 8 efficiency cores), macOS 27.2, Swift 6.4.4, inter
 27.3 beta 2 (`Xcode_27.3_beta_2.aea`, 2.17 GB; 10.46 GB of Apple Archive stream in 624 xz segments of 16 MiB; 167,541
 entries). The format is in [FORMAT.md](FORMAT.md). Package benchmarks: baselines `aea-1` (Compression's decoder)
 and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIVE=…/Xcode_27.3_beta_2.aea`); the
-synthetic archive is `Tools/test-data fetch nativeaea-synthetic`.
+synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
+M1 Max's (baseline `m1max`).
+
+## 2026-11-19: M1 Max against M3 Ultra (baselines `aea-2` → `m1max`, synthetic archive only)
+
+Every package's benchmarks were re-run on a new machine. Same macOS (27.2 / 27.2.1) and compiler (Swift 6.4.4,
+Xcode 27.3); the hardware differs:
+
+| | M3 Ultra (`aea-2`, 2026-11-18) | M1 Max (`m1max`) |
+|---|---|---|
+| Cores | 24 P + 8 E (`activeProcessorCount` 32) | 8 P + 2 E (10) |
+| P-core clock | ~4.05 GHz | ~3.23 GHz (1.25x lower) |
+| Memory | 256 GB, 819 GB/s | 64 GB, 400 GB/s |
+| P-cluster L2 | not measured | 12 MB |
+
+Method: one full run, `swift package --disable-sandbox benchmark baseline update m1max --no-progress`, nothing else
+benchmarking, fixture `TestData/nativeaea-synthetic` (3.15 GB, 30,363 entries). `corespotlightd` used about one core
+during the Bytes runs on this machine (it was indexing new files and couldn't be stopped), so treat the threaded rows
+with extra care. Extractions go to `NSTemporaryDirectory()/NativeAEABenchmarks.noindex` on each machine's internal SSD
+(different SSDs, not measured separately). The baseline has no Xcode rows (evidently run **without `NATIVEAEA_ARCHIVE`**), so the Xcode rows
+(the table in 2026-11-18) have no M1 Max counterpart; only the 8 synthetic-archive timed benchmarks pair. The List and
+Extract rows are the median of at most 5 and 3 iterations. Ratios are M1 Max time over M3 Ultra time (above 1 =
+slower; the clock alone is 1.25).
+
+### Thread counts
+
+The benchmarks use `AEAReadOptions` and `AEAExtractionOptions` defaults (fact from the sources):
+
+| Setting | Default | M3 Ultra | M1 Max |
+|---|---|---|---|
+| `decodeThreads` | `activeProcessorCount` | 32 | 10 |
+| `extraBuffers` | 8 | 8 | 8 |
+| `writerThreads` | 24 | 24 | 24 |
+| `fileSystemWidth` (writers in file system calls) | 6 | 6 | 6 |
+
+So decoding scales with the machine, but writers (24, including compression with `archived`) and file system width (6)
+do not: on the M1 Max, 10 decoders and 24 writers share 10 logical CPUs. Nothing was tuned for the M1 Max.
+
+### Headline
+
+Geometric mean of the time ratio over the 8 paired benchmarks: **1.93**. It is two groups:
+
+| Kind | n | Geomean | Rows |
+|---|---|---|---|
+| Single-threaded (decode one segment, open and verify, parse headers) | 4 | **1.20** | 1.36, 1.24, 1.13, 1.08 |
+| Threaded (list, extract) | 4 | **3.10** | 3.01, 2.70, 3.28, 3.47 |
+
+Same-code check: instruction counts exist only for the single-threaded rows (the threaded benchmarks record time,
+CPU, and memory, not instructions or mallocs: the malloc interposer traps on thread exit). Both decode rows are
+identical (1,132 M and 929 M), parse headers is identical (63 K), open and verify is −2.7% (3.29 M → 3.20 M), under 3%;
+mallocs are identical (0, 0, 287). The M3 baseline was taken at a slightly earlier commit than HEAD, and for the
+threaded rows no counter confirms the code is the same.
+
+### Benchmarks
+
+| Benchmark | M3 Ultra | M1 Max | Ratio | Instructions |
+|---|---|---|---|---|
+| Decode segment 0, Bytes decoder | 90 ms | 122 ms | 1.36 | 1,132 M, identical |
+| Decode segment 0, Compression's decoder | 107 ms | 133 ms | 1.24 | 929 M, identical |
+| Parse 170 headers (segment 0) | 3.50 µs | 3.79 µs | 1.08 | 63 K, identical |
+| Open and verify | 218 µs | 246 µs | 1.13 | 3.29 M → 3.20 M (−2.7%) |
+| List (decode, verify, parse), Bytes | 1.211 s | 3.645 s | 3.01 | not recorded |
+| List, Compression | 1.460 s | 3.947 s | 2.70 | not recorded |
+| Extract, `archived` (APFS-compressed) | 1.860 s | 6.094 s | 3.28 | not recorded |
+| Extract, `none` | 1.261 s | 4.370 s | 3.47 | not recorded |
+
+### Observations
+
+Measured:
+
+- **One thread: 1.08–1.36, geomean 1.20**, a little under the 1.30–1.34 geomeans of the Bytes, MQTT, and NativeZip
+  suites. Two of the four are µs-scale rows (parse 3.5 µs, open and verify 218 µs), where a few hundred ns of
+  timer or cache effect is ±8%. The segment decodes are the substantial ones: the Bytes
+  decoder (the Swift LZMA2) is 1.36, Compression's 1.24, with identical instructions on both machines, so the Swift
+  decoder loses more than the clock (1.25) going to the M1 Max and Compression's loses about the clock. Not
+  investigated (the LZMA decoder is branch- and latency-bound; a different core's branch prediction and load-to-use
+  latency could account for it).
+- **Threaded rows 2.70–3.47**, geomean 3.10: about 2.6x the single-thread geomean. The P-core ratio is 3.0
+  (24 against 8) and the P-core cycles ratio 3.76 (24 × 4.05 against 8 × 3.23 GHz). One-thread ratios of 1.2–1.36 times
+  3.0 would be 3.6–4.1; list measures 2.7–3.0 and extract 3.3–3.5. Interpretation: perfect scaling on both machines
+  would put the ratio near 3.6–4.1; list stays well below it (the M3 Ultra's 32 threads don't all pay off, or the
+  M1 Max's 10 do better than that), and extract comes closer. The E cores and the read side (memory, one archive
+  mapping) are not accounted for.
+- **Extraction is the worse ratio**: archived 3.28 and none 3.47, against list 3.01 and 2.70. Extract minus list
+  (difference of medians of separate benchmarks, Bytes decoder):
+
+  | | M3 Ultra | M1 Max | Ratio |
+  |---|---|---|---|
+  | `none` minus list | 0.050 s | 0.725 s | 14x |
+  | `archived` minus list | 0.649 s | 2.449 s | 3.8x |
+  | `archived` minus `none` (compression) | 0.599 s | 1.724 s | 2.9x |
+
+  Writing the files adds 4% to decoding alone on the M3 Ultra (1.261 against 1.211 s) and 20% on the M1 Max (4.370
+  against 3.645 s). The compression of disk blocks (`archived` minus `none`) costs 2.9x as much on the M1 Max, about
+  the P-core ratio, as CPU-bound work spread over the writers would. The 0.725 s `none` figure is what an extraction
+  needs beyond decoding on the M1 Max.
+
+  Interpretation, not measured: on the M3 Ultra the writers and six file system slots hide behind the decoders on
+  idle cores; on the M1 Max, 10 decoders and 24 writers on 10 logical CPUs compete, and the walker thread with them.
+  Per-thread running time (`Tools/tasks`) would say; it wasn't run. Whether `fileSystemWidth` 6 suits this SSD is open
+  too: AGENTS.md has APFS peaking near 4 threads on the M3 Ultra, and it was not swept on the M1 Max.
+- **Entries a second** (30,363 entries over the extract time, rough, directories included): `none` 24 K on the M3
+  Ultra, 6.9 K on the M1 Max; `archived` 16 K and 5.0 K. Both are below the 46,000 small files a second AGENTS.md
+  measured for APFS creation on the M3 Ultra, consistent with decoding 3.15 GB of LZMA2 being the larger cost on this
+  archive on both machines (not separated here).
+
+Not done: the Xcode archive (`NATIVEAEA_ARCHIVE=…`) on the M1 Max; CPU-total and peak-memory columns for the threaded
+rows (they are in the baselines, but the comparison tool was run for time, instructions and mallocs only);
+`decodeThreads`, `writerThreads` and `fileSystemWidth` sweeps for 10 cores; `Tools/tasks` and `Tools/counters` runs.
 
 ## 2026-11-18: a reader and extractor for Apple Encrypted Archives
 
