@@ -29,7 +29,7 @@ conversions.
 **Headline results.** Every figure is on the machine described below, release builds, medians:
 
 - Base64 encoding reaches 21.5 GB/s at 1 MB, level with C of the same design and 93% of a C kernel that uses `ld3` and
-  `st4` (ARM's deinterleaving load and interleaving store, Part I) directly.
+  `st4` (ARM's deinterleaving load and interleaving store, [Part I](#part-i-foundations)) directly.
   <!-- src: Bytes/Benchmarks/RESULTS-base64.md "Encoding" table (M3 Ultra column, d2-final: 21.5 GB/s at 1 MB) and "The ceiling: a C kernel with ld3 and st4" (23.1 GB/s; same-design C 21.8); Bytes/OPTIMIZATION.md (old) §10 (93%) -->
 - CRC-32 uses ARM's carry-less multiply and CRC instructions: 32 MB in 532 µs (63 GB/s) against zlib's 888 µs, and
   2.3x zlib at 64 bytes.
@@ -55,9 +55,9 @@ Markdown is rendered. Assembly listings come from release builds of the library 
 can differ slightly from the current code.
 <!-- src: BRIEF.md "Audience and voice"; Part I "A note on the listings" -->
 
-Part I builds the vocabulary: CPUs, SIMD, assembly, the Swift compiler, and measurement. Part II walks through the
-library's APIs from the bottom up. Part III is organized by problem and technique, with examples from the codecs, the
-crypto, and the consumer projects. Part IV covers Swift concurrency for performance, SocketStream's prototypes, known
+[Part I](#part-i-foundations) builds the vocabulary: CPUs, SIMD, assembly, the Swift compiler, and measurement. [Part II](#part-ii-the-bytes-toolkit-bottom-up) walks through the
+library's APIs from the bottom up. [Part III](#part-iii-techniques-by-problem) is organized by problem and technique, with examples from the codecs, the
+crypto, and the consumer projects. [Part IV](#part-iv-concurrency-and-further-reading) covers Swift concurrency for performance, SocketStream's prototypes, known
 compiler limitations, and further reading.
 
 **The machine and the measurements.** Unless a section says otherwise, numbers come from an Apple M3 Ultra (24
@@ -147,7 +147,7 @@ about 0.25 ns.
 
 Inside the core, an instruction is split into smaller **micro-ops**, and some limits are counted in micro-ops rather than
 instructions. A table-lookup instruction that reads four table registers costs more micro-ops than one that reads a
-single register. On an M1 Max core, measured with probes (small test programs), a `tbl` (section 2.4) with one or two table registers runs 4 per cycle, with
+single register. On an M1 Max core, measured with probes (small test programs), a `tbl` ([section 2.4](#24-table-lookup-tbl-and-tbx)) with one or two table registers runs 4 per cycle, with
 three registers 1.9 per cycle, with four registers 1.3 per cycle, and a four-register `tbx` 1.0 per cycle.
 <!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do: instruction and memory measurements (one P core)" table (tbl 1-2 regs: 4/cycle; 3: 1.9; 4: 1.3; tbx 4: 1.0) -->
 
@@ -160,10 +160,10 @@ work overlap.
 
 Two numbers describe an instruction. Its **latency** is how many cycles pass before its result can be used. Its
 **throughput** is how many of that instruction the core can start per cycle. On the M1 Max, a vector `add` (an add on
-several values at once, section 2) has 2 cycles of latency and a throughput of 4 per cycle. There are four 128-bit vector
+several values at once, [section 2](#2-simd-and-neon)) has 2 cycles of latency and a throughput of 4 per cycle. There are four 128-bit vector
 pipes (the units that execute vector instructions); the probe took these two values as its calibration, so the others are
 good to about ±15%. `udot` and `pmull` have 3 cycles of latency and run at 2.7 per cycle; `aese` has 3 cycles of latency
-at 2.7 per cycle, and `aesmc` 2 cycles at 4 per cycle. Sections 2.8 and 2.9 describe these instructions.
+at 2.7 per cycle, and `aesmc` 2 cycles at 4 per cycle. Sections [2.8](#28-dot-products-udot) and [2.9](#29-carry-less-multiply-crc-aes-and-sha-instructions) describe these instructions.
 <!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" (calibration assumption: add 2 cycles, 4 a cycle; "treat cycles as ±15%"; table: udot, pmull: 3 / 2.7; aese/aesmc: 3, 2 / 2.7, 4) -->
 
 A **dependency chain** is a sequence of instructions where each needs the previous one's result. A chain runs at the
@@ -189,8 +189,8 @@ A **register** is a storage slot inside the core, and the only place instruction
 general-purpose 64-bit registers and 32 vector registers of 128 bits. A value in a register costs nothing to access; a
 value in memory must be loaded and stored around each use. A value must be in memory whenever its address is needed:
 passing it `inout` or calling a non-inlined `mutating` method hands out a pointer, so it lives in memory for the whole
-function, even on paths that never make the call. Moving a register's value to the stack is a **spill**. Section 4 and
-Part III ("Keep hot state in registers") return to this constantly.
+function, even on paths that never make the call. Moving a register's value to the stack is a **spill**. [Section 4](#4-how-swift-becomes-machine-code) and
+Part III (["Keep hot state in registers"](#1-keep-hot-state-in-registers)) return to this constantly.
 <!-- src: Bytes/OPTIMIZATION.md (old) §1 "Registers are free; memory costs" (31 general-purpose, 32 128-bit vector registers; spill) -->
 
 Registers are scarce, so more work in a loop is not always free. ChaCha20's eight-block loop already uses all 32 vector
@@ -239,7 +239,7 @@ bounds check that always passes, are nearly free; unpredictable ones are not.
 <!-- src: Bytes/OPTIMIZATION.md (old) §1 "Branches are guesses" (~15 cycles) -->
 
 The measured example is the LZMA range decoder, the arithmetic decoder that turns LZMA's compressed bits back into
-symbols. LLVM (the optimizer and code generator inside the Swift compiler, section 4.1) turned `one ? 1 : 0` (the next
+symbols. LLVM (the optimizer and code generator inside the Swift compiler, [section 4.1](#41-the-pipeline-sil-then-llvm)) turned `one ? 1 : 0` (the next
 decoded bit) into a branch that mispredicted about half the literal bits. Taking the bit from the arithmetic borrow
 instead, `(UInt64(code) &- UInt64(bound)) >> 63`, removed the branch and cut cycles by 20%. The other branch in that
 loop, the normalization test, predicts well: every branchless form of it was 2–10% slower. Whether arithmetic beats a
@@ -271,7 +271,7 @@ instead: the parallel codecs are 2.4x apart.
 
 E cores change how work should be split. On the M1 Max, the two E cores added 10–13% to the parallel DEFLATE encoder,
 whose workers take the next chunk from a queue. They cost the parallel decoder 20–35%, because its segments were split
-evenly across lanes (parallel workers; the word also names a SIMD register's slots, section 2.1). Part III ("Static splits and efficiency cores") has the measurements.
+evenly across lanes (parallel workers; the word also names a SIMD register's slots, [section 2.1](#21-what-simd-is)). Part III (["Static splits and efficiency cores"](#static-splits-and-efficiency-cores)) has the measurements.
 <!-- src: Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help the encoder, hurt the decoder"; AGENTS.md "Efficiency cores" lesson -->
 
 ### 2. SIMD and NEON
@@ -286,7 +286,7 @@ two vectors of bytes adds 16 pairs. Arm's SIMD instruction set is **NEON**, with
 
 A vector instruction does the same thing in every lane, in lockstep. So anything that could differ per lane has no single
 vector instruction: which way a branch goes, whether to leave the loop, which address to load from, what an opaque
-function call does. This one rule explains every limit of the compiler's auto-vectorizer (section 2.2) in Part III.
+function call does. This one rule explains every limit of the compiler's auto-vectorizer ([section 2.2](#22-what-vectorized-means-concretely)) in [Part III](#part-iii-techniques-by-problem).
 <!-- src: Bytes/OPTIMIZATION.md (old) §1 "A vector instruction does the same thing in every lane, in lockstep" -->
 
 #### 2.2 What "vectorized" means concretely
@@ -336,7 +336,7 @@ made all of it.
 <!-- src: scratchpad probe addInPlace (alias checks cmp x0, x8 / cmp x1, x8; 8-byte epilogue add.8b) -->
 
 **Lane-by-lane code is the failure mode.** `Tools/loops` labels a loop `+lane-moves` when single lanes are moved into
-a vector one at a time (`mov.b v3[2], w12`, `ins`, `umov`): a shuffle built a lane at a time. Part III covers how to
+a vector one at a time (`mov.b v3[2], w12`, `ins`, `umov`): a shuffle built a lane at a time. [Part III](#part-iii-techniques-by-problem) covers how to
 avoid it.
 <!-- src: AGENTS.md "Tools/loops" description (verdicts vector128, vector64, scalar, +lane-moves, +calls) -->
 
@@ -360,7 +360,7 @@ st4.16b { v0, v1, v2, v3 }, [x1]        ; store 64 bytes: v0[0] v1[0] v2[0] v3[0
 
 The same instructions appear in real code. The portable Base64 encoder in `BytesBase64` is written as plain Swift loops
 over typed spans of 3-byte and 4-byte groups (a span is a view of contiguous memory, in effect a pointer and a
-count; Part II, "Borrowed memory: spans and `InlineArray`"), and LLVM turned it into this. The middle (the arithmetic
+count; Part II, ["Borrowed memory: spans and `InlineArray`"](#1-borrowed-memory-spans-and-inlinearray)), and LLVM turned it into this. The middle (the arithmetic
 that maps each 6-bit value to a character) is elided with `…`.
 
 ```asm
@@ -401,7 +401,7 @@ tbl.16b v0, { v0, v1, v2, v3 }, v4      ; v0[i] = table[v4[i]] for each of the 1
 
 The records count a `tbl` or `tbx` on the M3 as one micro-op per table register, so a 4-register lookup is much more
 expensive than a 1-register one (on the M1 Max, measured, a 4-register `tbl` takes 3 vector slots and a 4-register `tbx`
-4; section 1.1). For this reason Base64's decoder went from a 128-byte table (a 64-byte `tbl` plus a 64-byte `tbx`) to an
+4; [section 1.1](#11-instructions-pipelines-and-issue-width)). For this reason Base64's decoder went from a 128-byte table (a 64-byte `tbl` plus a 64-byte `tbx`) to an
 80-byte window (64 + 16 bytes), and gained 11% (69 to 61 micro-ops per block).
 <!-- src: AGENTS.md "On M3, NEON ld4/st3 didn't beat uzp and tbl shuffles" (each tbl/tbx costs one per table register; 128-byte table, tbl + tbx on 64 each, to an 80-byte window, 69 to 61 micro-ops, +11%); Bytes/Benchmarks/RESULTS.md "What the cores can do" (4-register tbl three slots, tbx four) -->
 
@@ -459,8 +459,8 @@ elsewhere. A probe shows the call:
 
 <!-- src: scratchpad probe a.swift `anyZero`; xcrun objdump -dr shows ARM64_RELOC_BRANCH26 to "specialized SIMD<>.min()", defined in the same object as sminv.16b b0, v0 / fmov w0, s0 / ret; AGENTS.md "SIMD16<UInt8> on 6.4" (any()/all() out-of-line calls elsewhere; fixed in 6.5-dev) -->
 
-This is why Bytes' `ByteLanes` builds its tests from wrapping arithmetic and bitwise operations (Part II, "Scanning and
-shuffles: `ByteLanes`, `ByteMatches`, `GroupShuffle`, `CBytesNEON`").
+This is why Bytes' `ByteLanes` builds its tests from wrapping arithmetic and bitwise operations (Part II, ["Scanning and
+shuffles: `ByteLanes`, `ByteMatches`, `GroupShuffle`, `CBytesNEON`"](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)).
 <!-- src: Bytes/OPTIMIZATION.md (old) §8 "Which SIMD16 operations are safe on Swift 6.4" -->
 
 #### 2.7 Narrowing and widening: `shrn`, `xtn`
@@ -516,16 +516,16 @@ chose `udot` against a vector of ones.
 
 <!-- src: scratchpad probe a.swift `sumBytes`, swiftc -O 6.4.4 -->
 
-Note the four accumulators: the compiler broke one dependency chain into four independent ones (section 1.2).
+Note the four accumulators: the compiler broke one dependency chain into four independent ones ([section 1.2](#12-latency-throughput-and-dependency-chains)).
 Adler-32's weighted sum is different, and Swift's SIMD types have no widening dot product, so Bytes' `Adler32` calls a
-`static inline` C wrapper around the instruction and keeps the loop in Swift. Part II ("Adler-32: `udot`") describes the
-loop, and Part III ("Reaching instructions Swift cannot name") walks through its machine code.
+`static inline` C wrapper around the instruction and keeps the loop in Swift. Part II (["Adler-32: `udot`"](#adler-32-udot)) describes the
+loop, and Part III (["Reaching instructions Swift cannot name"](#reaching-instructions-swift-cannot-name)) walks through its machine code.
 <!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster" -->
 
 #### 2.9 Carry-less multiply, CRC, AES, and SHA instructions
 
 ARM64 has instructions for whole algorithms, which Swift cannot express and which Bytes reaches through small C targets
-(Part II, "Builds and traits: optimized, `Portable`, and no-C").
+(Part II, ["Builds and traits: optimized, `Portable`, and no-C"](#15-builds-and-traits-optimized-portable-and-no-c)).
 
 **`pmull`: carry-less multiply.** A carry-less multiply multiplies two bit strings with XOR in place of addition. A CRC is
 polynomial division over GF(2) (arithmetic on single bits, where addition is XOR), so it is built from carry-less
@@ -634,8 +634,8 @@ Swift has no intrinsics (functions that map to one instruction) for `tbl` with r
 `udot`, or the AES and SHA instructions. Bytes reaches them through three small C targets (`CBytesNEON`, `CBytesCRC`,
 `CBytesCrypto`) of `static inline` functions over C vector types that Swift imports as SIMD types (`SIMD16<UInt8>`,
 `SIMD4<UInt32>`); Swift inlines them, so each call becomes the single instruction. `ld3`/`st4` on explicit vectors are
-out of reach both ways (a C wrapper would need pointers): Bytes gets them only from the vectorizer. Part III ("Write
-SIMD by hand, and reach instructions Swift cannot name") covers how, and what goes wrong.
+out of reach both ways (a C wrapper would need pointers): Bytes gets them only from the vectorizer. Part III (["Write
+SIMD by hand, and reach instructions Swift cannot name"](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)) covers how, and what goes wrong.
 <!-- src: Bytes/OPTIMIZATION.md (old) §9; Bytes/Sources/CBytesNEON, CBytesCRC, CBytesCrypto (target names; ext_vector_type(16) u8 and ext_vector_type(4) u32 typedefs); Bytes/Benchmarks/RESULTS-base64.md "The ceiling" ("Swift has no way to emit them for explicit vectors: Swift has no intrinsics, and a C wrapper would need pointers"); Bytes/Benchmarks/RESULTS.md line 578 -->
 
 ### 3. Reading ARM64 assembly
@@ -740,8 +740,8 @@ callee may overwrite (the caller-saved ones), and the optimizer cannot see throu
 For Swift performance work, the callees worth spotting are the runtime's: `swift_retain`/`swift_release` (reference
 counting), `swift_allocObject` (a heap allocation), `swift_beginAccess` (dynamic exclusivity checking), `swift_once` (lazy
 global initialization), `swift_allocError` (boxing an error), and `swift_task_switch` (an executor check: whether an
-async function is already running where it must run; Part IV, "Executor checks and real hops: `swift_task_switch`").
-Section 4 shows probes that call several of them.
+async function is already running where it must run; Part IV, ["Executor checks and real hops: `swift_task_switch`"](#12-executor-checks-and-real-hops-swift_task_switch)).
+[Section 4](#4-how-swift-becomes-machine-code) shows probes that call several of them.
 <!-- src: AGENTS.md "Workflow" step 4 and "Lessons" (retain/release, outlined destroy, swift_task_switch); scratchpad probe d.swift relocations -->
 
 #### 3.6 How to find the loop
@@ -796,7 +796,7 @@ func readBE32(_ p: UnsafeRawBufferPointer, _ offset: Int) -> UInt32? {
 <!-- src: scratchpad probe a.swift `readBE32`, swiftc -O 6.4.4 -->
 
 Read it as: seven instructions of check (`tbnz`, `sub`, `cmp`, `csel`, `sub`, `cmp`, `b.lt`) and a null test (`cbz`),
-one load, one byte swap. Everything in Parts II and III about cursors is about making sure this is all that is left.
+one load, one byte swap. Everything in Parts [II](#part-ii-the-bytes-toolkit-bottom-up) and [III](#part-iii-techniques-by-problem) about cursors is about making sure this is all that is left.
 When many reads share a check (a fixed-size record), the checks fold into one, which is why a record read as its own
 cursor beats field-by-field reading: 199 K against 285 K instructions for 2,000 zip directory entries.
 <!-- src: Bytes/Benchmarks/RESULTS.md 2026-11-17 "Results, t0 → final" ("Zip directory with @BinaryRecord vs field by field / ParserSpan | 285 / 461 K | 199 K"); Bytes/OPTIMIZATION.md (old) §6 "Give the record a known size" (301 K first measurement, 285 K latest, 199 K) -->
@@ -860,8 +860,8 @@ input bytes (16 three-byte groups) and writes 64 characters. Registers `v0`–`v
 What to take from it:
 
 - **There is one bounds check, before the loop** (`cmp x8, x1; b.ne … brk`). The loop body has none, because each span
-  element is a whole 48- or 64-byte block and the loop count equals both spans' counts. Section 4 and Part III ("Remove
-  the checks the compiler cannot prove away") explain how the compiler knows.
+  element is a whole 48- or 64-byte block and the loop count equals both spans' counts. [Section 4](#4-how-swift-becomes-machine-code) and Part III (["Remove
+  the checks the compiler cannot prove away"](#2-remove-the-checks-the-compiler-cannot-prove-away)) explain how the compiler knows.
 - **The seven `tbl`s are the bound** (three 3-register ones that split bytes, four 4-register ones that map to
   characters), and the interleave is eight cheap `zip`s, two of which LLVM folded into the two `st2` stores. Counting a
   `tbl` or `tbx` as one micro-op per table register, the kernel is 7 `tbl` instructions and 25 micro-ops, with 10 other
@@ -887,7 +887,7 @@ knows about Swift's types, reference counting, and generics. SIL passes do Swift
 call with the callee's body), **generic specialization** (making a copy of a generic function for the concrete types it is
 called with), reference-count removal, and moving boxed locals to the stack. The result is lowered to **LLVM IR** (LLVM's
 lower-level, language-neutral intermediate representation), which LLVM optimizes with its general passes (the loop
-vectorizer and the SLP vectorizer of section 4.10, instruction combining, jump threading, function merging) and then
+vectorizer and the SLP vectorizer of [section 4.10](#410-the-two-vectorizers-and-their-remarks), instruction combining, jump threading, function merging) and then
 turns into ARM64.
 <!-- src: AGENTS.md "Swift's LLVM vs Homebrew's" (Swift's own LLVM is linked into swiftc; SIL printing via -Xllvm -sil-print-*); AGENTS.md "Tools/sil-trace" ("prints the SIL instructions ... after every pass that changed them"); stage descriptions are general background -->
 
@@ -904,7 +904,7 @@ the compiler did, the second for experiments.
 
 #### 4.2 Inlining and its cost model
 
-Inlining (section 4.1) removes the call's overhead, but its larger benefit is that the optimizer then sees one
+Inlining ([section 4.1](#41-the-pipeline-sil-then-llvm)) removes the call's overhead, but its larger benefit is that the optimizer then sees one
 function: it can keep values in registers across what was a call boundary, fold
 constants, and merge checks. **Outlining** is the reverse: moving code into a separate function.
 <!-- src: Bytes/OPTIMIZATION.md (old) §13 glossary "Inlining" -->
@@ -931,7 +931,7 @@ Swift has three levels of request:
   <!-- src: Bytes/OPTIMIZATION.md (old) §5 "2. A function that isn't inlined" (SE-0496, DEFLATE); AGENTS.md "@inline(__always) is a hint; @inline(always) is a guarantee" (quality 5, 2–8%) -->
 
 An inlinable function is not free to *add*: a rare path inlined into a hot function grows it, and can slow the inputs
-that never take it. So inlining is chosen per function, measured both ways; Part III ("Rare paths stay out of line")
+that never take it. So inlining is chosen per function, measured both ways; Part III (["Rare paths stay out of line"](#rare-paths-stay-out-of-line))
 has the DEFLATE case.
 <!-- src: AGENTS.md "Rare paths stay out of line even when they're the thing being optimized" -->
 
@@ -939,7 +939,7 @@ has the DEFLATE case.
 
 A generic function compiled once for all types must work without knowing a type's size or how to copy it. It receives
 **type metadata** and **witness tables** (per-type tables of function pointers for protocol requirements) and calls through
-them: slow, and opaque to the optimizer. Specialization (section 4.1) makes a copy for the concrete type, in which the
+them: slow, and opaque to the optimizer. Specialization ([section 4.1](#41-the-pipeline-sil-then-llvm)) makes a copy for the concrete type, in which the
 metadata calls become direct operations or disappear. It happens when the generic function's body is visible (in the
 same module, or from another module through `@inlinable`) and the call site knows the type. Otherwise the
 unspecialized fallback runs, with calls through metadata.
@@ -1014,8 +1014,8 @@ code's allocations contend for the allocator.
 such as `Date?` from a framework) is copied through its type's value-witness functions (the per-type functions that
 copy, move, and destroy a value; `swift_cvw_initWithCopyImpl` in profiles) instead of with a `memcpy`. Jobs that are queued, sorted, and handed between tasks are cheaper as final classes.
 <!-- src: AGENTS.md "Payload structs with resilient fields (`Date?`) copy through value witnesses" -->
-Likewise, a `~Escapable` struct (a type whose values cannot outlive what they borrow; Part II, "`~Escapable`: the
-compiler checks the lifetime") with more than 6 leaf fields is destroyed at `-O` even when every field is trivial; from
+Likewise, a `~Escapable` struct (a type whose values cannot outlive what they borrow; Part II, ["`~Escapable`: the
+compiler checks the lifetime"](#escapable-the-compiler-checks-the-lifetime)) with more than 6 leaf fields is destroyed at `-O` even when every field is trivial; from
 another module, the destroy is an indirect call to a no-op through the type's value witness table, costing 2.5–3% of
 MQTT's per-packet time.
 <!-- src: Bytes/OPTIMIZATION.md (old) §12 table row "~Escapable structs with more than 6 leaf fields" -->
@@ -1069,15 +1069,15 @@ Only computed initializers are lazy: literal `static let` arrays and `InlineArra
 The cost shows in measured places. An initializer that the compile-time evaluator could not fold cost zip-record parsing
 41% more instructions, and a global read inside a measured loop made one benchmark bimodal (78 K and 104 K instructions
 per iteration). Removing a lazy global can also cost: CRC-32's tables, made literals, cost 64-byte checksums +10.7% until
-the inner update was moved out of line. Part III ("Technique 6: no lazy globals on the hot path" and "No lazy globals
-inside a measured loop") has the details.
+the inner update was moved out of line. Part III (["Technique 6: no lazy globals on the hot path"](#technique-6-no-lazy-globals-on-the-hot-path) and ["No lazy globals
+inside a measured loop"](#no-lazy-globals-inside-a-measured-loop)) has the details.
 <!-- src: Bytes/OPTIMIZATION.md (old) §11 "Write constants as literals" (41%); AGENTS.md "No lazy globals inside a measured loop" (78 K / 104 K); AGENTS.md "A table that becomes a compile-time constant can make LLVM rematerialize its address in the loop" (+10.7%) -->
 
 #### 4.6 Bounds checks and overflow checks
 
 Swift checks array and span indices and traps on integer overflow. Each check is a compare and a well-predicted branch
-(section 3.4), cheap on its own, but two things make them costly in hot code. A failing check is an *early exit*, which
-blocks vectorization (section 2.1). And checks the optimizer cannot merge pile up.
+([section 3.4](#34-compare-branch-and-select)), cheap on its own, but two things make them costly in hot code. A failing check is an *early exit*, which
+blocks vectorization ([section 2.1](#21-what-simd-is)). And checks the optimizer cannot merge pile up.
 <!-- src: Bytes/OPTIMIZATION.md (old) §6 intro -->
 
 `&+`, `&-`, `&*` are the **wrapping** operators: they never trap, and compile to the bare instruction (the `overflow` and
@@ -1103,7 +1103,7 @@ An index of a plain `Array` shows both a sign test and a count compare:
 <!-- src: scratchpad probe a.swift `spanAt` -->
 
 (The first test is redundant with the unsigned compare; the compiler emitted both for the array subscript.) Part III
-("Remove the checks the compiler cannot prove away") shows how Bytes removes them: a loop over typed spans leaves one check per span;
+(["Remove the checks the compiler cannot prove away"](#2-remove-the-checks-the-compiler-cannot-prove-away)) shows how Bytes removes them: a loop over typed spans leaves one check per span;
 `assume` states an invariant the cursor maintains; a count check is a single unsigned compare
 (`UInt(bitPattern: n) <= UInt(bitPattern: remaining)`).
 <!-- src: Bytes/OPTIMIZATION.md (old) §6; AGENTS.md "A count check is one unsigned compare" -->
@@ -1159,7 +1159,7 @@ which become a parameter of one `merged …` function. That is useful as a proof
 abstraction is free), and it is also a trap. When a benchmark compares two variants chosen by a constant `Bool`, LLVM
 can fold the two copies back into one `merged …` function taking the constant as a parameter, so both variants test it
 in the hot loop.
-Part III ("Function merging can undo a specialization") has the cases and how to check for them.
+Part III (["Function merging can undo a specialization"](#function-merging-can-undo-a-specialization)) has the cases and how to check for them.
 <!-- src: AGENTS.md "Old and new code in one benchmark run" paragraph; Bytes/OPTIMIZATION.md (old) §2 "Check a new API's code from another module" -->
 
 #### 4.10 The two vectorizers and their remarks
@@ -1167,7 +1167,7 @@ Part III ("Function merging can undo a specialization") has the cases and how to
 LLVM has two relevant vectorizers. The **loop vectorizer** rewrites a loop to handle several iterations per pass: it needs
 a loop whose iterations are independent, without early exits or per-lane addresses. The **SLP vectorizer** (superword-level
 parallelism) merges *straight-line* scalar operations on neighboring data into vector operations: for example, 16 scalar
-loads or stores in a kernel become vector ops with lane moves. Both estimate with a cost model (section 4.2) whether the
+loads or stores in a kernel become vector ops with lane moves. Both estimate with a cost model ([section 4.2](#42-inlining-and-its-cost-model)) whether the
 vector form pays, and Swift has no loop pragma (a source annotation that would force the choice) to override it.
 <!-- src: Bytes/OPTIMIZATION.md (old) §7 table ("Two 64-bit lanes: LLVM's cost model ... Swift has no loop pragma"); AGENTS.md "Vectorize independent work, not a dependent chain" (SLP turns a scalar kernel's 16 loads or stores into vector ops with lane moves); AGENTS.md "Tools/remarks" (passes slp-vectorizer, licm) -->
 
@@ -1192,8 +1192,8 @@ A probe of the early-exit case, `for b in s where b == 0 { return true }`:
 <!-- src: scratchpad probe a.swift `firstNonzero` -->
 
 The loop leaves when it finds a zero, so it must examine bytes in order: scalar, 7 instructions per byte. The fix, in
-Bytes, is explicit SIMD that tests 16 bytes per step (Part II, "Scanning and shuffles: `ByteLanes`, `ByteMatches`,
-`GroupShuffle`, `CBytesNEON`"), and the zip signature search that uses it is 16x faster (33 µs to 2.0 µs for 64 KB).
+Bytes, is explicit SIMD that tests 16 bytes per step (Part II, ["Scanning and shuffles: `ByteLanes`, `ByteMatches`,
+`GroupShuffle`, `CBytesNEON`"](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)), and the zip signature search that uses it is 16x faster (33 µs to 2.0 µs for 64 KB).
 <!-- src: Bytes/OPTIMIZATION.md (old) §8 "Searching 16 positions at once" (33 µs to 2.0 µs, 16x) -->
 
 ### 5. Measuring
@@ -1228,7 +1228,7 @@ the same code ran on both.
 
 Even instruction counts can mislead. An unchanged 3-byte-run benchmark went 104 → 78 → 104 K instructions across three
 steps in code nobody touched. It was first attributed to code layout; the cause was a lazy global read inside the
-measured loop (section 4.5). Identical code also differed by a constant of about 1.3 K per iteration between two builds
+measured loop ([section 4.5](#45-lazy-globals-swift_once)). Identical code also differed by a constant of about 1.3 K per iteration between two builds
 of a harness. So a move under about 1% needs a second look before it is called a regression or a win.
 <!-- src: Bytes/OPTIMIZATION.md (old) §2 "Track every change across every package" (104 → 78 → 104 K, "layout"; under about 1% needs a second look); AGENTS.md "No lazy globals inside a measured loop" (Bytes' "Runs: … 3-byte" rows bimodal, 78 K and 104 K, from swift_once); AGENTS.md "Old and new code in one benchmark run" (~1.3 K) -->
 
@@ -1245,7 +1245,7 @@ The framework's **process model** shapes how benchmarks must be written: it star
 benchmarks and again for *each* benchmark, and every start runs the whole `benchmarks` closure. That closure should only
 register. Fixtures (the input data a benchmark works on) are made lazily in a benchmark's `setup:` (which runs only in
 that benchmark's process, unmeasured).
-Part III ("Measuring honestly") gives what eager fixtures cost and the other rules for the measured loop.
+Part III (["Measuring honestly"](#12-measuring-honestly)) gives what eager fixtures cost and the other rules for the measured loop.
 <!-- src: AGENTS.md "A benchmark costs a few seconds at most" bullet (process model) -->
 
 Two practical rules: every plugin invocation costs about 25 s of build, so batch filters into one invocation, and
@@ -1259,7 +1259,7 @@ A workload that should not allocate gets a benchmark counting only `malloc` call
 'swift_allocObject|swift_slowAlloc|malloc'` statically, `Tools/runtime-count --break swift_allocObject` dynamically, and
 `Tools/allocations` for responsible callers. The malloc interposer (the framework's replacement `malloc` that counts
 calls) costs about 10% on large transfers and biases comparisons with libraries that allocate per call (Part III,
-"Malloc counting biases comparisons with libraries"), so allocation and timing benchmarks are kept separate. It also traps on thread exit, so benchmarks that start threads cannot
+["Malloc counting biases comparisons with libraries"](#malloc-counting-biases-comparisons-with-libraries)), so allocation and timing benchmarks are kept separate. It also traps on thread exit, so benchmarks that start threads cannot
 count mallocs; count them in single-threaded ones.
 <!-- src: AGENTS.md "Allocations: package-benchmark's malloc counter with a Thresholds/ file at 0 is the gate"; "The malloc interposer costs ~10%" bullet; "package-benchmark's malloc interposer traps on thread exit"; Bytes/Benchmarks/RESULTS.md "Benchmark coverage pass (2026-11-19)" ("the timed configurations no longer count mallocs (the interposer biased comparisons with libraries that allocate per call") -->
 
@@ -1300,7 +1300,7 @@ toolchains, and tools.
 - **`Tools/calls`** lists static call sites per caller and callee (demangled), from relocations in objects: *"is
   `swift_retain` still called from the hot function?"*; `--callee 'SIMD.init'` finds the vector-literal trap.
   <!-- src: AGENTS.md "Tools/calls"; AGENTS.md "Constant vectors" lesson (Check new kernels with Tools/calls … --callee 'SIMD.init') -->
-- **`Tools/sil-trace`** and **`Tools/swiftc-target`** (section 4.1).
+- **`Tools/sil-trace`** and **`Tools/swiftc-target`** ([section 4.1](#41-the-pipeline-sil-then-llvm)).
 - **`Tools/mca`** runs `llvm-mca` (LLVM's static throughput model) on a loop for a throughput bound. Treat it as a lower
   bound only: LLVM's Apple models derive from Cyclone, an early Apple core (every `tbl` is one micro-op whatever its
   table count). It predicted 7.7 cycles per 48 bytes for two Base64 kernels measured at 9.1 and 8.4.
@@ -1326,7 +1326,7 @@ toolchains, and tools.
   `malloc`, `swift_retain`); each hit costs tens of µs and perturbs timing, so run two workload sizes to separate
   per-iteration from fixed counts. `--who swift_task_switch=x0` tallies which async function switched. In NativeAEA,
   marking internal async functions `nonisolated(nonsending)` (which keeps an async function on its caller's executor;
-  Part IV) took checks from 21,374 to 1,467–1,481 for 1,001 files (the two records differ).
+  [Part IV](#part-iv-concurrency-and-further-reading)) took checks from 21,374 to 1,467–1,481 for 1,001 files (the two records differ).
   <!-- src: AGENTS.md "Tools/runtime-count" and "Threads to structured concurrency" bullet 1 -->
 - **`Tools/tasks`** uses Instruments' Swift Concurrency template: per task, its runs, threads, thread and actor switches
   (real hops), continuation waits, and the wait from runnable to running. It records moves but not executor checks, so
@@ -1373,18 +1373,18 @@ Named bit fields passed it; a `BitPattern` literal passed it only after both its
 
 **Track every change across every package.** Bytes' clients each keep a benchmark baseline. A change that helped the
 library's own benchmarks moved a client by 10%, and one move of code between modules cost 1.3–1.7% on small Brotli streams
-where nothing else changed. Neither shows up if only the edited code is benchmarked. Part III ("Measuring honestly") returns
+where nothing else changed. Neither shows up if only the edited code is benchmarked. Part III (["Measuring honestly"](#12-measuring-honestly)) returns
 to this.
 <!-- src: Bytes/OPTIMIZATION.md (old) §2 "Track every change across every package" -->
 
 ## Part II. The Bytes toolkit, bottom-up
 
-Part I explains what the CPU and the compiler do with your code. This part walks through the library built around those
+[Part I](#part-i-foundations) explains what the CPU and the compiler do with your code. This part walks through the library built around those
 facts, from the lowest layer (borrowed memory) up to the codecs, the crypto entry points, and the macros. Each section
 says what a piece is, shows a small example with real API names, explains why it is fast (what the compiler can prove,
 what code comes out, what it costs), and quotes the measurement that justified it. "Measured" always means the Apple M3
 Ultra unless a sentence says M1 Max. Sections that name a technique in passing leave its full treatment to Part III
-("Techniques, by problem").
+(["Techniques, by problem"](#part-iii-techniques-by-problem)).
 
 ### 1. Borrowed memory: spans and `InlineArray`
 
@@ -1429,11 +1429,12 @@ captured by an escaping closure, or returned from a function, unless the functio
 borrows. The declaration is `@_lifetime(...)`. That is how the compiler can promise that a span never outlives its memory,
 with no reference count and no runtime check. <!-- src: Bytes/Sources/Bytes/Buffers.swift ByteBuffer.unread `@_lifetime(borrow self)`; Bytes/Sources/Bytes/BytesReader.swift init `@_lifetime(copy span)`; Bytes/Package.swift comment "`@_lifetime`: `Bytes` is `~Escapable` and hands out spans that borrow the memory it reads" -->
 
-Bytes leans on it everywhere. A cursor (`BytesReader`, section 3) is itself non-escapable and non-copyable (`~Copyable`:
+Bytes leans on it everywhere. A cursor (`BytesReader`, [section 3](#3-cursors-bytesreader-byteswriter-and-their-modes)) is itself non-escapable and non-copyable (`~Copyable`:
 a value with one owner, which can be moved but not copied), and everything it hands out is a view of the same memory:
 
 ```swift
-// The result borrows from `data`; the annotation says so. (Needs the `Lifetimes` experimental feature.)
+// The result views the same memory as `data` and may live as long as that memory does.
+// (Needs the `Lifetimes` experimental feature.)
 @_lifetime(copy data)
 func payload(of data: RawSpan) throws(BytesError) -> RawSpan {
     var reader = BigEndianBytesReader(data)
@@ -1441,6 +1442,15 @@ func payload(of data: RawSpan) throws(BytesError) -> RawSpan {
     return reader.readRemainingBytes()      // a RawSpan of the same memory: no copy
 }
 ```
+
+The `copy` in `@_lifetime(copy data)` copies a *lifetime dependence*, not bytes. `data` is itself non-escapable: it
+carries the lifetime of the memory it views. `copy data` says the result inherits that same lifetime, so a caller can
+keep the returned span for as long as the memory lives, after `data`'s own variable has gone. The other form, `@_lifetime(borrow x)`,
+says the result borrows the value `x` itself and stays valid only while `x` does. That's the form for a source that
+owns its memory rather than viewing it: an `Array`'s `span` and a `ByteBuffer`'s `unread` are `@_lifetime(borrow self)`.
+For a span parameter, `borrow data` would tie the result to the caller's `data` variable instead of to the memory
+behind it, a narrower promise than the function can make. Neither form generates any code; both are checked at compile
+time. <!-- src: Bytes/Sources/Bytes/BytesReader.swift init `@_lifetime(copy span)`, readRemainingBytes `@_lifetime(copy self)`; Bytes/Sources/Bytes/Buffers.swift ByteBuffer.unread `@_lifetime(borrow self)`; Swift's Lifetimes feature (SE-0446 non-escapable types; the lifetime dependency annotations) -->
 
 <!-- src: Bytes/Sources/Bytes/BytesReader.swift readRemainingBytes (`@_lifetime(copy self)`), skip(byteCount:); Bytes/Sources/Bytes/Bytes.docc/WritingParsers.md "Parse" (the `@_lifetime` and `Lifetimes` note) -->
 
@@ -1457,19 +1467,19 @@ per packet) contend in the allocator. <!-- src: MQTT/Benchmarks/RESULTS.md "The 
   A span is never an owner, so handing one out costs nothing and holds nothing alive.
 - **Against raw pointers.** An `UnsafeRawPointer` has no length, so every access is on the programmer. A span has a
   length, and the standard library's loads check it. Bytes goes one step further and reads through unchecked loads
-  *behind its own single check*, confined to a handful of functions, each with a comment saying why it is safe (section 3
+  *behind its own single check*, confined to a handful of functions, each with a comment saying why it is safe ([section 3](#3-cursors-bytesreader-byteswriter-and-their-modes)
   explains the check). <!-- src: Bytes/Benchmarks/RESULTS.md "Safe constructs instead of unsafe ones" ("Kept unsafe (each with a comment saying why it is safe)"); Bytes/Sources/Bytes/BytesReader.swift `enum Load` doc comment -->
 - **Against `Data`.** `Data` already has a `bytes` view, but no way to append a span or start from one; that is the
-  entire content of the `BytesFoundation` module (section 13). <!-- src: Bytes/Sources/BytesFoundation/Data.swift header comment -->
+  entire content of the `BytesFoundation` module ([section 13](#13-bytesbase64-and-bytesfoundation)). <!-- src: Bytes/Sources/BytesFoundation/Data.swift header comment -->
 
 The one thing a span cannot do is cross threads (it is non-escapable, so no task or closure that outlives the call can
-capture it). Parallel code gets the same memory through *lending*, covered in section 9.
+capture it). Parallel code gets the same memory through *lending*, covered in [section 9](#9-buffers-and-moving-bytes).
 
 #### `InlineArray`: fixed-size storage in place
 
 `InlineArray<N, T>` stores exactly `N` elements inline, in the value that holds it: no allocation, no reference count.
 Bytes uses it for blocks (`InlineArray<48, UInt8>` is one Base64 input block), for the raw bytes of custom types
-(`ByteRepresentable`, section 2), and for small tables. <!-- src: Bytes/Sources/BytesBase64/Base64.swift encodeBlocks signature; Bytes/Sources/Bytes/ByteRepresentable.swift doc comment -->
+(`ByteRepresentable`, [section 2](#2-byte-sized-value-types-bits-byte2byte16-byte-order-ascii-tags)), and for small tables. <!-- src: Bytes/Sources/BytesBase64/Base64.swift encodeBlocks signature; Bytes/Sources/Bytes/ByteRepresentable.swift doc comment -->
 
 It has one trap. Indexing an `InlineArray` that is a stored property or a `borrowing` parameter can copy the whole array
 for each access. The Zstandard decoder's FSE (finite state entropy) table builder read a 256-entry `InlineArray<256, Int16>` passed `borrowing`;
@@ -1514,7 +1524,7 @@ for block in blocks.indices {
 <!-- src: Bytes/Sources/BytesBase64/Base64.swift encodeBlocks -->
 The previous version loaded three vectors per block at byte offsets from a `RawSpan` and stored four. Each access was
 checked, 14 of the loop's 45 instructions. <!-- src: Bytes/Benchmarks/RESULTS-base64.md "How it got here" ("checked each access: 14 of 45 instructions") --> The typed-span form cut instructions from 5.0 M to 2.2 M per 4 MB of input. Throughput did not move
-(from 19.1 to 18.9 GB/s), because the loop was bound by its table lookups, not by the checks. <!-- src: Bytes/Benchmarks/RESULTS-base64.md "How it got here" table (rows `tbl` and `tbl-spans`) --> Section 13 shows the machine code, where the
+(from 19.1 to 18.9 GB/s), because the loop was bound by its table lookups, not by the checks. <!-- src: Bytes/Benchmarks/RESULTS-base64.md "How it got here" table (rows `tbl` and `tbl-spans`) --> [Section 13](#13-bytesbase64-and-bytesfoundation) shows the machine code, where the
 single check is the first three instructions of the function.
 
 #### When not to use it
@@ -1523,7 +1533,7 @@ A typed `Span` over `InlineArray<N, UInt8>` elements loads each element through 
 and LLVM merges those byte loads only for 4-byte elements. Iterating a zero-copy span of 4-byte elements runs at memory
 speed (113 GB/s in cache, 76 GB/s from memory); for 6-byte elements it reached 17 GB/s against 33 GB/s for `forEach`,
 and for 16-byte elements 30 GB/s against 112 GB/s. <!-- src: Bytes/Benchmarks/RESULTS.md "The standard library's ConvertibleFromBytes" table (InlineArray<4,UInt8> 113/76; <6> 17/17 vs forEach 33/31; <16> 30/32 vs 112/73) --> Bytes loads its own groups as a same-size integer
-and `bitCast`s, which is why `forEach` (section 3) is the path that is at raw speed for every size.
+and `bitCast`s, which is why `forEach` ([section 3](#3-cursors-bytesreader-byteswriter-and-their-modes)) is the path that is at raw speed for every size.
 
 ### 2. Byte-sized value types: `Bits`, `Byte2`…`Byte16`, byte order, ASCII tags
 
@@ -1589,7 +1599,7 @@ static let signature = Byte4(0x504B_0102, .bigEndian)    // a byte swap: swift_o
   ambiguous the way a shift of a group would be ("shift by a byte" depends on which end is first). There are deliberately no
   shifts; the byte subscript and `lowHalf`/`highHalf` say which byte is meant. <!-- src: Bytes/Benchmarks/RESULTS.md "Group operations: ByteGroup operators …" -->
 - **A vector view.** `Byte16.vector` turns a group into a `SIMD16<UInt8>` with a bit cast and no instructions, which
-  matters for building constant vectors (section 7). <!-- src: Bytes/Sources/Bytes/ByteGroup.swift Byte16.vector doc comment -->
+  matters for building constant vectors ([section 7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)). <!-- src: Bytes/Sources/Bytes/ByteGroup.swift Byte16.vector doc comment -->
 
 #### ASCII tags
 
@@ -1650,9 +1660,9 @@ Apple's CPUs) or most-significant first (big-endian, as in most network protocol
 interesting design question is *where the order lives*. Bytes has three answers, in increasing order of commitment:
 
 1. an argument at each call: `read(Byte4.self, .bigEndian)`;
-2. a type: `BigEndianBytesReader` reads integers by type with no argument (section 3);
+2. a type: `BigEndianBytesReader` reads integers by type with no argument ([section 3](#3-cursors-bytesreader-byteswriter-and-their-modes));
 3. a generic parameter: a record parsed by code generic over `Mode: ByteOrderedCursorMode`, specialized once per order
-   (section 5), for formats such as ELF and PCAPNG that name their byte order in their first bytes.
+   ([section 5](#5-structure-sections-length-prefixes-leb128-records-text-dates)), for formats such as ELF and PCAPNG that name their byte order in their first bytes.
 
 The order is a constant after specialization in the second and third forms, so the generated code equals the explicit
 form. This matters most for a format whose order is chosen at run time. Apple's `swift-binary-parsing` examples pass an
@@ -1752,7 +1762,7 @@ beside it, turning an 88-instruction innermost loop into a 287-instruction outer
 (a `_slowPath` hint, moving the fill out of line) did not help, so that decoder keeps `BytesReader`. <!-- src: Bytes/Benchmarks/RESULTS.md "QOI's run-filling decoder keeps BytesReader" --> Each operation does strictly less in
 the aligned mode, but the compiler sees a different loop; measure hot loops when you switch.
 
-Formats with flag bits *inside* a byte are still byte-aligned: read the `Byte` and take it apart by name (section 4). Only
+Formats with flag bits *inside* a byte are still byte-aligned: read the `Byte` and take it apart by name ([section 4](#4-bit-level-fields-bitflag-bitfield-bitpattern)). Only
 formats whose fields cross byte boundaries in the stream, such as DEFLATE's block headers, need the bit-addressable
 cursors. Conversion at a byte boundary is `AlignedBytesReader(bytesReader)` (which throws `BytesError.misaligned` partway
 through a byte) and `BytesReader(alignedReader)`. <!-- src: Bytes/Sources/Bytes/Bytes.docc/UnderstandingTheTypes.md "Which cursor"; BytesReader.swift init(_ reader: consuming BytesReader) -->
@@ -1763,10 +1773,10 @@ A `BytesReader` is a struct of plain values: a `RawSpan` (pointer and count), a 
 40 bytes in all. There is no class, no buffer, and no existential. <!-- src: Bytes/OPTIMIZATION.md (old version) §3 "A small struct of plain values: … 40 bytes that fit in registers"; Bytes/Benchmarks/RESULTS.md "Allocation checks" ("the 40-byte cursor and a header") --> That helps only if the optimizer keeps its fields in
 registers, which it does only while no instruction needs the cursor's *address*. Anything that takes the cursor `inout`
 and is not inlined, or a non-inlined `mutating` method, passes a pointer, and from then on the whole struct lives in
-memory for the entire function, even on paths that never make the call. (Part I, "Stores, forwarding, and why
-memory-resident values are slow", gives the machine-level reason.)
+memory for the entire function, even on paths that never make the call. (Part I, ["Stores, forwarding, and why
+memory-resident values are slow"](#16-stores-forwarding-and-why-memory-resident-values-are-slow), gives the machine-level reason.)
 
-Three habits keep the cursor in registers. The library follows them, and Part III ("Keep hot state in registers") shows
+Three habits keep the cursor in registers. The library follows them, and Part III (["Keep hot state in registers"](#1-keep-hot-state-in-registers)) shows
 each with its measurements:
 
 1. **Rare paths take values.** The unaligned read is a `static` function (`_unalignedBytes`) rather than a `mutating`
@@ -1854,7 +1864,7 @@ Two more forms deliver values as views rather than into a closure:
 
 - `read(_:count:)` returns a typed span of the input, with no copying and no decoding (native byte order), and throws
   `.misaligned` where the memory is not aligned for the type. Types with alignment 1, such as `InlineArray<N, UInt8>`, are
-  never misaligned. As section 1 noted, it is at memory speed for 4-byte elements and slower for others. <!-- src: Bytes/Sources/Bytes/ConvertibleFromBytes.swift read(_:count:) doc comment -->
+  never misaligned. As [section 1](#1-borrowed-memory-spans-and-inlinearray) noted, it is at memory speed for 4-byte elements and slower for others. <!-- src: Bytes/Sources/Bytes/ConvertibleFromBytes.swift read(_:count:) doc comment -->
 - `values(of: Byte3.self, .bigEndian)` returns a view you can `for`-`in` over (the standard library's `Iterable`): its
   iterator decodes 1,024 values at a time into a buffer it owns and hands out a span of them. It is convenient, and costs
   up to 2.5x a `forEach` with a trivial body (4.4x for `Bit`), because decoded values are stored and reloaded where
@@ -1939,7 +1949,7 @@ loops stopped vectorizing. <!-- src: Bytes/Benchmarks/RESULTS.md "Safe construct
 Where the checked form *did* fold (a sub-cursor's `extracting`), the safe version was kept, and made fixed-size
 records 31% faster (7.3 against 10.6 µs). <!-- src: same section, first table -->
 The unsafe forms that are public are named `unsafe…` (`unsafeCommonPrefixLength`, `unsafeFlush`) and each is for a loop
-that proves its bounds once per block, with the proof in a comment at the call (sections 6 and 7).
+that proves its bounds once per block, with the proof in a comment at the call (sections [6](#6-entropy-coding-building-blocks-bitbuffer-bitwriter-huffmantable) and [7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)).
 
 ### 4. Bit-level fields: `BitFlag`, `BitField`, `BitPattern`
 
@@ -2101,7 +2111,7 @@ let version = try reader.read(Version.self)
 `Padding<Byte4>` (skipped on read, zeros on write) and `Reserved<Byte2>` (must be zero or the read throws) are field types
 for records. `ByteOrderedParsable` and `ByteOrderedWritable` are the same protocols generic over a *byte-ordered* mode, for formats
 that name their byte order in their first bytes (ELF, PCAPNG): one declaration, compiled once per order, and a cursor with
-no declared order is a compile error rather than a guess. <!-- src: Bytes/Sources/Bytes/BinaryRecords.swift --> The macros of section 14 generate all of this.
+no declared order is a compile error rather than a guess. <!-- src: Bytes/Sources/Bytes/BinaryRecords.swift --> The macros of [section 14](#14-macros-bitfields-and-binaryrecord) generate all of this.
 
 Integers of a *run-time* width, as in a binary property list's object references, are
 `read(Int64.self, signedByteCount: width)` and its unsigned and writing counterparts; a width outside 1 through 8 throws. The port of that example does one
@@ -2110,7 +2120,7 @@ Integers of a *run-time* width, as in a binary property list's object references
 #### Terminated strings
 
 `read(bytesTerminatedBy: 0)` and `read(utf8TerminatedBy: 0)` find the terminator 16 bytes at a time with
-`RawSpan.firstByteOffset(where:)` (section 7), return a view of the bytes before it, and consume the terminator too; the
+`RawSpan.firstByteOffset(where:)` ([section 7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)), return a view of the bytes before it, and consume the terminator too; the
 UTF-8 form validates. Reading an ELF file's 56 section names went from 25 K to 19 K instructions (−24%) with it. <!-- src: Bytes/Sources/Bytes/Sections.swift read(bytesTerminatedBy:); BinaryParsingComparison/RESULTS.md 2026-11-18 table (section names 25 K → 19 K, −24%) -->
 
 #### Numbers written as ASCII digits
@@ -2142,7 +2152,7 @@ two-load path was taken for fewer than 9 digits and loaded past the end of the d
 `read(_:asciiDigitsUpTo:)` stops before the first non-digit (HTTP's `Content-Length: 1024\r\n`). `read(_:asciiOctalDigits:)`
 (1 to 21 digits, one or two 8-byte loads) replaced 74 per-digit branches in NativeAEA's cpio header parse, from 625 to
 266 instructions counted statically. <!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" "Adopted in consumers"; Bytes/Sources/Bytes/ASCII.swift --> `write(_:asciiDigits:)` is the writing side.
-In vectors, `ByteLanes.asciiDigits` (section 7) counts digits in 620 KB 2.7x faster than a byte loop that LLVM auto-vectorizes (29 µs
+In vectors, `ByteLanes.asciiDigits` ([section 7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)) counts digits in 620 KB 2.7x faster than a byte loop that LLVM auto-vectorizes (29 µs
 against 78 µs). <!-- src: Bytes/Benchmarks/RESULTS.md "ASCII without tricks" table row 3 -->
 
 #### Hexadecimal and dates
@@ -2434,14 +2444,14 @@ end") is a comment at their one call site. <!-- src: Bytes/Benchmarks/RESULTS.md
 #### Table lookups: `tbl`, and why there is a C target
 
 Some instructions do in one step what takes a dozen otherwise, and Swift cannot emit them. NEON's table lookup (`tbl`,
-Part I, "Table lookup: `tbl` and `tbx`") uses each byte of an index vector to pick a byte from a table of 1–4 vectors
+Part I, ["Table lookup: `tbl` and `tbx`"](#24-table-lookup-tbl-and-tbx)) uses each byte of an index vector to pick a byte from a table of 1–4 vectors
 (16–64 bytes), all in registers: 16 lookups in one instruction. It is the gather that NEON cannot do from memory. Swift has no intrinsics, `Builtin`
 exposes no CPU-specific ones, and `SIMD16`'s dynamic subscript compiles a lane at a time (a byte shuffle written in Swift
 ran 0.3 GB/s against 16.7 GB/s for overlapping stores). <!-- src: Bytes/Benchmarks/RESULTS.md "Write bandwidth" bullets; Bytes/OPTIMIZATION.md (old version) §9 -->
 
 The fix is a small C target, `CBytesNEON`, of `static inline` functions over a C vector type that Swift imports as
-`SIMD16<UInt8>`. Swift inlines them, so each call becomes the single instruction; Part III ("Reaching instructions Swift
-cannot name") shows one. <!-- src: Bytes/Sources/CBytesNEON/include/CBytesNEON.h (NEON branch of bytes_table4) -->
+`SIMD16<UInt8>`. Swift inlines them, so each call becomes the single instruction; Part III (["Reaching instructions Swift
+cannot name"](#reaching-instructions-swift-cannot-name)) shows one. <!-- src: Bytes/Sources/CBytesNEON/include/CBytesNEON.h (NEON branch of bytes_table4) -->
 
 On the Swift side that is `ByteLanes.lookup(in:)` in seven forms: a 16-, 48-, 64-, and 128-byte table, and
 `keepingOutOfRange:` variants for 16, 48, and 64, which compile to `tbx` (the form that keeps the destination lane when
@@ -2452,7 +2462,7 @@ the index is out of range). Passing the result of one lookup as `fallback` exten
 `interleave(_:_:_:)` is the inverse, as `st3` does when storing. The four-vector forms, `deinterleave(_:_:_:_:)` (as
 `ld4`) and `interleave(_:_:_:_:)` (as `st4`), are eight `uzp`s and eight `zip`s instead of lookups. <!-- src: Bytes/Sources/Bytes/ByteLookup.swift --> Each lookup costs a
 micro-op per table register (a 4-register `tbl` is 4 micro-ops, a one-register `tbl` is a quarter of that), and micro-ops,
-not instructions, bound a table-driven kernel (section 13). <!-- src: Bytes/Benchmarks/RESULTS-base64.md "The kernel" ("Counting a tbl/tbx as one micro-op per table register"); Bytes/Benchmarks/RESULTS.md "2026-11-12: the optimized build adopts the portable iterator path" (4-register tbl 4 micro-ops) -->
+not instructions, bound a table-driven kernel ([section 13](#13-bytesbase64-and-bytesfoundation)). <!-- src: Bytes/Benchmarks/RESULTS-base64.md "The kernel" ("Counting a tbl/tbx as one micro-op per table register"); Bytes/Benchmarks/RESULTS.md "2026-11-12: the optimized build adopts the portable iterator path" (4-register tbl 4 micro-ops) -->
 
 #### Keeping LLVM from merging your shuffles
 
@@ -2460,7 +2470,7 @@ LLVM is good at combining neighboring operations, and sometimes that undoes your
 initializers, the two rounds of `zip`s that interleave four vectors were fused into four-source shuffles that ARM64 builds
 a lane at a time, and the loads feeding `bytes_deinterleave4` were narrowed to the lanes its first round used. The C
 helpers prevent both with an empty inline-assembly statement, which emits nothing but is opaque to the optimizer; Part III
-("The catch: LLVM merges shuffles into ones it cannot build") shows the code and the counts. <!-- src: Bytes/Sources/CBytesNEON/include/CBytesNEON.h bytes_interleave4 and bytes_deinterleave4 doc comment --> Both fixes are
+(["The catch: LLVM merges shuffles into ones it cannot build"](#the-catch-llvm-merges-shuffles-into-ones-it-cannot-build)) shows the code and the counts. <!-- src: Bytes/Sources/CBytesNEON/include/CBytesNEON.h bytes_interleave4 and bytes_deinterleave4 doc comment --> Both fixes are
 specific to one architecture; the portable alternative is the next topic.
 
 #### Constant shuffles need no C: `GroupShuffle`
@@ -2468,7 +2478,7 @@ specific to one architecture; the portable alternative is the next topic.
 A table lookup with *run-time* indices needs `tbl`. With *constant* indices, Swift can express it: build a vector from lanes
 of another picked at constant positions, and LLVM recognizes the initializer as one shuffle. Bytes' (internal) `GroupShuffle`
 unpacks and packs 3-, 5-, 6-, and 7-byte groups this way, computing the constant picks with
-`GroupShuffle.unpacked(_:byteCount:bigEndian:_:)`; Part III ("Constant shuffles do not need C") shows the code. <!-- src: Bytes/OPTIMIZATION.md (old version) §9 "Constant shuffles don't need C"; Bytes/Sources/Bytes/GroupShuffle.swift (the shuffle is computed from `unpacked(_:byteCount:bigEndian:_:)` with constant arguments) -->
+`GroupShuffle.unpacked(_:byteCount:bigEndian:_:)`; Part III (["Constant shuffles do not need C"](#constant-shuffles-do-not-need-c)) shows the code. <!-- src: Bytes/OPTIMIZATION.md (old version) §9 "Constant shuffles don't need C"; Bytes/Sources/Bytes/GroupShuffle.swift (the shuffle is computed from `unpacked(_:byteCount:bigEndian:_:)` with constant arguments) -->
 
 The loop is one load, one *single-register* `tbl`, and one store; on x86-64 macOS the same Swift compiles to `pshufb`. A
 one-register `tbl` is a quarter of a 64-byte one's micro-ops, so for iterators (`for`-`in`) it beat the NEON lookups by
@@ -2476,9 +2486,9 @@ one-register `tbl` is a quarter of a 64-byte one's micro-ops, so for iterators (
 `forEach` with a body and for bulk reads and writes, the optimized build keeps the NEON lookups. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-12: the optimized build adopts the portable iterator path" table -->
 
 LLVM's merging sets two traps here too, and the portable fix is a small stack buffer (`withUnsafeTemporaryAllocation`, no
-allocation) that the plain loops vectorize over; Part III has the details. Staging (computing values into that buffer
+allocation) that the plain loops vectorize over; [Part III](#part-iii-techniques-by-problem) has the details. Staging (computing values into that buffer
 first) pays only for a full buffer (128 values of 3 bytes, 64 of 5–7): runs of 1–62 `Byte3`s took 37% more instructions
-staged. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-12: fast portable builds" bullets; Bytes/Sources/Bytes/GroupShuffle.swift `stages(_:count:)` --> Section 15 returns to the portable builds.
+staged. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-12: fast portable builds" bullets; Bytes/Sources/Bytes/GroupShuffle.swift `stages(_:count:)` --> [Section 15](#15-builds-and-traits-optimized-portable-and-no-c) returns to the portable builds.
 
 ### 8. Checksums: `CRC32`, `Adler32`, `CRC64`, `XXHash64`, `RunningChecksum`
 
@@ -2511,7 +2521,7 @@ nothing measurable, and keeping their code out of clients keeps the C module and
 
 A **CRC** is the remainder of dividing the data, viewed as a polynomial over bits, by a fixed polynomial. Software computes
 it a byte at a time with a 256-entry table, or 8 bytes at a time with 8 tables ("slicing-by-8"). A CPU with a carry-less
-multiply (XOR in place of addition; `pmull` on Arm, Part I, "Carry-less multiply, CRC, AES, and SHA instructions") can do
+multiply (XOR in place of addition; `pmull` on Arm, Part I, ["Carry-less multiply, CRC, AES, and SHA instructions"](#29-carry-less-multiply-crc-aes-and-sha-instructions)) can do
 better by *folding*. <!-- src: Bytes/OPTIMIZATION.md (old version) §10 "CRC-32: 1.7–2.3x zlib" -->
 
 **Hardware (Apple silicon).** Eight 16-byte accumulators each hold the CRC state so far for one 16-byte lane of the
@@ -2520,8 +2530,8 @@ ahead (`pmull` on its low half and `pmull2` on its high half), then XORed with t
 position (`eor3`, a three-way XOR). The eight chains are independent, so the multiplies' latencies overlap. At the end the
 lanes fold into one, and the CPU's `crc32x` instruction reduces its last 16 bytes to a 32-bit CRC. <!-- src: Bytes/Sources/Bytes/CRC32.swift _fold doc comment; Bytes/Benchmarks/RESULTS.md "CRC32 (measured in NativeZip's benchmarks…)" "Large inputs" -->
 
-Each 128-byte step is 16 `pmull`, 8 `eor3`, 4 `ldp`, and about 10 bookkeeping instructions; Part I ("Carry-less multiply,
-CRC, AES, and SHA instructions") walks through the loop's machine code. <!-- src: Bytes/Benchmarks/RESULTS.md "CRC32 …" ("16 pmull, 8 eor3, 4 ldp, ~10 bookkeeping instructions per 128 bytes") -->
+Each 128-byte step is 16 `pmull`, 8 `eor3`, 4 `ldp`, and about 10 bookkeeping instructions; Part I (["Carry-less multiply,
+CRC, AES, and SHA instructions"](#29-carry-less-multiply-crc-aes-and-sha-instructions)) walks through the loop's machine code. <!-- src: Bytes/Benchmarks/RESULTS.md "CRC32 …" ("16 pmull, 8 eor3, 4 ldp, ~10 bookkeeping instructions per 128 bytes") -->
 
 The constants are `x^(n ± 32) mod P`, bit-reflected, and a test derives them. Inputs shorter than 256 bytes use `crc32x`
 8 bytes at a time instead (a dependency chain, one instruction per 3 cycles) rather than pay to combine eight lanes. <!-- src: Bytes/Sources/Bytes/CRC32.swift foldThreshold comment; Bytes/Benchmarks/RESULTS.md "CRC32" "Below 256 bytes" -->
@@ -2531,7 +2541,7 @@ bytes. <!-- src: Bytes/Benchmarks/RESULTS.md "CRC32 (measured in NativeZip's ben
 The first version was **3.5x slower than zlib**. The nested helper that loaded each 16 bytes was not inlined, and as a call
 per load it spilled the eight accumulators to the stack every time. `@inline(always)` on it fixed that. <!-- src: Bytes/Benchmarks/RESULTS.md same section ("First version 3.5x slower than zlib") --> Eight live
 128-bit values plus constants take a large share of the 32-register file; this is the register-pressure lesson of Part I
-("Registers and the register file") in one function.
+(["Registers and the register file"](#13-registers-and-the-register-file)) in one function.
 
 **Tables (other CPUs, and the `Portable` builds).** Slicing-by-8 is a latency chain: each word's eight lookups wait for the
 previous word's. Fewer instructions did not help: rewriting the byte shifts and masks with Bytes' APIs halved the
@@ -2589,7 +2599,7 @@ safe access to an output span's free capacity, so each codec and socket buffer w
 | `OutputRawSpan.withFreeCapacity(byteCount:_:)` | a `MutableRawSpan` over the free capacity; the closure reports how many bytes it wrote at its start |
 | `withOutputRawSpan(overwritingFrom:_:)` on `[UInt8]`, `MutableSpan<UInt8>`, `MutableRawSpan` | an empty output span over existing bytes; what it appends overwrites them |
 | `[UInt8](copying:)`, `append(copying:)` | a copy of a span into an array |
-| `[UInt8](alignedByteCapacity:writing:)`, `String(utf8Capacity:writing:)` | build an array or string with a writer (section 3) |
+| `[UInt8](alignedByteCapacity:writing:)`, `String(utf8Capacity:writing:)` | build an array or string with a writer ([section 3](#3-cursors-bytesreader-byteswriter-and-their-modes)) |
 
 <!-- src: Bytes/Sources/Bytes/Buffers.swift; Bytes/Sources/Bytes/BytesReader.swift [UInt8].init(copying:); Bytes/Sources/Bytes/BytesWriter.swift builders -->
 
@@ -2637,16 +2647,16 @@ The design points:
 
 - **One allocation, never moved or grown** (64-byte aligned). A `fill` can then *suspend* (wait in a socket read) with its
   output span in place. No `Array`'s span can stay borrowed across a suspension point (an `await` where the task may give
-  up its thread), but a pointer into a fixed allocation can. That is why `ByteBuffer.receive` exists (section 11). <!-- src: Bytes/Sources/Bytes/Buffers.swift ByteBuffer doc comment and init -->
+  up its thread), but a pointer into a fixed allocation can. That is why `ByteBuffer.receive` exists ([section 11](#11-async-bytesasync)). <!-- src: Bytes/Sources/Bytes/Buffers.swift ByteBuffer doc comment and init -->
 - **`compact()` moves the unread bytes to the front, but only when needed.** `fill` compacts first when fewer bytes than
   `compactionThreshold` (half the capacity by default) are free at the end, and `consume` resets both ends to 0 when the buffer
   empties (nothing to move). The code it replaced moved a partial packet after every piece; SocketStream's receive
   buffer, as a `ByteBuffer`, moves it only when less than half is free, and unprotecting with Brotli and TLS fell from
   27 M to 26 M instructions (−3.7%). <!-- src: Bytes/Sources/Bytes/Buffers.swift consume, fill; Bytes/Benchmarks/RESULTS.md "2026-11-16, buffer and copy API" (Unprotect, Brotli + TLS: 27 M → 26 M, −3.7%) -->
 - **A unit must fit.** A record that is larger than the buffer can't be assembled in it (a 4 KB receive buffer with 16 KB TLS
-  records traps), which is why pipeline stages declare unit sizes (section 10). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-16, buffer and copy API" ("A 4 KB receive buffer with TLS records (16 KB) traps") -->
+  records traps), which is why pipeline stages declare unit sizes ([section 10](#10-pipelines-bytetransform-pipeline-and-why-composition-costs-nothing)). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-16, buffer and copy API" ("A 4 KB receive buffer with TLS records (16 KB) traps") -->
 - **It is `~Copyable` and `Sendable`.** It owns its memory, and only one owner can use it at a time (that is what
-  non-copyable means), and it can be handed to another thread (Part IV, "`Sendable` and `sending`"). A class's
+  non-copyable means), and it can be handed to another thread (Part IV, ["`Sendable` and `sending`"](#14-sendable-and-sending)). A class's
   `ByteBuffer` property cannot lend `unread` for long (the access ends at once); pass the buffer `inout` to a static
   function instead. <!-- src: Bytes/Sources/Bytes/Buffers.swift; Bytes/Benchmarks/RESULTS.md same section Ergonomics -->
 
@@ -2760,7 +2770,7 @@ and `.needsInput` only ever means "more input, please". `transform(_:appending:f
 its caller's executor (whatever runs the caller's code: an actor, or the shared pool of threads) and does not hop to
 another. It must, because the call borrows the caller's `inout OutputRawSpan`, which cannot cross to another isolation
 domain (another actor, or code outside any actor). <!-- src: Bytes/Sources/BytesAsync/AsyncByteTransform.swift doc comment -->
-Part IV ("Isolation, actors, and where a function runs") explains these terms. Any `ByteTransform` becomes an
+Part IV (["Isolation, actors, and where a function runs"](#13-isolation-actors-and-where-a-function-runs)) explains these terms. Any `ByteTransform` becomes an
 `AsyncByteTransform` in one of three ways:
 
 | Adapter | Where the stage's calls run | When |
@@ -2787,11 +2797,11 @@ func perform<T: Sendable>(_ work: @Sendable () -> T) async -> T {
 The closure is non-escaping, so it allocates nothing. The Dispatch form (`perform(on:)`) waits with `withUnsafeContinuation`
 (a continuation suspends the task until something calls `resume` on it), because a checked continuation allocates its
 checker per call; the block resumes it exactly once, after the work returns. <!-- src: Bytes/Sources/BytesAsync/Offloading.swift perform(on:_:) comment --> For DEFLATE level 1 in
-64 KiB calls, `concurrently()` took the same time as running in place, and a Dispatch queue hop cost +7%. <!-- src: AGENTS.md Lessons "Offload synchronous work with a @concurrent function taking a non-escaping @Sendable closure" --> Part IV ("Tasks,
-executors, and the cooperative pool") covers executors and the hop itself. For the API, the consequence is that a heavy
+64 KiB calls, `concurrently()` took the same time as running in place, and a Dispatch queue hop cost +7%. <!-- src: AGENTS.md Lessons "Offload synchronous work with a @concurrent function taking a non-escaping @Sendable closure" --> Part IV (["Tasks,
+executors, and the cooperative pool"](#11-tasks-executors-and-the-cooperative-pool)) covers executors and the hop itself. For the API, the consequence is that a heavy
 stage uses `concurrently()` unless it must not occupy a cooperative thread.
 
-The stage and the buffers reach the other executor through lending (section 9). `transformLending` takes a pointer to the
+The stage and the buffers reach the other executor through lending ([section 9](#9-buffers-and-moving-bytes)). `transformLending` takes a pointer to the
 stage (the stage is `inout` for the whole call, so it stays put), lends the input and the output's free capacity, awaits
 the work, and returns the progress. Neither form can stop a synchronous stage midway; the caller's loop sees cancellation
 between calls. <!-- src: Bytes/Sources/BytesAsync/AsyncByteTransform.swift transformLending; Bytes/Sources/BytesAsync/Offloading.swift header comment -->
@@ -2801,7 +2811,7 @@ between calls. <!-- src: Bytes/Sources/BytesAsync/AsyncByteTransform.swift trans
 `ByteBuffer.receive` is `fill` for a source that suspends (a socket read), and it runs on the caller's executor. It has a
 separate name rather than being an `async` overload of `fill`, because with a closure that names its error type, Swift 6.4
 finds such a call ambiguous from async code, even when the closure does not suspend. <!-- src: Bytes/Sources/BytesAsync/Buffers.swift doc comment --> `receive` is the reason
-`ByteBuffer`'s storage never moves (section 9).
+`ByteBuffer`'s storage never moves ([section 9](#9-buffers-and-moving-bytes)).
 
 #### The parallel codecs, asynchronously
 
@@ -2823,8 +2833,8 @@ worker claims its next chunk, so the synchronous forms' instruction counts did n
 ### 12. Codec and crypto entry points
 
 This section is about the *shape* of the codec and crypto APIs: what you call, what you must provide, and what they promise
-not to allocate. How the codecs get their speed is the subject of Part III ("Algorithms and data structures, codec by
-codec").
+not to allocate. How the codecs get their speed is the subject of Part III (["Algorithms and data structures, codec by
+codec"](#8-algorithms-and-data-structures-codec-by-codec)).
 
 #### The formats
 
@@ -2883,7 +2893,7 @@ encoder.reset()                                                // the next strea
 
 The state of every encoder and decoder is `~Copyable`. It is allocated once at initialization (tables, window, staging
 buffers), and `reset()` prepares it for the next stream, keeping the allocations. After that, encoding and decoding
-allocate nothing, in any of the three builds (section 15). <!-- src: Bytes/OPTIMIZATION.md (old version) §10 "Compression: DEFLATE and Brotli, both directions"; Bytes/Sources/BytesCompression/DeflateEncoder.swift ("Encoding allocates nothing after initialization") -->
+allocate nothing, in any of the three builds ([section 15](#15-builds-and-traits-optimized-portable-and-no-c)). <!-- src: Bytes/OPTIMIZATION.md (old version) §10 "Compression: DEFLATE and Brotli, both directions"; Bytes/Sources/BytesCompression/DeflateEncoder.swift ("Encoding allocates nothing after initialization") -->
 The exceptions are documented:
 
 - `ZstdDecoder` allocates its tables and a 160 KB literal buffer at creation. Streaming adds the window (window size +
@@ -2989,8 +2999,8 @@ Three input bytes `aaaaaabb bbbbcccc ccdddddd` become four 6-bit values, `aaaaaa
 mapped to a character. `deinterleave` puts every third byte in its own vector (so lane *i* of `first` is byte 3*i* of the
 block), which makes each of the four values a shift or two of a whole vector, and the table lookup maps 16 values at once.
 
-Part I ("A worked example: the Base64 encoding kernel") walks through the compiled loop: 32 instructions per block, one
-bounds check before the loop and none inside it (section 1's typed-span loop), no scalar loads or branches, and the
+Part I (["A worked example: the Base64 encoding kernel"](#38-a-worked-example-the-base64-encoding-kernel)) walks through the compiled loop: 32 instructions per block, one
+bounds check before the loop and none inside it ([section 1](#1-borrowed-memory-spans-and-inlinearray)'s typed-span loop), no scalar loads or branches, and the
 second round of interleaving folded by LLVM into `st2` stores. It runs at about 9 cycles per block (3.5 instructions per
 cycle). <!-- src: Bytes/Benchmarks/RESULTS-base64.md "Current" bullets ("Per block … 32 per 48-byte block, at about 9 cycles per block"); disassembly of Base64.encodeBlocks in Bytes/.build/agent-tools/BytesBase64.o -->
 
@@ -3006,7 +3016,7 @@ Encoding throughput on one core, in GB/s of input (the latest M3 Ultra run, base
 
 The encoder allocates nothing at any size. It is level with C of the same design, and 93% of a C kernel that uses `ld3` and
 `st4` directly (23.1 GB/s), which Swift cannot emit for explicit vectors. The limit is the core's table-lookup rate; Part III
-("Case study: the Base64 encoder's kernel") traces each step and its effect. <!-- src: Bytes/Benchmarks/RESULTS-base64.md "The ceiling: a C kernel with ld3 and st4" (23.1; kernel table 21.8) -->
+(["Case study: the Base64 encoder's kernel"](#case-study-the-base64-encoders-kernel)) traces each step and its effect. <!-- src: Bytes/Benchmarks/RESULTS-base64.md "The ceiling: a C kernel with ld3 and st4" (23.1; kernel table 21.8) -->
 
 The first working version was a plain loop that computes each character with arithmetic masks (no table, so no gather) and
 lets LLVM vectorize it to `ld3`…`st4`. It already ran at 9.0 GB/s, and that kernel is what other CPUs get
@@ -3076,7 +3086,7 @@ compiler plugin (`BytesMacrosPlugin`). What it generates is ordinary Swift, so i
   sizes summed, a constant), and the same three conformances.
 
 With no byte order (`@BinaryRecord`, and `@BitFields` over `UInt16`/`UInt32`/`UInt64`), the conformances are the
-`ByteOrdered…` ones, read by `BigEndianBytesReader` or `LittleEndianBytesReader` (section 5). <!-- src: Bytes/Sources/BytesMacros/Macros.swift doc comments -->
+`ByteOrdered…` ones, read by `BigEndianBytesReader` or `LittleEndianBytesReader` ([section 5](#5-structure-sections-length-prefixes-leb128-records-text-dates)). <!-- src: Bytes/Sources/BytesMacros/Macros.swift doc comments -->
 
 #### What it generates
 
@@ -3103,7 +3113,7 @@ the diagnostics point at the offending property rather than the whole struct.)
 
 <!-- src: Bytes/Tests/BytesMacrosTests/ExpansionTests.swift `record()` expansion (abridged) -->
 
-This is the known-size technique of section 5 applied by code generation: the record's bytes are taken with one bounds
+This is the known-size technique of [section 5](#5-structure-sections-length-prefixes-leb128-records-text-dates) applied by code generation: the record's bytes are taken with one bounds
 check, and every field is read from a cursor whose length the optimizer can see.
 
 #### Generated code must be forced inline
@@ -3137,7 +3147,7 @@ The library is built for CPUs it was not tuned on, and each build is measured. `
 
 | Trait | What it enables |
 |---|---|
-| `NEONShuffle` | the `CBytesNEON` C module: `tbl`/`tbx`/`uzp`/`zip` wrappers (section 7) |
+| `NEONShuffle` | the `CBytesNEON` C module: `tbl`/`tbx`/`uzp`/`zip` wrappers ([section 7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)) |
 | `HardwareCRC` | the `CBytesCRC` C module: `pmull`, `eor3`, `crc32x`, `udot` for `CRC32`, `Adler32`, and `CRC64` |
 | `HardwareCrypto` | the `CBytesCrypto` C module: AES, SHA-1, SHA-256, SHA-512, GHASH (AES-GCM's authentication hash) instructions |
 | `Portable` | enables the three above *and* compiles their headers' portable fallbacks (`BYTES_PORTABLE`), to measure the fallbacks on Apple silicon |
@@ -3204,8 +3214,8 @@ an emulation. <!-- src: AGENTS.md Lessons "Emulating a lookup that's one instruc
 
 Two changes, neither specific to a CPU, closed most of the gap:
 
-1. **Odd widths:** `GroupShuffle`'s constant shuffles (section 7) instead of emulated lookups, with a stack buffer for writes and `forEach`.
-2. **CRC:** the braided table CRC (section 8), which took the table path from 30x slower than `pmull` to 8.3x.
+1. **Odd widths:** `GroupShuffle`'s constant shuffles ([section 7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)) instead of emulated lookups, with a stack buffer for writes and `forEach`.
+2. **CRC:** the braided table CRC ([section 8](#8-checksums-crc32-adler32-crc64-xxhash64-runningchecksum)), which took the table path from 30x slower than `pmull` to 8.3x.
 
 For iterators (`for`-`in`), the portable path is faster than the NEON one: a one-register `tbl` per vector of two
 values (four for 3 bytes) beat the NEON build's four-register lookups, so the optimized build adopted the portable path
@@ -3241,14 +3251,14 @@ fallbacks are slower, and correct on any CPU. <!-- src: Bytes/OPTIMIZATION.md (o
 
 ## Part III. Techniques, by problem
 
-Part II describes what each Bytes API does. This part is organized the other way round: by the problem a fast
+[Part II](#part-ii-the-bytes-toolkit-bottom-up) describes what each Bytes API does. This part is organized the other way round: by the problem a fast
 program has to solve, and the technique that solves it. Each technique is shown where it was measured, in the codecs
 (`BytesCompression`), the crypto (`BytesCrypto`), and the projects built on Bytes. Every section follows the same
 shape: what goes wrong, why the CPU or the compiler behaves that way, the fix, the measured effect, and when not to
 use it. Numbers are from an Apple M3 Ultra unless a section says otherwise.<!-- src: brief; Bytes/Benchmarks/RESULTS.md header "M3 Ultra" -->
 
 Two habits run through every section, so they are stated once here. First, a claim is checked in the machine code, not
-only in a timing: the tools in `Tools/` (`loops`, `calls`, `remarks`; see Part I, "Measuring") say whether a loop is
+only in a timing: the tools in `Tools/` (`loops`, `calls`, `remarks`; see Part I, ["Measuring"](#5-measuring)) say whether a loop is
 vectorized, whether a call survived inlining, and why the vectorizer declined.<!-- src: AGENTS.md "Ground rules" "Check the machine code" --> Second, a change that removes instructions
 is not automatically faster: several sections below show cases where instruction count fell and time did not move
 (the work removed was not on the critical path), and cases where instruction count rose and time fell (the added work
@@ -3259,14 +3269,14 @@ between runs minutes apart.<!-- src: AGENTS.md "Compare times only within one in
 
 #### The problem
 
-A CPU computes only on values in registers (Part I, "Registers and the register file"). A value that lives in memory
+A CPU computes only on values in registers (Part I, ["Registers and the register file"](#13-registers-and-the-register-file)). A value that lives in memory
 must be loaded before use and stored after a change, and a load of a value just stored still waits for store-to-load
 forwarding, a delay that can sit on the critical path of a loop. A compiler keeps a variable in a register only while it
 can see every use of it. Once the variable's *address* is passed to code the compiler cannot see through (a function
 that is not inlined, a closure it cannot inline), the optimizer in practice keeps the variable in memory wherever that
 address might be used, even on paths that never call the function.<!-- src: OPTIMIZATION-old.md "5. Keep the cursor in registers" first paragraph and item 1 -->
 
-Bytes' central type is the cursor (Part II, "Cursors: `BytesReader`, `BytesWriter`, and their modes"): a struct holding a view of the bytes, a byte offset, and (for
+Bytes' central type is the cursor (Part II, ["Cursors: `BytesReader`, `BytesWriter`, and their modes"](#3-cursors-bytesreader-byteswriter-and-their-modes)): a struct holding a view of the bytes, a byte offset, and (for
 the bit-addressed `BytesReader`) a bit offset and bit order. A 40-byte cursor does not fit in a handful of registers for
 free, but the optimizer breaks a struct into its fields (scalar replacement) and keeps each field in a register, as long
 as nothing takes the struct's address. Everything in Bytes that is fast depends on that happening.<!-- src: OPTIMIZATION-old.md "5. Keep the cursor in registers" ("whole 40-byte cursor") -->
@@ -3288,7 +3298,7 @@ static func _unalignedBytes(_ count: Int, in span: RawSpan, atByte byteOffset: I
 <!-- src: Bytes/Sources/Bytes/BytesReader.swift _unalignedBytes (line 683) -->
 
 **A function that is not inlined.** When `read(byteCount:)` was not inlined, the cursor was spilled around every call.
-Inlining it and the slow-path fix above, together with the invariant in section 2, took field parsing from 439 K to
+Inlining it and the slow-path fix above, together with the invariant in [section 2](#2-remove-the-checks-the-compiler-cannot-prove-away), took field parsing from 439 K to
 287 K instructions (−35%), and bit-field parsing from 2,378 K to 886 K (−63%).<!-- src: OPTIMIZATION-old.md "5." item 2 -->
 
 **A cursor captured by a closure.** A closure that is not inlined keeps its captured variables in memory. A benchmark
@@ -3341,25 +3351,25 @@ instructions and seeing stack accesses (`ldr`/`str` with an `sp` base) where reg
   position, nothing.<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "Lessons for AGENTS.md" "A helper used once after a hot loop" -->
 - **The DEFLATE decoder.** LLVM's inliner declined `@inline(__always)` for the back-reference copy inside a large
   function, so the call took the writer by address and the writer lived in memory for the whole loop. Splitting the
-  decoder into small functions that each hold their cursors as locals, with the guaranteed `@inline(always)` (section
-  5), was the largest of the changes that took it from 2x slower than zlib to faster.<!-- src: OPTIMIZATION-old.md "5." paragraph on @inline(__always) and "DEFLATE: from 2x slower than zlib to faster" -->
+  decoder into small functions that each hold their cursors as locals, with the guaranteed `@inline(always)` ([section
+  5](#5-inlining-and-specialization)), was the largest of the changes that took it from 2x slower than zlib to faster.<!-- src: OPTIMIZATION-old.md "5." paragraph on @inline(__always) and "DEFLATE: from 2x slower than zlib to faster" -->
 
 #### Cursor design: a constant bit offset
 
 The bit-addressed `BytesReader` has to carry a bit offset (0–7) and test it on byte-granular reads. For formats made
 only of whole bytes, `AlignedBytesReader` and `AlignedBytesWriter` are the same type in a mode where the bit offset is
-the *constant* 0, so the tests fold away and there is one less field to keep in a register (Part II, "Why byte-aligned
-cursors are faster", has the measurements: MQTT encode −6%, DEFLATE decode −1.7% to −4%).<!-- src: AGENTS.md "Byte-only formats use AlignedBytesReader and AlignedBytesWriter" -->
+the *constant* 0, so the tests fold away and there is one less field to keep in a register (Part II, ["Why byte-aligned
+cursors are faster"](#why-byte-aligned-cursors-are-faster), has the measurements: MQTT encode −6%, DEFLATE decode −1.7% to −4%).<!-- src: AGENTS.md "Byte-only formats use AlignedBytesReader and AlignedBytesWriter" -->
 Out-of-line helpers on the cursors belong in the constrained extensions where the type is not generic, so that they do
 not take type metadata at each call (`Tools/calls … --callee metadata` finds such calls).<!-- src: AGENTS.md same lesson -->
 
 #### When not to
 
 A cursor that does less is not always a faster loop: QOI's run-filling decoder ran 54% more instructions with the aligned
-reader and keeps the bit-addressed `BytesReader` (Part II, "Why byte-aligned cursors are faster"). Measure when switching
+reader and keeps the bit-addressed `BytesReader` (Part II, ["Why byte-aligned cursors are faster"](#why-byte-aligned-cursors-are-faster)). Measure when switching
 a hot loop.<!-- src: AGENTS.md "One exception measured: QOI's run-filling decoder" -->
 Also, helpers that take and return values are for paths that run rarely or once per block; a helper called per element must be
-inlined, or its call cost dominates (section 5).
+inlined, or its call cost dominates ([section 5](#5-inlining-and-specialization)).
 
 ### 2. Remove the checks the compiler cannot prove away
 
@@ -3368,7 +3378,7 @@ inlined, or its call cost dominates (section 5).
 Every read of untrusted data must check that enough bytes remain, and ordinary integer arithmetic traps on overflow.
 Each check is a compare and a branch that is almost always predicted correctly, so one check is cheap. Three things
 make checks expensive in aggregate. They are instructions that compete for issue slots. A failing check is an early
-exit, which prevents vectorization (section 3). And the optimizer can merge two checks into one only if it knows a
+exit, which prevents vectorization ([section 3](#3-let-llvm-vectorize-your-loops)). And the optimizer can merge two checks into one only if it knows a
 fact about the values, which it often cannot see.<!-- src: OPTIMIZATION-old.md "6. Make bounds checks disappear" first paragraph -->
 
 #### Tell the optimizer the invariant
@@ -3417,7 +3427,7 @@ let version = try record.read(Byte2.self, .littleEndian)   // bytes 4..<6 of 46:
 
 The compiler even loads adjacent 4-byte fields with one instruction (`ldp w6, w7, [x16, #16]`: two fields from address
 x16 + 16).<!-- src: OPTIMIZATION-old.md "6." -->
-`@BinaryRecord` generates this form (Part II, "Macros: `@BitFields` and `@BinaryRecord`"). Against the same workload the field-by-field Bytes parser costs
+`@BinaryRecord` generates this form (Part II, ["Macros: `@BitFields` and `@BinaryRecord`"](#14-macros-bitfields-and-binaryrecord)). Against the same workload the field-by-field Bytes parser costs
 285 K instructions, `ParserSpan` fixed records 325 K, and `ParserSpan` field by field 461 K.<!-- src: OPTIMIZATION-old.md "Macros: formats as declarations" table -->
 
 #### Loop over typed spans
@@ -3450,7 +3460,7 @@ which were the bottleneck. Removing work that is not the bottleneck does not mak
 #### Masked indices, one unsigned compare, unmasked stores
 
 - **Mask an index so its range is visible.** Brotli's decoder indexes with `context & 0x3F` and `types & 0xFF`, so the
-  span check folds. Together with state in locals (section 1) and Huffman tables built only from used symbols, Brotli
+  span check folds. Together with state in locals ([section 1](#1-keep-hot-state-in-registers)) and Huffman tables built only from used symbols, Brotli
   decoding got 20–42% faster across the corpus, the 1.6 KB streams most.<!-- src: AGENTS.md "Hot decode loops keep their state in locals" -->
 - **A count check is one unsigned compare.** `UInt(bitPattern: n) <= UInt(bitPattern: remaining)` rejects a negative and
   an oversized count at once, because a negative `n` becomes a huge unsigned number. Written as `n >= 0 && n <= remaining`
@@ -3528,7 +3538,7 @@ then ran out of registers, spilled, and checked again (126 to 293 instructions p
 into the borrowed array, with the argument for safety (every index is a byte) in a comment. Whether a safe access is
 free can depend on register pressure in code nearby: check the loop, not the function.<!-- src: OPTIMIZATION-old.md "6." last paragraph; AGENTS.md "Table lookups in a Span lose their bounds checks" -->
 The same pattern, for the same reason, is the Zstandard decoder's tables in a workspace it owns, indexed through a
-pointer (section 6).<!-- src: AGENTS.md "InlineArray passed borrowing can be copied at every subscript" -->
+pointer ([section 6](#6-allocation-free-code)).<!-- src: AGENTS.md "InlineArray passed borrowing can be copied at every subscript" -->
 
 #### The inverse: a wide load that ends past the data
 
@@ -3539,7 +3549,7 @@ field does.<!-- src: AGENTS.md "Test reads that end exactly at the data's end" -
 
 ### 3. Let LLVM vectorize your loops
 
-Auto-vectorization (Part I, "SIMD and NEON") turns a loop that processes one element per iteration into one
+Auto-vectorization (Part I, ["SIMD and NEON"](#2-simd-and-neon)) turns a loop that processes one element per iteration into one
 that processes several (for bytes on ARM64, 16) per iteration, with a vector register and one instruction per operation.
 It is the largest source of speed in Bytes: most of its bulk loops are ordinary Swift written so that LLVM's loop vectorizer
 accepts them.<!-- src: OPTIMIZATION-old.md "7. Let LLVM vectorize your loops" first line; Part I section on SIMD for the definition -->
@@ -3586,10 +3596,10 @@ Each of these was found in the assembly, then confirmed with a benchmark:<!-- sr
 |---|---|---|
 | A lookup at a computed index (`table[Int(x)]`) | Each lane needs a different address: a gather, which NEON cannot do from memory | Compute the value instead (below) |
 | `if`s or ternaries in the body | LLVM vectorizes an `if` by computing both sides and picking per lane, but only while it is still an `if`; once optimized into real jumps it cannot | Arithmetic masks (below) |
-| An early exit (`return` or `throw` in the loop) | The vector loop would already have run the lanes after the exit | Explicit SIMD (section 4), or one check before the loop (section 2) |
+| An early exit (`return` or `throw` in the loop) | The vector loop would already have run the lanes after the exit | Explicit SIMD ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)), or one check before the loop ([section 2](#2-remove-the-checks-the-compiler-cannot-prove-away)) |
 | 128-bit arithmetic | LLVM does not vectorize it | Split into 64-bit halves (`Byte9`–`Byte15`: scalar to vectorized) |
 | Two 64-bit lanes | LLVM's cost model judges it not worth it, and Swift has no loop pragma to overrule it | Accept it: `Byte16` reads and `Byte8` writes stay scalar, yet `Byte16` still reads 56 GB/s on one core |
-| A variable kept in memory | Each iteration's store must reach the next iteration's load | Section 1 |
+| A variable kept in memory | Each iteration's store must reach the next iteration's load | [Section 1](#1-keep-hot-state-in-registers) |
 <!-- src: OPTIMIZATION-old.md "7." table -->
 
 Two more entries from other loops:
@@ -3598,8 +3608,8 @@ Two more entries from other loops:
   resetting `Int16` tables was 59% of a small input's time in the Brotli encoder; explicit `SIMD8<Int16>` stores fixed
   it. Likewise `initializeMemory(as:repeating:count:)` stored one `UInt16` at a time over a 262,144-entry table in the
   LZBITMAP encoder: reset large tables with explicit 64-byte vector stores.<!-- src: OPTIMIZATION-old.md "Compression: DEFLATE and Brotli, both directions" item 3; Bytes/Benchmarks/RESULTS-lzbitmap.md "Lessons" `initializeMemory` -->
-- **SLP vectorization of a scalar kernel's edges.** The SLP vectorizer (Part I, "The two vectorizers and their
-  remarks") turned scrypt's 16 consecutive `UInt32` loads and stores into vector operations with a lane move per word
+- **SLP vectorization of a scalar kernel's edges.** The SLP vectorizer (Part I, ["The two vectorizers and their
+  remarks"](#410-the-two-vectorizers-and-their-remarks)) turned scrypt's 16 consecutive `UInt32` loads and stores into vector operations with a lane move per word
   on the critical path. Loading and storing `UInt64` pairs (split with a shift) kept the words scalar: −6%.
   Check scalar kernels with `Tools/loops --forbid mov.s,fmov,ins,umov`.<!-- src: Bytes/Benchmarks/RESULTS-scrypt-x509.md "Salsa20/8: scalar beats vector here" last paragraph and Lessons -->
 
@@ -3645,7 +3655,7 @@ character was computed with masks and LLVM vectorized it to `ld3` and `st4`.<!--
   kernels with `Tools/calls … --callee 'SIMD.init'`.<!-- src: AGENTS.md "Constant vectors" -->
 - **Shuffles chosen by a `Bool`, and vectors built from an array literal and then mutated per lane,** also become
   per-lane inserts (16 for the literal); `Tools/loops` flags these as `+lane-moves`.<!-- src: OPTIMIZATION-old.md "9." "The catch" last paragraph -->
-- **A stack buffer instead of a shuffle** keeps scalar and vector code apart when LLVM would merge them (section 4).
+- **A stack buffer instead of a shuffle** keeps scalar and vector code apart when LLVM would merge them ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)).
 
 #### Asking the compiler why not
 
@@ -3662,7 +3672,7 @@ Tools/loops --target Bytes BytesBase64 encodeBlocks --require tbl,zip --forbid m
 
 #### When not to
 
-Vectorize independent work, not a dependent chain (section 7), and not when the loop around the vector code goes
+Vectorize independent work, not a dependent chain ([section 7](#7-branches-and-data-dependent-work)), and not when the loop around the vector code goes
 back to scalar per element: unpacking 3-byte values with `tbl` and then calling the loop body once per value was 5x
 slower than the plain loop that LLVM had already vectorized, body included, using `ld3`.<!-- src: OPTIMIZATION-old.md "9." "When not to shuffle" -->
 
@@ -3765,7 +3775,7 @@ candidate's two 8-byte counts in 14 `addp.16b`, against 3 `uaddlp` per candidate
 #### Reaching instructions Swift cannot name
 
 Some NEON instructions do in one step what otherwise takes a dozen, and Swift cannot emit them: it has no
-intrinsics (Part I, "Reaching these from Swift"), `Builtin` does not expose CPU-specific ones, and
+intrinsics (Part I, ["Reaching these from Swift"](#210-reaching-these-from-swift)), `Builtin` does not expose CPU-specific ones, and
 `SIMD16`'s dynamic subscript compiles a lane at a time. The fix is a small C target of `static inline` functions over C
 vector types that Swift imports as `SIMD16<UInt8>`. Swift inlines these, so each call becomes the single instruction:<!-- src: OPTIMIZATION-old.md "9. Reach instructions Swift can't express" -->
 
@@ -3790,10 +3800,10 @@ The families worth this treatment:
   Uses: moving the bytes of 3-, 5-, 6-, and 7-byte values into whole lanes and back, and Base64's mapping of 6-bit values
   to characters. On the M3 a `tbl` costs one micro-op per table register.<!-- src: OPTIMIZATION-old.md "9." ; AGENTS.md "On M3, NEON ld4/st3" -->
 - **`zip`: interleave.** `zip1`/`zip2` interleave two vectors lane by lane (`a0 b0 a1 b1 …`).<!-- src: OPTIMIZATION-old.md "9." -->
-- **`pmull`, `eor3`, `crc32x`** for CRCs (sections 7 and 8), **`udot`** for Adler-32, and the crypto
-  instructions `aese`/`aesmc`, `sha256h`, `sha512h` through `CBytesCrypto` (section 9).<!-- src: OPTIMIZATION-old.md "9."; Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT"; Bytes/Sources/BytesCrypto/AES.swift bytes_aese -->
+- **`pmull`, `eor3`, `crc32x`** for CRCs (sections [7](#7-branches-and-data-dependent-work) and [8](#8-algorithms-and-data-structures-codec-by-codec)), **`udot`** for Adler-32, and the crypto
+  instructions `aese`/`aesmc`, `sha256h`, `sha512h` through `CBytesCrypto` ([section 9](#9-crypto)).<!-- src: OPTIMIZATION-old.md "9."; Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT"; Bytes/Sources/BytesCrypto/AES.swift bytes_aese -->
 
-**`udot` made Adler-32 twice as fast.** Adler-32's two sums are dot products (Part II, "Adler-32: `udot`"), so the
+**`udot` made Adler-32 twice as fast.** Adler-32's two sums are dot products (Part II, ["Adler-32: `udot`"](#adler-32-udot)), so the
 instruction is a `static inline` wrapper (`bytes_crc_udot`) and the loop is Swift. The inner loop is 16 instructions per
 64 bytes and is bound by `udot` throughput:<!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster"; Bytes/Sources/Bytes/Adler32.swift line 200 -->
 
@@ -3895,8 +3905,8 @@ Recheck hot loops with `Tools/calls --callee 'specialized SIMD'` after adding co
 
 #### An emulated instruction is no fallback
 
-Emulating `tbl` a lane at a time made the portable build 37–113x slower than the NEON one (Part II, "Why emulating `tbl`
-is no fallback"). An algorithm designed around one CPU's instruction belongs behind a check that the instruction is there
+Emulating `tbl` a lane at a time made the portable build 37–113x slower than the NEON one (Part II, ["Why emulating `tbl`
+is no fallback"](#why-emulating-tbl-is-no-fallback)). An algorithm designed around one CPU's instruction belongs behind a check that the instruction is there
 (`ByteLanes.isLookupVectorized`), with a different algorithm elsewhere. LZBITMAP's decoder does this: with `tbl` it
 resolves 16 groups at a time, and without it, it decodes a group at a time (31 instructions a group).<!-- src: OPTIMIZATION-old.md "9." "An emulated instruction is no fallback"; AGENTS.md "Emulating a lookup"; Bytes/Sources/BytesCompression/LZBitmapDecoder.swift line 302; Bytes/Benchmarks/RESULTS-lzbitmap.md "The decoder" -->
 
@@ -3916,8 +3926,8 @@ and then extract the 6-bit values with shifts and masks per 32-bit lane, so no i
 
 #### Case study: the Base64 encoder's kernel
 
-The kernel per 48-byte block (its Swift source is in Part II, "Base64"; its machine code in Part I, "A worked example:
-the Base64 encoding kernel") is the section's techniques together: a deinterleave in registers (3 `tbl`s doing what `ld3`
+The kernel per 48-byte block (its Swift source is in Part II, ["Base64"](#base64); its machine code in Part I, ["A worked example:
+the Base64 encoding kernel"](#38-a-worked-example-the-base64-encoding-kernel)) is the section's techniques together: a deinterleave in registers (3 `tbl`s doing what `ld3`
 does), shifts and masks to cut out the 6-bit values, `tbl` to map them to characters, `zip`s to interleave.<!-- src: OPTIMIZATION-old.md "10." "Base64" kernel -->
 
 The steps and their effect (1 MB, one run): scalar table loop 0.86 GB/s; characters by masks, LLVM-vectorized, 9.0; 48-byte
@@ -3931,7 +3941,7 @@ The limit is how many `tbl` micro-ops the core can start per cycle, not instruct
 not change the speed, but replacing the 4 four-register lookups that interleaved with 8 cheaper `zip`s gained 15% in the
 Swift encoder at 1 MB (18.9 to 21.7 GB/s), and 12% in the C kernels of the same design (19.5 to 21.8 GB/s).<!-- src: Bytes/Benchmarks/RESULTS-base64.md "How it got here" table (tbl-spans 18.9 → zip 21.7) and "The ceiling" table (19.5 → 21.8; its "gained 12%"); the "+12%" bullet under "How it got here" does not match its own table -->
 
-The decoder (described in Part II, "Base64") is the same lesson with `tbx`, a lookup that keeps the lane's old value when
+The decoder (described in Part II, ["Base64"](#base64)) is the same lesson with `tbx`, a lookup that keeps the lane's old value when
 the index is out of range: an 80-entry window of the ASCII table looked up as one 64-byte `tbx` plus one 16-byte `tbx`,
 instead of two 64-byte lookups, took 61 micro-ops per block instead of 69, +11%, to 12.8 GB/s, 99% of a C kernel using
 `ld4`/`st3` (12.9). Two compiler traps account for the middle of its history: the `SIMD16` array literals that became
@@ -3948,9 +3958,9 @@ because the shuffle's table needed a register in a loop that already uses all 32
 
 #### What the compiler does, and where it declines
 
-Swift is compiled twice over (Part I, "The pipeline: SIL, then LLVM"). The SIL optimizer decides what to inline and
+Swift is compiled twice over (Part I, ["The pipeline: SIL, then LLVM"](#41-the-pipeline-sil-then-llvm)). The SIL optimizer decides what to inline and
 specialize; then LLVM runs its own inliner and loop passes. A generic function is fast only once it is specialized
-(Part I, "Generics, specialization, and metadata"); an unspecialized one calls through type metadata and witness tables
+(Part I, ["Generics, specialization, and metadata"](#43-generics-specialization-and-metadata)); an unspecialized one calls through type metadata and witness tables
 and passes values through memory. `@inlinable` makes a function's body visible to other modules so they *can*
 inline and specialize it; it does not make them do so. Two attributes force inlining, with different strength:<!-- src: Part I section 4 definitions; AGENTS.md "@inlinable doesn't mean inlined" -->
 
@@ -3961,7 +3971,7 @@ inline and specialize it; it does not make them do so. Two attributes force inli
 
 #### Where forcing paid
 
-- **DEFLATE's decoder** (section 1): the guaranteed attribute plus small functions with local cursors was the largest
+- **DEFLATE's decoder** ([section 1](#1-keep-hot-state-in-registers)): the guaranteed attribute plus small functions with local cursors was the largest
   of the changes that took it from 2x slower than zlib to faster.<!-- src: OPTIMIZATION-old.md "DEFLATE: from 2x slower than zlib" -->
 - **CRC-32's `pmull` version** in its first form ran 3.5x slower than zlib: a nested helper that loaded each 16 bytes
   was not inlined, and each call spilled the eight accumulators. `@inline(always)` fixed it.<!-- src: OPTIMIZATION-old.md "CRC-32: 1.7–2.3x zlib" -->
@@ -3970,7 +3980,7 @@ inline and specialize it; it does not make them do so. Two attributes force inli
   to 48 M, mozilla 215 to 141 M) and 31–45% in time.<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "What worked and what didn't" -->
 - **The LZMA range decoder's `length` and `distance` methods** were calls until `@inline(always)`: 7% fewer
   instructions on the seg0 test input (93.5 to 87.3 per byte), though cycles moved only 0–4% (the chain, not the call,
-  was the limit; section 7).<!-- src: Bytes/Benchmarks/RESULTS.md "LZMA ... How it got there" step 2 (87.3 vs 93.5 ins/B seg0) -->
+  was the limit; [section 7](#7-branches-and-data-dependent-work)).<!-- src: Bytes/Benchmarks/RESULTS.md "LZMA ... How it got there" step 2 (87.3 vs 93.5 ins/B seg0) -->
 - **LZRAVEN's coder** had 10 calls left in the decode loop with `@inline(__always)`; `@inline(always)` inlined them,
   and `start()` had to be inlined too, or its `inout` call kept the coder in memory through the loop.<!-- src: Bytes/Benchmarks/RESULTS-lzraven.md "Lessons" last bullet -->
 - **A new `BytesWriter` initializer**, only `@inlinable`, was called out of line from NativeZip's decode function (789 to
@@ -3979,7 +3989,7 @@ inline and specialize it; it does not make them do so. Two attributes force inli
 - **Generated code.** `@BinaryRecord`'s `init(parsing:)` stayed a call and returned its 17-field record through memory:
   297 K instructions against 199 K for the same hand-written parser. Forced inline, equal.<!-- src: AGENTS.md "Generated code needs @inline(__always)" -->
 - **Closures with an inferred error type.** An unannotated closure passed to a generic `throws(E)` parameter was not
-  inlined into Bytes' array builder (+3% instructions; Part I, "Typed throws and error boxing"); annotated with its error
+  inlined into Bytes' array builder (+3% instructions; Part I, ["Typed throws and error boxing"](#48-typed-throws-and-error-boxing)); annotated with its error
   type, it was. An overload taking only `throws(BytesError)` does not fix it: the unannotated closure still infers
   `any Error`.<!-- src: AGENTS.md "Closures passed to a generic throws(E) parameter" -->
 
@@ -3987,7 +3997,7 @@ inline and specialize it; it does not make them do so. Two attributes force inli
 
 The opposite problem is inlining a path that rarely runs, which enlarges the hot loop. Bytes' faster short-distance back-reference,
 inlined, grew DEFLATE's decode loop 15% and cost 12–14% on text, where it never runs. As a static function taking values
-(the slow-path pattern from section 1) it kept its gain (−38% on pixel runs) at no cost elsewhere.<!-- src: AGENTS.md "Rare paths stay out of line" -->
+(the slow-path pattern from [section 1](#1-keep-hot-state-in-registers)) it kept its gain (−38% on pixel runs) at no cost elsewhere.<!-- src: AGENTS.md "Rare paths stay out of line" -->
 The decoders have a fast loop, used while 32 (DEFLATE) or 128 (Brotli) bytes of input remain, and a careful, resumable one
 for the rest. With both in one function the inliner gave up on the fast one; split, DEFLATE's went from 1,390 to 667
 instructions, and Brotli's decoder got 10–30% faster with its own fast path.<!-- src: OPTIMIZATION-old.md "Compression: DEFLATE and Brotli" item 2 -->
@@ -4013,7 +4023,7 @@ wrappers over an `@inline(__always)` body taking a constant `Bool` gave each cas
 
 #### Function merging can undo a specialization
 
-LLVM's function merging (Part I, "Function merging, and benchmarks that lie") folds identical functions into one. For a
+LLVM's function merging (Part I, ["Function merging, and benchmarks that lie"](#49-function-merging-and-benchmarks-that-lie)) folds identical functions into one. For a
 benchmark that compares an old and a new variant chosen by a constant `Bool`, merging can fold the two copies back into
 one `merged …` function taking the constant as a run-time parameter, so both variants test it in the hot loop. A closure
 that captures the flag is specialized once, taking it at run time, with the same effect. Look for `merged` symbols
@@ -4057,7 +4067,7 @@ call, which shows on short messages (1 KB × 1,024: 919 µs against Bytes' 212 �
 that allocates 3–4 times per packet scales badly on many cores (the conventional parser is 8.6x slower than the views on one
 core and 18.6x on all).<!-- src: Bytes/Benchmarks/RESULTS.md "crypto in Swift" table (d2-final); MQTT/Benchmarks/RESULTS.md "The views against the conventional code" (M3, d2-final code) -->
 The gate is package-benchmark's malloc counter with a `Thresholds/` file at 0 for each benchmark that claims to allocate
-nothing; Part I ("Allocation gates") lists the tools that find a failing gate's source.<!-- src: AGENTS.md "Allocations:" lesson -->
+nothing; Part I (["Allocation gates"](#53-allocation-gates)) lists the tools that find a failing gate's source.<!-- src: AGENTS.md "Allocations:" lesson -->
 
 #### Technique 1: workspaces, allocated once
 
@@ -4095,7 +4105,7 @@ A local `func` passed as a closure boxed its captured `crc` and `written` variab
 NativeZip's extraction. Closure literals keep them on the stack. After the fix, inflating 2,000 small files went from
 4,001 mallocs to 1 (the harness's own); times were unchanged, because allocation was never the bottleneck there, but it
 is provably absent.<!-- src: NativeZipArchive/Benchmarks/RESULTS.md "step4" -->
-The bzip2 decoder's nested function was the same trap (section 1).
+The bzip2 decoder's nested function was the same trap ([section 1](#1-keep-hot-state-in-registers)).
 
 #### Technique 4: typed throws without boxing
 
@@ -4114,8 +4124,8 @@ do throws(BytesError) {          // the error stays an unboxed enum
 With this form, LZ4/LZFSE/LZVN's block decode stopped allocating its error; NativeAEA's header parsing went from
 66 K to 63 K instructions per 170 headers with no `swift_allocError`.<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "Code generation"; NativeAEA/RESULTS.md "Opening" bullet -->
 (A typed-throws trap that is not about allocation: never pass a `throws(E)` closure to an untyped generic `rethrows` API
-such as `Array.withUnsafeMutableBytes`; Swift 6.4.2 throws the wrong error silently. See Part IV, "Limitations and
-compiler bugs met in concurrency and nearby".)<!-- src: AGENTS.md "Never pass a throws(E) closure to an untyped generic rethrows API" -->
+such as `Array.withUnsafeMutableBytes`; Swift 6.4.2 throws the wrong error silently. See Part IV, ["Limitations and
+compiler bugs met in concurrency and nearby"](#5-limitations-and-compiler-bugs-met-in-concurrency-and-nearby).)<!-- src: AGENTS.md "Never pass a throws(E) closure to an untyped generic rethrows API" -->
 
 #### Technique 5: make rarely used members on first use
 
@@ -4146,18 +4156,18 @@ literal tables cost 64-byte checksums +10.7% until the inner update was `@inline
 −3.3% against the lazy tables), and CRC-64's literal table lost outright (+1.0%) against
 the lazy table, whose `swift_once` check is one load per call. Measure after removing a lazy global. And in a benchmark, a lazy global read in the loop calls `swift_once` →
 `dispatch_once_f` (about 36 instructions) on every check for tens of milliseconds after first use, which made Bytes'
-3-byte rows bimodal (78 K and 104 K instructions): capture fixtures as locals (section 12).<!-- src: AGENTS.md "A table that becomes a compile-time constant can make LLVM rematerialize"; Bytes/Benchmarks/RESULTS.md "Cleanup and improvements" "CRC-64's table as a literal" and table row "CRC-32 tables, 64 B"; AGENTS.md "No lazy globals inside a measured loop" -->
+3-byte rows bimodal (78 K and 104 K instructions): capture fixtures as locals ([section 12](#12-measuring-honestly)).<!-- src: AGENTS.md "A table that becomes a compile-time constant can make LLVM rematerialize"; Bytes/Benchmarks/RESULTS.md "Cleanup and improvements" "CRC-64's table as a literal" and table row "CRC-32 tables, 64 B"; AGENTS.md "No lazy globals inside a measured loop" -->
 
 #### Technique 7: waits that do not allocate
 
 A `CheckedContinuation` allocates per wait; `UnsafeContinuation` in release builds (checked in debug) does not. For waits
 that happen once per file (NativeAEA's writers wait about once per file) this matters. The waits are `Mutex` state plus a
-continuation, taken synchronously under the lock when nothing has to wait (see section 11 and Part IV, "NativeAEA: from threads to structured concurrency").<!-- src: AGENTS.md "Waits are Mutex state plus a continuation"; NativeAEA/RESULTS.md "UnsafeContinuation in release builds" -->
+continuation, taken synchronously under the lock when nothing has to wait (see [section 11](#11-techniques-in-the-projects-built-on-bytes) and Part IV, ["NativeAEA: from threads to structured concurrency"](#3-nativeaea-from-threads-to-structured-concurrency)).<!-- src: AGENTS.md "Waits are Mutex state plus a continuation"; NativeAEA/RESULTS.md "UnsafeContinuation in release builds" -->
 
 #### Technique 8: stack buffers, and allocations per entry
 
 `withUnsafeTemporaryAllocation` gives a buffer on the stack when it is small enough (larger requests fall back to the heap);
-Bytes uses it for staging shuffles of 64 or 128 values (section 4), well within that.<!-- src: OPTIMIZATION-old.md "9." -->
+Bytes uses it for staging shuffles of 64 or 128 values ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)), well within that.<!-- src: OPTIMIZATION-old.md "9." -->
 Per-entry strings are the other source: NativeAEA's verify without `-l` built 1–2 strings per entry (176,000 mallocs),
 3,000 once it did not; a `[UInt8]` path per directory (34,781 mallocs) moved into the walker's arena (4,712). Payload
 structs with resilient fields (`Date?`) copy through value witnesses (`swift_cvw_initWithCopyImpl` in profiles): jobs that
@@ -4168,16 +4178,16 @@ are queued, sorted, and handed between tasks are cheaper as final classes.<!-- s
 Zero allocation is a gate rather than a goal in itself. Parallel codecs allocate their thread pool's bookkeeping per call
 (`concurrentPerform` 11 mallocs on 8 lanes and 27 on 24, a task group 34 and 98); the compression itself allocates
 nothing.<!-- src: OPTIMIZATION-old.md "Compression: DEFLATE and Brotli" (thread pools allocate a few dozen small blocks per call); RESULTS.md "Parallel compression: a chunk scheduler" Allocation bullet -->
-And the counting itself has a cost: allocation benchmarks are kept separate from timing ones (section 12).<!-- src: AGENTS.md "The malloc interposer costs ~10%" and "package-benchmark's malloc interposer traps on thread exit" -->
+And the counting itself has a cost: allocation benchmarks are kept separate from timing ones ([section 12](#12-measuring-honestly)).<!-- src: AGENTS.md "The malloc interposer costs ~10%" and "package-benchmark's malloc interposer traps on thread exit" -->
 
 ### 7. Branches and data-dependent work
 
 #### What goes wrong
 
 A CPU runs ahead of the instruction it is certain about: it predicts each branch and starts the predicted side. A
-mispredict throws away that work, about a pipeline's worth of cycles (Part I, "Branches, prediction, and mispredicts"). A
+mispredict throws away that work, about a pipeline's worth of cycles (Part I, ["Branches, prediction, and mispredicts"](#15-branches-prediction-and-mispredicts)). A
 branch on random-looking data is predicted right half the time. Separately, a dependency chain (each step needs the
-previous step's result; Part I, "Latency, throughput, and dependency chains") runs at the latency of one step per link,
+previous step's result; Part I, ["Latency, throughput, and dependency chains"](#12-latency-throughput-and-dependency-chains)) runs at the latency of one step per link,
 however wide the CPU is. The two together decide the speed of entropy decoders (each decoded symbol decides how the next
 is read) and cipher rounds. `Tools/counters`' `bottlenecks` mode shows it: the share of cycles *discarded*
 (mispredictions), lost in the front end, or stalled in the back end.<!-- src: AGENTS.md "Tools/counters"; Part I section 1 for definitions -->
@@ -4326,7 +4336,7 @@ Fewer instructions could not shorten the table CRC's chain (slicing-by-8: each l
 could. zlib's braided CRC runs five independent CRCs and combines them at the end, which made the loop bound by loads
 instead of latency, 3.6x faster at 256 KB. It is what CPUs without `pmull` use: 8.3x slower than folding, down from 30x.
 The hardware version's eight independent 16-byte accumulators overlap the multiplies' latencies the same way. Part II
-("CRC-32: three implementations") describes all three.<!-- src: OPTIMIZATION-old.md "CRC-32: 1.7–2.3x zlib" second and third bullets -->
+(["CRC-32: three implementations"](#crc-32-three-implementations)) describes all three.<!-- src: OPTIMIZATION-old.md "CRC-32: 1.7–2.3x zlib" second and third bullets -->
 
 #### When not to
 
@@ -4345,7 +4355,7 @@ same benchmark process.
 **Decoder.** Built on `BitBuffer`, `HuffmanTable`, and `AlignedBytesWriter`, with zero allocations; inflating Main.js
 (3.8 MB) takes 1,864 µs against libdeflate's 1,674 and zlib's 2,058 (Apple's Compression: 3,600). In order of payoff:<!-- src: OPTIMIZATION-old.md "DEFLATE: from 2x slower than zlib to faster" and Compression table (d2-final) -->
 
-1. Inlining and small functions with local state (sections 1 and 5).
+1. Inlining and small functions with local state (sections [1](#1-keep-hot-state-in-registers) and [5](#5-inlining-and-specialization)).
 2. **A register-only refill.** The slow refill, used near the end of the input, took the buffer's fields `inout`, which
    kept them in memory on the fast path too; it takes and returns values instead. The fast path is loop-free: while 8
    bytes remain, one unaligned 8-byte load and three arithmetic steps, with no branch on how many bytes fit:<!-- src: OPTIMIZATION-old.md DEFLATE item 2 -->
@@ -4366,7 +4376,7 @@ same benchmark process.
 5. **Copies that may overrun.** Back-references copy 16 bytes at a time and may write up to 32 bytes past their end; this
    loop runs only while 32 spare bytes remain in the output. Back-references at distances under 8 overlap their own
    output; they become a run of the last `distance` bytes (one load, then 16-byte stores, as libdeflate does), in a
-   separate static function (section 5).<!-- src: OPTIMIZATION-old.md DEFLATE item 5; Bytes/Benchmarks/RESULTS.md "Follow-ups: short-distance back-references"; AGENTS.md "Rare paths stay out of line" -->
+   separate static function ([section 5](#5-inlining-and-specialization)).<!-- src: OPTIMIZATION-old.md DEFLATE item 5; Bytes/Benchmarks/RESULTS.md "Follow-ups: short-distance back-references"; AGENTS.md "Rare paths stay out of line" -->
 6. **Named fields in the table entries.** The decode loop went from 246 to 236 instructions, and NativeZip's inflate plus
    CRC ran 2.5–2.8% fewer instructions.<!-- src: OPTIMIZATION-old.md DEFLATE item 6 -->
 
@@ -4411,7 +4421,7 @@ against 522,000; decoding quality-11 streams of Main.js, 3,799 against Google's 
   memory for the whole decode loop (and its bit order was tested at run time). Copied into locals, passed by value, and
   stored back once, it made decoding 20–42% faster on every input, 1.6 KB streams the most.<!-- src: AGENTS.md "Hot decode loops keep their state in locals" -->
 - **Decoder fast loop.** A fast loop runs while 128 bytes of input remain, split from the careful loop: Brotli's decode got
-  10–30% faster (section 5).
+  10–30% faster ([section 5](#5-inlining-and-specialization)).
 - **The adaptive tag filter.** Google's newer hashers keep 8 more bits of each bucket entry's hash (a *tag*) and compare 16
   tags at once, loading only entries whose tag matches. On x-ray this is 35% faster. On text it is 17–30% slower: most
   candidates match there, so the tags are one more load and a branchy loop in front of loads the plain scan issues anyway,
@@ -4452,8 +4462,8 @@ The first complete version followed libzstd's loops: a four-stream Huffman loop 
 at a time with 16- and 32-byte wild copies (copies allowed to write past their end), and the careful path out of line. It
 was already 5–28% faster on large inputs but 1–24% slower on 1–4 KB ones.
 
-What closed the rest, each a technique from an earlier section: tables in a workspace instead of `InlineArray`s (section
-6), a cold reload as a static function (section 1), one base pointer for the FSE states (section 1), and double-symbol
+What closed the rest, each a technique from an earlier section: tables in a workspace instead of `InlineArray`s ([section
+6](#6-allocation-free-code)), a cold reload as a static function ([section 1](#1-keep-hot-state-in-registers)), one base pointer for the FSE states (section 1), and double-symbol
 Huffman tables chosen by a measured rule. libzstd's own cost model picked double-symbol tables for x-ray's literals, where
 they cost 6%; the rule used here (literals compressing below 10/16, at least 8 KB of them) gave dickens −8% and moved
 nothing else by more than 0.1%. Prefetching each match's source (as libzstd does on AArch64) added 0.7% instructions and
@@ -4461,7 +4471,7 @@ no speed in an interleaved comparison, so it was removed.<!-- src: Bytes/Benchma
 
 #### LZMA, LZMA2, and `.xz`
 
-The range-coder techniques are in section 7. The container work: block headers with CRC-32s, the index checked against the
+The range-coder techniques are in [section 7](#7-branches-and-data-dependent-work). The container work: block headers with CRC-32s, the index checked against the
 blocks, and checks (none, CRC-32, CRC-64) verified. CRC-64/XZ by slicing-by-8 tables ran 2.2 GB/s (already twice
 liblzma's) but took 18% of xml's decode time. Folded with `pmull`, four 16-byte lanes and 64 bytes per step, it runs 24–41
 GB/s, taking 2–13% of instructions off the Silesia rows.<!-- src: Bytes/Benchmarks/RESULTS.md LZMA "lzma-1 → lzma-2 is the CRC-64" paragraph -->
@@ -4520,7 +4530,7 @@ Decoding happens in five passes over one workspace:
 2. Symbols: per 50-symbol group, a loop with no calls, 41 instructions a symbol, with the move-to-front list's first 16
    bytes in a register (`tbl` to pick the byte, `ext` and a select to move it).
 3. Links.
-4. The walk (section 7).
+4. The walk ([section 7](#7-branches-and-data-dependent-work)).
 5. Run expansion, 16 bytes at a time where no 4 equal bytes end in the window.
 
 Results on Silesia files as `bzip2 -9` writes them: 2.1–5.3x libbz2, at about half the instructions per byte (dickens
@@ -4530,7 +4540,7 @@ Results on Silesia files as `bzip2 -9` writes them: 2.1–5.3x libbz2, at about 
 
 XXH64's one-shot form (no streaming state) took 16,384 64-byte inputs from 3.79 to 2.44 M instructions (−35.5%).<!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements" XXH64 row -->
 CRC-32 runs at 63 GB/s with `pmull` folding and 8.3 GB/s braided in software; Adler-32 at 58 GB/s with `udot` on the M1
-Max (section 4).<!-- src: OPTIMIZATION-old.md CRC-32; Bytes/Benchmarks/RESULTS.md Adler-32 with UDOT -->
+Max ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)).<!-- src: OPTIMIZATION-old.md CRC-32; Bytes/Benchmarks/RESULTS.md Adler-32 with UDOT -->
 
 #### Matching Apple's bytes exactly
 
@@ -4580,7 +4590,7 @@ in constant time.<!-- src: OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" fi
   first eight powers before reducing once, and reduces with two more `pmull`s by the field's constant (0xC2 shifted)
   instead of shifts and XORs.<!-- src: OPTIMIZATION-old.md same -->
 - **Sealing is stitched**: each batch's GHASH runs over the previous batch's ciphertext among the AES rounds of the next
-  (section 7's idea).<!-- src: OPTIMIZATION-old.md same -->
+  ([section 7](#7-branches-and-data-dependent-work)'s idea).<!-- src: OPTIMIZATION-old.md same -->
 - **Open is one pass, with a restore.** Each group of eight blocks is hashed from memory (before it is overwritten) while
   its keystream is made. On a tag mismatch, the stitched part is encrypted back with the same counter, so the buffer holds
   the ciphertext it was given when `open` throws, byte for byte. This is tested with forgeries of every kind at 16
@@ -4599,7 +4609,7 @@ below 16 KB).<!-- src: OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" table 
 - **SHA-512/384 on the SHA-512 instructions** (`sha512h`/`sha512h2` for two rounds, `sha512su0`/`sha512su1` for two
   schedule words; ARMv8.2): 1 MB went from 38 M to 4.01 M instructions (−89%; CryptoKit's 4.34 M) and from 1.60 ms to
   0.64 ms (CryptoKit 0.64; times taken under load, indicative), at 489 instructions a block with no calls. The first
-  version's state in captured variables is section 1's SHA-512 example.<!-- src: Bytes/Benchmarks/RESULTS.md "Crypto cleanup" SHA-512 bullet -->
+  version's state in captured variables is [section 1](#1-keep-hot-state-in-registers)'s SHA-512 example.<!-- src: Bytes/Benchmarks/RESULTS.md "Crypto cleanup" SHA-512 bullet -->
   The portable block function was a rolled 80-round loop with a `round >= 16` test per round; written as five groups of
   sixteen rounds with the schedule in sixteen locals, it is about 2,570 instructions a block against about 4,600.<!-- src: same -->
 - **SHA-256** on `sha256h`, `sha256h2`, `sha256su0`, `sha256su1`: 400 µs per MB against CryptoKit's 337, in 6% more
@@ -4656,7 +4666,7 @@ What the work taught:<!-- src: Bytes/Benchmarks/RESULTS-ecc.md "Optimization log
   duplicates by parsing every earlier extension again (quadratic). Walking only what the parse does not read, and keeping
   the first 16 extension identifiers' ranges on the stack, gave −42%. Validation passes add up.<!-- src: Bytes/Benchmarks/RESULTS-scrypt-x509.md "Parsing, per certificate" and Lessons -->
 - **scrypt** (RFC 7914): 1.50–1.53x OpenSSL's speed (17.0 ms against 25.6 for N = 2¹⁴, r = 8). Salsa20/8 is scalar
-  (section 7). The time per Salsa20/8 grows from 29 ns (N ≤ 2¹⁴) to 35–36 ns at 2¹⁶ and above, because ROMix's second
+  ([section 7](#7-branches-and-data-dependent-work)). The time per Salsa20/8 grows from 29 ns (N ≤ 2¹⁴) to 35–36 ns at 2¹⁶ and above, because ROMix's second
   loop reads V[j] at a data-dependent j. One DRAM and TLB miss per BlockMix is exposed and cannot be prefetched, since j
   is known only when the previous BlockMix ends.<!-- src: Bytes/Benchmarks/RESULTS-scrypt-x509.md "Against OpenSSL" -->
 
@@ -4785,19 +4795,19 @@ In general, parallelism helps only the stage that is the bottleneck, and the nex
 
 scrypt's `p` ROMix calls run on `concurrentPerform` lanes with a table per lane (p = 4, N = 2¹⁴: 70 ms on one lane, 17 ms
 on four, 4.1x, with the same 775 M instructions).<!-- src: Bytes/Benchmarks/RESULTS-scrypt-x509.md "scrypt" and "Against OpenSSL" -->
-Many-core memory-bound reads and many-archive extraction are in sections 11 and 12.
+Many-core memory-bound reads and many-archive extraction are in sections [11](#11-techniques-in-the-projects-built-on-bytes) and [12](#12-measuring-honestly).
 
 #### When not to
 
 Parallelism has a floor per call (pool bookkeeping allocations, waking threads whose cores are at low clocks), so small
 inputs stay sequential. Parallel inflate falls back to sequential decoding when its speculation fails. And file-system work
-(section 11) stops scaling at a handful of threads, because the kernel, not the CPU, is the limit.<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel compression"; NativeZipArchive/Benchmarks/RESULTS.md step15 -->
+([section 11](#11-techniques-in-the-projects-built-on-bytes)) stops scaling at a handful of threads, because the kernel, not the CPU, is the limit.<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel compression"; NativeZipArchive/Benchmarks/RESULTS.md step15 -->
 
 ### 11. Techniques in the projects built on Bytes
 
 The libraries above are used by four projects whose job is not a codec but a *workload*: packets, archives, extraction.
-Each found its own limits. (SocketStream, the fifth, is about concurrency and sockets: Part IV ("SocketStream: what the PR
-toolchain's I/O interfaces made possible").)
+Each found its own limits. (SocketStream, the fifth, is about concurrency and sockets: Part IV (["SocketStream: what the PR
+toolchain's I/O interfaces made possible"](#2-socketstream-what-the-pr-toolchains-io-interfaces-made-possible)).)
 
 #### MQTT: views, per-type dispatch, and not decoding twice
 
@@ -4820,7 +4830,7 @@ in the allocator (the contention itself was not measured).<!-- src: MQTT/Benchma
 The techniques, in the order they mattered:
 
 **Zero-copy views.** Parsing copies nothing: payloads and strings are spans of the input (`~Escapable` view types; Part II,
-"`~Escapable`: the compiler checks the lifetime"). Copying the topic, payload, and strings out of the views (2 allocations
+["`~Escapable`: the compiler checks the lifetime"](#escapable-the-compiler-checks-the-lifetime)). Copying the topic, payload, and strings out of the views (2 allocations
 per packet) takes one core from 25.5 M to 7.2 M packets per second.<!-- src: MQTT/Benchmarks/RESULTS.md "What vectorizes" Copies; "2026-11-19" "One core" table (M3 Ultra) -->
 Views have a price in Swift 6.4: `~Escapable` structs with more than 6 leaf fields are destroyed at `-O` even when every
 field is trivial, and from another module the destroy is an indirect call to a no-op through the type's value witness
@@ -4828,7 +4838,7 @@ table. That is 2.5–3% of MQTT's per-packet time. The workaround is at most 6 l
 for packet views.<!-- src: OPTIMIZATION-old.md section 12 table "~Escapable structs with more than 6 leaf fields"; MQTT/Benchmarks/RESULTS.md "MQTTPacket out of the hot paths" last bullet -->
 
 **Aligned cursors.** Every MQTT field is whole bytes, so parsing moved to `AlignedBytesReader` and writing to
-`AlignedBytesWriter` (section 1): PUBLISH encode −6.1% (5,464 K to 5,132 K instructions), parse −0.9 to −2.9%, mixed
+`AlignedBytesWriter` ([section 1](#1-keep-hot-state-in-registers)): PUBLISH encode −6.1% (5,464 K to 5,132 K instructions), parse −0.9 to −2.9%, mixed
 stream −1.8%. Flag bits are read from a `Byte`, not from the stream. MQTT uses `BigEndianBytesReader` and
 `BigEndianBytesWriter`, the same byte-aligned cursors with big-endian integers by default, at identical instruction
 counts.<!-- src: MQTT/Benchmarks/RESULTS.md "2026-11-16: byte-aligned cursors" and "2026-11-17" BigEndianBytesReader bullet; MQTT/Sources/MQTT/Framing.swift MQTTFrame.read(from:); Bytes/Sources/Bytes/CursorMode.swift -->
@@ -4858,7 +4868,7 @@ What did not help: inlining `MQTTPacket(parsing:)` into the caller (4–9% slowe
 `@frozen` (identical code), and wrapping each case in an immediately called closure. The last does not compile: a
 closure's result cannot depend on a lifetime, so it cannot return `~Escapable` values.<!-- src: MQTT/Benchmarks/RESULTS.md "MQTTPacket out of the hot paths" table and bullets -->
 
-**16-byte string scans** (section 4): a string's UTF-8 and forbidden bytes are checked in one NEON pass, replacing the
+**16-byte string scans** ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)): a string's UTF-8 and forbidden bytes are checked in one NEON pass, replacing the
 standard library's out-of-line validation followed by a SWAR scan. Parsing PUBLISH went from 15.1 to 19.0 M packets per
 second (+26%, 14 M to 11 M instructions), and with properties not iterated, +40%.<!-- src: MQTT/Benchmarks/RESULTS.md "16-byte scans" table -->
 
@@ -4925,7 +4935,7 @@ file), and copying into a shared mapping of the destination was slower (4 thread
 Info-ZIP's `unzip`: 20,000 files in 542 ms against 2,170 ms; 1 GB stored in 209 against 3,990. What stays serial: one
 DEFLATE stream decodes on one core (about 2 GB/s).<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step15 table and "What stays serial" -->
 
-**Allocation-free decode.** Section 6's closure-capture fix took inflating 2,000 small files from 4,001 mallocs to 1, with
+**Allocation-free decode.** [Section 6](#6-allocation-free-code)'s closure-capture fix took inflating 2,000 small files from 4,001 mallocs to 1, with
 `sending` instead of `@unchecked Sendable` for the pipelined chunk.<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step4 -->
 Directory parsing also recovered the cost of richer entries. `ZipEntry` stores the DOS time as a `Double` (NaN for none)
 and permissions as a `UInt16`, with `modificationDate` and `posixPermissions` computed and the time conversion out of
@@ -4938,7 +4948,7 @@ DEFLATE's fast loop is untouched.<!-- src: NativeZipArchive/Benchmarks/RESULTS.m
 **Streamed decryption.** Encrypted entries decrypt in 256 KB pieces into a staging buffer as the decompressor takes input
 (except Deflate64 and LZMA, whose decoders read their whole input and still decrypt into one buffer). AES checks the whole
 payload's MAC before any output (WinZip's specification requires it). The staging buffer and decoder are made on the first
-encrypted entry (section 6).<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step16 "Streamed decryption"; OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" last paragraph -->
+encrypted entry ([section 6](#6-allocation-free-code)).<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step16 "Streamed decryption"; OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" last paragraph -->
 
 #### NativeAEA: a decode pipeline against a file system
 
@@ -5028,9 +5038,9 @@ its own copy.<!-- src: AGENTS.md "Shared mutable state the walker reads to decid
 **Results.** Xcode's `.xip` (2.05 GB; 10.35 GB of cpio; 167,193 items) expands in 9.9 s against Apple's `xip --expand` at
 47.8 s (4.8x), with identical output, and 2.2x faster than `unxip`, in less than a third of its memory. Xcode's `.aea`
 extracts 5.2x faster than `aa extract` (8x less system time). Every one of the 167,542 items `aa extract` writes from the `.aea` matches
-byte for byte, compressed bytes included, which depends on the encoder techniques in section 8. Moving the stages from threads
+byte for byte, compressed bytes included, which depends on the encoder techniques in [section 8](#8-algorithms-and-data-structures-codec-by-codec). Moving the stages from threads
 to structured concurrency kept wall time within a few percent (10.30 to 10.01 s for the xip, 9.39 to 9.64 s for the aea;
-Part IV, "NativeAEA: from threads to structured concurrency").<!-- src: NativeAEA/RESULTS.md xip section and APFS compression section "Timing" tables; "structured Swift concurrency" table -->
+Part IV, ["NativeAEA: from threads to structured concurrency"](#3-nativeaea-from-threads-to-structured-concurrency)).<!-- src: NativeAEA/RESULTS.md xip section and APFS compression section "Timing" tables; "structured Swift concurrency" table -->
 
 #### BinaryParsingComparison: what porting swift-binary-parsing taught
 
@@ -5040,7 +5050,7 @@ instruction and malloc counts.<!-- src: OPTIMIZATION-old.md "swift-binary-parsin
 The generated code shows why Bytes' field-by-field parsing is about 2x faster than `ParserSpan` (11 against 23 µs for the
 zip directory):<!-- src: BinaryParsingComparison/RESULTS.md "Why" -->
 
-1. **Overflow-checked advance** after the bounds check (`adds` + `b.vs` per field): section 2.
+1. **Overflow-checked advance** after the bounds check (`adds` + `b.vs` per field): [section 2](#2-remove-the-checks-the-compiler-cannot-prove-away).
 2. **Error locations.** Every throw builds a `ParsingError` carrying that site's byte offset, so each failing read has its
    own throw path. The function is 2.6x larger (568 against 220 instructions), and register pressure spills the cursor's
    position to the stack. Bytes' failing reads branch to one shared throw; because a throwing read consumes nothing,
@@ -5088,7 +5098,7 @@ a byte-at-a-time generic `reduce` where the port does one 8-byte load and a shif
 widths. Measured with them: ELF's section names −24% (25 to 19 K, the 16-byte scan), swift-help −4.9%.<!-- src: OPTIMIZATION-old.md "What the ports taught about Bytes"; BinaryParsingComparison/RESULTS.md "Adopted into Bytes" -->
 It also exposed a caveat of Bytes' own: a QOI port that captured its cursors in closures passed to `[UInt8](capacity:)`
 slowed both libraries, and Bytes more, because its bit offset and bit order, in memory, were re-checked by every byte read
-(section 1).<!-- src: BinaryParsingComparison/RESULTS.md "A Bytes caveat this exposed" -->
+([section 1](#1-keep-hot-state-in-registers)).<!-- src: BinaryParsingComparison/RESULTS.md "A Bytes caveat this exposed" -->
 What swift-binary-parsing could take from Bytes, per the comparison: advance with `&+=` after the bounds check, make
 `sliceSpan(byteCount: Int)` non-generic so slices inline, read odd widths from overlapping loads, and share a throw path.<!-- src: BinaryParsingComparison/RESULTS.md "What swift-binary-parsing could take from Bytes" -->
 
@@ -5099,15 +5109,15 @@ nearly did, and the rules that came out of each.
 
 #### Count instructions, then ask the CPU
 
-Instruction counts are stable between runs, and times drift (Part I, "Instructions, cycles, and time"). So judge a change
+Instruction counts are stable between runs, and times drift (Part I, ["Instructions, cycles, and time"](#51-instructions-cycles-and-time)). So judge a change
 by instruction counts, allocation counts, and codegen, and compare *times* only within one interleaved run (Part I,
-"Interleaved A/B runs").<!-- src: AGENTS.md "Compare times only within one interleaved run" -->
-But instructions can mislead in both directions. Stitching cut time 40% while instructions barely moved (section 7); the
+["Interleaved A/B runs"](#54-interleaved-ab-runs)).<!-- src: AGENTS.md "Compare times only within one interleaved run" -->
+But instructions can mislead in both directions. Stitching cut time 40% while instructions barely moved ([section 7](#7-branches-and-data-dependent-work)); the
 LZMA decoder's instructions rose while cycles fell; the Base64 encoder's instructions fell 2.3x with no change in speed
-(section 2). Where instruction counts and time disagree, `Tools/counters` says why (useful, discarded, front-end, and
+([section 2](#2-remove-the-checks-the-compiler-cannot-prove-away)). Where instruction counts and time disagree, `Tools/counters` says why (useful, discarded, front-end, and
 back-end cycles).<!-- src: Bytes/Benchmarks/RESULTS.md "ChaCha20-Poly1305, stitched"; RESULTS.md LZMA; OPTIMIZATION-old.md "6." -->
 Counts have their own noise too, under about 100 K instructions per iteration and in file-system benchmarks (Part I,
-"Instructions, cycles, and time", gives the ranges).<!-- src: AGENTS.md "What one run can't tell" -->
+["Instructions, cycles, and time"](#51-instructions-cycles-and-time), gives the ranges).<!-- src: AGENTS.md "What one run can't tell" -->
 
 #### One process per benchmark, so fixtures are lazy
 
@@ -5150,7 +5160,7 @@ for names with spaces break (ordo-one/package-benchmark#373).<!-- src: Bytes/Ben
 
 An unchanged reference row (zlib, libdeflate, CryptoKit) next to the changed one is the control: the Adler-32 work
 reported zlib's and libdeflate's 1 MB rows unchanged (64 to 63 and 18 µs, on the M1 Max) beside Bytes' 36 to 19 µs. Do not
-put the new path and its reference in one function behind a run-time flag, and check for function merging (section 5).
+put the new path and its reference in one function behind a run-time flag, and check for function merging ([section 5](#5-inlining-and-specialization)).
 Compare instruction counts across two builds of a harness with care: identical code differed by a constant of about 1.3 K
 instructions per iteration between them.<!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT" table; AGENTS.md "Old and new code in one benchmark run" -->
 Benchmark sizes that are all multiples of a kernel's block size hide its remainder path: include odd sizes (Base64's
@@ -5187,8 +5197,8 @@ does from what the chip does.<!-- src: Writeups/M1-Max-vs-M3-Ultra.md intro; OPT
 machines, an M1 Max core takes 1.31x as long as an M3 Ultra core (geometric mean of the time ratio). The clock ratio is
 1.25 (4.05 against 3.23 GHz), so the M3 gets about 4% more done per clock. Other packages: Base64 (then its own package)
 1.27, MQTT 1.34, NativeZip 1.33, BinaryParsingComparison 1.30, SocketStream 1.32. The three builds (NEON, portable C, Swift
-only) stay within 1.4% of each other on both chips, so the portable builds' near-zero cost (Part II, "Builds and traits:
-optimized, `Portable`, and no-C") is not an M3 artifact.
+only) stay within 1.4% of each other on both chips, so the portable builds' near-zero cost (Part II, ["Builds and traits:
+optimized, `Portable`, and no-C"](#15-builds-and-traits-optimized-portable-and-no-c)) is not an M3 artifact.
 
 Bytes' standings against the references hold. Zstandard's lead over libzstd shrinks from 1.29x to 1.09x on large inputs,
 and one flip (LZ4 swift-help, Bytes 0.93x to 1.05x of `ParserSpan`'s, same instructions) was not investigated.<!-- src: OPTIMIZATION-old.md "15." paragraph 1; Writeups/M1-Max-vs-M3-Ultra.md "The short version" and "Per package" -->
@@ -5219,10 +5229,10 @@ other: derive worker counts from the machine.<!-- src: OPTIMIZATION-old.md "15."
 Memory: L1 3 cycles, L2 17–18 cycles, system-level cache 35–52 ns, DRAM about 122 ns; one core reads 61 GB/s, two 115
 GB/s, and all ten only 126 GB/s.<!-- src: Writeups/M1-Max-vs-M3-Ultra.md same section; Bytes/Benchmarks/RESULTS.md "What the cores can do" read bandwidth -->
 Read as cost per lookup, this core's `tbl` with one or two table registers takes one vector slot, with four about three,
-and a four-register `tbx` four, with 8 cycles of latency (section 4).<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" paragraph after the table; AGENTS.md "Measure a core's instructions rather than assuming" -->
+and a four-register `tbx` four, with 8 cycles of latency ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)).<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" paragraph after the table; AGENTS.md "Measure a core's instructions rather than assuming" -->
 
-**What changed in the code for the M1 Max.** One instruction nobody had used (`udot`; section 4: Adler-32 from 29.8 to
-58.0 GB/s) and the efficiency cores (section 10). **What did not help:** software prefetch on CRC-32 (the fold already runs
+**What changed in the code for the M1 Max.** One instruction nobody had used (`udot`; [section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name): Adler-32 from 29.8 to
+58.0 GB/s) and the efficiency cores ([section 10](#10-parallelism)). **What did not help:** software prefetch on CRC-32 (the fold already runs
 at the memory rate; a distance of 8 KB lost 7–50%), interleaving two halves, and buffer alignment; the AES kernels are
 already at about 90% of the `aese` bound. Candidates not tried: store-heavy and short-copy code, and Base64's decoder
 lookups (tuned around the M3's micro-op counts for `tbl` and `tbx`).<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "M1 Max-specific optimizations explored"; OPTIMIZATION-old.md "15." "What did not help" -->
@@ -5267,7 +5277,7 @@ The cooperative pool has one property that the rest of this part keeps meeting. 
 thread for as long as it runs. NativeAEA's decoder tasks decode a 16 MiB xz block in about 100 ms without a single
 suspension, so 32 of them can occupy every thread of the pool while a just-resumed writer waits for one.
 <!-- src: NativeAEA/ARCHITECTURE.md §9 "Executors and priorities" -->
-Section 3 shows what was measured to find out whether this matters, and that here it did not.
+[Section 3](#3-nativeaea-from-threads-to-structured-concurrency) shows what was measured to find out whether this matters, and that here it did not.
 
 #### 1.2 Executor checks and real hops: `swift_task_switch`
 
@@ -5418,7 +5428,7 @@ The reasons to want one:
   caches.
 - **Isolation from the pool.** A task that blocks or burns CPU on its own executor does not hold a cooperative thread.
 - **Fewer wake-ups.** If the I/O layer can resume a suspended task directly on the thread that is already running the
-  event loop (the loop that waits for sockets to become ready), a read that completes needs no hop at all. Section 2
+  event loop (the loop that waits for sockets to become ready), a read that completes needs no hop at all. [Section 2](#2-socketstream-what-the-pr-toolchains-io-interfaces-made-possible)
   shows exactly that.
 
 ### 2. SocketStream: what the PR toolchain's I/O interfaces made possible
@@ -5511,7 +5521,7 @@ There are two **placements**, chosen by `--placement`:
   its socket's kqueue, and its buffers stay on one thread. For `n` connections that is `2 * n` executors.
 - **`sharedPool`**: one `PThreadTaskExecutor` pool (`Workload.poolSize` threads, one per core by default) for every task.
   The pool hands each job to its next thread in turn, "so a task resumes on a different thread after most reads and
-  writes", the source says. Section 2.4 shows that this is not what happens once tasks are running.
+  writes", the source says. [Section 2.4](#24-nonisolatednonsending-all-the-way-55-to-113-switches-that-were-zero-hops) shows that this is not what happens once tasks are running.
 <!-- src: Transfer.swift `Placement` doc comments and `run` (`executorCount = placement == .sharedPool ? 1 : 2 * workload.connections`); README.md "Placement" -->
 
 #### 2.4 `nonisolated(nonsending)` all the way: 55 to 113 switches that were zero hops
@@ -5624,7 +5634,7 @@ retain and release per read).
 <!-- src: SocketStream/RESULTS.md "Allocations: none per packet" bullets "Receiving" and "Sending"; Transfer.swift `encode` doc comment -->
 
 The packet code itself skips the 153-byte `MQTTPacket` enum on both ends (`MQTTFrame` and per-type `init(parsing:)`/
-`write(to:)`; see Part III, "MQTT: views, per-type dispatch, and not decoding twice"). In memory that took checking
+`write(to:)`; see Part III, ["MQTT: views, per-type dispatch, and not decoding twice"](#mqtt-views-per-type-dispatch-and-not-decoding-twice)). In memory that took checking
 from 21.2 to 36.4 M packets/s (+72%) and encoding from 26.2 to 43.4 M packets/s (+65%), and 64 B on one connection
 from 16.1 to 22.4 M packets/s (+39%).
 <!-- src: SocketStream/RESULTS.md "Skipping the MQTTPacket enum (nonsending-scan16 → frames)" -->
@@ -5666,7 +5676,7 @@ Adding the per-end stage costs predicts what the transfers measure: for TLS at 6
 This is the concurrency lesson in numbers. A single task running its stages in sequence runs at one over the sum of
 its stage costs, and no executor setting changes that. To go faster, one connection has to use more than one core.
 
-Across connections (64 B payloads, command-line runs with `--packets 3000000`, one run each; a different method from the benchmark baselines in section 2.9, so its plain figures for several connections differ from that table's), GB/s:
+Across connections (64 B payloads, command-line runs with `--packets 3000000`, one run each; a different method from the benchmark baselines in [section 2.9](#29-measured-throughput-against-the-kernels-ceiling), so its plain figures for several connections differ from that table's), GB/s:
 
 | Connections | plain | TLS | deflate + TLS |
 |---|---|---|---|
@@ -5762,7 +5772,7 @@ tasks: the calling task, 32 decoders, 1 block producer, 24 writers, and 1 conten
 #### 3.1 Primitives: `Mutex` plus a continuation
 
 Every wait that blocked a thread in the threaded version is `Mutex` state plus a continuation (a free buffer, a job,
-room in a queue, a file system permit, a large-file slot, a fork's turn, a decoded chunk). The rules from section 1.6 apply to all of them:
+room in a queue, a file system permit, a large-file slot, a fork's turn, a decoded chunk). The rules from [section 1.6](#16-continuations-checked-and-unsafe) apply to all of them:
 a synchronous fast path under the lock, no lost wake-ups, one waiter per event resumed outside the lock, waiter storage
 reserved up front (so the steady state allocates nothing), and closing resumes everyone.
 <!-- src: NativeAEA/ARCHITECTURE.md §9 "The primitives" -->
@@ -5807,14 +5817,14 @@ new, interleaved on an idle machine, 3 rounds, medians:
 Instructions are identical to within about 0.2%, and wall time moved little (the aea extraction 0.08–0.25 s higher in
 every round, with CPU time equal or lower; the xip 0.2–0.5 s lower). Peak memory fell by 236 and 268 MB in the two
 extractions (the section's heading says "190–270 MB less memory"). That came mostly from a memory pass made in the same
-change (read buffers that give their pages back, encoders made on first use; section 3.5) rather than from the task
+change (read buffers that give their pages back, encoders made on first use; [section 3.5](#35-two-smaller-lessons-from-the-same-rewrite)) rather than from the task
 structure. The rewrite was for structure (cancellation that releases every buffer, no threads of the library's own)
 rather than speed, and the table shows it cost little or nothing.
 <!-- src: NativeAEA/RESULTS.md "2026-11-19 (concurrency)" heading, table (1449 → 1213, 1627 → 1359 MB: −236, −268, derived), the note on wall times, and "Memory and allocations" bullets (madvise: xip extraction 1398 → 1228 MB, aea 1597 → 1363 MB; encoders and decoders on first use about −35 MB) -->
 
 #### 3.3 Did 32 CPU-bound decoders starve the pool?
 
-The concern from section 1.1 is real on paper. Traced on the synthetic archive, the writers' first wakes waited up to
+The concern from [section 1.1](#11-tasks-executors-and-the-cooperative-pool) is real on paper. Traced on the synthetic archive, the writers' first wakes waited up to
 250 ms (median 25 µs). Three remedies were tried, each interleaved against the threaded build: decoders yielding
 (`Task.yield()`) after every segment, decoders yielding only after resuming the consumer, and decoders one priority
 below the walker and writers. None made a difference beyond run-to-run noise (xip extraction 10.1–11.1 s across all
@@ -5843,8 +5853,8 @@ Failure follows the same path: the first error wins, is stored under the stream'
 #### 3.5 Two smaller lessons from the same rewrite
 
 - **A pool of slots sized for the wrong latency.** Pools that jobs hold until they finish wait on the queue's latency,
-  not on the work: four large-file slots made the walker wait 6.0 s of 9.0 s (Part III, "NativeAEA: a decode pipeline
-  against a file system", has the case and the fix).
+  not on the work: four large-file slots made the walker wait 6.0 s of 9.0 s (Part III, ["NativeAEA: a decode pipeline
+  against a file system"](#nativeaea-a-decode-pipeline-against-a-file-system), has the case and the fix).
   <!-- src: AGENTS.md Lessons "A pool of slots that jobs hold until they finish waits on the queue's latency" -->
 - **Resident memory from a buffer sized for the largest item.** Giving read buffers' pages back after each use
   (`madvise`, described in the same Part III section) saved 170–230 MB across 32 read buffers of 16 MiB, with no
@@ -5868,7 +5878,7 @@ The function is `nonisolated(nonsending)`, so the inline path runs on the caller
 
 **The right width is set by the kernel, not the cores.** Workers creating files contend in the kernel, file-system-wide,
 so file creation is capped at 8 workers, with one worker per entry of 1 MB or more beyond that (Part III,
-"NativeZipArchive: the kernel is the limit", has the width experiments). `ZipExtractor` expresses the same rule without
+["NativeZipArchive: the kernel is the limit"](#nativeziparchive-the-kernel-is-the-limit), has the width experiments). `ZipExtractor` expresses the same rule without
 knowing the counts in advance: "Eight workers take anything; the rest (up to `--jobs`, default all cores) take only
 large files".
 <!-- src: NativeZipArchive/Benchmarks/RESULTS.md "step2 — cap file-creation width at 8" and step15 "Parallelism" -->
@@ -5876,7 +5886,7 @@ large files".
 **Queue discipline.** `ZipExtractor.extract(maxConcurrency:stopOnFirstError:_:)` starts the workers first and then runs
 the planning closure (open archives, select entries, prompt, create directories, resolve collisions). Each planned file
 is queued at once: large ones (1 MB or more) largest first, small ones in order. Overlapping the planning with the writes
-takes it off the wall clock (Part III, "NativeZipArchive: the kernel is the limit", has the numbers). A file replacing
+takes it off the wall clock (Part III, ["NativeZipArchive: the kernel is the limit"](#nativeziparchive-the-kernel-is-the-limit), has the numbers). A file replacing
 one that is already being written waits until the pool is done; symbolic links follow every file, then directory
 metadata, deepest level first, each level in parallel.
 <!-- src: NativeZipArchive/Benchmarks/RESULTS.md step15 "Parallelism" bullets -->
@@ -5884,8 +5894,8 @@ metadata, deepest level first, each level in parallel.
 **A pipelined write for large entries.** `ZipDecoder.decodePipelined` keeps two 1 MB buffers: chunk N is written in a
 child task while chunk N+1 inflates, for deflated entries of 4 MB or more.
 <!-- src: NativeZipArchive/Benchmarks/RESULTS.md "step3" bullet on inflatePipelined (the function is now `decodePipelined`: NativeZipArchive/Sources/NativeZip/ZipDecoder.swift) -->
-Parallel writes to one file gain nothing, because the kernel serializes them (Part III, "NativeZipArchive: the kernel
-is the limit").
+Parallel writes to one file gain nothing, because the kernel serializes them (Part III, ["NativeZipArchive: the kernel
+is the limit"](#nativeziparchive-the-kernel-is-the-limit)).
 <!-- src: NativeZipArchive/Benchmarks/RESULTS.md step15 "One large stored file (1 GB)" bullet -->
 
 #### 4.2 BytesAsync: offloading synchronous work
@@ -5901,7 +5911,7 @@ the choice between them is a measurement:
 <!-- src: Bytes/Sources/BytesAsync/Offloading.swift header comment -->
 
 The helper behind the first is a one-line `@concurrent` function, `perform(_:)`, taking a non-escaping closure (Part II,
-"Async: `BytesAsync`", shows it), so no closure context is allocated.
+["Async: `BytesAsync`"](#11-async-bytesasync), shows it), so no closure context is allocated.
 <!-- src: Bytes/Sources/BytesAsync/Offloading.swift lines 20-23 -->
 DEFLATE level 1 in 64 KiB calls took the same time with `concurrently()` as in place, and a Dispatch queue hop cost
 +7%.
@@ -5922,12 +5932,12 @@ The parallel codecs use the same pattern. Their async entry points are `nonisola
 discarding task group (`runConcurrently`) or on a Dispatch queue (`run(on:)`).
 <!-- src: Bytes/Sources/BytesAsync/ParallelCodecs.swift header comment and lines 20-48 -->
 Cancellation is cooperative inside them: a task cancellation handler sets `ChunkScheduler`'s stop flag, chunks under way
-finish, and the call throws `BytesError.cancelled` (Part III, "Chunks pulled from a queue, not rounds").
+finish, and the call throws `BytesError.cancelled` (Part III, ["Chunks pulled from a queue, not rounds"](#chunks-pulled-from-a-queue-not-rounds)).
 <!-- src: Bytes/Benchmarks/RESULTS.md "Cancellation for the async parallel codecs" -->
 
 As for how the parallel forms compare, a task group was up to 10% faster than `concurrentPerform` in the harness
 (dickens L1 2.01 against 2.19 ms) and 0–7% faster in the benchmarks, with more spread, but allocates more per call (34 and 98 mallocs at 8 and 24
-lanes, against 11 and 27; Part III, "Allocation-free code").
+lanes, against 11 and 27; Part III, ["Allocation-free code"](#6-allocation-free-code)).
 <!-- src: Bytes/Benchmarks/RESULTS.md "A task group was up to 10% faster than concurrentPerform" and "Allocation: the sequential paths allocate nothing" -->
 
 Lending memory across an await is the last piece. `RawSpan.withLentBytes` and `OutputRawSpan.withLentFreeCapacity` hand
@@ -5979,7 +5989,7 @@ All of these are stable, widely linked pages. Swift Evolution links use the prop
 - [SE-0446 Nonescapable types](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0446-non-escapable.md):
   `~Escapable`, the rule that makes spans safe without a lock or a copy.
 - [SE-0447 `Span`](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0447-span-access-shared-contiguous-storage.md):
-  `Span` and `RawSpan`, the borrowed views Part II is built on.
+  `Span` and `RawSpan`, the borrowed views [Part II](#part-ii-the-bytes-toolkit-bottom-up) is built on.
 - [SE-0467 `MutableSpan`](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0467-MutableSpan.md):
   the writable counterpart.
 - [SE-0485 `OutputSpan`](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0485-outputspan.md):
@@ -6012,7 +6022,7 @@ All of these are stable, widely linked pages. Swift Evolution links use the prop
 - [SE-0302 `Sendable` and `@Sendable` closures](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0302-concurrent-value-and-concurrent-closures.md):
   what may cross a concurrency boundary.
 - [SE-0338 Clarify the execution of non-actor-isolated async functions](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0338-clarify-execution-non-actor-async.md):
-  why plain `nonisolated async` functions run on the generic executor (the origin of the checks in section 2).
+  why plain `nonisolated async` functions run on the generic executor (the origin of the checks in [section 2](#2-socketstream-what-the-pr-toolchains-io-interfaces-made-possible)).
 - [SE-0381 `DiscardingTaskGroup`](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0381-task-group-discard-results.md):
   the task group NativeAEA and NativeZip use for long-lived workers.
 - [SE-0392 Custom actor executors](https://github.com/swiftlang/swift-evolution/blob/main/proposals/0392-custom-actor-executors.md):
@@ -6048,7 +6058,7 @@ All of these are stable, widely linked pages. Swift Evolution links use the prop
 #### 6.5 Arm and CPU documentation
 
 - [Arm Neon intrinsics reference](https://developer.arm.com/architectures/instruction-sets/intrinsics/):
-  each NEON intrinsic, the instruction it compiles to, and what it does; covers the instructions in Part I and Part III.
+  each NEON intrinsic, the instruction it compiles to, and what it does; covers the instructions in [Part I](#part-i-foundations) and [Part III](#part-iii-techniques-by-problem).
 - [Arm Neoverse and Cortex software optimization guides](https://developer.arm.com/documentation/):
   latency and throughput tables, and the meaning of each pipeline's units, for the Arm cores closest to Apple's.
 - [Arm Architecture Reference Manual for A-profile](https://developer.arm.com/documentation/ddi0487/latest):
@@ -6095,7 +6105,7 @@ All of these are stable, widely linked pages. Swift Evolution links use the prop
 - [zstd](https://github.com/facebook/zstd) and [Brotli](https://github.com/google/brotli): the reference implementations.
 - [The xz file format](https://tukaani.org/xz/xz-file-format.txt) and the LZMA specification in the
   [LZMA SDK](https://www.7-zip.org/sdk.html): the range coder and the `.xz` container.
-- [RFC 8439, ChaCha20-Poly1305](https://www.rfc-editor.org/rfc/rfc8439): the AEAD whose stitched kernel is in Part III.
+- [RFC 8439, ChaCha20-Poly1305](https://www.rfc-editor.org/rfc/rfc8439): the AEAD whose stitched kernel is in [Part III](#part-iii-techniques-by-problem).
 - [NIST SP 800-38D, GCM](https://csrc.nist.gov/pubs/sp/800/38/d/final): AES-GCM and GHASH.
 - [RFC 8446, TLS 1.3](https://www.rfc-editor.org/rfc/rfc8446): the key schedule and record layer SocketStream's TLS follows.
 - [RFC 8448, TLS 1.3 example handshake traces](https://www.rfc-editor.org/rfc/rfc8448): the vectors the tests replay.
@@ -6196,7 +6206,7 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **Critical path**: the longest dependency chain in a loop; sets its minimum time per iteration.
 - **Cross-module optimization**: inlining and specializing code from another module, which `@inlinable` makes possible.
   Inlining decisions depend on a module's contents, so moving code between modules changed instruction counts even when
-  it stayed inlined (Part III, "Inlining and specialization").
+  it stayed inlined (Part III, ["Inlining and specialization"](#5-inlining-and-specialization)).
 - **Cursor**: a small value that remembers a position in a span and reads or writes fields in order (`BytesReader`,
   `BytesWriter`); fast only while its fields stay in registers.
 - **Cursor mode (`BytesCursorMode`)**: the type that specializes `GenericBytesReader` and `GenericBytesWriter`:
@@ -6264,7 +6274,7 @@ Each term is bold where the text first defines it; this list collects the terms 
   itself cause inlining.
 - **`@inline(always)`, `@inline(__always)`**: the guaranteed and the hint-only inlining attributes. The SIL inliner
   declined an `@inline(__always)` function once its caller's loop grew; `@inline(always)` (Swift 6.4, SE-0496) inlined it
-  (Part I, "Inlining and its cost model").
+  (Part I, ["Inlining and its cost model"](#42-inlining-and-its-cost-model)).
 - **`InlineArray`**: `InlineArray<N, T>` stores exactly `N` elements in the value that holds it, with no allocation and no
   reference count. Indexing one that is a stored property or a `borrowing` parameter can copy the whole array per access;
   take its `span` once and index that.
@@ -6300,8 +6310,11 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **Lending (`LentBytes`)**: handing a span's memory to other threads or child tasks as a `Sendable` pointer
   (`withLentBytes`, `withLentFreeCapacity`), through scoped functions whose rule is that the work using it must finish
   before the function returns; the async forms guarantee that with `await`.
-- **Lifetime annotation (`@_lifetime`)**: the declaration of whose lifetime a returned non-escapable value borrows, such as
-  `@_lifetime(copy data)`, which lets a function return a span.
+- **Lifetime annotation (`@_lifetime`)**: the declaration of what a returned non-escapable value depends on, which lets a
+  function return a span. `@_lifetime(copy data)`: the result inherits the lifetime of `data`, itself non-escapable (a
+  span parameter), so it lives as long as the memory `data` views. `@_lifetime(borrow x)`: the result borrows `x` itself
+  (an array, a buffer that owns its memory) and is valid only while `x` is. "Copy" refers to the dependence, never to
+  bytes.
 - **LLVM IR**: the lower-level representation SIL is turned into, where LLVM's general passes run.
 - **Longest-processing-time scheduling**: sorting work items largest first, so a big item does not start last and leave
   the other workers idle (NativeZipArchive's worker pool).
