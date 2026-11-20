@@ -1,4 +1,6 @@
+import BytesTestSupport
 import Foundation
+@_spi(Benchmarking) import NativeZip
 import zlib
 
 /// Deterministic benchmark archives, generated once and cached in a fixed temporary directory.
@@ -13,20 +15,66 @@ enum Fixtures {
     static var zstdText: URL { root.appending(path: "text-zstd.zip") } // the 32 MB text as Zstandard (method 93), level 3
     static var zstdRaster: URL { root.appending(path: "raster-zstd.zip") } // the 32 MB raster as Zstandard, level 3
 
-    /// A per-iteration scratch directory for extraction output, always inside `root`.
-    static func scratchDirectory() -> URL {
-        root.appending(path: "scratch").appending(path: UUID().uuidString)
+    /// Where extraction benchmarks write: `.noindex`, so Spotlight doesn't index what they extract.
+    static var output: URL { root.appending(path: "output.noindex") }
+
+    /// A new directory (not yet created) for one sample's extraction output, inside `output`.
+    static func outputDirectory() -> URL {
+        output.appending(path: UUID().uuidString)
     }
 
-    /// Removes a directory previously returned by `scratchDirectory()`, refusing anything else.
-    static func removeScratch(_ url: URL) {
-        let scratch = root.appending(path: "scratch").standardizedFileURL.path + "/"
-        guard url.standardizedFileURL.path.hasPrefix(scratch) else { fatalError("Refusing to remove \(url.path)") }
-        try? FileManager.default.removeItem(at: url)
+    /// Removes a directory returned by `outputDirectory()`, refusing anything else.
+    ///
+    /// The 2,000-file benchmarks call this after every sample, outside the measurement. Leaving their files until
+    /// teardown was tried: extraction then ran 1–23% slower (instructions +4–15%) as the files piled up, and deleting
+    /// them all at the end (unlinked on 8 threads) took longer than deleting as it went. One 32 MB file is kept
+    /// until teardown instead: deleted after every sample, some samples of `Extract 32 MB random` took 2–9x as long (the
+    /// p50 went from 3.9 to 9 ms in one run); kept, one run's samples were all within 15% of the fastest (a single
+    /// observation: another run, under other agents' load, still spread from 3.9 to 16 ms).
+    static func remove(_ directory: URL) {
+        let parent = output.standardizedFileURL.path + "/"
+        guard directory.standardizedFileURL.path.hasPrefix(parent) else { fatalError("Refusing to remove \(directory.path)") }
+        try? FileManager.default.removeItem(at: directory)
     }
 
+    /// Removes every sample's directory under `output` (a benchmark's teardown).
+    static func removeOutput() {
+        for name in (try? FileManager.default.contentsOfDirectory(atPath: output.path)) ?? [] {
+            remove(output.appending(path: name))
+        }
+    }
+
+    /// `count` pseudo-random bytes (SplitMix64, eight bytes a step, so made quickly).
+    static func randomBytes(count: Int) -> [UInt8] {
+        var rng = SplitMix64(seed: UInt64(count))
+        return rng.packedBytes(count)
+    }
+
+    /// Checks the `Bytes` central-directory parser against the original `ByteReader` one: the same entries and payload
+    /// ranges in every fixture archive.
+    static func checkParsersAgree() throws {
+        for url in [smallFiles, largeText, largeRandom] {
+            let archive = try ZipArchive(url: url)
+            let original = try ZipArchive.entriesUsingByteReader(of: url)
+            precondition(archive.entries.count == original.count)
+            for (new, old) in Swift.zip(archive.entries, original) {
+                let sameHeader = new.path == old.path && new.kind == old.kind && new.method == old.method && new.flags == old.flags
+                let sameSizes = new.crc32 == old.crc32 && new.compressedSize == old.compressedSize
+                    && new.uncompressedSize == old.uncompressedSize && new.localHeaderOffset == old.localHeaderOffset
+                let sameAttributes = new.posixPermissions == old.posixPermissions && new.modificationDate == old.modificationDate
+                precondition(sameHeader && sameSizes && sameAttributes, "Parsers disagree on \(new.path)")
+                let payload = try archive.payloadCount(of: new)
+                let originalPayload = try archive.payloadCountUsingByteReader(of: old)
+                precondition(payload == originalPayload, "Payloads disagree on \(new.path)")
+            }
+        }
+    }
+
+    /// Makes the fixture archives if they aren't there yet (about 20 s; then cached in `root`), and the output
+    /// directory. Called from `Benchmark.setup`, so only before a benchmark runs, not when they're listed.
     static func prepare() throws {
         let fileManager = FileManager.default
+        try fileManager.createDirectory(at: output, withIntermediateDirectories: true)
         if fileManager.fileExists(atPath: largeRandom.path) { return }
 
         let source = root.appending(path: "source")
@@ -106,7 +154,7 @@ enum Fixtures {
     }
 
     private static func zip(_ directory: String, into archive: URL, from source: URL) throws {
-        try run("/usr/bin/zip", ["-qr", archive.path, directory], in: source)
+        try ExternalTool.run("/usr/bin/zip", ["-qr", archive.path, directory], in: source)
     }
 
     /// A one-entry archive of `directory/file` compressed by the `zstd` command (`brew install zstd`) at level 3:
@@ -117,8 +165,8 @@ enum Fixtures {
         let work = root.appending(path: "zstd-work")
         try FileManager.default.createDirectory(at: work.appending(path: directory), withIntermediateDirectories: true)
         let compressed = work.appending(path: directory).appending(path: file)
-        try run("/usr/bin/env", ["zstd", "-q", "-3", "-f", source.appending(path: directory).appending(path: file).path, "-o", compressed.path], in: work)
-        try run("/usr/bin/zip", ["-q0r", archive.path, directory], in: work)
+        try ExternalTool.run("/usr/bin/env", ["zstd", "-q", "-3", "-f", source.appending(path: directory).appending(path: file).path, "-o", compressed.path], in: work)
+        try ExternalTool.run("/usr/bin/zip", ["-q0r", archive.path, directory], in: work)
         var raw = try [UInt8](Data(contentsOf: archive))
         let crc = original.withUnsafeBytes { UInt32(crc32(0, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt($0.count))) }
         func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
@@ -132,28 +180,5 @@ enum Fixtures {
             store(UInt32(original.count), at: base + size)
         }
         try Data(raw).write(to: archive)
-    }
-
-    private static func run(_ tool: String, _ arguments: [String], in directory: URL) throws {
-        let process = Process()
-        process.executableURL = URL(filePath: tool)
-        process.arguments = arguments
-        process.currentDirectoryURL = directory
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw CocoaError(.fileWriteUnknown) }
-    }
-}
-
-struct SplitMix64 {
-    private var state: UInt64
-    init(seed: UInt64) { state = seed }
-
-    mutating func next() -> UInt64 {
-        state &+= 0x9E37_79B9_7F4A_7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-        return z ^ (z >> 31)
     }
 }

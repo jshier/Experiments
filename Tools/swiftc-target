@@ -23,7 +23,7 @@
 # The toolchain is whatever `swift build` used: set TOOLCHAINS for another.
 #
 # example:
-#   Tools/swiftc-target Base64 Base64 -- -emit-ir -o /tmp/Base64.ll
+#   Tools/swiftc-target Bytes BytesBase64 -- -emit-ir -o /tmp/BytesBase64.ll
 source "$(dirname "$0")/lib/common.sh"
 
 configuration=release refresh= print=

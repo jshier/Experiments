@@ -32,6 +32,9 @@ internal import Dispatch
 ///   task group on the cooperative thread pool. The fastest of the three on an M3 Ultra (10% ahead of
 ///   `concurrentPerform`, whose last workers started later), but it occupies the cooperative pool's threads
 ///   for the whole call.
+///
+/// The async forms stop early when their task is cancelled: workers take no more chunks (those under way
+/// finish), and the call throws ``BytesError/cancelled`` with the output incomplete.
 @safe
 public struct ParallelDeflateEncoder: ~Copyable {
     /// The container: raw DEFLATE, zlib, or gzip.
@@ -132,10 +135,14 @@ public struct ParallelDeflateEncoder: ~Copyable {
     ///   written).
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
         let job = try begin(byteCount: input.byteCount, into: &output)
-        // Unsafe: the input and the output's free capacity lent to the workers. Safe: `run` returns only once
-        // every worker has.
+        // Unsafe: the input, the output's free capacity, and the lanes' and slots' storage lent to the workers.
+        // Safe: `run` returns only once every worker has, and the storage keeps its size meanwhile.
         let delivery = unsafe input.withLent(output: &output) { source, target in
-            unsafe batch(job, input: source, output: target).run()
+            let (lanes, slots) = unsafe buffers()
+            return unsafe scheduler.run(
+                job, chunkCount: job.chunkCount, format: job.format, lanes: lanes, slots: slots, input: source, output: target,
+                checksum: job.initialChecksum
+            )
         }
         try Self.end(delivery, job: job, into: &output)
     }
@@ -151,6 +158,8 @@ public struct ParallelDeflateEncoder: ~Copyable {
 
     /// The call's workers over lent input and output, to run.
     package mutating func batch(_ job: Job, input: LentBytes, output: LentMutableBytes) -> ChunkBatch {
+        // Unsafe: the lanes' and slots' storage, for the batch's workers. Safe: `BytesAsync` runs the batch to
+        // its end within the call that lent the input and output, while the encoder is borrowed.
         let (lanes, slots) = unsafe buffers()
         return unsafe scheduler.batch(
             job, chunkCount: job.chunkCount, format: job.format, lanes: lanes, slots: slots, input: input, output: output,
@@ -160,8 +169,10 @@ public struct ParallelDeflateEncoder: ~Copyable {
 
     /// Ends a call once its workers are done (the delivered bytes already counted in `output`): the trailer.
     ///
-    /// - Throws: ``BytesError/insufficientCapacity`` if the output ran out of room.
+    /// - Throws: ``BytesError/cancelled`` if the batch was stopped before the end (no trailer is written),
+    ///   ``BytesError/insufficientCapacity`` if the output ran out of room.
     package static func end(_ delivery: ChunkDelivery, job: Job, into output: inout OutputRawSpan) throws(BytesError) {
+        guard !delivery.cancelled else { throw .cancelled }
         guard !delivery.failed else { throw .insufficientCapacity }
         try write(trailer: job.format, checksum: delivery.checksum, length: job.byteCount, into: &output)
     }
@@ -365,6 +376,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
     private mutating func compressWindow(finishing: Bool) {
         let pending = windowEnd &- historyCount
         let job = job(byteCount: pending, base: historyCount, finishing: finishing)
+        // Unsafe: the lanes' storage as a pointer. Safe: used only within this call, while `lanes` keeps its size.
         let lanes = unsafe laneBuffer()
         do {
             let data = window.span.bytes.extracting(0..<windowEnd)

@@ -7,6 +7,11 @@ The 2026-11-19 section below compares this machine's numbers with an M1 Max's (b
 
 ## 2026-11-19: M1 Max against M3 Ultra (baselines `d2-zip2` → `m1max`)
 
+> Later the same day the benchmark file was reworked for runtime: the three `Open + extract …` benchmarks were removed
+> (each `Extract …` sample already opens the archive; they differed by ~0.2 ms of parsing, which `Parse central
+> directory` measures; `Extract 2,000 small files: Bytes` is the equivalent row), CRC-32 inputs are made once in setup,
+> and iteration counts changed. The rows below are from the old settings.
+
 Every package's benchmarks were re-run on a new machine, an M1 Max. Same macOS (27.2 / 27.2.1) and
 compiler (Swift 6.4.4, Xcode 27.3); what differs is the hardware:
 

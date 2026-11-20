@@ -2,7 +2,7 @@ import SocketStream
 import Testing
 
 /// Run with the PR toolchain and its Concurrency runtime (see README.md).
-@Suite(.serialized) struct TransferTests {
+@Suite struct TransferTests {
     /// Every packet arrives, in order, checked, in every mode and placement.
     @Test(arguments: TransferMode.allCases, Placement.allCases)
     func transfers(mode: TransferMode, placement: Placement) async throws {

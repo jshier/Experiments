@@ -2,7 +2,7 @@
 
 Every number below comes from one of these logs, named in the text by file and baseline or section:
 `Bytes/Benchmarks/RESULTS.md` (cited as **Bytes**), `MQTT/Benchmarks/RESULTS.md` (**MQTT**),
-`Base64/Benchmarks/RESULTS.md` (**Base64**), `NativeZipArchive/Benchmarks/RESULTS.md` (**NativeZip**),
+`Bytes/Benchmarks/RESULTS-base64.md` (**Base64**; was `Base64/Benchmarks/RESULTS.md`), `NativeZipArchive/Benchmarks/RESULTS.md` (**NativeZip**),
 `BinaryParsingComparison/RESULTS.md` (**BPC**), `SocketStream/RESULTS.md` (**SocketStream**), the 2026-11-17
 tracking log (**tracking**), and `Bytes/OPTIMIZATION.md` (**OPTIMIZATION**). Commit dates are from `git log`.
 Ratios in the "Factor" columns are computed from the two cited numbers. All runs: M3 Ultra, macOS 27.2,
@@ -346,7 +346,7 @@ Renamed or removed on the way: `isSet(at:)` (the `bit:` subscript does it), `rea
 
 ## 5. Compiler and toolchain findings (reports 22–28)
 
-From `~/Downloads/swift-bugs/README.md`. All are written with reproducers and marked "ready to file; not
+From `~/Scratch/swift-bugs/README.md`. All are written with reproducers and marked "ready to file; not
 filed"; three are to be posted as comments on existing issues.
 
 | # | Report | Status |

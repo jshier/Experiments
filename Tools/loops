@@ -28,8 +28,8 @@
 #
 # examples (Base64's two kernels: the NEON table kernel, without lane-at-a-time inserts, and the
 # auto-vectorized 3-byte-group kernel):
-#   Tools/loops --target Base64 Base64 encodeBlocks --require tbl,zip --forbid mov.b,ins
-#   Tools/loops --target Base64 Base64 'encode\(_:into:alphabet' --require ld3.16b,st4.16b
+#   Tools/loops --target Bytes BytesBase64 encodeBlocks --require tbl,zip --forbid mov.b,ins
+#   Tools/loops --target Bytes BytesBase64 'encode\(_:into:alphabet:\)' --require ld3.16b,st4.16b
 #   Tools/loops .build/release/mqtt-benchmarks 'MQTTPublish.init' --body
 source "$(dirname "$0")/lib/common.sh"
 

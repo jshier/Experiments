@@ -2,6 +2,7 @@
 // move the cursor on nil or a throw, and every packet accepted re-encodes into bytes the parser accepts.
 
 import Bytes
+import BytesTestSupport
 import MQTT
 import Testing
 
@@ -112,17 +113,6 @@ func corpus() throws -> [[UInt8]] {
     ]
 }
 
-struct SplitMix64: RandomNumberGenerator {
-    var state: UInt64
-    mutating func next() -> UInt64 {
-        state &+= 0x9E37_79B9_7F4A_7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-        return z ^ (z >> 31)
-    }
-}
-
 // MARK: - Fuzzing
 
 @Suite struct Fuzz {
@@ -145,7 +135,7 @@ struct SplitMix64: RandomNumberGenerator {
     }
 
     @Test func randomMutations() throws {
-        var rng = SplitMix64(state: 0xC0FFEE)
+        var rng = SplitMix64(seed: 0xC0FFEE)
         var accepted = 0, failed = 0, incomplete = 0, notRoundTripping = 0
         var reencodedRejected: [String] = []
         let seeds = try corpus()

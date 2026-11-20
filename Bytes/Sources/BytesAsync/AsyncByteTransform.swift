@@ -3,9 +3,15 @@ public import Dispatch
 
 /// A stage of a byte pipeline whose calls may suspend: `Bytes`' ``Bytes/ByteTransform``, `async`.
 ///
-/// Any `ByteTransform` becomes one with ``Bytes/ByteTransform/synchronously()`` (its calls run in place) or
-/// ``Bytes/ByteTransform/offloaded(to:)`` (its calls run on a Dispatch queue, so a heavy stage, a compressor at a
-/// high level, doesn't hold a thread of Swift's cooperative pool while it works).
+/// Any `ByteTransform` becomes one with ``Bytes/ByteTransform/synchronously()`` (its calls run in place, on the
+/// caller's executor), ``Bytes/ByteTransform/concurrently()`` (its calls run in a `@concurrent` function, on the
+/// global concurrent executor: never on the caller's actor), or ``Bytes/ByteTransform/offloaded(to:)`` (its calls
+/// run on a Dispatch queue, so a heavy stage, a compressor at a high level, doesn't hold a thread of Swift's
+/// cooperative pool while it works).
+///
+/// The requirement is `nonisolated(nonsending)`: it borrows the caller's spans (`inout OutputRawSpan`), which can't
+/// cross to another isolation domain, so a stage that moves its work elsewhere lends the memory for the call
+/// (``Bytes/RawSpan/withLentBytes(_:)``) and awaits the work before returning.
 ///
 /// Stages follow `ByteTransform`'s rules, including the end of a stream: `.finished` at `.finish`, or a throw.
 public protocol AsyncByteTransform: ~Copyable {
@@ -97,9 +103,21 @@ public extension ByteTransform where Self: ~Copyable {
         SynchronousTransform(self)
     }
 
+    /// This stage as an asynchronous one whose calls run in a `@concurrent` function: on Swift's global
+    /// concurrent executor, in the calling task, so never on the caller's actor. A caller that's already on the
+    /// global executor (a nonisolated task) runs the stage without changing threads; one on an actor hops off
+    /// and back per call. Priority and task-locals carry over, as for any call.
+    ///
+    /// The structured way to keep a heavy stage off an actor; prefer it to ``offloaded(to:)`` unless the
+    /// work must stay off the cooperative pool's threads.
+    consuming func concurrently() -> ConcurrentTransform<Self> where Self: SendableMetatype {
+        ConcurrentTransform(self)
+    }
+
     /// This stage as an asynchronous one whose calls run on `queue`: the calling task suspends, and its thread
     /// is free, while the stage works. One hop to the queue and one back per call, so for calls that do a lot
-    /// (a compressor's block, a large batch), not a few bytes.
+    /// (a compressor's block, a large batch), not a few bytes. ``concurrently()`` is the structured alternative;
+    /// this is for work that must stay off the cooperative pool's threads, or run on a queue of its own.
     ///
     /// - Parameter queue: Where the calls run.
     consuming func offloaded(to queue: DispatchQueue) -> OffloadedTransform<Self> where Self: SendableMetatype {
@@ -159,10 +177,88 @@ public struct OffloadedTransform<Base: ByteTransform & ~Copyable & SendableMetat
     }
 }
 
-/// A stage, for a closure on another thread. Unsafe: a pointer, valid while its owner keeps the stage borrowed.
+/// A `ByteTransform` as an ``AsyncByteTransform`` whose calls run in a `@concurrent` function: from
+/// ``Bytes/ByteTransform/concurrently()``.
+public struct ConcurrentTransform<Base: ByteTransform & ~Copyable & SendableMetatype>: ~Copyable {
+    /// The stage.
+    public var base: Base
+
+    /// Wraps `base`.
+    ///
+    /// - Parameter base: The stage.
+    public init(_ base: consuming Base) {
+        self.base = base
+    }
+}
+
+/// A stage, for work in another isolation domain. Unsafe: a pointer, valid while its owner keeps the stage borrowed.
 @unsafe
 struct UnsafeStage<Base: ~Copyable>: @unchecked Sendable {
     let pointer: UnsafeMutablePointer<Base>
+}
+
+extension UnsafeStage where Base: ByteTransform & ~Copyable {
+    /// Runs the stage over lent input and output: what the offloaded forms run elsewhere.
+    ///
+    /// Unsafe: the stage's pointer and the lent buffers. Safe when the caller keeps all three borrowed until this
+    /// returns (each form awaits it).
+    ///
+    /// - Returns: The stage's progress (what it wrote is the prefix of `target` it reports), or its error (then
+    ///   nothing is counted written).
+    func transform(_ source: LentBytes, into target: LentMutableBytes, flush: TransformFlush) -> Result<TransformProgress, Base.Failure> {
+        var output = unsafe OutputRawSpan(buffer: target.buffer, initializedCount: 0)
+        let result: Result<TransformProgress, Base.Failure>
+        do throws(Base.Failure) {
+            result = .success(try unsafe pointer.pointee.transform(source.span, into: &output, flush: flush))
+        } catch {
+            result = .failure(error)
+        }
+        _ = unsafe output.finalize(for: target.buffer)
+        return result
+    }
+}
+
+/// Lends `input`, `output`'s free capacity, and `stage` to `run`, which runs the stage elsewhere; counts what it
+/// wrote. The part ``ConcurrentTransform`` and ``OffloadedTransform`` share.
+nonisolated(nonsending) func transformLending<Base: ByteTransform & ~Copyable>(
+    _ stage: inout Base, _ input: RawSpan, into output: inout OutputRawSpan,
+    _ run: nonisolated(nonsending) (UnsafeStage<Base>, LentBytes, LentMutableBytes) async -> Result<TransformProgress, Base.Failure>
+) async throws(Base.Failure) -> TransformProgress {
+    // The stage's pointer escapes its closure: `stage` is `inout` for this whole call, so it stays put, and `run`
+    // finishes with it before this call returns.
+    let pointer = withUnsafeMutablePointer(to: &stage) { unsafe UnsafeStage(pointer: $0) }
+    var result: Result<TransformProgress, Base.Failure> = .success(TransformProgress(consumed: 0, produced: 0, status: .needsInput))
+    // Unsafe: the input, the output's free capacity, and the stage lent to work elsewhere. Safe: `run` awaits it.
+    _ = await unsafe input.withLentBytes { source in
+        await unsafe output.withLentFreeCapacity { target in
+            result = await unsafe run(pointer, source, target)
+            return (try? result.get())?.produced ?? 0
+        }
+    }
+    return try result.get()
+}
+
+extension ConcurrentTransform: AsyncByteTransform where Base: ~Copyable & SendableMetatype {
+    /// The stage's error type.
+    public typealias Failure = Base.Failure
+
+    /// Runs the stage's `transform` on the global concurrent executor (a `@concurrent` function), suspending
+    /// until it returns if that means leaving the caller's executor.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append transformed bytes.
+    ///   - flush: Whether to finish the output so far (or the whole stream) once `input` is used.
+    /// - Returns: The stage's progress.
+    /// - Throws: The stage's `Failure`.
+    public nonisolated(nonsending) mutating func transform(
+        _ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush
+    ) async throws(Failure) -> TransformProgress {
+        try await unsafe transformLending(&base, input, into: &output) { stage, source, target in
+            // Unsafe: the lent stage and buffers, used off this executor. Safe: awaited before they're released.
+            await perform { unsafe stage.transform(source, into: target, flush: flush) }
+        }
+    }
 }
 
 extension OffloadedTransform: AsyncByteTransform where Base: ~Copyable & SendableMetatype {
@@ -181,39 +277,9 @@ extension OffloadedTransform: AsyncByteTransform where Base: ~Copyable & Sendabl
         _ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush
     ) async throws(Failure) -> TransformProgress {
         let queue = queue
-        // The stage's pointer escapes its closure: `self` is `inout` for this whole call, so `base` stays put,
-        // and the closure on `queue` finishes before the call returns.
-        let stage = withUnsafeMutablePointer(to: &base) { unsafe UnsafeStage(pointer: $0) }
-        var progress = TransformProgress(consumed: 0, produced: 0, status: .needsInput)
-        var failure: Failure?
-        // Unsafe: the input, the output's free capacity, and the stage lent to a closure on `queue`. Safe: it's
-        // awaited before this call returns.
-        _ = await unsafe input.withLentBytes { source in
-            await unsafe output.withLentFreeCapacity { target in
-                let result: Result<TransformProgress, Failure> = await unsafe withUnsafeContinuation { continuation in
-                    queue.async {
-                        var output = unsafe OutputRawSpan(buffer: target.buffer, initializedCount: 0)
-                        do throws(Failure) {
-                            let progress = try unsafe stage.pointer.pointee.transform(source.span, into: &output, flush: flush)
-                            _ = unsafe output.finalize(for: target.buffer)
-                            unsafe continuation.resume(returning: .success(progress))
-                        } catch {
-                            _ = unsafe output.finalize(for: target.buffer)
-                            unsafe continuation.resume(returning: .failure(error))
-                        }
-                    }
-                }
-                switch result {
-                case let .success(value):
-                    progress = value
-                    return value.produced
-                case let .failure(error):
-                    failure = error
-                    return 0
-                }
-            }
+        return try await unsafe transformLending(&base, input, into: &output) { stage, source, target in
+            // Unsafe: the lent stage and buffers, used on `queue`. Safe: `perform` returns after the block has.
+            await perform(on: queue) { unsafe stage.transform(source, into: target, flush: flush) }
         }
-        if let failure { throw failure }
-        return progress
     }
 }

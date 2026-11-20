@@ -72,7 +72,8 @@ Beyond the types below, `Bytes` extends the standard library (DocC can't link th
 `[UInt8](byteCapacity:writing:)`, `[UInt8](alignedByteCapacity:writing:)`, `[UInt8](byteCapacity:mode:writing:)`,
 `append(byteCapacity:writing:)`, `append(alignedByteCapacity:writing:)`, `append(byteCapacity:mode:writing:)`, `[UInt8](copying:)`, `append(copying:)`, and
 `withOutputRawSpan(overwritingFrom:_:)` on `Array` (the last also on `MutableSpan<UInt8>` and
-`MutableRawSpan`); `String(utf8Capacity:writing:)`, which passes an ``AlignedBytesWriter``;
+`MutableRawSpan`); `[UInt8](hexadecimal:)` and `String(hexadecimal:uppercase:)` for hexadecimal text;
+`String(utf8Capacity:writing:)`, which passes an ``AlignedBytesWriter``;
 `withBytesWriter`, `withAlignedBytesWriter`, and `withBytesWriter(mode:_:)` on `OutputSpan` and `OutputRawSpan`;
 `withLentBytes(_:)` on `RawSpan` and `withLentFreeCapacity(_:)` on `OutputRawSpan` (see ``LentBytes``); `append(copying:)` and
 `withFreeCapacity(byteCount:_:)` on `OutputRawSpan`; `copyBytes(from:toByteOffset:)` and
@@ -162,8 +163,18 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``ByteGroup/init(ascii:)``
 - ``GenericBytesReader/expect(_:_:)``
 - ``GenericBytesReader/read(_:asciiDigits:)``
+- ``GenericBytesReader/read(_:asciiDigitsUpTo:)``
+- ``GenericBytesReader/read(_:asciiOctalDigits:)``
 - ``GenericBytesWriter/write(_:asciiDigits:)``
 - ``Bits/init(ascii:)``
+
+### Hexadecimal text
+
+- ``GenericBytesWriter/write(hexadecimal:uppercase:)``
+
+### Dates and times
+
+- ``UTCDateTime``
 
 ### Scanning and shuffling 16 bytes at once
 

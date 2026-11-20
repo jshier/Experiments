@@ -63,6 +63,10 @@ public struct AAEntryHeader: Sendable, Equatable {
     public var data: (offset: Int, count: Int)?
     /// Extended attributes (`XAT`): offset from the end of the header and size.
     public var extendedAttributes: (offset: Int, count: Int)?
+    /// The access control list (`ACL`): offset from the end of the header and size.
+    public var accessControlList: (offset: Int, count: Int)?
+    /// A device's `st_rdev` (`DEV`), for character and block devices.
+    public var device: UInt64?
     /// Every blob's bytes, together: what follows the header before the next entry.
     public var blobByteCount = 0
 
@@ -76,7 +80,10 @@ public struct AAEntryHeader: Sendable, Equatable {
             && a.hardLinkCluster == b.hardLinkCluster && a.cloneCluster == b.cloneCluster
             && a.data?.offset == b.data?.offset && a.data?.count == b.data?.count
             && a.extendedAttributes?.offset == b.extendedAttributes?.offset
-            && a.extendedAttributes?.count == b.extendedAttributes?.count && a.blobByteCount == b.blobByteCount
+            && a.extendedAttributes?.count == b.extendedAttributes?.count
+            && a.accessControlList?.offset == b.accessControlList?.offset
+            && a.accessControlList?.count == b.accessControlList?.count && a.device == b.device
+            && a.blobByteCount == b.blobByteCount
     }
 }
 
@@ -90,19 +97,24 @@ public enum AppleArchive {
     @inline(__always)
     public static func headerByteCount(_ bytes: RawSpan) throws(AEAError) -> Int {
         var reader = AlignedBytesReader(bytes)
-        do {
-            let magic = try reader.read(Byte4.self, .bigEndian)
-            guard magic == Byte4(ascii: "AA01").bigEndian || magic == Byte4(ascii: "YAA1").bigEndian else {
-                throw AEAError.invalidArchive("no entry magic")
-            }
-            let count = try Int(reader.read(Byte2.self, .littleEndian))
-            guard count >= minimumHeaderByteCount else { throw AEAError.invalidArchive("header size \(count)") }
-            return count
-        } catch let error as AEAError {
-            throw error
+        // Reads in typed `do`s, checks outside them: an untyped `do` boxes every error it rethrows.
+        let magic: UInt32
+        do throws(BytesError) {
+            magic = try reader.read(Byte4.self, .bigEndian)
         } catch {
             throw .invalidArchive("truncated header")
         }
+        guard magic == Byte4(ascii: "AA01").bigEndian || magic == Byte4(ascii: "YAA1").bigEndian else {
+            throw .invalidArchive("no entry magic")
+        }
+        let count: Int
+        do throws(BytesError) {
+            count = try Int(reader.read(Byte2.self, .littleEndian))
+        } catch {
+            throw .invalidArchive("truncated header")
+        }
+        guard count >= minimumHeaderByteCount else { throw .invalidArchive("header size \(count)") }
+        return count
     }
 
     /// Parses one entry's header.
@@ -114,44 +126,56 @@ public enum AppleArchive {
         var entry = AAEntryHeader()
         entry.byteCount = header.byteCount
         var reader = AlignedBytesReader(header)
-        do {
-            try reader.skip(byteCount: minimumHeaderByteCount)
-            while reader.remainingByteCount > 0 {
-                let field = try reader.read(Byte4.self, .bigEndian)
-                // The common fields by their whole 4 bytes, key and subtype.
-                switch field {
-                case Byte4(ascii: "TYP1").bigEndian:
-                    let raw = try UInt8(reader.read(Byte.self))
-                    guard let type = AAEntryType(rawValue: raw) else { throw AEAError.invalidArchive("entry type \(raw)") }
-                    entry.type = type
-                case Byte4(ascii: "PATP").bigEndian:
-                    entry.path = try string(&reader)
-                case Byte4(ascii: "UID1").bigEndian:
-                    entry.uid = try UInt32(UInt8(reader.read(Byte.self)))
-                case Byte4(ascii: "GID1").bigEndian:
-                    entry.gid = try UInt32(UInt8(reader.read(Byte.self)))
-                case Byte4(ascii: "MOD2").bigEndian:
-                    entry.mode = try reader.read(Byte2.self, .littleEndian)
-                case Byte4(ascii: "FLG1").bigEndian:
-                    entry.flags = try UInt32(UInt8(reader.read(Byte.self)))
-                case Byte4(ascii: "AFT1").bigEndian:
-                    entry.diskCompression = try UInt32(UInt8(reader.read(Byte.self)))
-                case Byte4(ascii: "LNKP").bigEndian:
-                    entry.linkTarget = try string(&reader)
-                case Byte4(ascii: "DATA").bigEndian:
-                    try addData(&entry, count: Int(reader.read(Byte2.self, .littleEndian)))
-                case Byte4(ascii: "DATB").bigEndian:
-                    try addData(&entry, count: Int(reader.read(Byte4.self, .littleEndian)))
-                default:
-                    try parseField(field, &reader, &entry)
-                }
-            }
-        } catch let error as AEAError {
-            throw error
+        // The fields' reads throw `BytesError` (a field running past the header); what they hold that's wrong comes back
+        // as a value. Both typed: an untyped `do` boxes every error it rethrows.
+        let problem: AEAError?
+        do throws(BytesError) {
+            problem = try parseFields(&reader, &entry)
         } catch {
             throw .invalidArchive("a field runs past its header")
         }
+        if let problem { throw problem }
         return entry
+    }
+
+    /// The fields after the magic and size, into `entry`.
+    ///
+    /// - Returns: What's wrong with a field's value, or `nil`.
+    /// - Throws: `BytesError` when a field runs past the header.
+    @inline(__always)
+    private static func parseFields(_ reader: inout AlignedBytesReader, _ entry: inout AAEntryHeader) throws(BytesError) -> AEAError? {
+        try reader.skip(byteCount: minimumHeaderByteCount)
+        while reader.remainingByteCount > 0 {
+            let field = try reader.read(Byte4.self, .bigEndian)
+            // The common fields by their whole 4 bytes, key and subtype.
+            switch field {
+            case Byte4(ascii: "TYP1").bigEndian:
+                let raw = try UInt8(reader.read(Byte.self))
+                guard let type = AAEntryType(rawValue: raw) else { return .invalidArchive("entry type \(raw)") }
+                entry.type = type
+            case Byte4(ascii: "PATP").bigEndian:
+                entry.path = try string(&reader)
+            case Byte4(ascii: "UID1").bigEndian:
+                entry.uid = try UInt32(UInt8(reader.read(Byte.self)))
+            case Byte4(ascii: "GID1").bigEndian:
+                entry.gid = try UInt32(UInt8(reader.read(Byte.self)))
+            case Byte4(ascii: "MOD2").bigEndian:
+                entry.mode = try reader.read(Byte2.self, .littleEndian)
+            case Byte4(ascii: "FLG1").bigEndian:
+                entry.flags = try UInt32(UInt8(reader.read(Byte.self)))
+            case Byte4(ascii: "AFT1").bigEndian:
+                entry.diskCompression = try UInt32(UInt8(reader.read(Byte.self)))
+            case Byte4(ascii: "LNKP").bigEndian:
+                entry.linkTarget = try string(&reader)
+            case Byte4(ascii: "DATA").bigEndian:
+                if let problem = addData(&entry, count: try Int(reader.read(Byte2.self, .littleEndian))) { return problem }
+            case Byte4(ascii: "DATB").bigEndian:
+                if let problem = addData(&entry, count: try Int(reader.read(Byte4.self, .littleEndian))) { return problem }
+            default:
+                if let problem = try parseField(field, &reader, &entry) { return problem }
+            }
+        }
+        return nil
     }
 
     @inline(__always)
@@ -162,86 +186,91 @@ public enum AppleArchive {
         return AAHeaderRange(offset: offset, count: count)
     }
 
+    /// Records the contents' blob, or what's wrong: a second one.
     @inline(__always)
-    private static func addData(_ entry: inout AAEntryHeader, count: Int) throws(AEAError) {
-        guard entry.data == nil else { throw .invalidArchive("two DAT fields") }
+    private static func addData(_ entry: inout AAEntryHeader, count: Int) -> AEAError? {
+        guard entry.data == nil else { return .invalidArchive("two DAT fields") }
         entry.data = (entry.blobByteCount, count)
         entry.blobByteCount += count
+        return nil
     }
 
     /// Any other field, by its subtype: the values Xcode's archives don't use, or other widths.
+    ///
+    /// - Returns: What's wrong with the field's value, or `nil`.
+    /// - Throws: `BytesError` when it runs past the header.
     @inline(never)
-    private static func parseField(_ field: UInt32, _ reader: inout AlignedBytesReader, _ entry: inout AAEntryHeader) throws(AEAError) {
+    private static func parseField(_ field: UInt32, _ reader: inout AlignedBytesReader, _ entry: inout AAEntryHeader) throws(BytesError) -> AEAError? {
         let key = field >> 8
         let subtype = UInt8(truncatingIfNeeded: field)
         func keyIs(_ name: Byte4) -> Bool { key == name.bigEndian >> 8 }
-        do {
-            switch subtype {
-            case 0x2A: // "*": a flag
-                break
-            case 0x31, 0x32, 0x34, 0x38: // "1" "2" "4" "8"
-                let width = Int(subtype - 0x30)
-                var value: UInt64 = 0
-                for index in 0..<width { value |= try UInt64(UInt8(reader.read(Byte.self))) << (8 * index) }
-                if keyIs(Byte4(ascii: "TYP*")) {
-                    guard let type = AAEntryType(rawValue: UInt8(truncatingIfNeeded: value)) else {
-                        throw AEAError.invalidArchive("entry type \(value)")
-                    }
-                    entry.type = type
-                } else if keyIs(Byte4(ascii: "UID*")) {
-                    entry.uid = UInt32(truncatingIfNeeded: value)
-                } else if keyIs(Byte4(ascii: "GID*")) {
-                    entry.gid = UInt32(truncatingIfNeeded: value)
-                } else if keyIs(Byte4(ascii: "MOD*")) {
-                    entry.mode = UInt16(truncatingIfNeeded: value)
-                } else if keyIs(Byte4(ascii: "FLG*")) {
-                    entry.flags = UInt32(truncatingIfNeeded: value)
-                } else if keyIs(Byte4(ascii: "AFT*")) {
-                    entry.diskCompression = UInt32(truncatingIfNeeded: value)
-                } else if keyIs(Byte4(ascii: "HLC*")) {
-                    entry.hardLinkCluster = value
-                } else if keyIs(Byte4(ascii: "CLC*")) {
-                    entry.cloneCluster = value
+        switch subtype {
+        case 0x2A: // "*": a flag
+            break
+        case 0x31, 0x32, 0x34, 0x38: // "1" "2" "4" "8"
+            let width = Int(subtype - 0x30)
+            var value: UInt64 = 0
+            for index in 0..<width { value |= try UInt64(UInt8(reader.read(Byte.self))) << (8 * index) }
+            if keyIs(Byte4(ascii: "TYP*")) {
+                guard let type = AAEntryType(rawValue: UInt8(truncatingIfNeeded: value)) else {
+                    return .invalidArchive("entry type \(value)")
                 }
-            case 0x50: // "P": a string
-                let range = try string(&reader)
-                if keyIs(Byte4(ascii: "PAT*")) { entry.path = range } else if keyIs(Byte4(ascii: "LNK*")) { entry.linkTarget = range }
-            case 0x54, 0x53: // "T": seconds and nanoseconds; "S": seconds
-                let seconds = Int64(bitPattern: try reader.read(Byte8.self, .littleEndian))
-                let nanoseconds = subtype == 0x54 ? try reader.read(Byte4.self, .littleEndian) : 0
-                if keyIs(Byte4(ascii: "MTM*")) {
-                    entry.modificationTime = (seconds, nanoseconds)
-                } else if keyIs(Byte4(ascii: "CTM*")) {
-                    entry.creationTime = (seconds, nanoseconds)
-                }
-            case 0x46: try reader.skip(byteCount: 4) // "F": CRC-32
-            case 0x47: try reader.skip(byteCount: 20) // "G": SHA-1
-            case 0x48: try reader.skip(byteCount: 32) // "H": SHA-256
-            case 0x49: try reader.skip(byteCount: 48) // "I": SHA-384
-            case 0x4A: try reader.skip(byteCount: 64) // "J": SHA-512
-            case 0x41, 0x42, 0x43: // "A" "B" "C": blobs of 16-, 32-, 64-bit size
-                let count: Int
-                switch subtype {
-                case 0x41: count = try Int(reader.read(Byte2.self, .littleEndian))
-                case 0x42: count = try Int(reader.read(Byte4.self, .littleEndian))
-                default:
-                    let wide = try reader.read(Byte8.self, .littleEndian)
-                    guard wide < 1 << 62 else { throw AEAError.invalidArchive("blob size") }
-                    count = Int(wide)
-                }
-                if keyIs(Byte4(ascii: "DAT*")) {
-                    try addData(&entry, count: count)
-                } else {
-                    if keyIs(Byte4(ascii: "XAT*")) { entry.extendedAttributes = (entry.blobByteCount, count) }
-                    entry.blobByteCount += count
-                }
-            default:
-                throw AEAError.invalidArchive("field subtype \(subtype)")
+                entry.type = type
+            } else if keyIs(Byte4(ascii: "UID*")) {
+                entry.uid = UInt32(truncatingIfNeeded: value)
+            } else if keyIs(Byte4(ascii: "GID*")) {
+                entry.gid = UInt32(truncatingIfNeeded: value)
+            } else if keyIs(Byte4(ascii: "MOD*")) {
+                entry.mode = UInt16(truncatingIfNeeded: value)
+            } else if keyIs(Byte4(ascii: "FLG*")) {
+                entry.flags = UInt32(truncatingIfNeeded: value)
+            } else if keyIs(Byte4(ascii: "AFT*")) {
+                entry.diskCompression = UInt32(truncatingIfNeeded: value)
+            } else if keyIs(Byte4(ascii: "HLC*")) {
+                entry.hardLinkCluster = value
+            } else if keyIs(Byte4(ascii: "CLC*")) {
+                entry.cloneCluster = value
+            } else if keyIs(Byte4(ascii: "DEV*")) {
+                entry.device = value
             }
-        } catch let error as AEAError {
-            throw error
-        } catch {
-            throw .invalidArchive("a field runs past its header")
+        case 0x50: // "P": a string
+            let range = try string(&reader)
+            if keyIs(Byte4(ascii: "PAT*")) { entry.path = range } else if keyIs(Byte4(ascii: "LNK*")) { entry.linkTarget = range }
+        case 0x54, 0x53: // "T": seconds and nanoseconds; "S": seconds
+            let seconds = Int64(bitPattern: try reader.read(Byte8.self, .littleEndian))
+            let nanoseconds = subtype == 0x54 ? try reader.read(Byte4.self, .littleEndian) : 0
+            if keyIs(Byte4(ascii: "MTM*")) {
+                entry.modificationTime = (seconds, nanoseconds)
+            } else if keyIs(Byte4(ascii: "CTM*")) {
+                entry.creationTime = (seconds, nanoseconds)
+            }
+        case 0x46: try reader.skip(byteCount: 4) // "F": CRC-32
+        case 0x47: try reader.skip(byteCount: 20) // "G": SHA-1
+        case 0x48: try reader.skip(byteCount: 32) // "H": SHA-256
+        case 0x49: try reader.skip(byteCount: 48) // "I": SHA-384
+        case 0x4A: try reader.skip(byteCount: 64) // "J": SHA-512
+        case 0x41, 0x42, 0x43: // "A" "B" "C": blobs of 16-, 32-, 64-bit size
+            let count: Int
+            switch subtype {
+            case 0x41: count = try Int(reader.read(Byte2.self, .littleEndian))
+            case 0x42: count = try Int(reader.read(Byte4.self, .littleEndian))
+            default:
+                let wide = try reader.read(Byte8.self, .littleEndian)
+                guard wide < 1 << 62 else { return .invalidArchive("blob size") }
+                count = Int(wide)
+            }
+            if keyIs(Byte4(ascii: "DAT*")) {
+                return addData(&entry, count: count)
+            }
+            if keyIs(Byte4(ascii: "XAT*")) {
+                entry.extendedAttributes = (entry.blobByteCount, count)
+            } else if keyIs(Byte4(ascii: "ACL*")) {
+                entry.accessControlList = (entry.blobByteCount, count)
+            }
+            entry.blobByteCount += count
+        default:
+            return .invalidArchive("field subtype \(subtype)")
         }
+        return nil
     }
 }

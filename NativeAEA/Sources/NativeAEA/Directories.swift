@@ -7,18 +7,18 @@ import Darwin
 /// An open-addressed table keyed by the path's bytes, kept in one arena: no allocation per lookup. Only the walker
 /// thread touches it; writers get descriptors in their jobs. A directory whose descriptor couldn't be opened (the
 /// process's descriptor limit) isn't in it, and its entries fall back to paths from the destination.
+///
+/// Empty unless ``AEAExtractionOptions/relativeToParents`` opens directories (it's off by default): then it allocates
+/// nothing, and ``resolve(_:count:)`` returns the destination at once, without scanning or hashing the path.
 struct DirectoryTable: ~Copyable {
     private var arena: [UInt8] = []
     private var entries: [(hash: UInt64, start: Int, count: Int, descriptor: Int32)] = []
-    /// Indices into `entries`, plus one; 0 is empty. A power of two, at most half full.
-    private var slots: [Int32]
+    /// Indices into `entries`, plus one; 0 is empty. A power of two, at most half full; empty until the first insert.
+    private var slots: [Int32] = []
     let root: Int32
 
     init(root: Int32) {
         self.root = root
-        slots = Array(repeating: 0, count: 1 << 16)
-        arena.reserveCapacity(4 << 20)
-        entries.reserveCapacity(1 << 15)
     }
 
     /// Every directory descriptor, for setting attributes at the end.
@@ -37,6 +37,7 @@ struct DirectoryTable: ~Copyable {
     /// The descriptor of the directory at `path`, or `nil` if the walker didn't open it.
     func lookup(_ path: UnsafeRawPointer, count: Int) -> Int32? {
         if count == 0 { return root }
+        if entries.isEmpty { return nil }
         let hash = unsafe Self.hash(path, count)
         let mask = slots.count - 1
         var slot = Int(truncatingIfNeeded: hash) & mask
@@ -57,6 +58,12 @@ struct DirectoryTable: ~Copyable {
     /// - Returns: The entry's index.
     @discardableResult
     mutating func insert(_ path: UnsafeRawPointer, count: Int, descriptor: Int32) -> Int {
+        if slots.isEmpty {
+            // The first directory: room for Xcode's 30,000 without growing.
+            slots = Array(repeating: 0, count: 1 << 16)
+            arena.reserveCapacity(4 << 20)
+            entries.reserveCapacity(1 << 15)
+        }
         if (entries.count + 1) * 2 > slots.count { grow() }
         let hash = unsafe Self.hash(path, count)
         let start = arena.count
@@ -81,6 +88,8 @@ struct DirectoryTable: ~Copyable {
     /// Splits `path` into its parent's descriptor and the name in it, or the destination and the whole path when the
     /// parent wasn't opened.
     func resolve(_ path: UnsafeRawPointer, count: Int) -> (directory: Int32, leaf: Int) {
+        // No directory opened: every path is from the destination (what the scan and lookup below would find).
+        if entries.isEmpty { return (root, 0) }
         var slash = count - 1
         while slash >= 0, unsafe path.load(fromByteOffset: slash, as: UInt8.self) != 0x2F { slash -= 1 }
         guard slash >= 0 else { return (root, 0) }
@@ -104,5 +113,28 @@ struct DirectoryTable: ~Copyable {
             limit.rlim_cur = wanted
             _ = unsafe setrlimit(RLIMIT_NOFILE, &limit)
         }
+    }
+}
+
+/// The walker's per-entry parent lookup, for benchmarks: ``DirectoryTable/resolve(_:count:)`` as the extraction sink
+/// calls it for every file, directory, and link, with no directories opened (the default).
+@_spi(Benchmarking)
+public enum DirectoryResolution {
+    /// Makes a table, then resolves each of `paths` (ranges of `bytes`) `rounds` times.
+    ///
+    /// - Returns: The sum of the results' name offsets, so the work isn't optimized away.
+    public static func resolve(_ bytes: [UInt8], paths: [Range<Int>], rounds: Int) -> Int {
+        let table = DirectoryTable(root: 3)
+        var sum = 0
+        bytes.withUnsafeBytes { buffer in
+            for _ in 0..<rounds {
+                for path in paths {
+                    // A range of `bytes`, which outlives the call: safe.
+                    let (directory, leaf) = unsafe table.resolve(buffer.baseAddress! + path.lowerBound, count: path.count)
+                    sum &+= Int(directory) &+ leaf
+                }
+            }
+        }
+        return sum
     }
 }

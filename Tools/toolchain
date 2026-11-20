@@ -45,7 +45,7 @@
 #   Tools/toolchain SocketStream -- swift run --package-path SocketStream -c release socket-stream --payload 1024
 #   Tools/toolchain SocketStream -- swift package --package-path SocketStream --disable-sandbox benchmark
 #   Tools/toolchain SocketStream test
-#   Tools/toolchain pr-91981 -- Tools/loops --target Base64 Base64 encodeBlocks
+#   Tools/toolchain pr-91981 -- Tools/loops --target Bytes BytesBase64 encodeBlocks
 source "$(dirname "$0")/lib/common.sh"
 have jq || die "needs jq: brew install jq"
 REGISTRY="$TOOLS_DIR/toolchains.json"

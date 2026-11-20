@@ -1,0 +1,108 @@
+#!/bin/bash
+# slim-baselines — shrink package-benchmark baselines (results.json) without changing any number they report.
+#
+# usage: Tools/slim-baselines [--check] [--min-size SIZE] PATH...
+#
+#   PATH        results.json files, or directories searched for them (a package, its .benchmarkBaselines/, or
+#               the repository)
+#   --check     change nothing; list the files that would shrink, and exit 1 if there are any
+#   --min-size  only files at least this large (find's -size syntax: 1M, 200k; default: all)
+#
+# Each metric's samples are an HDR histogram whose counts array covers every value from 1 to the largest
+# trackable one: about 21,500 slots for 3 significant digits, almost all zero (a benchmark's samples fill
+# 1–100 of them). That made baselines 40–400 MB. The histogram is rebased so its first bucket starts at the
+# smallest recorded value (a larger unitMagnitude) and ends at the bucket holding the largest; below about
+# 2^(unitMagnitude+10) the rebased histogram has no slots, above it every slot covers exactly the values it
+# covered before. So every count stays in a bin with the same bounds, and percentiles, means, and
+# `baseline read`/`compare`/`check` output are unchanged (checked against package-benchmark's own output).
+# A file is rewritten only if every histogram keeps its total count; it's idempotent.
+#
+# Run it after `swift package benchmark baseline update`, before committing.
+#
+# examples:
+#   Tools/slim-baselines Bytes
+#   Tools/slim-baselines --check .
+source "$(dirname "$0")/lib/common.sh"
+
+check=0 min_size='' paths=()
+[[ $# -ge 1 ]] || usage 2
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check) check=1 ;;
+        --min-size) min_size="$2"; shift ;;
+        -h|--help) usage ;;
+        -*) die "unknown option $1" ;;
+        *) paths+=("$1") ;;
+    esac
+    shift
+done
+[[ ${#paths[@]} -ge 1 ]] || usage 2
+have jq || die "needs jq: brew install jq"
+
+# HDR indexing (HdrHistogram's Histogram.swift), with h = subBucketHalfCountMagnitude, u = unitMagnitude:
+# bucket 0 holds values below 2^(u+h+1) in steps of 2^u, bucket b ≥ 1 the values in [2^(u+h+b), 2^(u+h+b+1))
+# in steps of 2^(u+b), at counts index (b+1)·2^h + value/2^(u+b) − 2^h. A value v ≥ 2^(u'+h) has the same
+# step and bounds with unitMagnitude u' ≥ u, at an index (u'−u)·2^h lower. Value 0 stays at index 0.
+program='
+def flog2($x): ($x | log2 | floor) as $k
+    | if pow(2; $k) > $x then $k - 1 elif pow(2; $k + 1) <= $x then $k + 1 else $k end;
+# Buckets needed to cover $v (bucketsNeededToCoverValue).
+def buckets($v; $u; $h): {b: 1, s: pow(2; $u + $h + 1)} | until(.s > $v; .b += 1 | .s *= 2) | .b;
+def plan:
+    .subBucketHalfCountMagnitude as $h | .unitMagnitude as $uo
+    | (if .minNonZeroValue > .maxValue then $uo else ([flog2(.minNonZeroValue) - $h, $uo] | max) end) as $u
+    | {u: $u, shift: (($u - $uo) * pow(2; $h)), bc: buckets(.maxValue; $u; $h),
+       len: ((buckets(.maxValue; $u; $h) + 1) * pow(2; $h)), half: pow(2; $h)};
+def slimmable: (.counts | type) == "array" and (.maxValue | type) == "number" and .maxValue < pow(2; 52);
+def needed: slimmable and (plan as $p | $p.shift > 0 or (.counts | length) > $p.len);
+def slim:
+    if (needed | not) then . else
+        plan as $p | .counts as $c | .subBucketHalfCountMagnitude as $h
+        | ((if $p.shift == 0 then $c[0:$p.half] else [$c[0]] + [range(1; $p.half) | 0] end)
+           + $c[$p.half + $p.shift : $p.len + $p.shift]) as $n
+        | ($n + [range(0; $p.len - ($n | length)) | 0]) as $n
+        | if ($n | add) != ($c | add) then error("counts would change") else
+            .counts = $n | .unitMagnitude = $p.u | .bucketCount = $p.bc
+            | .lowestDiscernibleValue = pow(2; $p.u)
+            | .subBucketMask = (pow(2; $h + 1) - 1) * pow(2; $p.u)
+            | .leadingZeroCountBase = 64 - $p.u - $h - 1
+            | .highestTrackableValue = pow(2; $p.u + $h + $p.bc) - 1
+          end
+    end;
+def histograms: .results[]? | arrays | .[] | .statistics.histogram;
+'
+
+files=()
+for path in "${paths[@]}"; do
+    if [[ -f "$path" ]]; then files+=("$path")
+    elif [[ -d "$path" ]]; then
+        while IFS= read -r -d '' file; do files+=("$file"); done < <(
+            find "$path" \( -name .build -o -name '.build-*' -o -name TestData -o -name .git \) -prune -o \
+                -name results.json -path '*.benchmarkBaselines/*' ${min_size:+-size +"$min_size"} -print0)
+    else die "no such file or directory: $path"; fi
+done
+
+pending=0 before=0 after=0
+[[ ${#files[@]} -gt 0 ]] || { note "no baselines found"; exit 0; }
+for file in "${files[@]}"; do
+    if ! jq -e "$program"' [histograms | needed] | any' "$file" >/dev/null 2>&1; then continue; fi
+    pending=$((pending + 1))
+    size=$(stat -f %z "$file")
+    if [[ $check == 1 ]]; then printf '%s\t%s\n' "$file" "$size"; continue; fi
+    tmp="$file.slim.$$"
+    if ! jq -c "$program"' .results |= map(if type == "array" then map(.statistics.histogram |= slim) else . end)' \
+        "$file" > "$tmp"; then
+        rm -f -- "$tmp"; note "skipped $file (jq failed)"; continue
+    fi
+    chmod "$(stat -f %Lp "$file")" "$tmp" && mv -f -- "$tmp" "$file"
+    new=$(stat -f %z "$file")
+    before=$((before + size)) after=$((after + new))
+    printf '%s\t%s\t%s\n' "$file" "$size" "$new"
+done
+
+if [[ $check == 1 ]]; then
+    note "$pending of ${#files[@]} baselines can be slimmed"
+    [[ $pending == 0 ]] || exit 1
+else
+    note "slimmed $pending of ${#files[@]} baselines: $((before / 1048576)) MB → $((after / 1048576)) MB"
+fi

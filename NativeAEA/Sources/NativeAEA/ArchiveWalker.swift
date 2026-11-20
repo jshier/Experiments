@@ -6,13 +6,21 @@ import Bytes
 /// ``segmentFinished(buffer:)``) unless the sink retains it through the pool.
 protocol ArchiveSink: ~Copyable {
     /// An entry's header. `header` points at its first byte, in buffer `buffer`.
-    mutating func entry(_ entry: AAEntryHeader, header: UnsafeRawPointer, buffer: Int) throws(AEAError)
+    nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: UnsafeRawPointer, buffer: Int) async throws(AEAError)
     /// A piece of the current entry's file contents, at `fileOffset` in the file.
-    mutating func data(_ bytes: UnsafeRawPointer, count: Int, fileOffset: Int, buffer: Int, segment: Int) throws(AEAError)
-    /// A piece of the current entry's extended attributes blob.
-    mutating func extendedAttributes(_ bytes: UnsafeRawPointer, count: Int, offset: Int) throws(AEAError)
+    nonisolated(nonsending) mutating func data(_ bytes: UnsafeRawPointer, count: Int, fileOffset: Int, buffer: Int, segment: Int) async throws(AEAError)
+    /// A piece of one of the current entry's metadata blobs, `offset` bytes into it.
+    mutating func metadata(_ blob: AAMetadataBlob, _ bytes: UnsafeRawPointer, count: Int, offset: Int) throws(AEAError)
     /// The current entry's blobs are complete.
-    mutating func endEntry() throws(AEAError)
+    nonisolated(nonsending) mutating func endEntry() async throws(AEAError)
+}
+
+/// The blobs an entry may carry besides its contents.
+enum AAMetadataBlob: Sendable {
+    /// `XAT`: extended attributes, entries of u32 size (the entry's, itself included), NUL-terminated name, value.
+    case extendedAttributes
+    /// `ACL`: access control entries, each u32 size, type, u64 flags, u64 permissions, qualifier type, qualifier.
+    case accessControlList
 }
 
 /// Walks the Apple Archive stream across segments: headers, then each entry's blobs, routed to a sink.
@@ -20,33 +28,33 @@ protocol ArchiveSink: ~Copyable {
 /// Headers that cross a segment's end are made contiguous by copying their first bytes into the next buffer's
 /// carry region; file contents are never copied (the sink gets pointers into the buffers).
 enum ArchiveWalker {
-    static func walk<Sink: ArchiveSink & ~Copyable>(_ stream: SegmentStream, into sink: inout Sink) throws(AEAError) {
-        let archive = stream.archive
-        let pool = stream.pool
+    nonisolated(nonsending) static func walk<Sink: ArchiveSink & ~Copyable>(_ source: some ChunkSource, into sink: inout Sink) async throws(AEAError) {
+        let pool = source.pool
         var position = 0 // In the stream.
         var inHeader = true
         var entry = AAEntryHeader()
         var blobsStart = 0
         var blobsEnd = 0
         var previousBuffer = -1
-        var carry = 0 // Bytes of a partial header at the end of the previous segment.
-        var consumed = 0
+        var previousStart = 0 // The previous chunk's offset in the stream.
+        var carry = 0 // Bytes of a partial header at the end of the previous chunk.
+        var streamEnd = 0
         defer {
             if previousBuffer >= 0 { pool.release(previousBuffer) }
-            stream.finish(consumedThrough: consumed)
         }
-        for segment in archive.segments {
-            let buffer = try stream.next(segment.index)
-            consumed = segment.index + 1
+        while let chunk = try await source.nextChunk() {
+            let buffer = chunk.buffer
             let base = unsafe pool.segmentBase(buffer)
-            let start = segment.rawOffset
-            let end = start + segment.rawSize
+            let start = chunk.rawOffset
+            let end = start + chunk.rawSize
+            streamEnd = end
             if carry > 0 {
-                // The partial header goes just before this segment's bytes. `carry` is under the carry
-                // region's size (a header is at most 65,535 bytes), and the previous buffer is still held.
-                unsafe (base - carry).copyMemory(from: pool.segmentBase(previousBuffer) + (position - (start - archive.segments[segment.index - 1].rawSize)), byteCount: carry)
+                // The partial header goes just before this chunk's bytes. `carry` is under the carry region's size
+                // (a header is at most 65,535 bytes), and the previous buffer is still held.
+                unsafe (base - carry).copyMemory(from: pool.segmentBase(previousBuffer) + (position - previousStart), byteCount: carry)
                 carry = 0
             }
+            previousStart = start
             if previousBuffer >= 0 { pool.release(previousBuffer) }
             previousBuffer = buffer
 
@@ -67,10 +75,10 @@ enum ArchiveWalker {
                         break
                     }
                     entry = try unsafe AppleArchive.parseHeader(RawSpan(_unsafeStart: pointer(position), byteCount: count)) // Same.
-                    try unsafe sink.entry(entry, header: pointer(position), buffer: buffer)
+                    try await unsafe sink.entry(entry, header: pointer(position), buffer: buffer)
                     position += count
                     if entry.blobByteCount == 0 {
-                        try sink.endEntry()
+                        try await sink.endEntry()
                         continue
                     }
                     inHeader = false
@@ -82,23 +90,30 @@ enum ArchiveWalker {
                     let dataStart = blobsStart + data.offset
                     let low = max(position, dataStart), high = min(stop, dataStart + data.count)
                     if low < high {
-                        try unsafe sink.data(pointer(low), count: high - low, fileOffset: low - dataStart, buffer: buffer, segment: segment.index)
+                        try await unsafe sink.data(pointer(low), count: high - low, fileOffset: low - dataStart, buffer: buffer, segment: chunk.index)
                     }
                 }
-                if let attributes = entry.extendedAttributes, attributes.count > 0 {
-                    let attributesStart = blobsStart + attributes.offset
-                    let low = max(position, attributesStart), high = min(stop, attributesStart + attributes.count)
+                if let blob = entry.extendedAttributes, blob.count > 0 {
+                    let blobStart = blobsStart + blob.offset
+                    let low = max(position, blobStart), high = min(stop, blobStart + blob.count)
                     if low < high {
-                        try unsafe sink.extendedAttributes(pointer(low), count: high - low, offset: low - attributesStart)
+                        try unsafe sink.metadata(.extendedAttributes, pointer(low), count: high - low, offset: low - blobStart)
+                    }
+                }
+                if let blob = entry.accessControlList, blob.count > 0 {
+                    let blobStart = blobsStart + blob.offset
+                    let low = max(position, blobStart), high = min(stop, blobStart + blob.count)
+                    if low < high {
+                        try unsafe sink.metadata(.accessControlList, pointer(low), count: high - low, offset: low - blobStart)
                     }
                 }
                 position = stop
                 guard position == blobsEnd else { break }
-                try sink.endEntry()
+                try await sink.endEntry()
                 inHeader = true
             }
         }
-        guard inHeader, carry == 0, position == archive.rootHeader.rawSize else {
+        guard inHeader, carry == 0, position == streamEnd else {
             throw .invalidArchive("the stream ends inside an entry")
         }
     }

@@ -1,5 +1,6 @@
 import Bytes
 import BytesCrypto
+import BytesTestSupport
 import Foundation
 import Testing
 
@@ -10,11 +11,60 @@ import Testing
 
 /// A Wycheproof vector file from the repository's TestData/wycheproof (made by `Tools/test-data fetch wycheproof`).
 func wycheproof<T: Decodable>(_ name: String, as type: T.Type) throws -> T {
-    let url = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../../TestData/wycheproof/\(name)")
-    guard let data = try? Data(contentsOf: url) else {
-        throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "\(name) is missing: run Tools/test-data fetch wycheproof"])
-    }
+    let data = try Data(contentsOf: TestData.file(set: "wycheproof", name: name))
     return try JSONDecoder().decode(T.self, from: data)
+}
+
+/// Files decoded once and shared by every test that reads them (`get` rethrows a missing file's error).
+func wycheproofFiles<T: Decodable & Sendable>(_ names: [String], as type: T.Type) -> [String: Result<T, any Error>] {
+    Dictionary(uniqueKeysWithValues: names.map { name in (name, Result { try wycheproof(name, as: T.self) }) })
+}
+
+// MARK: - Splitting a file's vectors between the fast and bulk runs
+
+/// A vector's place in its file: its group and its index in the group.
+struct VectorPosition: Hashable, Sendable {
+    let group: Int
+    let test: Int
+}
+
+/// A file's vectors split between the fast run and the bulk run. Wycheproof's flags name the edge case each vector
+/// tests, so the fast run takes `perClass` vectors from every class (a result and its flags: the first, then spread
+/// evenly through the class), and the bulk run takes all the others. Every class of edge case is in the fast run;
+/// together the two check every vector.
+struct VectorSplit: Sendable {
+    let fast: [VectorPosition]
+    let bulk: [VectorPosition]
+
+    /// `classes[group][test]` is the vector's result and flags.
+    init(classes: [[String]], perClass: Int = 2) {
+        var all: [VectorPosition] = []
+        var members: [String: [VectorPosition]] = [:]
+        for (group, tests) in classes.enumerated() {
+            for (test, name) in tests.enumerated() {
+                let position = VectorPosition(group: group, test: test)
+                all.append(position)
+                members[name, default: []].append(position)
+            }
+        }
+        var fast = Set<VectorPosition>()
+        for positions in members.values {
+            let count = min(perClass, positions.count)
+            for k in 0..<count { fast.insert(positions[k * positions.count / count]) }
+        }
+        self.fast = all.filter { fast.contains($0) }
+        self.bulk = all.filter { !fast.contains($0) }
+    }
+
+    /// One of `count` interleaved shards of `positions`, so a file's vectors spread across test cases.
+    static func shard(_ positions: [VectorPosition], _ shard: Int, of count: Int) -> [VectorPosition] {
+        stride(from: shard, to: positions.count, by: count).map { positions[$0] }
+    }
+}
+
+/// A Wycheproof class name: the result and the sorted flags.
+func vectorClass(_ result: String, _ flags: [String]) -> String {
+    "\(result) \(flags.sorted().joined(separator: "+"))"
 }
 
 struct AEADVectors: Decodable {
@@ -85,10 +135,10 @@ extension ChaCha20Poly1305: TestedAEAD {}
                     try aead.open(&raw, nonce: nonce.span.bytes, authenticating: aad.span.bytes, tag: tag.span.bytes)
                 }
                 if vector.result == "invalid" {
-                    #expect(throws: BytesError.self, "\(file) #\(vector.tcId)") { try result.get() }
+                    #expect(throws: BytesError.self, "\(file) #\(vector.tcId)") { _ = try result.get() }
                     #expect(opened == ciphertext, "\(file) #\(vector.tcId): a rejected message is left as it was")
                 } else {
-                    #expect(throws: Never.self, "\(file) #\(vector.tcId)") { try result.get() }
+                    #expect(throws: Never.self, "\(file) #\(vector.tcId)") { _ = try result.get() }
                     #expect(opened == plaintext, "\(file) #\(vector.tcId)")
                     // Sealing: the same ciphertext and tag.
                     var sealed = plaintext

@@ -1,6 +1,8 @@
 import Bytes
 import BytesCompression
 import BytesCrypto
+import BytesTesting
+import BytesTestSupport
 import Testing
 
 /// Runs `data` through `transform` in pieces of up to `chunk` bytes into an output buffer of `outputChunk`
@@ -68,7 +70,7 @@ struct CopyStage: ByteTransform {
 
 @Suite struct PipelineTests {
     static let text: [UInt8] = {
-        var rng = SplitMix64(state: 3)
+        var rng = SplitMix64(seed: 3)
         let words = ["mqtt", "packet", "topic", "sensor", "temperature", "{", "}", "\"value\":", " ", "\n", "21.5", "true"]
         var bytes: [UInt8] = []
         while bytes.count < 300_000 { bytes += Array(words.randomElement(using: &rng)!.utf8) }
@@ -83,16 +85,21 @@ struct CopyStage: ByteTransform {
         #expect(try run(&brotli, Self.text, chunk: chunk, outputChunk: outputChunk) == Self.text)
     }
 
-    /// Compress and seal on one side, open and decompress on the other, message by message.
+    /// Compress and seal on one side, open and decompress on the other, message by message: the first 40 messages
+    /// here, all 300 in `PipelineBulkTests`.
     @Test(arguments: [true, false])
     func messagesThroughCompressionAndRecords(useBrotli: Bool) throws {
+        try Self.messagesThroughCompressionAndRecords(useBrotli: useBrotli, count: 40)
+    }
+
+    static func messagesThroughCompressionAndRecords(useBrotli: Bool, count: Int) throws {
         let keys = TLSKeySchedule.applicationKeys(sharedSecret: [UInt8](repeating: 7, count: 32).span.bytes)
-        var rng = SplitMix64(state: 9)
+        var rng = SplitMix64(seed: 9)
         var sendDeflate = DeflateEncoder(format: .raw, level: 1).then(TLSRecordSealer(keys: keys.client))
         var receiveDeflate = TLSRecordOpener(keys: keys.client).then(DeflateDecoder(format: .raw))
         var sendBrotli = BrotliEncoder(quality: 1, windowBits: 18).then(TLSRecordSealer(keys: keys.client))
         var receiveBrotli = TLSRecordOpener(keys: keys.client).then(BrotliDecoder())
-        for _ in 0..<300 {
+        for _ in 0..<count {
             let start = Int.random(in: 0..<(Self.text.count - 40_000), using: &rng)
             let message = Array(Self.text[start..<(start + Int.random(in: 1...40_000, using: &rng))])
             let wire = useBrotli
@@ -108,11 +115,16 @@ struct CopyStage: ByteTransform {
     }
 
     /// Whole streams through pipelines built once and reset between them: a flush per 16 KB sent, then a
-    /// finish; received in 64 KB pieces, the opener rewound to replay the first stream's records.
+    /// finish; received in 64 KB pieces, the opener rewound to replay the first stream's records. Streams of 300 KB
+    /// here (19 flushes each), 1.2 MB in `PipelineBulkTests`.
     @Test(arguments: [true, false])
     func resetPipelinesCarryStreamAfterStream(useBrotli: Bool) throws {
+        try Self.resetPipelinesCarryStreamAfterStream(useBrotli: useBrotli, copies: 1)
+    }
+
+    static func resetPipelinesCarryStreamAfterStream(useBrotli: Bool, copies: Int) throws {
         let keys = TLSKeySchedule.applicationKeys(sharedSecret: [UInt8](repeating: 5, count: 32).span.bytes).server
-        let data = Array((0..<4).map { _ in Self.text }.joined())
+        let data = Array((0..<copies).map { _ in Self.text }.joined())
         var sendDeflate = DeflateEncoder(format: .raw, level: 1).then(TLSRecordSealer(keys: keys))
         var receiveDeflate = TLSRecordOpener(keys: keys).then(DeflateDecoder(format: .raw))
         var sendBrotli = BrotliEncoder(quality: 5, windowBits: 18).then(TLSRecordSealer(keys: keys))
@@ -273,13 +285,18 @@ extension PipelineTests {
 
 extension PipelineTests {
     /// A socket stream's two pipelines, without the socket: parallel DEFLATE then TLS records in 1 MB
-    /// flushed batches, then TLS records then inflate, the wire cut into reads of many sizes.
+    /// flushed batches, then TLS records then inflate, the wire cut into reads of many sizes. Here 1.3 MB (a full
+    /// batch and a partial one); 6 MB in `PipelineBulkTests`.
     @Test(arguments: [8, 16])
     func parallelCompressionThroughTLSRoundTrips(lanes: Int) throws {
+        try Self.parallelCompressionThroughTLSRoundTrips(lanes: lanes, byteCount: (1 << 20) + 300_001)
+    }
+
+    static func parallelCompressionThroughTLSRoundTrips(lanes: Int, byteCount: Int) throws {
         var state: UInt64 = 0x1234_5678
         let words = ["sensor", "temp", "building", "floor", "\"value\":", "21.5", ",", "{", "}", "\n"]
         var data: [UInt8] = []
-        while data.count < 6 << 20 {
+        while data.count < byteCount {
             state = state &* 6_364_136_223_846_793_005 &+ 1_442_695_040_888_963_407
             data += Array(words[Int(state >> 33) % words.count].utf8)
         }
@@ -294,5 +311,23 @@ extension PipelineTests {
             let decoded = try run(&receive, wire, chunk: read, outputChunk: room)
             #expect(decoded == data, "reads of \(read), output room \(room)")
         }
+    }
+}
+
+/// The pipeline runs at full length: 300 messages, 1.2 MB streams, and 6 MB through parallel DEFLATE and TLS.
+@Suite(.bulk) struct PipelineBulkTests {
+    @Test(arguments: [true, false])
+    func messagesThroughCompressionAndRecords(useBrotli: Bool) throws {
+        try PipelineTests.messagesThroughCompressionAndRecords(useBrotli: useBrotli, count: 300)
+    }
+
+    @Test(arguments: [true, false])
+    func resetPipelinesCarryStreamAfterStream(useBrotli: Bool) throws {
+        try PipelineTests.resetPipelinesCarryStreamAfterStream(useBrotli: useBrotli, copies: 4)
+    }
+
+    @Test(arguments: [8, 16])
+    func parallelCompressionThroughTLSRoundTrips(lanes: Int) throws {
+        try PipelineTests.parallelCompressionThroughTLSRoundTrips(lanes: lanes, byteCount: 6 << 20)
     }
 }

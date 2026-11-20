@@ -92,6 +92,7 @@ let package = Package(
                 .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BytesCompression", package: "Bytes"),
                 .product(name: "BytesCrypto", package: "Bytes"),
+                .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/SocketStreamBenchmarks",

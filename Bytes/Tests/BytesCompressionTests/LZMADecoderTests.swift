@@ -1,5 +1,7 @@
 import Bytes
 import BytesCompression
+import BytesTesting
+import BytesTestSupport
 import CLZMA
 import Compression
 import Foundation
@@ -211,7 +213,7 @@ extension Result where Success == (output: [UInt8], consumed: Int) {
 /// Inputs for LZMA: the shared samples, plus binary-like data (structs with small fields, short distances),
 /// text and random bytes interleaved (uncompressed LZMA2 chunks between compressed ones), and long runs.
 func lzmaSamples() -> [(name: String, bytes: [UInt8])] {
-    var rng = SplitMix64(state: 2026)
+    var rng = SplitMix64(seed: 2026)
     // Records of a fixed layout: matches at distance 16, 32, 48, literals after matches.
     var records: [UInt8] = []
     for index in 0..<20_000 {
@@ -258,10 +260,9 @@ func xzCommand() -> URL? {
 
 /// `xz ARGUMENTS` with `data` as its input, writing to its output.
 func runXZ(_ command: URL, _ arguments: [String], _ data: [UInt8]) throws -> [UInt8] {
-    let directory = FileManager.default.temporaryDirectory.appending(path: "lzma-tests-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-    defer { try? FileManager.default.removeItem(at: directory) }
-    let input = directory.appending(path: "input")
+    let directory = try TemporaryDirectory(prefix: "lzma-tests")
+    defer { directory.remove() }
+    let input = directory.path("input")
     try Data(data).write(to: input)
     let process = Process()
     process.executableURL = command
@@ -473,9 +474,15 @@ struct LZMADecoderTests {
 
     // MARK: Malformed input
 
-    /// Every byte of small files changed, and every truncation: decoding throws or succeeds, never traps or
-    /// reads outside the input; with a CRC-64, success means the original content.
-    @Test func survivesCorruption() {
+    /// Bytes of small files changed, and truncations: decoding throws or succeeds, never traps or reads outside the
+    /// input; with a CRC-64, success means the original content. Every position in the first 64 bytes (headers,
+    /// properties, the first chunk) and the last 32 (index, footer, check), and every 9th between; every position in
+    /// LZMABulkTests.
+    @Test func survivesCorruption() throws {
+        try Self.checkSurvivesCorruption { index, count in index < 64 || index >= count - 32 || index % 9 == 0 }
+    }
+
+    static func checkSurvivesCorruption(at positions: (_ index: Int, _ count: Int) -> Bool) throws {
         let text = Array(samples().first { $0.name == "text" }!.bytes.prefix(3_000))
         let records = Array(lzmaSamples().first { $0.name == "records" }!.bytes.prefix(4_000))
         let files: [(name: String, content: [UInt8], file: [UInt8], checked: Bool)] = [
@@ -486,7 +493,7 @@ struct LZMADecoderTests {
         ]
         var decoder = LZMA2Decoder()
         for (name, content, file, checked) in files {
-            for index in 0..<file.count {
+            for index in 0..<file.count where positions(index, file.count) {
                 for mask: UInt8 in [0xFF, 0x01, 0x80, 0x10] {
                     var corrupt = file
                     corrupt[index] ^= mask
@@ -496,30 +503,35 @@ struct LZMADecoderTests {
                     }
                 }
             }
-            for length in 0..<file.count {
+            for length in 0..<file.count where positions(length, file.count) {
                 #expect(xzDecode(Array(file.prefix(length)), capacity: content.count, decoder: &decoder) == .failure(.insufficientData), "\(name) cut at \(length)")
             }
         }
         // Raw streams cut anywhere.
         let raw2 = lzmaRawCompress(records, filter: LZMAFilterID.lzma2, options: lzmaOptions(preset: 6))
-        for length in 0..<raw2.count {
+        for length in 0..<raw2.count where positions(length, raw2.count) {
             #expect(lzma2Decode(Array(raw2.prefix(length)), dictionarySize: 1 << 23, capacity: records.count, decoder: &decoder).output == nil, "LZMA2 cut at \(length)")
         }
         let raw1 = lzmaRawCompress(records, filter: LZMAFilterID.lzma1, options: lzmaOptions(preset: 6))
-        let properties = try! LZMAProperties(byte: 0x5D, dictionarySize: 1 << 23)
-        for length in 0..<raw1.count {
+        let properties = try LZMAProperties(byte: 0x5D, dictionarySize: 1 << 23)
+        for length in 0..<raw1.count where positions(length, raw1.count) {
             let decoded = lzmaDecode(Array(raw1.prefix(length)), properties: properties, size: nil, capacity: records.count + 10, decoder: &decoder)
             #expect(decoded.output == nil, "LZMA cut at \(length)")
         }
     }
 
-    @Test func survivesRandomInput() {
-        var rng = SplitMix64(state: 1729)
+    /// 40 rounds per size here, 200 in LZMABulkTests.
+    @Test func survivesRandomInput() throws {
+        try Self.checkSurvivesRandomInput(rounds: 40)
+    }
+
+    static func checkSurvivesRandomInput(rounds: Int) throws {
+        var rng = SplitMix64(seed: 1729)
         var decoder = LZMA2Decoder()
         // lc 8, lp 4 (more literal contexts than LZMA2 allows: the model grows) for every other round.
-        let properties = [try! LZMAProperties(byte: 0x5D, dictionarySize: 1 << 16), try! LZMAProperties(literalContextBits: 8, literalPositionBits: 4, positionBits: 4, dictionarySize: 1 << 16)]
+        let properties = try [LZMAProperties(byte: 0x5D, dictionarySize: 1 << 16), LZMAProperties(literalContextBits: 8, literalPositionBits: 4, positionBits: 4, dictionarySize: 1 << 16)]
         for size in [0, 1, 5, 6, 10, 20, 100, 1000, 20_000] {
-            for round in 0..<200 {
+            for round in 0..<rounds {
                 // A valid LZMA2 chunk header, then garbage; and garbage as LZMA1 after a valid first byte.
                 var chunk: [UInt8] = [0xE0 | UInt8(round & 0x1F), UInt8(truncatingIfNeeded: rng.next()), UInt8(truncatingIfNeeded: rng.next()), UInt8(size >> 8 & 0xFF), UInt8(size & 0xFF), 0x5D, 0]
                 chunk += (0..<size).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
@@ -535,7 +547,7 @@ struct LZMADecoderTests {
 
     @Test func computesCRC64LikeLiblzma() {
         #expect(CRC64.checksum(Array("123456789".utf8).span.bytes) == 0x995D_C9BB_DF19_39FA)
-        var rng = SplitMix64(state: 64)
+        var rng = SplitMix64(seed: 64)
         let bytes = (0..<600).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
         for length in 0...600 {
             let data = Array(bytes.prefix(length))
@@ -561,4 +573,11 @@ struct LZMADecoderTests {
             #expect(CRC64.checksum(data.span.bytes.extracting(1000...), continuing: CRC64.checksum(data.span.bytes.extracting(..<1000))) == expected)
         }
     }
+}
+
+/// Every byte of the corruption files changed and every cut, and 200 rounds of random input per size.
+@Suite(.bulk) struct LZMABulkTests {
+    @Test func survivesCorruption() throws { try LZMADecoderTests.checkSurvivesCorruption { _, _ in true } }
+
+    @Test func survivesRandomInput() throws { try LZMADecoderTests.checkSurvivesRandomInput(rounds: 200) }
 }

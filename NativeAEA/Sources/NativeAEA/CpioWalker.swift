@@ -1,0 +1,215 @@
+import Bytes
+import Darwin
+
+// The cpio "odc" format (POSIX.1 portable, `070707`), what an Xcode `.xip`'s `Content` holds once its pbzx blocks are
+// decoded: per entry a 76-byte header of octal ASCII fields, the NUL-terminated name, then the file's bytes (a
+// symbolic link's target, for links), with no padding; a `TRAILER!!!` entry ends the archive.
+//
+//     magic 6 | dev 6 | ino 6 | mode 6 | uid 6 | gid 6 | nlink 6 | rdev 6 | mtime 11 | namesize 6 | filesize 11
+//
+// Hard links share `dev` and `ino`.
+
+enum Cpio {
+    static let headerSize = 76
+
+    /// One entry's header fields.
+    struct Header {
+        var dev = 0
+        var ino = 0
+        var mode = 0
+        var uid = 0
+        var gid = 0
+        var nlink = 0
+        var rdev = 0
+        var mtime = 0
+        var nameSize = 0
+        var fileSize = 0
+    }
+
+    /// Parses the 76 header bytes at `bytes`.
+    ///
+    /// - Throws: ``AEAError/invalidArchive(_:)`` for another magic or a field that isn't octal.
+    static func parseHeader(_ bytes: UnsafeRawPointer) throws(AEAError) -> Header {
+        // The magic, "070707", as one comparison of 6 bytes (in a u64 with its next two bytes masked off).
+        let magic = UInt64(littleEndian: unsafe bytes.loadUnaligned(as: UInt64.self)) & 0xFFFF_FFFF_FFFF
+        guard magic == 0x3730_3730_3730 else { throw .invalidArchive("no cpio (odc) magic") }
+        // Unsafe: a span over the header's bytes. Safe: the caller checked all 76 are in its buffer.
+        var reader = AlignedBytesReader(unsafe RawSpan(_unsafeStart: bytes + 6, byteCount: headerSize - 6))
+        var header = Header()
+        // Each field is one or two 8-byte loads, checked and combined a word at a time (`asciiOctalDigits`).
+        do throws(BytesError) {
+            header.dev = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.ino = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.mode = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.uid = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.gid = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.nlink = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.rdev = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.mtime = try reader.read(Int.self, asciiOctalDigits: 11)
+            header.nameSize = try reader.read(Int.self, asciiOctalDigits: 6)
+            header.fileSize = try reader.read(Int.self, asciiOctalDigits: 11)
+        } catch {
+            throw .invalidArchive("a cpio header field isn't octal")
+        }
+        return header
+    }
+
+    /// The entry type for `mode`'s file type bits.
+    static func type(_ mode: Int) -> AAEntryType? {
+        switch mode_t(mode) & S_IFMT {
+        case S_IFREG: .regularFile
+        case S_IFDIR: .directory
+        case S_IFLNK: .symbolicLink
+        case S_IFIFO: .fifo
+        case S_IFCHR: .characterDevice
+        case S_IFBLK: .blockDevice
+        case S_IFSOCK: .socket
+        default: nil
+        }
+    }
+}
+
+/// Walks a cpio (odc) stream across decoded chunks, routing its entries to an ``ArchiveSink`` as Apple Archive
+/// entries: the same extraction and listing.
+///
+/// Each entry's header and name (and a link's target) are made contiguous, as ``ArchiveWalker`` makes Apple Archive
+/// headers, by copying a partial one into the next buffer's carry region; file contents are never copied.
+enum CpioWalker {
+    /// The longest header, name, and link target handled (the carry region's size).
+    static let maximumHeaderAndName = 65_535
+
+    /// `xip --expand` compresses only files larger than this (16 KiB: every one of Xcode 27.2's files of 16,384
+    /// bytes or fewer is plain, and every larger one is compressed unless it's a PNG or doesn't pay).
+    static let xipCompressionThreshold = 16_384
+
+    nonisolated(nonsending) static func walk<Sink: ArchiveSink & ~Copyable>(_ source: some ChunkSource, into sink: inout Sink) async throws(AEAError) {
+        let pool = source.pool
+        var position = 0 // In the stream.
+        var inHeader = true
+        var ended = false
+        var dataStart = 0, dataEnd = 0 // The current file's contents in the stream.
+        var previousBuffer = -1
+        var previousStart = 0
+        var carry = 0
+        var streamEnd = 0
+        defer {
+            if previousBuffer >= 0 { pool.release(previousBuffer) }
+        }
+        while let chunk = try await source.nextChunk() {
+            let buffer = chunk.buffer
+            let base = unsafe pool.segmentBase(buffer)
+            let start = chunk.rawOffset
+            let end = start + chunk.rawSize
+            streamEnd = end
+            if carry > 0 {
+                // The partial header goes just before this chunk's bytes; the previous buffer is still held.
+                unsafe (base - carry).copyMemory(from: pool.segmentBase(previousBuffer) + (position - previousStart), byteCount: carry)
+                carry = 0
+            }
+            previousStart = start
+            if previousBuffer >= 0 { pool.release(previousBuffer) }
+            previousBuffer = buffer
+            if ended { continue } // Padding after the trailer.
+
+            // `pointer(p)` for stream positions from `start - carry` to `end`.
+            func pointer(_ p: Int) -> UnsafeMutableRawPointer { unsafe base + (p - start) }
+
+            while true {
+                if inHeader {
+                    let available = end - position
+                    if available == 0 { break }
+                    if available < Cpio.headerSize {
+                        carry = available
+                        break
+                    }
+                    // The fixed part is in this buffer (or carried before it): safe.
+                    let header = try unsafe Cpio.parseHeader(pointer(position))
+                    guard header.nameSize >= 1, header.nameSize <= PATH_MAX else { throw .invalidArchive("a cpio name size \(header.nameSize)") }
+                    let type = Cpio.type(header.mode)
+                    // A link's target is its contents: part of the header here, so that it's contiguous.
+                    let isLink = type == .symbolicLink
+                    if isLink, header.fileSize > Int(PATH_MAX) { throw .invalidArchive("a cpio link target of \(header.fileSize) bytes") }
+                    let count = Cpio.headerSize + header.nameSize + (isLink ? header.fileSize : 0)
+                    if available < count {
+                        guard count <= maximumHeaderAndName else { throw .invalidArchive("a cpio header of \(count) bytes") }
+                        carry = available
+                        break
+                    }
+                    let headerPointer = unsafe pointer(position)
+                    // The name ends with its NUL, which must be its last byte.
+                    guard unsafe headerPointer.load(fromByteOffset: Cpio.headerSize + header.nameSize - 1, as: UInt8.self) == 0 else {
+                        throw .invalidArchive("a cpio name without its NUL")
+                    }
+                    let nameCount = header.nameSize - 1
+                    if nameCount == 10, unsafe memcmp(headerPointer + Cpio.headerSize, "TRAILER!!!", 10) == 0 {
+                        position += count
+                        ended = true
+                        break
+                    }
+                    let entry = try unsafe entryHeader(header, type: type, at: headerPointer, count: count)
+                    try await unsafe sink.entry(entry, header: headerPointer, buffer: buffer)
+                    position += count
+                    if let data = entry.data, data.count > 0 {
+                        inHeader = false
+                        dataStart = position
+                        dataEnd = position + data.count
+                    } else {
+                        try await sink.endEntry()
+                        continue
+                    }
+                }
+                let stop = min(dataEnd, end)
+                if position < stop {
+                    try await unsafe sink.data(pointer(position), count: stop - position, fileOffset: position - dataStart, buffer: buffer, segment: chunk.index)
+                }
+                position = stop
+                guard position == dataEnd else { break }
+                try await sink.endEntry()
+                inHeader = true
+            }
+        }
+        // After the trailer only padding may follow (archivers pad to a block); before it, nothing may end.
+        guard ended, position <= streamEnd else { throw .invalidArchive("the cpio stream ends without its trailer") }
+    }
+
+    /// The Apple Archive form of a cpio entry whose header (and name, and a link's target) is the `count` bytes at
+    /// `header`.
+    static func entryHeader(_ cpio: Cpio.Header, type: AAEntryType?, at header: UnsafeRawPointer, count: Int) throws(AEAError) -> AAEntryHeader {
+        guard let type else { throw .invalidArchive("a cpio entry of an unknown type (mode \(String(cpio.mode, radix: 8)))") }
+        var entry = AAEntryHeader()
+        entry.byteCount = count
+        entry.type = type
+        // Names are relative, `./a/b` or `.` for the root: the path without `./`, empty for the root.
+        var nameOffset = Cpio.headerSize, nameCount = cpio.nameSize - 1
+        if nameCount >= 2, unsafe header.load(fromByteOffset: nameOffset, as: UInt8.self) == 0x2E,
+           unsafe header.load(fromByteOffset: nameOffset + 1, as: UInt8.self) == 0x2F {
+            nameOffset += 2
+            nameCount -= 2
+        } else if nameCount == 1, unsafe header.load(fromByteOffset: nameOffset, as: UInt8.self) == 0x2E {
+            nameCount = 0
+        }
+        entry.path = AAHeaderRange(offset: nameOffset, count: nameCount)
+        entry.mode = UInt16(truncatingIfNeeded: cpio.mode & 0o7777)
+        entry.uid = UInt32(truncatingIfNeeded: cpio.uid)
+        entry.gid = UInt32(truncatingIfNeeded: cpio.gid)
+        // Files keep their time; directories and links get the extraction's, as `xip --expand` leaves them.
+        if type == .regularFile { entry.modificationTime = (Int64(cpio.mtime), 0) }
+        switch type {
+        case .symbolicLink:
+            entry.linkTarget = AAHeaderRange(offset: Cpio.headerSize + cpio.nameSize, count: cpio.fileSize)
+        case .regularFile:
+            entry.data = (0, cpio.fileSize)
+            // `xip --expand`'s compression: LZVN forks for files over 16 KiB (whether one pays, and PNGs, are decided
+            // with the data: `Decmpfs.pays`, `Decmpfs.skips`).
+            if cpio.fileSize > xipCompressionThreshold { entry.diskCompression = 8 }
+            entry.blobByteCount = cpio.fileSize
+            // A file with other names: the first one written, the others linked to it.
+            if cpio.nlink > 1 { entry.hardLinkCluster = UInt64(truncatingIfNeeded: cpio.dev) &<< 32 | UInt64(truncatingIfNeeded: cpio.ino) }
+        case .characterDevice, .blockDevice:
+            entry.device = UInt64(truncatingIfNeeded: cpio.rdev)
+        default:
+            guard cpio.fileSize == 0 else { throw .invalidArchive("a cpio \(type) entry with contents") }
+        }
+        return entry
+    }
+}

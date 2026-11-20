@@ -142,7 +142,7 @@ let characters = ByteLanes(indices).lookup(in: (t0, t1, t2, t3))           // 64
   at a time, and its zip patterns get merged into four-vector shuffles, which ARM64 builds a lane at a
   time. `ByteLanes.isLookupVectorized` says whether lookups are single instructions (ARM64 with the trait,
   not `Portable`), so code can choose another way where they aren't.
-- [Base64](../Base64) is built from these: 21 GB/s per core, 93% of a C kernel with `ld3` and `st4`.
+- Base64 (the `BytesBase64` product, `Sources/BytesBase64`) is built from these: 21 GB/s per core, 93% of a C kernel with `ld3` and `st4`.
 
 ## Decoders
 

@@ -163,6 +163,15 @@ func ipv4Workloads() -> [Workload] {
             }
             return UInt64(sum)
         },
+        // The little-endian reader: the order in the type.
+        Workload(name: "LittleEndianBytesReader: read(UInt32.self) per value", unit: 4, allCores: false) { span in
+            var reader = LittleEndianBytesReader(span)
+            var sum: UInt32 = 0
+            while reader.remainingByteCount >= 4 {
+                sum &+= try! reader.read(UInt32.self)
+            }
+            return UInt64(sum)
+        },
         Workload(name: "IPv4: read(IPv4Address.self) per value", unit: 4, allCores: false) { span in
             var reader = BytesReader(span)
             var sum: UInt32 = 0

@@ -2,6 +2,7 @@ import Benchmark
 import Bytes
 import BytesAsync
 import BytesCompression
+import BytesTestSupport
 import Darwin
 import Dispatch
 
@@ -16,14 +17,15 @@ let performanceCores: Int = {
     return Int(count)
 }()
 
-/// The large samples, plus a 256 KB slice of dickens, where a round's fixed costs show.
-private let parallelSamples: [Fixtures.Sample] = {
-    var samples = Fixtures.samples.filter { $0.bytes.count >= 1 << 20 && $0.name != "x-ray" }
-    if let dickens = Fixtures.samples.first(where: { $0.name == "dickens" }) {
-        samples.append(Fixtures.Sample(name: "dickens", bytes: Array(dickens.bytes.prefix(256 << 10))))
+/// The large samples (but xml, which added nothing to dickens and samba), plus a 256 KB slice of dickens, where a
+/// round's fixed costs show.
+private func parallelSamples() -> [Fixtures.Sample] {
+    var samples = Fixtures.samples.filter { $0.byteCount >= 1 << 20 && $0.name != "x-ray" && $0.name != "xml" }
+    if let dickens = Fixtures.Sample(name: "dickens", corpusPath: "silesia/dickens", limit: 256 << 10) {
+        samples.append(dickens)
     }
     return samples
-}()
+}
 
 /// An output buffer for the async forms, which can't borrow an array across a suspension: allocated once,
 /// never freed (the benchmark process registers it for its whole life).
@@ -31,99 +33,167 @@ private func outputBuffer(_ byteCount: Int) -> UnsafeMutableRawBufferPointer {
     UnsafeMutableRawBufferPointer.allocate(byteCount: byteCount, alignment: 64)
 }
 
+/// Parallel codecs' timings vary more than one thread's (thread wake-ups, cores' clocks): up to 1,000 samples in
+/// 300 ms (2–13 ms an operation: 23–150 samples). No malloc counting in timed runs (Fixtures.swift).
+private var parallelConfiguration: Benchmark.Configuration {
+    .init(
+        metrics: [.wallClock, .instructions, .throughput],
+        warmupIterations: 1,
+        scalingFactor: .one,
+        maxDuration: .milliseconds(300),
+        maxIterations: 1_000
+    )
+}
+
+final class ParallelEncodeFixture<Encoder: ~Copyable> {
+    let input: [UInt8]
+    var encoder: Encoder
+    var output: [UInt8]
+    let buffer: UnsafeMutableRawBufferPointer
+
+    init(input: [UInt8], encoder: consuming Encoder, outputCount: Int) {
+        self.input = input
+        self.encoder = encoder
+        output = [UInt8](repeating: 0, count: outputCount)
+        buffer = outputBuffer(outputCount)
+    }
+}
+
+final class ParallelDecodeFixture {
+    let original: [UInt8]
+    let compressed: [UInt8]
+    var decoder: ParallelDeflateDecoder
+    var sequential = DeflateDecoder(format: .raw)
+    var output: [UInt8]
+    let buffer: UnsafeMutableRawBufferPointer
+
+    init(_ sample: Fixtures.Sample, chunkSize: Int, lanes: Int) {
+        original = sample.bytes
+        // Independent chunks, so the decoder can split the stream.
+        var independent = ParallelDeflateEncoder(format: .raw, level: 6, chunkSize: chunkSize, lanes: lanes, independentChunks: true)
+        var scratch = [UInt8](repeating: 0, count: independent.maximumCompressedSize(forByteCount: original.count))
+        // (The size into a local first: `scratch.prefix(encode(into: &scratch))` reads `scratch` before
+        // the encoder writes it.)
+        let compressedSize = parallelEncodeAll(&independent, original, into: &scratch)
+        compressed = Array(scratch.prefix(compressedSize))
+        decoder = ParallelDeflateDecoder(format: .raw, lanes: lanes)
+        output = [UInt8](repeating: 0, count: original.count + 64)
+        buffer = outputBuffer(output.count)
+        precondition(parallelDecodeAll(&decoder, compressed, into: &output) == original.count
+            && output.prefix(original.count).elementsEqual(original) && decoder.lastSegmentCount > 1)
+    }
+}
+
 /// Compresses each large sample with the parallel DEFLATE encoder on `performanceCores` and 8 lanes, at levels
-/// 1 and 6, in each of its three forms: synchronous (`concurrentPerform` rounds), async on a Dispatch queue,
-/// and async as task groups. Raw format, 256 KB chunks (64 KB for the 256 KB input, so it fills 4 lanes).
-/// Compare with the sequential "Deflate N sample: Bytes" rows.
+/// 1 and 6, synchronously (`concurrentPerform` rounds); and in its async forms (on a Dispatch queue, and as task
+/// groups) at level 1 on samba and the 256 KB input, on the performance cores. Raw format, 256 KB chunks (64 KB for
+/// the 256 KB input, so it fills 4 lanes). Compare with the sequential "Deflate N sample: Bytes" rows.
 ///
 /// Then decodes an independent-chunk encoding of each (level 6) with the parallel decoder and, for
-/// reference, the sequential one.
+/// reference, the sequential one. Setups check that zlib (or Google's brotli) decodes each encoding back.
 func registerParallelBenchmarks() {
     let queue = DispatchQueue(label: "compression")
-    for sample in parallelSamples {
-        let chunkSize = sample.bytes.count <= 256 << 10 ? 64 << 10 : 256 << 10
+    let configuration = parallelConfiguration
+    for sample in parallelSamples() {
+        let chunkSize = sample.byteCount <= 256 << 10 ? 64 << 10 : 256 << 10
+        // The async forms' own costs (hops, task groups) show on the small input and one large one: on the
+        // performance cores only.
+        let asyncInput = sample.name == "samba" || sample.byteCount <= 256 << 10
         for lanes in Set([performanceCores, 8]).sorted(by: >) {
+            let async = asyncInput && lanes == performanceCores
             for level in [1, 6] {
-                var encoder = ParallelDeflateEncoder(format: .raw, level: level, chunkSize: chunkSize, lanes: lanes)
-                var output = [UInt8](repeating: 0, count: encoder.maximumCompressedSize(forByteCount: sample.bytes.count))
-                let buffer = outputBuffer(output.count)
-                precondition(parallelEncodeAll(&encoder, sample.bytes, into: &output) > 0)
+                let fixture = Lazy {
+                    let encoder = ParallelDeflateEncoder(format: .raw, level: level, chunkSize: chunkSize, lanes: lanes)
+                    let outputCount = encoder.maximumCompressedSize(forByteCount: sample.byteCount)
+                    let fixture = ParallelEncodeFixture(input: sample.bytes, encoder: encoder, outputCount: outputCount)
+                    let count = parallelEncodeAll(&fixture.encoder, fixture.input, into: &fixture.output)
+                    precondition(Fixtures.inflates(fixture.output[..<count], to: fixture.input), "Parallel deflate: wrong result")
+                    return fixture
+                }
                 let name = "Parallel deflate \(level) \(sample.label): Bytes, \(lanes) lanes"
-                Benchmark("\(name), sync") { benchmark in
+                Benchmark("\(name), sync", configuration: configuration) { benchmark in
+                    let f = fixture.value
                     for _ in benchmark.scaledIterations {
-                        blackHole(parallelEncodeAll(&encoder, sample.bytes, into: &output))
+                        blackHole(parallelEncodeAll(&f.encoder, f.input, into: &f.output))
                     }
-                }
-                Benchmark("\(name), async Dispatch") { (benchmark: Benchmark) async in
-                    for _ in benchmark.scaledIterations {
-                        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-                        try! await encoder.compressAll(sample.bytes.span.bytes, into: &span, on: queue)
-                        blackHole(span.finalize(for: buffer))
-                    }
-                }
-                Benchmark("\(name), async task group") { (benchmark: Benchmark) async in
+                } setup: { _ = fixture.value }
+                guard async && level == 1 else { continue }
+                Benchmark("\(name), async Dispatch", configuration: configuration) { (benchmark: Benchmark) async in
+                    let f = fixture.value
+                    let input = f.input, buffer = f.buffer
                     for _ in benchmark.scaledIterations {
                         var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-                        try! await encoder.compressAllConcurrently(sample.bytes.span.bytes, into: &span)
+                        try! await f.encoder.compressAll(input.span.bytes, into: &span, on: queue)
                         blackHole(span.finalize(for: buffer))
                     }
-                }
+                } setup: { _ = fixture.value }
+                Benchmark("\(name), async task group", configuration: configuration) { (benchmark: Benchmark) async in
+                    let f = fixture.value
+                    let input = f.input, buffer = f.buffer
+                    for _ in benchmark.scaledIterations {
+                        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+                        try! await f.encoder.compressAllConcurrently(input.span.bytes, into: &span)
+                        blackHole(span.finalize(for: buffer))
+                    }
+                } setup: { _ = fixture.value }
             }
 
-            // Independent chunks, so the decoder can split the stream.
-            var independent = ParallelDeflateEncoder(format: .raw, level: 6, chunkSize: chunkSize, lanes: lanes, independentChunks: true)
-            var scratch = [UInt8](repeating: 0, count: independent.maximumCompressedSize(forByteCount: sample.bytes.count))
-            // (The size into a local first: `scratch.prefix(encode(into: &scratch))` reads `scratch` before
-            // the encoder writes it.)
-            let compressedSize = parallelEncodeAll(&independent, sample.bytes, into: &scratch)
-            let compressed = Array(scratch.prefix(compressedSize))
-            var output = [UInt8](repeating: 0, count: sample.bytes.count + 64)
-            var decoder = ParallelDeflateDecoder(format: .raw, lanes: lanes)
-            precondition(parallelDecodeAll(&decoder, compressed, into: &output) == sample.bytes.count
-                && Array(output.prefix(sample.bytes.count)) == sample.bytes && decoder.lastSegmentCount > 1)
-            let buffer = outputBuffer(output.count)
+            let fixture = Lazy { ParallelDecodeFixture(sample, chunkSize: chunkSize, lanes: lanes) }
             let name = "Parallel inflate \(sample.label): Bytes, \(lanes) lanes"
-            Benchmark("\(name), sync") { benchmark in
+            Benchmark("\(name), sync", configuration: configuration) { benchmark in
+                let f = fixture.value
                 for _ in benchmark.scaledIterations {
-                    blackHole(parallelDecodeAll(&decoder, compressed, into: &output))
+                    blackHole(parallelDecodeAll(&f.decoder, f.compressed, into: &f.output))
                 }
-            }
-            Benchmark("\(name), async Dispatch") { (benchmark: Benchmark) async in
-                for _ in benchmark.scaledIterations {
-                    var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-                    _ = try! await decoder.decompressAll(compressed.span.bytes, into: &span, on: queue)
-                    blackHole(span.finalize(for: buffer))
-                }
+            } setup: { _ = fixture.value }
+            if async {
+                Benchmark("\(name), async Dispatch", configuration: configuration) { (benchmark: Benchmark) async in
+                    let f = fixture.value
+                    let compressed = f.compressed, buffer = f.buffer
+                    for _ in benchmark.scaledIterations {
+                        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+                        _ = try! await f.decoder.decompressAll(compressed.span.bytes, into: &span, on: queue)
+                        blackHole(span.finalize(for: buffer))
+                    }
+                } setup: { _ = fixture.value }
             }
             if lanes == performanceCores {
-                var sequential = DeflateDecoder(format: .raw)
-                Benchmark("Parallel inflate \(sample.label): Bytes, sequential") { benchmark in
+                Benchmark("Parallel inflate \(sample.label): Bytes, sequential", configuration: configuration) { benchmark in
+                    let f = fixture.value
                     for _ in benchmark.scaledIterations {
-                        blackHole(decodeAll(&sequential, compressed, into: &output))
+                        blackHole(decodeAll(&f.sequential, f.compressed, into: &f.output))
                     }
-                }
+                } setup: { _ = fixture.value }
             }
         }
 
         // Brotli on the performance cores, sync and Dispatch; compare with "Brotli encode qN sample: Bytes".
         for quality in [1, 5] {
-            var encoder = ParallelBrotliEncoder(quality: quality, chunkSize: chunkSize, lanes: performanceCores)
-            var output = [UInt8](repeating: 0, count: encoder.maximumCompressedSize(forByteCount: sample.bytes.count))
-            let buffer = outputBuffer(output.count)
-            precondition(parallelBrotliEncodeAll(&encoder, sample.bytes, into: &output) > 0)
-            let name = "Parallel Brotli q\(quality) \(sample.label): Bytes, \(performanceCores) lanes"
-            Benchmark("\(name), sync") { benchmark in
-                for _ in benchmark.scaledIterations {
-                    blackHole(parallelBrotliEncodeAll(&encoder, sample.bytes, into: &output))
-                }
+            let fixture = Lazy {
+                let encoder = ParallelBrotliEncoder(quality: quality, chunkSize: chunkSize, lanes: performanceCores)
+                let outputCount = encoder.maximumCompressedSize(forByteCount: sample.byteCount)
+                let fixture = ParallelEncodeFixture(input: sample.bytes, encoder: encoder, outputCount: outputCount)
+                let count = parallelBrotliEncodeAll(&fixture.encoder, fixture.input, into: &fixture.output)
+                precondition(Fixtures.brotliDecodes(fixture.output[..<count], to: fixture.input), "Parallel Brotli: wrong result")
+                return fixture
             }
-            Benchmark("\(name), async Dispatch") { (benchmark: Benchmark) async in
+            let name = "Parallel Brotli q\(quality) \(sample.label): Bytes, \(performanceCores) lanes"
+            Benchmark("\(name), sync", configuration: configuration) { benchmark in
+                let f = fixture.value
+                for _ in benchmark.scaledIterations {
+                    blackHole(parallelBrotliEncodeAll(&f.encoder, f.input, into: &f.output))
+                }
+            } setup: { _ = fixture.value }
+            guard quality == 1 && sample.name == "samba" else { continue }
+            Benchmark("\(name), async Dispatch", configuration: configuration) { (benchmark: Benchmark) async in
+                let f = fixture.value
+                let input = f.input, buffer = f.buffer
                 for _ in benchmark.scaledIterations {
                     var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-                    try! await encoder.compressAll(sample.bytes.span.bytes, into: &span, on: queue)
+                    try! await f.encoder.compressAll(input.span.bytes, into: &span, on: queue)
                     blackHole(span.finalize(for: buffer))
                 }
-            }
+            } setup: { _ = fixture.value }
         }
     }
 }

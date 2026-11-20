@@ -163,6 +163,8 @@ extension ZstdHuffman {
         var ip3 = count &- 8
         @inline(__always)
         func load(_ position: Int) -> UInt64 {
+            // Unsafe and safe as the function's comment says: positions within the section, 8 bytes before its
+            // streams' ends.
             UInt64(littleEndian: unsafe source.loadUnaligned(fromByteOffset: position, as: UInt64.self))
         }
         @inline(__always)
@@ -191,6 +193,8 @@ extension ZstdHuffman {
             repeat {
                 @inline(__always)
                 func decode(_ bits: inout UInt64, _ op: Int, _ index: Int) {
+                    // Unsafe: a lookup and a store. Safe: the index is the top 11 bits, within the table's 2048
+                    // entries; `op + index` stays below `limit`, within `output` (the rounds were counted for it).
                     let entry = unsafe table[Int(truncatingIfNeeded: bits &>> 53)]
                     bits &<<= UInt64(entry & 0x3F)
                     unsafe output[op &+ index] = UInt8(truncatingIfNeeded: entry &>> 8)
@@ -258,6 +262,7 @@ extension ZstdBlockDecoder {
         let sizeFormat = (header &>> 2) & 3
         @inline(__always)
         func byte(_ index: Int) -> Int {
+            // Unsafe and safe as the header loads above: callers check `available` before each index.
             Int(unsafe source.load(fromByteOffset: index, as: UInt8.self))
         }
         let literalBuffer = unsafe workspace.pointer(ZstdWorkspace.literalsOffset)

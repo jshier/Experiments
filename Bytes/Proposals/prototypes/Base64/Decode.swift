@@ -1,5 +1,5 @@
-import Base64
 import Bytes
+import BytesBase64
 
 /// Prototype: Base64 decoding kernel, 4 characters to 3 bytes, with arithmetic (no table), validity
 /// accumulated without an early exit so the loop can vectorize. Returns false if any character isn't in

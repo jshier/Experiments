@@ -1,5 +1,6 @@
 import Benchmark
 import Bytes
+import BytesTestSupport
 
 // Text fields in a binary-style parser: fixed-width timestamps and numbers in a 20,000-line log
 // ("2026-11-18T13:45:09 200 001532\n", 31 bytes a line), ASCII tags, and a digit scan. Each new API against what
@@ -166,45 +167,29 @@ func countDigitsByByte(_ bytes: RawSpan) -> Int {
 }
 
 func registerASCIIBenchmarks() {
-    let log = makeASCIILog(count: 20_000)
-    let expected = try! parseASCIILogByDigit(log.span.bytes)
-    precondition(try! parseASCIILog(log.span.bytes) == expected)
-    Benchmark("ASCII: 20,000 log lines, read(_:asciiDigits:)") { benchmark in
-        for _ in benchmark.scaledIterations {
-            blackHole(try parseASCIILog(log.span.bytes))
-        }
+    // Made by the setup of a benchmark that uses them; each setup checks its parser against the hand-written one.
+    let log = Lazy { makeASCIILog(count: 20_000) }
+    register("ASCII: 20,000 log lines, read(_:asciiDigits:)", log, check: { $1 == (try! parseASCIILogByDigit($0.span.bytes)) }) { log in
+        try parseASCIILog(log.span.bytes)
     }
-    Benchmark("ASCII: 20,000 log lines, a digit at a time") { benchmark in
-        for _ in benchmark.scaledIterations {
-            blackHole(try parseASCIILogByDigit(log.span.bytes))
-        }
+    register("ASCII: 20,000 log lines, a digit at a time", log) { log in
+        try parseASCIILogByDigit(log.span.bytes)
     }
 
-    let chunks = makeASCIIChunks(count: 20_000)
-    precondition(try! countASCIIChunks(chunks.span.bytes) == countHexChunks(chunks.span.bytes))
-    Benchmark("ASCII: 20,000 chunk types, Byte4(ascii:)") { benchmark in
-        for _ in benchmark.scaledIterations {
-            blackHole(try countASCIIChunks(chunks.span.bytes))
-        }
-    }
-    Benchmark("ASCII: 20,000 chunk types, hex literals") { benchmark in
-        for _ in benchmark.scaledIterations {
-            blackHole(try countHexChunks(chunks.span.bytes))
-        }
+    // `Byte4(ascii:)` against hex literals: the two compiled to the same function (LLVM merged them), so the hex
+    // literals' row was retired on 2026-11-19; setup still checks they agree.
+    let chunks = Lazy { makeASCIIChunks(count: 20_000) }
+    register("ASCII: 20,000 chunk types, Byte4(ascii:)", chunks, check: { $1 == (try! countHexChunks($0.span.bytes)) }) { chunks in
+        try countASCIIChunks(chunks.span.bytes)
     }
 
     // The log is 620 KB; its length is a multiple of 16 here, and `forEach(Byte16.self)` would leave a tail
     // otherwise.
-    let text = Array(log.prefix(log.count & ~15))
-    precondition(countDigitsByLanes(text.span.bytes) == countDigitsByByte(text.span.bytes))
-    Benchmark("ASCII: digits in 620 KB, ByteLanes.asciiDigits") { benchmark in
-        for _ in benchmark.scaledIterations {
-            blackHole(countDigitsByLanes(text.span.bytes))
-        }
+    let text = Lazy { Array(log.value.prefix(log.value.count & ~15)) }
+    register("ASCII: digits in 620 KB, ByteLanes.asciiDigits", text, check: { $1 == countDigitsByByte($0.span.bytes) }) { text in
+        countDigitsByLanes(text.span.bytes)
     }
-    Benchmark("ASCII: digits in 620 KB, isASCIIDigit per byte") { benchmark in
-        for _ in benchmark.scaledIterations {
-            blackHole(countDigitsByByte(text.span.bytes))
-        }
+    register("ASCII: digits in 620 KB, isASCIIDigit per byte", text) { text in
+        countDigitsByByte(text.span.bytes)
     }
 }

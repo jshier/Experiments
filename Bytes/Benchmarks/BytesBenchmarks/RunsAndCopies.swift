@@ -2,13 +2,15 @@ import Benchmark
 import Bytes
 
 // Runs (`write(repeating:…)`), literal copies from a reader (`write(from:byteCount:allowingOverrun:)`), short
-// span copies (`write(_: RawSpan)` up to 64 bytes), and minimal LEB128 (`requiringMinimal:`). Each new form is
-// measured next to the code it replaces, on the same data, so one run compares them (times drift between
-// runs; see AGENTS.md). Every workload fills or reads 64 KB; divide by the operation count in its name for a
-// per-operation cost.
+// span copies (`write(_: RawSpan)` up to 64 bytes), and minimal LEB128 (`requiringMinimal:`). Each new form was
+// measured next to the code it replaced, on the same data, until 2026-11-19; now setup checks it against that code.
+// Every workload fills or reads 64 KB; divide by the operation count in its name for a per-operation cost.
 //
 // The workload functions are `@inline(never)`, taking widths and sizes as arguments, so those are run-time
-// values, as in a decoder that reads them from a header.
+// values, as in a decoder that reads them from a header. They take their lengths and buffers as arguments too:
+// globals are lazily initialized, and a global read in the loop checks its `swift_once` token each time, which for
+// tens of milliseconds after first use calls into `dispatch_once_f` (~36 instructions; the runs' rows were bimodal,
+// 78 K against 104 K instructions, until 2026-11-19).
 
 /// Deterministic pseudo-random lengths in `range`: a power-of-two count, so the workloads index with a mask.
 func pseudoRandomLengths(in range: ClosedRange<Int>, seed: UInt64) -> [Int] {
@@ -32,20 +34,20 @@ let copySource = randomBuffer(byteCount: 128 << 10)
 // reference path's register allocation (the `Byte3` generating write went from 70 K to 102 K instructions
 // with no change to it).
 
-@inline(never) func writeRunsFilling(width: Int, into buffer: UnsafeMutableRawBufferPointer) -> Int {
-    writeRuns(width: width, filling: true, into: buffer)
+@inline(never) func writeRunsFilling(width: Int, lengths: [Int], into buffer: UnsafeMutableRawBufferPointer) -> Int {
+    writeRuns(width: width, lengths: lengths, filling: true, into: buffer)
 }
 
-@inline(never) func writeRunsPerElement(width: Int, into buffer: UnsafeMutableRawBufferPointer) -> Int {
-    writeRuns(width: width, filling: false, into: buffer)
+@inline(never) func writeRunsPerElement(width: Int, lengths: [Int], into buffer: UnsafeMutableRawBufferPointer) -> Int {
+    writeRuns(width: width, lengths: lengths, filling: false, into: buffer)
 }
 
-@inline(never) func writeGroupRunsFilling<T: ByteGroup>(_: T.Type, into buffer: UnsafeMutableRawBufferPointer) -> Int {
-    writeGroupRuns(T.self, filling: true, into: buffer)
+@inline(never) func writeGroupRunsFilling<T: ByteGroup>(_: T.Type, lengths: [Int], into buffer: UnsafeMutableRawBufferPointer) -> Int {
+    writeGroupRuns(T.self, lengths: lengths, filling: true, into: buffer)
 }
 
-@inline(never) func writeGroupRunsGenerating<T: ByteGroup>(_: T.Type, into buffer: UnsafeMutableRawBufferPointer) -> Int {
-    writeGroupRuns(T.self, filling: false, into: buffer)
+@inline(never) func writeGroupRunsGenerating<T: ByteGroup>(_: T.Type, lengths: [Int], into buffer: UnsafeMutableRawBufferPointer) -> Int {
+    writeGroupRuns(T.self, lengths: lengths, filling: false, into: buffer)
 }
 
 @inline(never) func writeByteRunsFilling(length: Int, into buffer: UnsafeMutableRawBufferPointer) -> Int {
@@ -57,13 +59,13 @@ let copySource = randomBuffer(byteCount: 128 << 10)
 }
 
 /// Runs of `width`-byte elements (a run-time width, like a QOI image's channel count), each run a different
-/// element, until the next doesn't fit. Returns the bytes written.
+/// element and `lengths[i]` long, until the next doesn't fit. Returns the bytes written.
 @inline(__always)
-func writeRuns(width: Int, filling: Bool, into buffer: UnsafeMutableRawBufferPointer) -> Int {
+func writeRuns(width: Int, lengths: [Int], filling: Bool, into buffer: UnsafeMutableRawBufferPointer) -> Int {
     var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
     var index = 0
     while true {
-        let count = runLengths[index & 4095]
+        let count = lengths[index & 4095]
         guard writer.remainingByteCount >= count &* width else { break }
         let element = hashedWide(index)
         if filling {
@@ -81,11 +83,11 @@ func writeRuns(width: Int, filling: Bool, into buffer: UnsafeMutableRawBufferPoi
 
 /// Runs of `T`, a width known at compile time: `write(repeating:count:)` or the generating write.
 @inline(__always)
-func writeGroupRuns<T: ByteGroup>(_: T.Type, filling: Bool, into buffer: UnsafeMutableRawBufferPointer) -> Int {
+func writeGroupRuns<T: ByteGroup>(_: T.Type, lengths: [Int], filling: Bool, into buffer: UnsafeMutableRawBufferPointer) -> Int {
     var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
     var index = 0
     while true {
-        let count = runLengths[index & 4095]
+        let count = lengths[index & 4095]
         guard writer.remainingByteCount >= count &* T.byteCount else { break }
         let element = T(T.Integer(truncatingIfNeeded: hashedWide(index)), .littleEndian)
         if filling {
@@ -252,70 +254,92 @@ func sumLEB128(_ method: LEB128Read, in bytes: RawSpan) -> UInt64 {
 
 // MARK: Registration
 
-/// Each workload: a name and a closure returning something to keep (bytes written, a sum).
-func runsAndCopiesWorkloads() -> [(name: String, run: () -> Int)] {
-    let target = runTarget
-    let source = copySource
-    var workloads: [(name: String, run: () -> Int)] = []
+/// A workload: a name, a closure returning something to keep (bytes written, a sum), and the code it replaced, which
+/// must return the same and leave the same bytes in `runTarget` (setup checks; the replaced code's own rows, "(before)",
+/// were retired on 2026-11-19: their numbers are in the saved baselines).
+struct RunsWorkload {
+    let name: String
+    let run: () -> Int
+    var reference: (() -> Int)?
+}
+
+/// Each workload. The globals (about 300 KB in all) are made here, while registering, and captured as locals: a
+/// closure reading a global checks its `swift_once` token on every call (see the top of the file).
+func runsAndCopiesWorkloads() -> [RunsWorkload] {
+    let target = runTarget, source = copySource, runs = runLengths, leb128 = leb128Values
+    var workloads: [RunsWorkload] = []
     for width in [3, 4] {
-        workloads += [
-            ("Runs: \(width)-byte elements, 1-62 each, write(repeating:byteCount:count:)", { writeRunsFilling(width: width, into: target) }),
-            ("Runs: \(width)-byte elements, 1-62 each, per-element writes (before)", { writeRunsPerElement(width: width, into: target) }),
-        ]
+        workloads.append(RunsWorkload(
+            name: "Runs: \(width)-byte elements, 1-62 each, write(repeating:byteCount:count:)",
+            run: { writeRunsFilling(width: width, lengths: runs, into: target) },
+            reference: { writeRunsPerElement(width: width, lengths: runs, into: target) }
+        ))
     }
-    workloads += [
-        ("Runs: Byte3, 1-62 each, write(repeating:count:)", { writeGroupRunsFilling(Byte3.self, into: target) }),
-        ("Runs: Byte3, 1-62 each, generating write (before)", { writeGroupRunsGenerating(Byte3.self, into: target) }),
-    ]
+    workloads.append(RunsWorkload(
+        name: "Runs: Byte3, 1-62 each, write(repeating:count:)", run: { writeGroupRunsFilling(Byte3.self, lengths: runs, into: target) },
+        reference: { writeGroupRunsGenerating(Byte3.self, lengths: runs, into: target) }
+    ))
     for length in [8, 40, 1_000] {
-        workloads += [
-            ("Runs: bytes, \(length) each, write(repeating:count:)", { writeByteRunsFilling(length: length, into: target) }),
-            ("Runs: bytes, \(length) each, generating write (before)", { writeByteRunsGenerating(length: length, into: target) }),
-        ]
+        workloads.append(RunsWorkload(
+            name: "Runs: bytes, \(length) each, write(repeating:count:)", run: { writeByteRunsFilling(length: length, into: target) },
+            reference: { writeByteRunsGenerating(length: length, into: target) }
+        ))
     }
     for (label, lengths) in [("0-15", literalLengths), ("16-64", longLiteralLengths)] {
-        workloads += [
-            ("Literals: \(label) B, write(from:byteCount:allowingOverrun:)", {
-                source.withUnsafeBytes { copyLiteralsOverrunning(lengths, from: RawSpan(_unsafeBytes: $0), into: target) }
-            }),
-            ("Literals: \(label) B, write(reader.read(byteCount:)) (before)", {
-                source.withUnsafeBytes { copyLiteralsExactly(lengths, from: RawSpan(_unsafeBytes: $0), into: target) }
-            }),
-        ]
+        workloads.append(RunsWorkload(
+            name: "Literals: \(label) B, write(from:byteCount:allowingOverrun:)",
+            run: { source.withUnsafeBytes { copyLiteralsOverrunning(lengths, from: RawSpan(_unsafeBytes: $0), into: target) } },
+            reference: { source.withUnsafeBytes { copyLiteralsExactly(lengths, from: RawSpan(_unsafeBytes: $0), into: target) } }
+        ))
     }
     for distance in [1, 2, 3, 4, 6, 7, 8] {
         for (label, lengths) in [("3-32", matchLengths), ("3-258", longMatchLengths)] {
-            workloads.append(("Back-references: distance \(distance), \(label) B", {
+            workloads.append(RunsWorkload(name: "Back-references: distance \(distance), \(label) B", run: {
                 copyBackReferences(distance: distance, lengths: lengths, into: target)
             }))
         }
     }
     for byteCount in [24, 32, 40, 48, 63, 64] {
-        for (label, method) in [("write(_: RawSpan)", SpanCopy.write), ("two writes of 32 or fewer (before)", .split), ("memmove (before)", .memmove)]
-            where byteCount > 32 || method == .write {
-            workloads.append(("Span copies: \(byteCount) B, \(label)", {
-                source.withUnsafeBytes { copySpans(byteCount: byteCount, method: method, from: RawSpan(_unsafeBytes: $0), into: target) }
-            }))
-        }
+        workloads.append(RunsWorkload(
+            name: "Span copies: \(byteCount) B, write(_: RawSpan)",
+            run: { source.withUnsafeBytes { copySpans(byteCount: byteCount, method: .write, from: RawSpan(_unsafeBytes: $0), into: target) } },
+            reference: { source.withUnsafeBytes { copySpans(byteCount: byteCount, method: .memmove, from: RawSpan(_unsafeBytes: $0), into: target) } }
+        ))
     }
-    for (label, method) in [("read", LEB128Read.plain), ("read(requiringMinimal: true)", .minimal), ("read, then check the length (before)", .checkedAfter)] {
-        workloads.append(("LEB128: 1-4 B, \(label)", {
-            leb128Values.withUnsafeBytes { Int(truncatingIfNeeded: sumLEB128(method, in: RawSpan(_unsafeBytes: $0))) }
-        }))
+    for (label, method) in [("read", LEB128Read.plain), ("read(requiringMinimal: true)", .minimal)] {
+        workloads.append(RunsWorkload(
+            name: "LEB128: 1-4 B, \(label)",
+            run: { leb128.withUnsafeBytes { Int(truncatingIfNeeded: sumLEB128(method, in: RawSpan(_unsafeBytes: $0))) } },
+            reference: { leb128.withUnsafeBytes { Int(truncatingIfNeeded: sumLEB128(.checkedAfter, in: RawSpan(_unsafeBytes: $0))) } }
+        ))
     }
     return workloads
 }
 
+/// What a workload leaves: its result, and the target's bytes up to it (writes that allow overrun leave bytes past
+/// their end; a sum leaves the target as it was).
+private func outcome(_ run: () -> Int) -> (Int, [UInt8]) {
+    runTarget.initializeMemory(as: UInt8.self, repeating: 0)
+    let result = run()
+    return (result, Array(runTarget.prefix(result)))
+}
+
 func registerRunsAndCopiesBenchmarks() {
+    // Under 0.12 ms an operation: up to 5,000 samples in 100 ms (at least 800).
     let configuration = Benchmark.Configuration(
         metrics: [.wallClock, .instructions], warmupIterations: 10, scalingFactor: .one,
-        maxDuration: .milliseconds(500), maxIterations: 5_000
+        maxDuration: .milliseconds(100), maxIterations: 5_000
     )
-    for (name, run) in runsAndCopiesWorkloads() {
-        Benchmark(name, configuration: configuration) { benchmark in
+    for workload in runsAndCopiesWorkloads() {
+        Benchmark(workload.name, configuration: configuration) { benchmark in
             for _ in benchmark.scaledIterations {
-                blackHole(run())
+                blackHole(workload.run())
             }
+        } setup: {
+            guard let reference = workload.reference else { return }
+            let (result, bytes) = outcome(workload.run)
+            let (expected, expectedBytes) = outcome(reference)
+            precondition(result == expected && bytes == expectedBytes, "\(workload.name): wrong result")
         }
     }
 }

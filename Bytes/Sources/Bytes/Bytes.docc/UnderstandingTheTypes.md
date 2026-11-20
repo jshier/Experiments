@@ -24,7 +24,7 @@ as it works; the few that own memory (``ByteBuffer``, ``Pipeline``) allocate onc
 
 The package's products: `Bytes` (everything above except the rows marked otherwise), `BytesMacros` (the
 `@BitFields` and `@BinaryRecord` macros, with their swift-syntax plugin: depend on it only if you use them), `BytesAsync` (asynchronous pipelines and sockets), `BytesCompression` (DEFLATE, zlib, gzip, and
-Brotli, both directions; Zstandard, and LZMA, LZMA2, and `.xz`, decoding), `BytesCrypto` (ChaCha20-Poly1305 and TLS 1.3 records), and `BytesFoundation` (`Data` with spans).
+Brotli, both directions; Zstandard, and LZMA, LZMA2, and `.xz`, decoding), `BytesCrypto` (ChaCha20-Poly1305 and TLS 1.3 records; P-256 and P-384 ECDSA verification and ECDH; HPKE), and `BytesFoundation` (`Data` with spans).
 
 The rest is extensions to the standard library's spans: copying between them, finding patterns in them, and
 building arrays and strings with a writer.
@@ -247,9 +247,13 @@ bit first, the order of the codecs that use it.
   - ``ByteTransform/transform(_:appending:flush:growth:)`` is the drive loop for a message or stream in
     memory: it calls the stage, adding room to an array, until the stage has taken its input.
 - `AsyncByteTransform` (the `BytesAsync` product) is `ByteTransform` with `async` calls, for stages that
-  wait on a socket or run on another queue. `synchronously()` and `offloaded(to:)` make any stage one, and
+  wait on a socket or run off the caller's actor. `synchronously()` makes any stage one that runs in place;
+  `concurrently()`, the structured default for heavy stages, runs its calls on Swift's global executor in the
+  calling task (off any actor, with the task's priority, no thread switch for a nonisolated caller); and
+  `offloaded(to:)` runs them on a Dispatch queue, for work that must stay off the cooperative pool's threads.
   `ByteBuffer.receive` fills a buffer from a read that suspends. The parallel codecs have `async` entry points
-  too (`compressAll(_:into:on:)` on a Dispatch queue, or as child tasks of a task group).
+  too (as child tasks of a task group, `compressAllConcurrently(_:into:)`, or on a Dispatch queue,
+  `compressAll(_:into:on:)`), which stop early when their task is cancelled (`BytesError.cancelled`).
 - ``LentBytes`` and ``LentMutableBytes`` carry a span's memory to other threads for the length of one
   call (`withLentBytes`, `withLentFreeCapacity`): a span can't be captured by a task, so parallel work over
   a caller's input and output is lent it as a `Sendable` pointer, valid until the lending call returns (which

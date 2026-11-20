@@ -278,7 +278,7 @@ public struct LZMA2Decoder: ~Copyable {
             guard registers.position == limit else { throw .insufficientData }
             if uncompressedSize == nil {
                 // The output is full: the end marker must be next, or the stream needs more room.
-                do {
+                do throws(BytesError) {
                     try LZMALoop.decodeEndMarker(&registers, &decoder, model: model)
                 } catch {
                     throw unsafe decoder.input > decoder.end ? .insufficientData : .insufficientCapacity

@@ -459,6 +459,27 @@ extension BytesWriter {
             _byteOffset &+= 1
             return
         }
+        if width < 8 && 8 % width == 0 {
+            // Widths that divide a byte: a value written after others of its width always fits in the current
+            // byte, so it's merged into `_partial` and that one byte stored, with no window or multi-byte store
+            // (27 instructions a nibble through `_writeBits`). Bits after the value stay zero.
+            let total = _bitOffset &+ width
+            guard likely(_byteOffset < _bytes.byteCount) else { throw .insufficientCapacity }
+            if likely(total <= 8) {
+                let bits = UInt64(value.rawValue)
+                let partial = switch bitOrder {
+                case .mostSignificantFirst: _partial | bits &<< UInt64(8 &- total)
+                case .leastSignificantFirst: _partial | bits &<< UInt64(_bitOffset)
+                }
+                // Unsafe: an unchecked store. Safe: `_byteOffset` is below the byte count (checked above).
+                unsafe _bytes.storeBytes(of: UInt8(truncatingIfNeeded: partial), toUncheckedByteOffset: _byteOffset, as: UInt8.self)
+                let full = total &>> 3 // 1 when the byte is complete.
+                _byteOffset &+= full
+                _bitOffset = total & 7
+                _partial = full == 0 ? partial : 0
+                return
+            }
+        }
         guard likely(remainingBitCount >= width) else { throw .insufficientCapacity }
         _writeBits(UInt64(value.rawValue), count: width)
     }

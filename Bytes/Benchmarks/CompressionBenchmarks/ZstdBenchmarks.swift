@@ -1,6 +1,7 @@
 import Benchmark
 import Bytes
 import BytesCompression
+import BytesTestSupport
 import CZstd
 import Foundation
 
@@ -60,14 +61,6 @@ final class LibZstd {
 enum ZstdFixtures {
     static let files = ["dickens", "mozilla", "xml", "x-ray", "samba"]
 
-    /// A Silesia file, or `nil` if the corpus doesn't have it.
-    static func silesia(_ name: String) -> Fixtures.Sample? {
-        guard let data = FileManager.default.contents(atPath: Fixtures.corpusRoot.appending(path: "silesia/\(name)").path) else {
-            return nil
-        }
-        return Fixtures.Sample(name: name, bytes: [UInt8](data))
-    }
-
     /// `zstd -LEVEL` (or `zstd --long=27 -LEVEL`) of `data`: checksum on, content size stated.
     static func compress(_ data: [UInt8], level: Int32, long: Bool = false) -> [UInt8] {
         let context = ZSTD_createCCtx()!
@@ -119,48 +112,53 @@ func zstdDecodeStreaming(_ decoder: inout ZstdDecoder, _ input: [UInt8], chunk: 
     }
 }
 
-/// Registers the comparisons: each Silesia file at levels 1, 3, 19 (and mozilla with `--long=27 -19`), one
-/// call and streamed in 64 KB pieces; and 1–64 KB inputs at levels 3 and 19, one call.
+/// Registers the comparisons: each Silesia file at levels 1, 3, 19 (and mozilla with `--long=27 -19`) in one call,
+/// level 3 also streamed in 64 KB pieces; 1–64 KB inputs at level 3 (and 4 KB at 19), one call; and random bytes.
 func registerZstdBenchmarks() {
-    let libzstd = LibZstd()
-    var decoder = ZstdDecoder()
+    let libzstd = Lazy { LibZstd() }
     for name in ZstdFixtures.files {
-        guard let sample = ZstdFixtures.silesia(name) else { continue }
+        guard let sample = Fixtures.silesia(name) else { continue }
+        let configuration = Fixtures.configuration(forByteCount: sample.byteCount)
         var variants: [(label: String, key: String, level: Int32, long: Bool)] = [1, 3, 19].map { level in
             ("L\(level)", "\(level)", Int32(level), false)
         }
         if name == "mozilla" { variants.append(("long=27 L19", "long27-19", 19, true)) }
-        var output = [UInt8](repeating: 0, count: sample.bytes.count + 64)
         for variant in variants {
-            let compressed = Fixtures.cached("\(name)-\(sample.bytes.count).zstd-1.5.7-\(variant.key)") {
-                ZstdFixtures.compress(sample.bytes, level: variant.level, long: variant.long)
+            let fixture = Lazy {
+                let compressed = Fixtures.cached("\(name)-\(sample.byteCount).zstd-1.5.7-\(variant.key)") {
+                    ZstdFixtures.compress(sample.bytes, level: variant.level, long: variant.long)
+                }
+                return DecodeFixture(original: sample.bytes, compressed: compressed, outputCount: sample.byteCount + 64, decoder: ZstdDecoder())
             }
-            precondition(zstdDecodeAll(&decoder, compressed, into: &output) == sample.bytes.count
-                && output.prefix(sample.bytes.count).elementsEqual(sample.bytes))
-            precondition(zstdDecodeStreaming(&decoder, compressed, chunk: 1 << 16, into: &output) == sample.bytes.count)
-            precondition(libzstd.decompressStreaming(compressed, chunk: 1 << 16, into: &output) == sample.bytes.count)
             let label = "\(variant.label) \(sample.label)"
-            Benchmark("Zstd decode \(label): Bytes") { benchmark in
-                for _ in benchmark.scaledIterations {
-                    blackHole(zstdDecodeAll(&decoder, compressed, into: &output))
-                }
+            register("Zstd decode \(label): Bytes", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+                zstdDecodeAll(&f.decoder, f.compressed, into: &f.output)
             }
-            Benchmark("Zstd decode \(label): libzstd") { benchmark in
-                for _ in benchmark.scaledIterations {
-                    blackHole(libzstd.decompress(compressed, into: &output))
-                }
+            register("Zstd decode \(label): libzstd", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+                libzstd.value.decompress(f.compressed, into: &f.output)
             }
-            Benchmark("Zstd decode \(label): Bytes, streaming 64 KB") { benchmark in
-                for _ in benchmark.scaledIterations {
-                    blackHole(zstdDecodeStreaming(&decoder, compressed, chunk: 1 << 16, into: &output))
-                }
+            // Streamed at the default level only: the window's cost doesn't depend on the level.
+            guard variant.label == "L3" else { continue }
+            register("Zstd decode \(label): Bytes, streaming 64 KB", configuration: configuration, fixture, check: { $0.decodedCount($1) }) { f in
+                zstdDecodeStreaming(&f.decoder, f.compressed, chunk: 1 << 16, into: &f.output)
             }
-            Benchmark("Zstd decode \(label): libzstd, streaming 64 KB") { benchmark in
-                for _ in benchmark.scaledIterations {
-                    blackHole(libzstd.decompressStreaming(compressed, chunk: 1 << 16, into: &output))
-                }
+            register("Zstd decode \(label): libzstd, streaming 64 KB", configuration: configuration, fixture, check: { $0.decodedCount($1) }) { f in
+                libzstd.value.decompressStreaming(f.compressed, chunk: 1 << 16, into: &f.output)
             }
         }
+    }
+
+    // 1 MB of random bytes: raw blocks, the copy path.
+    let random = Fixtures.random
+    let randomFixture = Lazy {
+        let compressed = ZstdFixtures.compress(random.bytes, level: 3)
+        return DecodeFixture(original: random.bytes, compressed: compressed, outputCount: random.byteCount + 64, decoder: ZstdDecoder())
+    }
+    register("Zstd decode L3 \(random.label): Bytes", configuration: Fixtures.largeConfiguration, randomFixture, check: { $0.decodedAll($1) }) { f in
+        zstdDecodeAll(&f.decoder, f.compressed, into: &f.output)
+    }
+    register("Zstd decode L3 \(random.label): libzstd", configuration: Fixtures.largeConfiguration, randomFixture, check: { $0.decodedAll($1) }) { f in
+        libzstd.value.decompress(f.compressed, into: &f.output)
     }
 
     // Small inputs: the first 1 to 64 KB of text, XML, a binary, and JavaScript.
@@ -168,25 +166,21 @@ func registerZstdBenchmarks() {
         ("dickens", "silesia/dickens"), ("xml", "silesia/xml"), ("mozilla", "silesia/mozilla"), ("Main.js", "web/Main.js"),
     ]
     for (name, path) in small {
-        guard let file = FileManager.default.contents(atPath: Fixtures.corpusRoot.appending(path: path).path) else { continue }
         for kilobytes in [1, 4, 16, 64] {
-            let content = [UInt8](file.prefix(kilobytes << 10))
-            var output = [UInt8](repeating: 0, count: content.count + 64)
-            for level: Int32 in [3, 19] {
-                let compressed = Fixtures.cached("small/\(name)-\(kilobytes)k.zstd-1.5.7-\(level)") {
-                    ZstdFixtures.compress(content, level: level)
-                }
-                precondition(zstdDecodeAll(&decoder, compressed, into: &output) == content.count
-                    && output.prefix(content.count).elementsEqual(content))
-                Benchmark("Zstd decode L\(level) \(name) \(kilobytes) KB: Bytes") { benchmark in
-                    for _ in benchmark.scaledIterations {
-                        blackHole(zstdDecodeAll(&decoder, compressed, into: &output))
+            guard let content = Fixtures.Sample(name: name, corpusPath: path, limit: kilobytes << 10) else { continue }
+            // Level 19's sequences differ from level 3's; one size shows it.
+            for level: Int32 in kilobytes == 4 ? [3, 19] : [3] {
+                let fixture = Lazy {
+                    let compressed = Fixtures.cached("small/\(name)-\(kilobytes)k.zstd-1.5.7-\(level)") {
+                        ZstdFixtures.compress(content.bytes, level: level)
                     }
+                    return DecodeFixture(original: content.bytes, compressed: compressed, outputCount: content.byteCount + 64, decoder: ZstdDecoder())
                 }
-                Benchmark("Zstd decode L\(level) \(name) \(kilobytes) KB: libzstd") { benchmark in
-                    for _ in benchmark.scaledIterations {
-                        blackHole(libzstd.decompress(compressed, into: &output))
-                    }
+                register("Zstd decode L\(level) \(name) \(kilobytes) KB: Bytes", fixture, check: { $0.decodedAll($1) }) { f in
+                    zstdDecodeAll(&f.decoder, f.compressed, into: &f.output)
+                }
+                register("Zstd decode L\(level) \(name) \(kilobytes) KB: libzstd", fixture, check: { $0.decodedAll($1) }) { f in
+                    libzstd.value.decompress(f.compressed, into: &f.output)
                 }
             }
         }
@@ -198,27 +192,19 @@ func registerZstdBenchmarks() {
 ///
 ///     swift package --disable-sandbox benchmark thresholds check --filter 'Allocations:Zstd.*'
 func registerZstdAllocationBenchmarks() {
-    let configuration = Benchmark.Configuration(
-        metrics: [.mallocCountTotal],
-        warmupIterations: 1,
-        maxIterations: 10,
-        thresholds: [.mallocCountTotal: BenchmarkThresholds(absolute: [.p0: 0, .p50: 0, .p90: 0, .p100: 0])]
-    )
-    let content = Array(Fixtures.json(count: 1_200)) + Array(Fixtures.json(count: 16))
-    var output = [UInt8](repeating: 0, count: content.count + 64)
-    var decoder = ZstdDecoder()
+    let content = Lazy { Array(Fixtures.json(count: 1_200)) + Array(Fixtures.json(count: 16)) }
     for level: Int32 in [1, 19] {
-        let compressed = ZstdFixtures.compress(content, level: level)
-        precondition(zstdDecodeAll(&decoder, compressed, into: &output) == content.count)
-        Benchmark("Allocations:Zstd_decode_L\(level)", configuration: configuration) { benchmark in
-            for _ in benchmark.scaledIterations {
-                blackHole(zstdDecodeAll(&decoder, compressed, into: &output))
-            }
+        let fixture = Lazy {
+            DecodeFixture(
+                original: content.value, compressed: ZstdFixtures.compress(content.value, level: level), outputCount: content.value.count + 64,
+                decoder: ZstdDecoder()
+            )
         }
-        Benchmark("Allocations:Zstd_decode_L\(level)_streaming", configuration: configuration) { benchmark in
-            for _ in benchmark.scaledIterations {
-                blackHole(zstdDecodeStreaming(&decoder, compressed, chunk: 1000, into: &output))
-            }
+        register("Allocations:Zstd_decode_L\(level)", configuration: Fixtures.allocationConfiguration, fixture, check: { $0.decodedAll($1) }) { f in
+            zstdDecodeAll(&f.decoder, f.compressed, into: &f.output)
+        }
+        register("Allocations:Zstd_decode_L\(level)_streaming", configuration: Fixtures.allocationConfiguration, fixture, check: { $0.decodedCount($1) }) { f in
+            zstdDecodeStreaming(&f.decoder, f.compressed, chunk: 1000, into: &f.output)
         }
     }
 }

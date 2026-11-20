@@ -8,7 +8,7 @@ the README's `Tools/loops` commands; they pass with every change kept here.
 
 **Status:** 1, 3, and the `Byte16.vector`, `write(repeating:count:)`, and 128-byte lookup parts of 6 are in
 Bytes. 2 is not (Base64 keeps `shiftedDown`, in both the encoder and the decoder). 4 and 5 were not
-recommended (Base64's `mask(_:atLeast:)` stays). Current Base64 numbers: `Base64/Benchmarks/RESULTS.md`.
+recommended (Base64's `mask(_:atLeast:)` stays). Current Base64 numbers: `Bytes/Benchmarks/RESULTS-base64.md` (Base64 is now Bytes' `BytesBase64` module).
 
 ## 1. Copy spans of up to 64 bytes inline in `BytesWriter.write(_: RawSpan)`
 

@@ -169,11 +169,21 @@ public struct AES: Sendable {
 
     /// A counter block for ``counterMode(_:into:counter:)``: its next value, and how it counts.
     public struct Counter: Sendable {
-        /// The next counter block.
+        /// How the block counts.
+        @usableFromInline enum Layout: Sendable {
+            /// The whole block, a 128-bit little-endian counter (WinZip).
+            case littleEndian128
+            /// The last four bytes, big-endian, wrapping (GCM).
+            case bigEndian32
+            /// The last eight bytes, big-endian, wrapping without a carry into the first eight: CommonCrypto's CTR
+            /// mode (`kCCModeOptionCTR_BE`; checked: a counter at 2⁶⁴ − 1 goes to 0 with the first half unchanged),
+            /// which Apple Encrypted Archives use.
+            case bigEndian64
+        }
+
+        /// The next counter block, in memory order.
         @usableFromInline var block: SIMD2<UInt64>
-        /// Whether the whole block is a 128-bit little-endian counter (WinZip), or only its last four bytes are,
-        /// big-endian (GCM).
-        @usableFromInline let isWide: Bool
+        @usableFromInline let layout: Layout
         /// Keystream bytes made but not yet used, from a call that ended mid-block.
         @usableFromInline var pending = SIMD16<UInt8>.zero
         @usableFromInline var pendingCount = 0
@@ -184,7 +194,7 @@ public struct AES: Sendable {
         @inlinable
         public init(littleEndianFrom value: UInt64) {
             block = SIMD2(value.littleEndian, 0)
-            isWide = true
+            layout = .littleEndian128
         }
 
         /// A block whose last four bytes count big-endian, wrapping: GCM's (`J0 + 1` onward).
@@ -192,24 +202,41 @@ public struct AES: Sendable {
         /// - Parameter block: The first counter block, 16 bytes.
         /// - Precondition: `block` is 16 bytes.
         @inlinable
-        public init(bigEndianCounterIn block: RawSpan) {
+        public init(bigEndian32BitCounterIn block: RawSpan) {
             precondition(block.byteCount == 16, "A counter block is 16 bytes")
             self.block = SIMD2(block.load(fromByteOffset: 0, as: UInt64.self), block.load(fromByteOffset: 8, as: UInt64.self))
-            isWide = false
+            layout = .bigEndian32
+        }
+
+        /// A block whose last eight bytes count big-endian, wrapping without a carry into the first eight:
+        /// CommonCrypto's CTR mode (`kCCModeOptionCTR_BE`), which Apple Encrypted Archives use from an IV their key
+        /// derivation gives.
+        ///
+        /// - Parameter block: The first counter block, 16 bytes.
+        /// - Precondition: `block` is 16 bytes.
+        @inlinable
+        public init(bigEndian64BitCounterIn block: RawSpan) {
+            precondition(block.byteCount == 16, "A counter block is 16 bytes")
+            self.block = SIMD2(block.load(fromByteOffset: 0, as: UInt64.self), block.load(fromByteOffset: 8, as: UInt64.self))
+            layout = .bigEndian64
         }
 
         /// The current block as bytes, then advances by one.
         @inlinable @inline(__always)
         mutating func next() -> SIMD16<UInt8> {
             let current = bitCast(block, to: SIMD16<UInt8>.self)
-            if isWide {
+            switch layout {
+            case .littleEndian128:
                 let low = UInt64(littleEndian: block[0]) &+ 1
                 block[0] = low.littleEndian
                 if low == 0 { block[1] = (UInt64(littleEndian: block[1]) &+ 1).littleEndian }
-            } else {
+            case .bigEndian32:
                 // The last four bytes: the high 32 bits of the second word, big-endian.
                 let word = UInt32(bigEndian: UInt32(truncatingIfNeeded: block[1] &>> 32)) &+ 1
                 block[1] = block[1] & 0xFFFF_FFFF | UInt64(word.bigEndian) &<< 32
+            case .bigEndian64:
+                // The second word, big-endian, wrapping.
+                block[1] = (UInt64(bigEndian: block[1]) &+ 1).bigEndian
             }
             return current
         }
@@ -256,6 +283,8 @@ public struct AES: Sendable {
     func counterMode(_ source: UnsafeRawPointer?, _ target: UnsafeMutableRawPointer?, count: Int, counter: inout Counter) {
         guard count > 0, let source = unsafe source, let target = unsafe target else { return }
         var offset = 0
+        // Unsafe (throughout): the caller's `count` bytes at `source` and `target` (see the callers); every access
+        // below is at an offset under `count`, a byte or a whole 16-byte block that fits.
         // Finish the keystream block a previous call started.
         while counter.pendingCount > 0 && offset < count {
             let byte = unsafe source.load(fromByteOffset: offset, as: UInt8.self) ^ counter.pending[16 &- counter.pendingCount]
@@ -264,6 +293,7 @@ public struct AES: Sendable {
             offset &+= 1
         }
         #if HardwareCrypto && arch(arm64) && !Portable
+        // Unsafe: the same buffers, 128 bytes at a time while that many remain.
         offset = unsafe counterModeBatches(source, target, count: count, counter: &counter, from: offset)
         #endif
         while count &- offset >= 16 {
@@ -303,7 +333,21 @@ public struct AES: Sendable {
         let rounds = rounds
         while count &- offset >= 128 {
             var b0, b1, b2, b3, b4, b5, b6, b7: SIMD16<UInt8>
-            if counter.isWide {
+            switch counter.layout {
+            case .bigEndian64:
+                // The second word counts, wrapping; each block is the first word and a byte-swapped sum (one `rev`).
+                let low = UInt64(bigEndian: counter.block[1])
+                let high = counter.block[0]
+                b0 = bitCast(SIMD2(high, low.bigEndian), to: SIMD16<UInt8>.self)
+                b1 = bitCast(SIMD2(high, (low &+ 1).bigEndian), to: SIMD16<UInt8>.self)
+                b2 = bitCast(SIMD2(high, (low &+ 2).bigEndian), to: SIMD16<UInt8>.self)
+                b3 = bitCast(SIMD2(high, (low &+ 3).bigEndian), to: SIMD16<UInt8>.self)
+                b4 = bitCast(SIMD2(high, (low &+ 4).bigEndian), to: SIMD16<UInt8>.self)
+                b5 = bitCast(SIMD2(high, (low &+ 5).bigEndian), to: SIMD16<UInt8>.self)
+                b6 = bitCast(SIMD2(high, (low &+ 6).bigEndian), to: SIMD16<UInt8>.self)
+                b7 = bitCast(SIMD2(high, (low &+ 7).bigEndian), to: SIMD16<UInt8>.self)
+                counter.block[1] = (low &+ 8).bigEndian
+            case .littleEndian128:
                 let low = UInt64(littleEndian: counter.block[0])
                 if low <= UInt64.max &- 8 {
                     // The 128-bit little-endian counter as two native words (arm64 is little-endian).
@@ -322,7 +366,7 @@ public struct AES: Sendable {
                     b0 = counter.next(); b1 = counter.next(); b2 = counter.next(); b3 = counter.next()
                     b4 = counter.next(); b5 = counter.next(); b6 = counter.next(); b7 = counter.next()
                 }
-            } else {
+            case .bigEndian32:
                 // GCM's: the block's words byte-swapped to native, so the last is the counter; add, swap back.
                 let native = bytes_rev32(bitCast(counter.block, to: SIMD16<UInt8>.self))
                 b0 = bytes_rev32_words(native)
@@ -391,6 +435,8 @@ public struct AES: Sendable {
         _ state: SIMD16<UInt8>, _ lastKey: SIMD16<UInt8>, _ finalKey: SIMD16<UInt8>,
         _ input: UnsafeRawPointer, _ output: UnsafeMutableRawPointer
     ) {
+        // Unsafe: an unchecked 16-byte load and store. Safe: callers pass a block within their buffers (`input` may
+        // be `output`: the load comes first).
         let block = unsafe input.loadUnaligned(as: SIMD16<UInt8>.self) ^ bytes_aese(state, lastKey) ^ finalKey
         unsafe output.storeBytes(of: block, as: SIMD16<UInt8>.self)
     }

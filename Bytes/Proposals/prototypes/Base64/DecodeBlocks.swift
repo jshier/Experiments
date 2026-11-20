@@ -1,5 +1,5 @@
-import Base64
 import Bytes
+import BytesBase64
 
 typealias Table4 = (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>)
 

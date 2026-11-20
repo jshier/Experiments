@@ -1,5 +1,6 @@
 import Bytes
 @testable import BytesCrypto
+import BytesTestSupport
 import CryptoKit
 import Foundation
 import Testing
@@ -41,9 +42,40 @@ import Testing
         #expect(case16.tag == hex("76fc6ece0f4e1768cddf8853bb2d551b"))
     }
 
+    /// Empty plaintext, empty associated data, or both (the tag alone authenticates): the specification's test case 1,
+    /// CryptoKit for each key length, and opening back, forged tags rejected.
+    @Test(arguments: [16, 32])
+    func emptyPlaintextAndAAD(keyLength: Int) throws {
+        if keyLength == 16 {
+            let case1 = seal([UInt8](repeating: 0, count: 16), [UInt8](repeating: 0, count: 12), [], [])
+            #expect(case1.ciphertext.isEmpty)
+            #expect(case1.tag == hex("58e2fccefa7e3061367f1d57a4e7455a"))
+        }
+        var rng = SplitMix64(seed: 0xE0 &+ UInt64(keyLength))
+        let key = randomBytes(keyLength, using: &rng), nonce = randomBytes(12, using: &rng)
+        let aead = AESGCM(key: key.span.bytes)
+        for (plaintext, aad) in [([UInt8](), [UInt8]()), ([], randomBytes(13, using: &rng)), (randomBytes(17, using: &rng), [])] {
+            let ours = seal(key, nonce, plaintext, aad)
+            let theirs = try CryptoKit.AES.GCM.seal(plaintext, using: SymmetricKey(data: key), nonce: CryptoKit.AES.GCM.Nonce(data: nonce), authenticating: aad)
+            let label = "\(plaintext.count)-byte plaintext, \(aad.count)-byte AAD"
+            #expect(ours.ciphertext == Array(theirs.ciphertext), "\(label)")
+            #expect(ours.tag == Array(theirs.tag), "\(label)")
+            var message = ours.ciphertext
+            var span = message.mutableSpan
+            var raw = MutableRawSpan(mutating: &span)
+            var forged = ours.tag
+            forged[0] ^= 1
+            #expect(throws: BytesError.mismatch, "\(label)") {
+                try aead.open(&raw, nonce: nonce.span.bytes, authenticating: aad.span.bytes, tag: forged.span.bytes)
+            }
+            try aead.open(&raw, nonce: nonce.span.bytes, authenticating: aad.span.bytes, tag: ours.tag.span.bytes)
+            #expect(message == plaintext, "\(label)")
+        }
+    }
+
     @Test(arguments: [16, 32])
     func matchesCryptoKit(keyLength: Int) throws {
-        var rng = SplitMix64(state: UInt64(keyLength))
+        var rng = SplitMix64(seed: UInt64(keyLength))
         let key = randomBytes(keyLength, using: &rng)
         for length in Array(0...300) + [511, 512, 513, 1023, 1024, 4097, 16_384 + 17] {
             let nonce = randomBytes(12, using: &rng)
@@ -65,7 +97,7 @@ import Testing
     }
 
     @Test func rejectsForgeries() {
-        var rng = SplitMix64(state: 3)
+        var rng = SplitMix64(seed: 3)
         let key = randomBytes(16, using: &rng), nonce = randomBytes(12, using: &rng)
         let aad = randomBytes(13, using: &rng), plaintext = randomBytes(200, using: &rng)
         let sealed = seal(key, nonce, plaintext, aad)
@@ -85,28 +117,31 @@ import Testing
             var altered = sealed.ciphertext
             altered[index] ^= 1
             let (result, message) = open(altered, aad, sealed.tag)
-            #expect(throws: BytesError.mismatch) { try result.get() }
+            #expect(throws: BytesError.mismatch) { _ = try result.get() }
             #expect(message == altered, "a forged message is left as it was, never decrypted")
         }
         var alteredAAD = aad
         alteredAAD[0] ^= 0x80
-        #expect(throws: BytesError.mismatch) { try open(sealed.ciphertext, alteredAAD, sealed.tag).0.get() }
+        #expect(throws: BytesError.mismatch) { _ = try open(sealed.ciphertext, alteredAAD, sealed.tag).0.get() }
         var alteredTag = sealed.tag
         alteredTag[15] ^= 1
-        #expect(throws: BytesError.mismatch) { try open(sealed.ciphertext, aad, alteredTag).0.get() }
-        #expect(throws: BytesError.invalidValue) { try open(sealed.ciphertext, aad, Array(sealed.tag.prefix(12))).0.get() }
+        #expect(throws: BytesError.mismatch) { _ = try open(sealed.ciphertext, aad, alteredTag).0.get() }
+        #expect(throws: BytesError.invalidValue) { _ = try open(sealed.ciphertext, aad, Array(sealed.tag.prefix(12))).0.get() }
     }
 
+    // Both reductions exist only where GHASH uses PMULL (AESGCM.swift's condition).
+    #if HardwareCrypto && arch(arm64) && !Portable
     @Test func vectorReductionMatchesTheScalarOne() {
-        var rng = SplitMix64(state: 21)
+        var rng = SplitMix64(seed: 21)
         for _ in 0..<2000 {
             let low = SIMD2(rng.next(), rng.next()), middle = SIMD2(rng.next(), rng.next()), high = SIMD2(rng.next(), rng.next())
             #expect(AESGCM.reduceInVectors(low: low, middle: middle, high: high) == AESGCM.reduce(low: low, middle: middle, high: high))
         }
     }
+    #endif
 
     @Test func multiplicationMatchesTheBitSerialForm() {
-        var rng = SplitMix64(state: 12)
+        var rng = SplitMix64(seed: 12)
         for _ in 0..<500 {
             let x = FieldElement(low: rng.next(), high: rng.next()), y = FieldElement(low: rng.next(), high: rng.next())
             #expect(AESGCM.multiply(x, y) == FieldElement.multiplyPortably(x, y))

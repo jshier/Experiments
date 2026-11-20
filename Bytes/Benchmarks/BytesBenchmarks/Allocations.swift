@@ -1,5 +1,6 @@
 import Benchmark
 import Bytes
+import BytesTestSupport
 
 // Allocation checks: every workload that shouldn't allocate, registered again as "Allocations:<name>",
 // measuring only allocations over a small buffer, with a static threshold of zero (in `Thresholds/`).
@@ -50,19 +51,36 @@ func registerAllocationBenchmarks(_ others: [(name: String, run: () -> Void)]) {
             for _ in benchmark.scaledIterations {
                 run()
             }
+        } setup: {
+            run() // Makes the fixtures, unmeasured.
         }
     }
 
-    let source = randomBuffer(byteCount: 64 << 10)
-    for workload in readWorkloads() {
-        let byteCount = source.count / workload.unit * workload.unit
-        register("Read: \(workload.name)") { blackHole(workload.read(source.span.bytes.extracting(first: byteCount))) }
+    // 64 KB to read and to write, made on first use.
+    let source = Lazy { randomBuffer(byteCount: 64 << 10) }
+    let target = Lazy { residentBuffer(byteCount: 64 << 10) }
+
+    // Every read workload (but one, below) in one gate, and every write workload in another: a gate's count is the sum
+    // of its workloads', so it fails if any of them allocates. (One gate per workload until 2026-11-19: 104 gates,
+    // each a process.) To find which one allocates, run them one by one (`Tools/allocations`, or a temporary gate).
+    let reads = readWorkloads().filter { $0.name != forInBytes.name }
+    register("Read_all_workloads") {
+        let source = source.value
+        for workload in reads {
+            let byteCount = source.count / workload.unit * workload.unit
+            blackHole(workload.read(source.span.bytes.extracting(first: byteCount)))
+        }
     }
-    // "for-in Bytes (UInt8)" above, `let reader = BytesReader(span); for byte in reader`, allocates once per loop
+    // "for-in Bytes (UInt8)", `let reader = BytesReader(span); for byte in reader`, allocates once per loop
     // (Swift 6.4.2): a `~Copyable` `let` is boxed, and the iterator's borrow dependence on the box keeps the
-    // optimizer from moving it to the stack. Its threshold is 1, so the check reports the fix as an
+    // optimizer from moving it to the stack. Its gate's threshold is 1, so the check reports the fix as an
     // improvement. A `var` reader isn't boxed:
+    register("Read: \(forInBytes.name)") {
+        let source = source.value
+        blackHole(forInBytes.read(source.span.bytes))
+    }
     register("Read: for-in Bytes (UInt8), var reader") {
+        let source = source.value
         var reader = BytesReader(source.span)
         var sum: UInt8 = 0
         for byte in reader {
@@ -72,13 +90,15 @@ func registerAllocationBenchmarks(_ others: [(name: String, run: () -> Void)]) {
         blackHole(sum)
     }
 
-    let target = residentBuffer(byteCount: 64 << 10)
-    for workload in writeWorkloads() {
-        let slice = UnsafeMutableRawBufferPointer(rebasing: target[..<(target.count / workload.unit * workload.unit)])
-        register("Write: \(workload.name)") { blackHole(workload.write(slice)) }
+    let writes = writeWorkloads()
+    register("Write_all_workloads") {
+        let target = target.value
+        for workload in writes {
+            blackHole(workload.write(UnsafeMutableRawBufferPointer(rebasing: target[..<(target.count / workload.unit * workload.unit)])))
+        }
     }
 
-    register("Sections: LEB128-prefixed write and read") { blackHole(sectionsRoundTrip(into: target, count: 1_000)) }
+    register("Sections: LEB128-prefixed write and read") { blackHole(sectionsRoundTrip(into: target.value, count: 1_000)) }
 
     for (name, run) in others {
         register(name, run)

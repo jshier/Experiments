@@ -75,6 +75,21 @@ let perValueWriteWorkloads: [WriteWorkload] = [
         }
         return writer.byteCount
     },
+    // The same through the byte-ordered and aligned writers: no bit offset, the order in the type or at the call.
+    WriteWorkload(name: "per-value BigEndianBytesWriter.write(_:as:) Byte4", unit: 4, allCores: false) { buffer in
+        var writer = BigEndianBytesWriter(MutableRawSpan(_unsafeBytes: buffer))
+        for index in 0..<buffer.count / 4 {
+            try! writer.write(hashed(index), as: Byte4.self)
+        }
+        return writer.byteCount
+    },
+    WriteWorkload(name: "per-value AlignedBytesWriter.write(_:as:_:) Byte4", unit: 4, allCores: false) { buffer in
+        var writer = AlignedBytesWriter(MutableRawSpan(_unsafeBytes: buffer))
+        for index in 0..<buffer.count / 4 {
+            try! writer.write(hashed(index), as: Byte4.self, .bigEndian)
+        }
+        return writer.byteCount
+    },
     WriteWorkload(name: "per-value write(_:as:_:) Byte3", unit: 3, allCores: false) { buffer in
         var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
         for index in 0..<buffer.count / 3 {
@@ -119,6 +134,8 @@ func residentBuffer(byteCount: Int) -> UnsafeMutableRawBufferPointer {
     return buffer
 }
 
+// Made on first use (globals are lazy), by the setup of a benchmark that writes them: every benchmark's process registers
+// them all, and zeroing 512 MB takes 0.1 s.
 nonisolated(unsafe) let cachedWriteBuffer = residentBuffer(byteCount: 4 << 20)
 nonisolated(unsafe) let memoryWriteBuffer = residentBuffer(byteCount: 512 << 20)
 
@@ -154,36 +171,49 @@ func registerWriteBenchmarks() {
     let workloads = writeWorkloads()
     let cores = ProcessInfo.processInfo.activeProcessorCount
 
-    func configuration(maxDuration: Duration) -> Benchmark.Configuration {
+    // As for reads (Bandwidth.swift): in cache up to 2,000 samples in 150 ms; from memory on one core 10 samples, or
+    // 400 ms' worth; on every core 200 ms' worth.
+    func configuration(maxDuration: Duration, maxIterations: Int = 2_000, warmupIterations: Int = 2) -> Benchmark.Configuration {
         // Bandwidth: throughput (iterations per second, the framework's) times the bytes per iteration
         // (4 MB or 512 MB, in the name). Only the writes run inside `scaledIterations`.
-        .init(metrics: [.wallClock, .instructions, .throughput], warmupIterations: 2, scalingFactor: .one,
-              maxDuration: maxDuration, maxIterations: 2_000)
+        .init(metrics: [.wallClock, .instructions, .throughput], warmupIterations: warmupIterations, scalingFactor: .one,
+              maxDuration: maxDuration, maxIterations: maxIterations)
     }
 
+    // From memory, as for reads (Bandwidth.swift): the references and two widths on one core, the references, `Byte`,
+    // and `Bits<3>` on every core, since 2026-11-19.
+    let memoryOneCore: Set = [rawStore.name, memsetStore.name, "Byte4", "Byte16"]
+    let memoryAllCores: Set = [rawStore.name, memsetStore.name, "Byte", "Bits<3>"]
     for workload in workloads {
-        for (label, buffer, duration) in [
-            ("in cache (4 MB)", cachedWriteBuffer, Duration.milliseconds(500)),
-            ("memory (512 MB), 1 core", memoryWriteBuffer, Duration.seconds(1)),
-        ] {
-            let target = UnsafeMutableRawBufferPointer(rebasing: buffer[..<(buffer.count / workload.unit * workload.unit)])
-            Benchmark("Write: \(workload.name), \(label)", configuration: configuration(maxDuration: duration)) { benchmark in
+        var places: [(String, () -> UnsafeMutableRawBufferPointer, Benchmark.Configuration)] = [
+            ("in cache (4 MB)", { cachedWriteBuffer }, configuration(maxDuration: .milliseconds(150))),
+        ]
+        if memoryOneCore.contains(workload.name) {
+            places.append(("memory (512 MB), 1 core", { memoryWriteBuffer }, configuration(maxDuration: .milliseconds(400), maxIterations: 10, warmupIterations: 1)))
+        }
+        for (label, buffer, configuration) in places {
+            Benchmark("Write: \(workload.name), \(label)", configuration: configuration) { benchmark in
+                let buffer = buffer()
+                let target = UnsafeMutableRawBufferPointer(rebasing: buffer[..<(buffer.count / workload.unit * workload.unit)])
                 for _ in benchmark.scaledIterations {
                     blackHole(workload.write(target))
                 }
-            }
+            } setup: { _ = buffer() }
         }
 
-        guard workload.allCores else { continue }
+        guard workload.allCores && memoryAllCores.contains(workload.name) else { continue }
         let chunks = cores * 16
-        let chunk = memoryWriteBuffer.count / chunks / workload.unit * workload.unit
-        Benchmark("Write: \(workload.name), memory (512 MB), \(cores) cores", configuration: configuration(maxDuration: .seconds(1))) { benchmark in
+        let chunk = (512 << 20) / chunks / workload.unit * workload.unit
+        Benchmark("Write: \(workload.name), memory (512 MB), \(cores) cores", configuration: configuration(maxDuration: .milliseconds(200))) { benchmark in
+            // Read once: each read of a global checks its lazy initializer's token. Unsafe as the global is: each
+            // worker writes only its own chunk.
+            nonisolated(unsafe) let buffer = memoryWriteBuffer
             for _ in benchmark.scaledIterations {
                 DispatchQueue.concurrentPerform(iterations: chunks) { index in
-                    let slice = UnsafeMutableRawBufferPointer(rebasing: memoryWriteBuffer[index * chunk..<(index + 1) * chunk])
+                    let slice = UnsafeMutableRawBufferPointer(rebasing: buffer[index * chunk..<(index + 1) * chunk])
                     blackHole(workload.write(slice))
                 }
             }
-        }
+        } setup: { _ = memoryWriteBuffer }
     }
 }

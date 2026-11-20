@@ -38,11 +38,8 @@ struct XZIndexSummary: Equatable {
         count &+= 1
         unpaddedSum &+= unpadded
         uncompressedSum &+= uncompressed
-        var record = (unpadded.littleEndian, uncompressed.littleEndian)
-        withUnsafeBytes(of: &record) { bytes in
-            // Unsafe: a span over the record's 16 bytes, which outlive it.
-            crc.update(unsafe RawSpan(_unsafeBytes: bytes))
-        }
+        let record: InlineArray<2, UInt64> = [unpadded.littleEndian, uncompressed.littleEndian]
+        crc.update(record.span.bytes)
     }
 }
 

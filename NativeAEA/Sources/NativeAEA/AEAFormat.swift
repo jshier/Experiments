@@ -29,7 +29,11 @@ public enum AEAProfile: Int, Sendable, CaseIterable {
     /// AES-256-CTR with a key derived from a password with scrypt.
     case scrypt = 5
 
-    /// The bytes of the prologue's signature field.
+    /// Whether the prologue carries a signature (0, 2, 4).
+    public var isSigned: Bool { signatureByteCount > 0 }
+
+    /// The bytes of the prologue's signature field: the DER signature padded to 128 bytes, then on encrypted
+    /// profiles encrypted, with a 32-byte MAC after it.
     var signatureByteCount: Int {
         switch self {
         case .signed: 128
@@ -105,36 +109,30 @@ public struct AEARootHeader: Sendable, Equatable {
     static var byteCount: Int { 48 }
 
     init(parsing bytes: RawSpan) throws(AEAError) {
+        let record: RootHeaderRecord
         do {
             var reader = AlignedBytesReader(bytes)
-            let raw = try reader.read(Byte8.self, .littleEndian)
-            let container = try reader.read(Byte8.self, .littleEndian)
-            let segment = try reader.read(Byte4.self, .littleEndian)
-            let perCluster = try reader.read(Byte4.self, .littleEndian)
-            let compressionByte = try UInt8(reader.read(Byte.self))
-            let checksumByte = try UInt8(reader.read(Byte.self))
-            guard let compression = AEACompression(rawValue: compressionByte) else {
-                throw AEAError.unsupportedCompression(compressionByte)
-            }
-            guard let checksum = AEAChecksum(rawValue: checksumByte) else {
-                throw AEAError.invalidHeader("checksum mode \(checksumByte)")
-            }
-            // Bounds that keep every later size computation in range: 64-bit sizes under 2^62, segments under
-            // 2^31 (their sizes in cluster headers are 32-bit), clusters under 2^20 segments.
-            guard raw < 1 << 62, container < 1 << 62, segment > 0, segment < 1 << 31, perCluster > 0,
-                  perCluster < 1 << 20
-            else { throw AEAError.invalidHeader("root header sizes") }
-            rawSize = Int(raw)
-            containerSize = Int(container)
-            segmentSize = Int(segment)
-            segmentsPerCluster = Int(perCluster)
-            self.compression = compression
-            self.checksum = checksum
-        } catch let error as AEAError {
-            throw error
+            record = try reader.read(RootHeaderRecord.self)
         } catch {
-            throw AEAError.invalidHeader("root header")
+            throw .invalidHeader("root header")
         }
+        guard let compression = AEACompression(rawValue: record.compression) else {
+            throw .unsupportedCompression(record.compression)
+        }
+        guard let checksum = AEAChecksum(rawValue: record.checksum) else {
+            throw .invalidHeader("checksum mode \(record.checksum)")
+        }
+        // Bounds that keep every later size computation in range: 64-bit sizes under 2^62, segments under 2^31 (their
+        // sizes in cluster headers are 32-bit), clusters under 2^20 segments.
+        guard record.rawSize < 1 << 62, record.containerSize < 1 << 62, record.segmentSize > 0, record.segmentSize < 1 << 31,
+              record.segmentsPerCluster > 0, record.segmentsPerCluster < 1 << 20
+        else { throw .invalidHeader("root header sizes") }
+        rawSize = Int(record.rawSize)
+        containerSize = Int(record.containerSize)
+        segmentSize = Int(record.segmentSize)
+        segmentsPerCluster = Int(record.segmentsPerCluster)
+        self.compression = compression
+        self.checksum = checksum
     }
 
     /// The bytes of a cluster header: per segment an info (8 bytes and the checksum) and a 32-byte HMAC, plus the
@@ -181,17 +179,23 @@ public struct AEAPrologue: Sendable {
     ///
     /// - Parameter bytes: The file's first bytes: at least ``byteCount(parsing:)`` of them.
     init(parsing bytes: RawSpan) throws(AEAError) {
+        var reader = AlignedBytesReader(bytes)
+        let head: PrologueHead
         do {
-            var reader = AlignedBytesReader(bytes)
-            guard bytes.byteCount >= Self.fixedByteCount else { throw AEAError.notAnAEAFile }
-            do { try reader.expect(Byte4(ascii: "AEA1")) } catch { throw AEAError.notAnAEAFile }
-            profileWord = try reader.read(Byte4.self, .littleEndian)
-            let profileValue = Int(profileWord & 0xFF_FFFF)
-            guard let profile = AEAProfile(rawValue: profileValue) else { throw AEAError.unsupportedProfile(profileValue) }
-            self.profile = profile
-            scryptStrength = Int(profileWord >> 24)
-            let authCount = try Int(reader.read(Byte4.self, .littleEndian))
-            authData = try Self.bytes(&reader, authCount)
+            head = try reader.read(PrologueHead.self)
+        } catch {
+            throw .notAnAEAFile
+        }
+        profileWord = head.profileWord
+        let profileValue = Int(profileWord & 0xFF_FFFF)
+        guard let profile = AEAProfile(rawValue: profileValue) else { throw .unsupportedProfile(profileValue) }
+        self.profile = profile
+        scryptStrength = Int(profileWord >> 24)
+        // N = 2^(14 + 2 × strength): 0 through 3 (16 MiB to 1 GiB of scratch), what `aea` accepts ("Invalid hardness
+        // parameter" above). A larger one from a hostile file would allocate 4 GiB to 1 TiB before any key check.
+        if profile == .scrypt, scryptStrength > 3 { throw .invalidHeader("scrypt strength \(scryptStrength)") }
+        do {
+            authData = try Self.bytes(&reader, head.authDataCount)
             signatureOffset = reader.byteOffset
             signature = try Self.bytes(&reader, profile.signatureByteCount)
             keyMaterial = try Self.bytes(&reader, profile.keyMaterialByteCount)
@@ -200,10 +204,8 @@ public struct AEAPrologue: Sendable {
             rootHeaderBytes = try Self.bytes(&reader, AEARootHeader.byteCount)
             firstClusterMAC = try Self.bytes(&reader, 32)
             byteCount = reader.byteOffset
-        } catch let error as AEAError {
-            throw error
         } catch {
-            throw AEAError.truncated
+            throw .truncated
         }
     }
 
@@ -212,21 +214,18 @@ public struct AEAPrologue: Sendable {
     /// - Parameter bytes: At least the first 12 bytes of the file.
     /// - Returns: The bytes to read before parsing.
     static func byteCount(parsing bytes: RawSpan) throws(AEAError) -> Int {
-        var reader = AlignedBytesReader(bytes)
+        let head: PrologueHead
         do {
-            try reader.expect(Byte4(ascii: "AEA1"))
-            let word = try reader.read(Byte4.self, .littleEndian)
-            guard let profile = AEAProfile(rawValue: Int(word & 0xFF_FFFF)) else {
-                throw AEAError.unsupportedProfile(Int(word & 0xFF_FFFF))
-            }
-            let authCount = try Int(reader.read(Byte4.self, .littleEndian))
-            return fixedByteCount + authCount + profile.signatureByteCount + profile.keyMaterialByteCount + 32 + 32
-                + AEARootHeader.byteCount + 32
-        } catch let error as AEAError {
-            throw error
+            var reader = AlignedBytesReader(bytes)
+            head = try reader.read(PrologueHead.self)
         } catch {
-            throw AEAError.notAnAEAFile
+            throw .notAnAEAFile
         }
+        guard let profile = AEAProfile(rawValue: Int(head.profileWord & 0xFF_FFFF)) else {
+            throw .unsupportedProfile(Int(head.profileWord & 0xFF_FFFF))
+        }
+        return fixedByteCount + head.authDataCount + profile.signatureByteCount + profile.keyMaterialByteCount + 32 + 32
+            + AEARootHeader.byteCount + 32
     }
 
     private static func bytes(_ reader: inout AlignedBytesReader, _ count: Int) throws(BytesError) -> [UInt8] {

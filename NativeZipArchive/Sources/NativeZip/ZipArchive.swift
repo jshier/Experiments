@@ -637,7 +637,7 @@ public extension ZipArchive {
     ///   - password: The password, for encrypted entries.
     ///   - consume: Called with each chunk, in order, in a child task. The chunk is valid until it returns.
     /// - Throws: The errors of ``contents(of:using:password:_:)``.
-    internal func contentsPipelined(
+    nonisolated(nonsending) internal func contentsPipelined(
         of entry: ZipEntry,
         using decoder: inout ZipDecoder,
         password: String?,
@@ -728,7 +728,7 @@ extension BytesError {
         case .insufficientData: .truncated(what)
         case .mismatch: .badSignature(what)
         // The parser doesn't use typed views, writing, or raw-value fields, which throw these.
-        case .misaligned, .insufficientCapacity, .invalidValue, .trailingData: .corruptData(what)
+        case .misaligned, .insufficientCapacity, .invalidValue, .trailingData, .cancelled: .corruptData(what)
         }
     }
 }

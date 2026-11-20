@@ -77,6 +77,21 @@ enum Zstd {
     static var offsetDefaultLog: Int { 5 }
 }
 
+/// The frame header descriptor's fields (RFC 8878, 3.1.1.1.1), and the window descriptor's (3.1.1.1.2).
+enum ZstdDescriptor {
+    /// The content size field's size code: 0 (none, or 1 byte in a single segment), 2, 4, or 8 bytes.
+    static var contentSizeCode: BitField<Int> { BitField(bits: 6...7) }
+    static var singleSegment: BitFlag { BitFlag(bit: 5) }
+    static var reserved: BitFlag { BitFlag(bit: 3) }
+    static var checksum: BitFlag { BitFlag(bit: 2) }
+    /// The dictionary ID field's size code: 0, 1, 2, or 4 bytes.
+    static var dictionaryIDCode: BitField<Int> { BitField(bits: 0...1) }
+    /// The window's log2, minus 10.
+    static var windowExponent: BitField<Int> { BitField(bits: 3...7) }
+    /// Eighths of the window's power of two to add.
+    static var windowMantissa: BitField<Int> { BitField(bits: 0...2) }
+}
+
 /// A Zstandard frame's header (RFC 8878, 3.1.1.1): what a decoder needs to know before the first block.
 ///
 /// ```swift
@@ -145,14 +160,15 @@ public struct ZstdFrameHeader: Hashable, Sendable {
             }
             return nil
         }
+        // Unsafe: an unchecked load. Safe: at least 4 bytes (the guard above).
         let magic = UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 0, as: UInt32.self))
         if magic & 0xFFFF_FFF0 == Zstd.skippableMagic { return 8 }
         guard magic == Zstd.magic else { throw .invalidValue }
         guard bytes.byteCount >= 5 else { return nil }
         let descriptor = bytes.load(fromByteOffset: 4, as: UInt8.self)
-        let singleSegment = descriptor & 0x20 != 0
+        let singleSegment = descriptor[ZstdDescriptor.singleSegment]
         let dictionaryIDSize = dictionaryIDFieldSize(descriptor)
-        let contentSizeCode = Int(descriptor &>> 6)
+        let contentSizeCode = descriptor[ZstdDescriptor.contentSizeCode]
         let contentSizeSize = contentSizeCode == 0 ? (singleSegment ? 1 : 0) : 1 &<< contentSizeCode
         return 5 &+ (singleSegment ? 0 : 1) &+ dictionaryIDSize &+ contentSizeSize
     }
@@ -160,6 +176,8 @@ public struct ZstdFrameHeader: Hashable, Sendable {
     /// Parses a header, or returns `nil` if `bytes` doesn't hold all of it.
     static func parse(_ bytes: RawSpan) throws(BytesError) -> ZstdFrameHeader? {
         guard let size = try size(bytes), bytes.byteCount >= size else { return nil }
+        // Unsafe: unchecked loads. Safe: the whole header is there, at least 8 bytes for a skippable frame's
+        // magic and length, 4 for the magic otherwise.
         let magic = UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 0, as: UInt32.self))
         if magic != Zstd.magic {
             let length = UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 4, as: UInt32.self))
@@ -169,23 +187,23 @@ public struct ZstdFrameHeader: Hashable, Sendable {
             )
         }
         let descriptor = bytes.load(fromByteOffset: 4, as: UInt8.self)
-        guard descriptor & 0x08 == 0 else { throw .invalidValue } // The reserved bit.
-        let singleSegment = descriptor & 0x20 != 0
+        guard !descriptor[ZstdDescriptor.reserved] else { throw .invalidValue }
+        let singleSegment = descriptor[ZstdDescriptor.singleSegment]
         var position = 5
         var windowSize: UInt64 = 0
         if !singleSegment {
             let window = bytes.load(fromByteOffset: position, as: UInt8.self)
             position &+= 1
-            let windowLog = 10 &+ Int(window &>> 3)
+            let windowLog = 10 &+ window[ZstdDescriptor.windowExponent]
             guard windowLog <= Zstd.windowLogMaximum else { throw .invalidValue }
             let base = UInt64(1) &<< UInt64(windowLog)
-            windowSize = base &+ (base &>> 3) &* UInt64(window & 7)
+            windowSize = base &+ (base &>> 3) &* UInt64(window[ZstdDescriptor.windowMantissa])
         }
         let dictionaryIDSize = dictionaryIDFieldSize(descriptor)
         let dictionaryID = UInt32(truncatingIfNeeded: field(bytes, at: position, count: dictionaryIDSize))
         position &+= dictionaryIDSize
         var contentSize: UInt64?
-        switch descriptor &>> 6 {
+        switch descriptor[ZstdDescriptor.contentSizeCode] {
         case 0: contentSize = singleSegment ? field(bytes, at: position, count: 1) : nil
         case 1: contentSize = field(bytes, at: position, count: 2) &+ 256
         case 2: contentSize = field(bytes, at: position, count: 4)
@@ -194,13 +212,13 @@ public struct ZstdFrameHeader: Hashable, Sendable {
         if singleSegment { windowSize = contentSize ?? 0 }
         return ZstdFrameHeader(
             isSkippable: false, headerSize: size, contentSize: contentSize, windowSize: windowSize,
-            dictionaryID: dictionaryID, hasChecksum: descriptor & 0x04 != 0, isSingleSegment: singleSegment
+            dictionaryID: dictionaryID, hasChecksum: descriptor[ZstdDescriptor.checksum], isSingleSegment: singleSegment
         )
     }
 
     /// The size of the dictionary ID field a frame header descriptor selects.
     private static func dictionaryIDFieldSize(_ descriptor: UInt8) -> Int {
-        let code = Int(descriptor & 3)
+        let code = descriptor[ZstdDescriptor.dictionaryIDCode]
         return code == 3 ? 4 : code
     }
 

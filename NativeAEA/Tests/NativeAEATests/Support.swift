@@ -1,49 +1,21 @@
+import BytesTestSupport
 import Foundation
 @testable import NativeAEA
 import System
 
-/// A temporary directory, removed on deinit.
-final class TemporaryDirectory: @unchecked Sendable {
-    let url: URL
+// Temporary directories (`TemporaryDirectory`, removed with their read-only files and ACLs), running tools
+// (`ExternalTool.run`), and `hex` are Bytes' `BytesTestSupport`; the bulk trait is `BytesTesting`'s.
 
-    init() throws {
-        url = FileManager.default.temporaryDirectory.appending(path: "NativeAEATests-\(UUID().uuidString).noindex")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+extension TemporaryDirectory {
+    /// A directory named for these tests.
+    convenience init() throws {
+        try self.init(prefix: "NativeAEATests")
     }
-
-    /// Removes the directory. (Explicit, not in `deinit`: Swift may end an object's life after its last use, before
-    /// the files in it are.)
-    func remove() {
-        // Extracted files can be read-only, as can directories: make them writable before removing.
-        _ = try? Tools.run("/bin/chmod", ["-R", "u+w", url.path])
-        try? FileManager.default.removeItem(at: url)
-    }
-
-    func path(_ name: String) -> URL { url.appending(path: name) }
 }
 
-enum Tools {
-    struct Failure: Error, CustomStringConvertible {
-        var description: String
-    }
-
-    /// Runs a tool, throwing with its output if it fails.
-    @discardableResult
-    static func run(_ executable: String, _ arguments: [String]) throws -> String {
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executable)
-        process.arguments = arguments
-        let pipe = Pipe()
-        process.standardOutput = pipe
-        process.standardError = pipe
-        try process.run()
-        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw Failure(description: "\(executable) \(arguments.joined(separator: " ")): \(output)")
-        }
-        return output
-    }
+/// A check in a test helper that failed.
+struct TestFailure: Error, CustomStringConvertible {
+    var description: String
 }
 
 /// A P-256 signing key pair as `aea` takes them: SEC1 PEM private key (made with openssl: `aea` doesn't read the
@@ -59,15 +31,15 @@ struct SigningKeys {
         certificate = directory.path("signing.cert.pem")
         // `aea` rejects keys whose private scalar DER shortens (a leading zero byte, 1 in 256): make another.
         while true {
-            try Tools.run("/usr/bin/openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", privateKey.path])
+            try ExternalTool.run("/usr/bin/openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", privateKey.path])
             let der = directory.path("signing.der")
-            try Tools.run("/usr/bin/openssl", ["ec", "-in", privateKey.path, "-outform", "DER", "-out", der.path])
+            try ExternalTool.run("/usr/bin/openssl", ["ec", "-in", privateKey.path, "-outform", "DER", "-out", der.path])
             // SEQUENCE { INTEGER 1, OCTET STRING (32 bytes) ...}: the octet string's length is at offset 6.
             let bytes = try Data(contentsOf: der)
             if bytes.count > 6, bytes[5] == 0x04, bytes[6] == 0x20 { break }
         }
-        try Tools.run("/usr/bin/openssl", ["ec", "-in", privateKey.path, "-pubout", "-out", publicKey.path])
-        try Tools.run("/usr/bin/openssl", [
+        try ExternalTool.run("/usr/bin/openssl", ["ec", "-in", privateKey.path, "-pubout", "-out", publicKey.path])
+        try ExternalTool.run("/usr/bin/openssl", [
             "req", "-new", "-x509", "-key", privateKey.path, "-subj", "/CN=NativeAEA tests", "-days", "2",
             "-out", certificate.path,
         ])
@@ -91,7 +63,7 @@ func makeAEA(
     if withCertificateChain {
         arguments += ["-auth-data-key", AEASignature.certificateChainKey, "-auth-data", keys.certificate.path]
     }
-    try Tools.run("/usr/bin/aea", arguments)
+    try ExternalTool.run("/usr/bin/aea", arguments)
     return output
 }
 
@@ -140,9 +112,76 @@ struct ArchiveStreamWriter {
         entry(Self.common("L", path, mode: mode) + Self.field("LNK", "P") + Self.le(UInt16(target.utf8.count)) + Array(target.utf8))
     }
 
+    /// A FIFO (`P`), character device (`C`), or block device (`B`, with `DEV`), or socket (`S`).
+    mutating func special(_ path: String, type: Character, mode: UInt16 = 0o644, device: UInt32? = nil) {
+        var fields = Self.common(type, path, mode: mode)
+        if let device { fields += Self.field("DEV", "4") + Self.le(device) }
+        entry(fields)
+    }
+
     func write(to url: URL) throws {
         try Data(bytes).write(to: url)
     }
+}
+
+/// Everything about an item that extraction restores beyond `DiskEntry`: extended attributes, its ACL, and which
+/// other paths are the same file.
+struct ItemMetadata: Equatable, CustomStringConvertible {
+    var attributes: [String: [UInt8]]
+    var accessControlList: String?
+    var hardLinks: [String]
+    var modification: timespec
+
+    static func == (a: Self, b: Self) -> Bool {
+        a.attributes == b.attributes && a.accessControlList == b.accessControlList && a.hardLinks == b.hardLinks
+            && a.modification.tv_sec == b.modification.tv_sec && a.modification.tv_nsec == b.modification.tv_nsec
+    }
+
+    var description: String {
+        "xattrs \(attributes.mapValues(\.count)) acl \(accessControlList ?? "-") links \(hardLinks) mtime \(modification.tv_sec).\(modification.tv_nsec)"
+    }
+}
+
+/// Extended attributes, ACLs (as text), hard-link groups, and modification times under `root`, by relative path,
+/// not following links. `ignoring` attributes are left out.
+func readMetadata(_ root: URL, ignoring: Set<String> = []) throws -> [String: ItemMetadata] {
+    var inodes: [UInt64: [String]] = [:]
+    var result: [String: ItemMetadata] = [:]
+    let enumerator = FileManager.default.enumerator(atPath: root.path)!
+    var paths: [String] = []
+    while let relative = enumerator.nextObject() as? String { paths.append(relative) }
+    for relative in paths {
+        let path = root.appending(path: relative).path
+        var info = stat()
+        guard lstat(path, &info) == 0 else { throw TestFailure(description: "lstat \(path)") }
+        if info.st_mode & S_IFMT == S_IFREG { inodes[info.st_ino, default: []].append(relative) }
+        var attributes: [String: [UInt8]] = [:]
+        var names = [CChar](repeating: 0, count: 65_536)
+        let namesCount = listxattr(path, &names, names.count, XATTR_NOFOLLOW)
+        if namesCount > 0 {
+            for name in names[0..<namesCount].split(separator: 0).map({ String(decoding: $0.map { UInt8(bitPattern: $0) }, as: UTF8.self) })
+            where !ignoring.contains(name) {
+                var value = [UInt8](repeating: 0, count: 1 << 20)
+                let count = getxattr(path, name, &value, value.count, 0, XATTR_NOFOLLOW)
+                attributes[name] = Array(value[0..<max(0, count)])
+            }
+        }
+        var aclText: String?
+        if let acl = acl_get_link_np(path, ACL_TYPE_EXTENDED) {
+            if let text = acl_to_text(acl, nil) {
+                aclText = String(cString: text)
+                acl_free(UnsafeMutableRawPointer(text))
+            }
+            acl_free(UnsafeMutableRawPointer(acl))
+        }
+        result[relative] = ItemMetadata(attributes: attributes, accessControlList: aclText, hardLinks: [], modification: info.st_mtimespec)
+        if info.st_mode & S_IFMT == S_IFREG { result[relative]!.hardLinks = [String(info.st_ino)] }
+    }
+    // Inode numbers differ between trees: replace each with the sorted paths sharing it.
+    for (_, group) in inodes {
+        for path in group { result[path]!.hardLinks = group.sorted() }
+    }
+    return result
 }
 
 /// Deterministic test bytes: `compressible` repeats text; otherwise a xorshift stream (incompressible).
@@ -182,7 +221,7 @@ func readTree(_ root: URL) throws -> [String: DiskEntry] {
     while let relative = enumerator.nextObject() as? String {
         let path = root.appending(path: relative).path
         var info = stat()
-        guard lstat(path, &info) == 0 else { throw Tools.Failure(description: "lstat \(path)") }
+        guard lstat(path, &info) == 0 else { throw TestFailure(description: "lstat \(path)") }
         let mode = UInt16(info.st_mode & 0o7777)
         let compressed = info.st_flags & UInt32(UF_COMPRESSED) != 0
         switch info.st_mode & S_IFMT {
@@ -205,4 +244,19 @@ func decmpfsType(_ url: URL) -> UInt32? {
     let count = getxattr(url.path, "com.apple.decmpfs", &header, header.count, 0, XATTR_SHOWCOMPRESSION | XATTR_NOFOLLOW)
     guard count >= 16 else { return nil }
     return UInt32(header[4]) | UInt32(header[5]) << 8 | UInt32(header[6]) << 16 | UInt32(header[7]) << 24
+}
+
+/// A file's stored APFS compression, as written: its `com.apple.decmpfs` attribute, then its resource fork (empty for
+/// a plain file).
+func decmpfsStoredBytes(_ url: URL) -> [UInt8] {
+    var stored: [UInt8] = []
+    for name in ["com.apple.decmpfs", "com.apple.ResourceFork"] {
+        let options = XATTR_SHOWCOMPRESSION | XATTR_NOFOLLOW
+        let size = getxattr(url.path, name, nil, 0, 0, options)
+        guard size > 0 else { continue }
+        var bytes = [UInt8](repeating: 0, count: size)
+        let got = getxattr(url.path, name, &bytes, size, 0, options)
+        stored += bytes.prefix(max(0, got))
+    }
+    return stored
 }

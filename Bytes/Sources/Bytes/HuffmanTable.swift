@@ -15,6 +15,9 @@
 /// (DEFLATE's length bases and extra-bit counts, say) with the generic
 /// ``build(codeLengths:bitOrder:rootBits:maximumCodeLength:allowingIncomplete:into:invalid:symbol:subtable:)``,
 /// which this table uses.
+// `init` and `build(codeLengths:bitOrder:allowingIncomplete:)` aren't `@inlinable`: they run once per table or
+// block, and their work (allocating, sorting, filling) dwarfs a call. What runs per symbol, `decode`, and the
+// generic `build` that callers specialize with their own entries, are.
 public struct HuffmanTable: ~Copyable {
     @usableFromInline var entries: UniqueArray<UInt32>
     /// Codes up to this long decode with one lookup.

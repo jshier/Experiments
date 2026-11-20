@@ -125,7 +125,7 @@ public struct TLSRecordProtection: Sendable {
     ///   - content: At most 2¹⁴ bytes, less the padding.
     ///   - type: The content type.
     ///   - padding: Zeros added to hide the content's length.
-    ///   - output: Room for at least ``TLSRecord/size(content:padding:)`` bytes.
+    ///   - output: Room for the record: a 5-byte header, the content, its type byte, the padding, and a 16-byte tag.
     /// - Returns: The record's size.
     /// - Throws: ``TLSAlert/internalError`` if the key has protected its limit of records (update it first).
     /// - Precondition: The content and padding fit a record, and `output` has room.
@@ -173,7 +173,7 @@ public struct TLSRecordProtection: Sendable {
         output.copyBytes(from: body.extracting(first: encryptedLength), toByteOffset: 0)
         let nonce = TLSRecord.nonce(iv, sequence: sequence)
         var plaintext = output._mutatingExtracting(0..<encryptedLength)
-        do {
+        do throws(BytesError) {
             try aead.open(&plaintext, nonce: nonce.span.bytes, authenticating: header, tag: body.extracting(droppingFirst: encryptedLength))
         } catch {
             throw .badRecordMAC

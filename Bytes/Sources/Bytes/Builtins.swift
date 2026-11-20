@@ -1,4 +1,5 @@
-import Builtin
+// Internal, though inlinable wrappers use it: the compiler doesn't count `Builtin` uses toward an import's access.
+internal import Builtin
 
 // Thin wrappers over compiler builtins, for hints the standard library doesn't expose publicly.
 // Each one is checked against the generated assembly and the benchmarks; see Benchmarks/RESULTS.md.
@@ -28,6 +29,23 @@ func unlikely(_ condition: Bool) -> Bool {
 @unsafe @usableFromInline @_transparent
 func assume(_ condition: Bool) {
     _ = Builtin.assume_Int1(condition._value)
+}
+
+// MARK: - Vector narrowing
+
+extension SIMD8 where Scalar == UInt16 {
+    /// Each lane's low byte: one `xtn` (or `shrn`, after a shift). Not `SIMD8<UInt8>(truncatingIfNeeded:)`: that
+    /// generic conversion is inlined only while its module has few callers, and stayed a call in LZBITMAP's
+    /// decoder once the LZFSE and LZVN encoders used it too (12–15% more instructions). Picking the even bytes
+    /// instead was merged by LLVM with the neighboring operations into lane moves.
+    @inlinable @_transparent
+    var _lowBytes: SIMD8<UInt8> {
+        var storage = UInt8.SIMD8Storage()
+        storage._value = Builtin.trunc_Vec8xInt16_Vec8xInt8(_storage._value)
+        var result = SIMD8<UInt8>()
+        result._storage = storage
+        return result
+    }
 }
 
 // MARK: - Bit reversal

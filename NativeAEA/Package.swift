@@ -7,6 +7,8 @@ let strictSettings: [SwiftSetting] = [
     .strictMemorySafety(),
     // `@_lifetime` lets non-escapable types (Span, RawSpan) be returned and stored.
     .enableExperimentalFeature("Lifetimes"),
+    // Async functions run on the caller's executor unless marked `@concurrent` (every one here is annotated).
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
 ]
 
 let package = Package(
@@ -14,7 +16,7 @@ let package = Package(
     platforms: [.macOS(.v27)],
     products: [
         .library(name: "NativeAEA", targets: ["NativeAEA"]),
-        .executable(name: "unaea", targets: ["unaea"]),
+        .executable(name: "nunarchiver", targets: ["nunarchiver"]),
     ],
     dependencies: [
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
@@ -30,11 +32,16 @@ let package = Package(
                 .product(name: "BytesCompression", package: "Bytes"),
                 // HKDF, HMAC-SHA256, and SHA-256 for the archive's MACs and checksums.
                 .product(name: "BytesCrypto", package: "Bytes"),
+                // `@BinaryRecord` for the formats' fixed records (AEARecords.swift).
+                .product(name: "BytesMacros", package: "Bytes"),
+                // The certificates in a xip's table of contents (XAR.swift), and Base64 keys (AEADecryption.swift,
+                // WKMS.swift).
+                .product(name: "BytesBase64", package: "Bytes"),
             ],
             swiftSettings: strictSettings
         ),
         .executableTarget(
-            name: "unaea",
+            name: "nunarchiver",
             dependencies: [
                 "NativeAEA",
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
@@ -43,13 +50,19 @@ let package = Package(
         ),
         .testTarget(
             name: "NativeAEATests",
-            dependencies: ["NativeAEA"],
+            dependencies: [
+                "NativeAEA",
+                .product(name: "BytesCrypto", package: "Bytes"),
+                .product(name: "BytesTestSupport", package: "Bytes"),
+                .product(name: "BytesTesting", package: "Bytes"),
+            ],
             swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")]
         ),
         .executableTarget(
             name: "NativeAEABenchmarks",
             dependencies: [
                 "NativeAEA",
+                .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/NativeAEABenchmarks",

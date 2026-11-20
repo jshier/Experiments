@@ -1,0 +1,66 @@
+import BytesMacros
+
+// The formats' fixed records, declared once and read (or written) in one call each with one bounds check, by the
+// code `@BinaryRecord` generates (the same instructions as reading the fields by hand: Bytes' RESULTS.md). The
+// variable parts (auth data, the Apple Archive's tagged fields, blobs) stay hand-parsed.
+
+/// The prologue's fixed part: magic, profile word (profile | scrypt strength << 24), auth data size.
+@BinaryRecord(.littleEndian)
+struct PrologueHead {
+    @Field(Byte4.self, expecting: 0x3141_4541) var magic: UInt32 // "AEA1"
+    @Field(Byte4.self) var profileWord: UInt32
+    @Field(Byte4.self) var authDataCount: Int
+}
+
+/// The 48-byte root header (decrypted on encrypted profiles). The reserved bytes are skipped, not checked.
+@BinaryRecord(.littleEndian)
+struct RootHeaderRecord {
+    @Field(Byte8.self) var rawSize: UInt64
+    @Field(Byte8.self) var containerSize: UInt64
+    @Field(Byte4.self) var segmentSize: UInt32
+    @Field(Byte4.self) var segmentsPerCluster: UInt32
+    @Field(Byte.self) var compression: UInt8
+    @Field(Byte.self) var checksum: UInt8
+    var reserved: Padding<Byte16>
+    var reserved2: Padding<Byte4>
+    var reserved3: Padding<Byte2>
+}
+
+/// A segment's sizes in its cluster header (its checksum follows, of the root header's checksum size).
+@BinaryRecord(.littleEndian)
+struct SegmentSizes {
+    @Field(Byte4.self) var raw: Int
+    @Field(Byte4.self) var stored: Int
+}
+
+/// A `pbz` stream's header: "pbz" and the algorithm letter, then the block size.
+@BinaryRecord(.bigEndian)
+struct PBZHeader {
+    @Field(Byte4.self) var magic: UInt32
+    @Field(Byte8.self) var blockSize: Int
+}
+
+/// A `pbz` block's header: its raw and stored sizes.
+@BinaryRecord(.bigEndian)
+struct PBZBlockHeader {
+    @Field(Byte8.self) var raw: Int
+    @Field(Byte8.self) var stored: Int
+}
+
+/// An `ACL` blob entry's fixed part; the qualifier (`size` − 22 bytes) follows.
+@BinaryRecord(.littleEndian)
+struct AccessControlEntryHead {
+    @Field(Byte4.self) var size: Int
+    @Field(Byte.self) var type: UInt8
+    @Field(Byte8.self) var flags: UInt64
+    @Field(Byte8.self) var permissions: UInt64
+    @Field(Byte.self) var qualifierType: UInt8
+}
+
+/// The `com.apple.decmpfs` attribute's header; inline data follows for the odd types.
+@BinaryRecord(.littleEndian)
+struct DecmpfsHeader {
+    @Field(Byte4.self, expecting: 0x636D_7066) var magic: UInt32 // "fpmc" on disk: 'cmpf' little-endian
+    @Field(Byte4.self) var type: UInt32
+    @Field(Byte8.self) var size: UInt64
+}

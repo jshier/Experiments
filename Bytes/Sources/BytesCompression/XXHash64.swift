@@ -52,9 +52,71 @@ public struct XXHash64: Sendable {
     ///   - seed: The seed; Zstandard uses 0.
     /// - Returns: The 64-bit hash.
     public static func hash(_ bytes: RawSpan, seed: UInt64 = 0) -> UInt64 {
-        var hasher = XXHash64(seed: seed)
-        hasher.update(bytes)
-        return hasher.digest
+        // One pass over the input, as libzstd's `XXH64()`: stripes straight from `bytes`, then the tail from its
+        // end. (Through the streaming hasher, its buffer and lane fields cost a 64-byte message 230 instructions
+        // against libzstd's 130.)
+        let count = bytes.byteCount
+        var index = 0
+        var hash: UInt64
+        if count >= 32 {
+            var v1 = seed &+ prime1 &+ prime2
+            var v2 = seed &+ prime2
+            var v3 = seed
+            var v4 = seed &- prime1
+            let end = count &- 32
+            repeat {
+                // Unsafe: unchecked loads. Safe: `index <= count - 32`, so all 32 bytes are within `bytes`.
+                v1 = round(v1, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt64.self)))
+                v2 = round(v2, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 8, as: UInt64.self)))
+                v3 = round(v3, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 16, as: UInt64.self)))
+                v4 = round(v4, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 24, as: UInt64.self)))
+                index &+= 32
+            } while index <= end
+            hash = converge(v1, v2, v3, v4)
+        } else {
+            hash = seed &+ prime5
+        }
+        return finish(hash &+ UInt64(truncatingIfNeeded: count), bytes, from: index)
+    }
+
+    /// The four lanes merged into one hash, once 32 bytes or more were hashed.
+    @inline(__always)
+    static func converge(_ v1: UInt64, _ v2: UInt64, _ v3: UInt64, _ v4: UInt64) -> UInt64 {
+        var hash = v1.rotatedLeft(by: 1) &+ v2.rotatedLeft(by: 7) &+ v3.rotatedLeft(by: 12) &+ v4.rotatedLeft(by: 18)
+        hash = merge(hash, v1)
+        hash = merge(hash, v2)
+        hash = merge(hash, v3)
+        return merge(hash, v4)
+    }
+
+    /// The hash finished with `bytes[start...]` (fewer than 32 bytes) and avalanched.
+    @inline(__always)
+    static func finish(_ hash: UInt64, _ bytes: RawSpan, from start: Int) -> UInt64 {
+        var hash = hash
+        let count = bytes.byteCount
+        var index = start
+        // Unsafe: unchecked loads. Safe: each loop's condition keeps its load's bytes below `count`.
+        while count &- index >= 8 {
+            hash ^= round(0, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt64.self)))
+            hash = hash.rotatedLeft(by: 27) &* prime1 &+ prime4
+            index &+= 8
+        }
+        if count &- index >= 4 {
+            hash ^= UInt64(UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt32.self))) &* prime1
+            hash = hash.rotatedLeft(by: 23) &* prime2 &+ prime3
+            index &+= 4
+        }
+        while index < count {
+            hash ^= UInt64(unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt8.self)) &* prime5
+            hash = hash.rotatedLeft(by: 11) &* prime1
+            index &+= 1
+        }
+        hash ^= hash &>> 33
+        hash &*= prime2
+        hash ^= hash &>> 29
+        hash &*= prime3
+        hash ^= hash &>> 32
+        return hash
     }
 
     @inline(__always)
@@ -120,40 +182,8 @@ public struct XXHash64: Sendable {
 
     /// The hash of everything added so far. Adding more afterwards continues the same hash.
     public var digest: UInt64 {
-        var hash: UInt64
-        if length >= 32 {
-            hash = lane1.rotatedLeft(by: 1) &+ lane2.rotatedLeft(by: 7) &+ lane3.rotatedLeft(by: 12) &+ lane4.rotatedLeft(by: 18)
-            hash = Self.merge(hash, lane1)
-            hash = Self.merge(hash, lane2)
-            hash = Self.merge(hash, lane3)
-            hash = Self.merge(hash, lane4)
-        } else {
-            hash = seed &+ Self.prime5
-        }
-        hash &+= length
-        let rest = buffer.span.bytes
-        var index = 0
-        while index &+ 8 <= bufferedCount {
-            hash ^= Self.round(0, UInt64(littleEndian: unsafe rest.unsafeLoadUnaligned(fromByteOffset: index, as: UInt64.self)))
-            hash = hash.rotatedLeft(by: 27) &* Self.prime1 &+ Self.prime4
-            index &+= 8
-        }
-        if index &+ 4 <= bufferedCount {
-            hash ^= UInt64(UInt32(littleEndian: unsafe rest.unsafeLoadUnaligned(fromByteOffset: index, as: UInt32.self))) &* Self.prime1
-            hash = hash.rotatedLeft(by: 23) &* Self.prime2 &+ Self.prime3
-            index &+= 4
-        }
-        while index < bufferedCount {
-            hash ^= UInt64(rest.load(fromByteOffset: index, as: UInt8.self)) &* Self.prime5
-            hash = hash.rotatedLeft(by: 11) &* Self.prime1
-            index &+= 1
-        }
-        hash ^= hash &>> 33
-        hash &*= Self.prime2
-        hash ^= hash &>> 29
-        hash &*= Self.prime3
-        hash ^= hash &>> 32
-        return hash
+        let hash = length >= 32 ? Self.converge(lane1, lane2, lane3, lane4) : seed &+ Self.prime5
+        return Self.finish(hash &+ length, buffer.span.bytes.extracting(0..<bufferedCount), from: 0)
     }
 }
 

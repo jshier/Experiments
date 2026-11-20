@@ -1,5 +1,6 @@
 import Benchmark
 import Bytes
+import BytesTestSupport
 import Dispatch
 import Foundation
 
@@ -127,14 +128,10 @@ let rawRead = Workload(name: "Raw SIMD read (reference)", unit: 128) { span in
 /// Deterministic pseudo-random bytes (SplitMix64), written in full so every page is resident.
 func randomBuffer(byteCount: Int) -> [UInt8] {
     [UInt8](unsafeUninitializedCapacity: byteCount) { buffer, initializedCount in
-        var state: UInt64 = 0x9E37_79B9_7F4A_7C15
+        var generator = SplitMix64(seed: 0x9E37_79B9_7F4A_7C15)
         let words = UnsafeMutableRawBufferPointer(buffer)
         for offset in stride(from: 0, to: byteCount - 7, by: 8) {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            words.storeBytes(of: z ^ (z >> 31), toByteOffset: offset, as: UInt64.self)
+            words.storeBytes(of: generator.next(), toByteOffset: offset, as: UInt64.self)
         }
         for offset in (byteCount & ~7)..<byteCount {
             buffer[offset] = 0xA5
@@ -184,45 +181,58 @@ func registerBandwidthBenchmarks() {
 
     // 4 MB stays in a performance core's L2 (16 MB per cluster): the code's own ceiling.
     // 512 MB is far beyond every cache, so it measures reading DRAM.
-    let cached = randomBuffer(byteCount: 4 << 20)
-    let memory = randomBuffer(byteCount: 512 << 20)
+    // Made by the setup of a benchmark that reads them, not while registering (every benchmark's process registers
+    // them all): filling 512 MB takes 0.1 s.
+    let cached = Lazy { randomBuffer(byteCount: 4 << 20) }
+    let memory = Lazy { randomBuffer(byteCount: 512 << 20) }
     let cores = ProcessInfo.processInfo.activeProcessorCount
 
-    func configuration(maxDuration: Duration) -> Benchmark.Configuration {
+    // From cache, 0.05–2 ms an iteration: up to 2,000 samples in 150 ms. From memory, 25–150 ms on one core: 10
+    // samples, or 400 ms' worth; 3–20 ms on every core: 200 ms' worth.
+    func configuration(maxDuration: Duration, maxIterations: Int = 2_000, warmupIterations: Int = 2) -> Benchmark.Configuration {
         .init(
             metrics: [.wallClock, .instructions, .throughput],
-            warmupIterations: 2,
+            warmupIterations: warmupIterations,
             scalingFactor: .one,
             maxDuration: maxDuration,
-            maxIterations: 2_000
+            maxIterations: maxIterations
         )
     }
 
+    // From memory, a width reads on one core at the lower of its in-cache rate and one core's DRAM rate (the reference's),
+    // and on every core nearly all widths read at the memory's rate: those rows add little to the in-cache ones. Since
+    // 2026-11-19 they're registered for the reference and two widths on one core, and for the reference, `Byte`, and
+    // `Bits<5>` (the slowest) on every core; the others are in the saved baselines.
+    let memoryOneCore: Set = [rawRead.name, "Byte4", "Byte16"]
+    let memoryAllCores: Set = [rawRead.name, "Byte", "Bits<5>"]
     for workload in workloads {
         // One core, from cache and from memory.
-        for (label, buffer, duration) in [
-            ("in cache (4 MB)", cached, Duration.milliseconds(500)),
-            ("memory (512 MB), 1 core", memory, Duration.seconds(1)),
-        ] {
-            let byteCount = buffer.count / workload.unit * workload.unit
-            Benchmark("Bandwidth: \(workload.name), \(label)", configuration: configuration(maxDuration: duration)) { benchmark in
+        var places = [("in cache (4 MB)", cached, configuration(maxDuration: .milliseconds(150)))]
+        if memoryOneCore.contains(workload.name) {
+            places.append(("memory (512 MB), 1 core", memory, configuration(maxDuration: .milliseconds(400), maxIterations: 10, warmupIterations: 1)))
+        }
+        for (label, buffer, configuration) in places {
+            Benchmark("Bandwidth: \(workload.name), \(label)", configuration: configuration) { benchmark in
+                let buffer = buffer.value
+                let byteCount = buffer.count / workload.unit * workload.unit
                 for _ in benchmark.scaledIterations {
                     blackHole(workload.read(buffer.span.bytes.extracting(first: byteCount)))
                 }
-            }
+            } setup: { _ = buffer.value }
         }
 
         // Every core, each chunk read with its own cursor. 16 chunks per core (1 MB each), handed out as
         // cores free up, so the efficiency cores take fewer and don't hold up the rest.
-        guard workload.allCores else { continue }
+        guard workload.allCores && memoryAllCores.contains(workload.name) else { continue }
         let chunks = cores * 16
-        let chunk = memory.count / chunks / workload.unit * workload.unit
-        Benchmark("Bandwidth: \(workload.name), memory (512 MB), \(cores) cores", configuration: configuration(maxDuration: .seconds(1))) { benchmark in
+        let chunk = (512 << 20) / chunks / workload.unit * workload.unit
+        Benchmark("Bandwidth: \(workload.name), memory (512 MB), \(cores) cores", configuration: configuration(maxDuration: .milliseconds(200))) { benchmark in
+            let memory = memory.value
             for _ in benchmark.scaledIterations {
                 DispatchQueue.concurrentPerform(iterations: chunks) { index in
                     blackHole(workload.read(memory.span.bytes.extracting(index * chunk..<(index + 1) * chunk)))
                 }
             }
-        }
+        } setup: { _ = memory.value }
     }
 }

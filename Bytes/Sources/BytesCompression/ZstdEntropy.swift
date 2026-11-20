@@ -1,4 +1,4 @@
-import Builtin
+internal import Builtin
 internal import Bytes
 
 // Zstandard's entropy coding (RFC 8878, section 4): FSE table descriptions and decoding tables, Huffman
@@ -504,6 +504,8 @@ enum ZstdFSE {
         _ table: UnsafeMutablePointer<UInt64>, index: Int, maximumSymbol: Int, tableLog: Int, codes: UnsafePointer<UInt64>,
         scratch: ZstdTableScratch
     ) throws(BytesError) {
+        // Unsafe: the scratch tables, through pointers. Safe: `spread` writes `1 << tableLog` cells and checks the
+        // counts it reads sum to that.
         try unsafe spread(maximumSymbol: maximumSymbol, tableLog: tableLog, scratch: scratch)
         let size = 1 &<< tableLog
         // Unsafe: table stores below `size`, which the caller's table holds; symbols are at most
@@ -530,6 +532,7 @@ enum ZstdFSE {
     static func buildByteTable(
         _ table: UnsafeMutablePointer<UInt32>, maximumSymbol: Int, tableLog: Int, scratch: ZstdTableScratch
     ) throws(BytesError) {
+        // Unsafe and safe as in `buildSequenceTable`.
         try unsafe spread(maximumSymbol: maximumSymbol, tableLog: tableLog, scratch: scratch)
         let size = 1 &<< tableLog
         // Unsafe: table stores below `size`, which the caller's table holds.
@@ -617,6 +620,8 @@ enum ZstdHuffman {
     private static func decodeWeights(
         _ source: UnsafeRawPointer, count: Int, table: UnsafeMutablePointer<UInt32>, scratch: ZstdTableScratch
     ) throws(BytesError) -> Int {
+        // Unsafe: the source and scratch through pointers. Safe: the counts' reader stays within `count` bytes
+        // (throwing past them), and the table built from them is the caller's, sized for log 6.
         let (tableLog, maximumSymbol, headerSize) = try unsafe ZstdFSE.readNormalizedCounts(
             source, available: count, maximumSymbol: 255, maximumLog: 6, into: scratch.counts
         )

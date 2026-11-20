@@ -158,6 +158,16 @@ struct NUnzip: AsyncParsableCommand {
     // MARK: Run
 
     func run() async throws {
+        // The main task runs at the default priority; the work runs in a child at `.userInitiated` (the user waits
+        // for it), which the extraction's and verification's worker tasks inherit.
+        let command = self
+        try await withThrowingTaskGroup { group in
+            group.addTask(priority: .userInitiated) { try await command.work() }
+            try await group.waitForAll()
+        }
+    }
+
+    private func work() async throws {
         let paths = try resolveArchives()
         var status = Status()
         switch mode {

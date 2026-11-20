@@ -13,15 +13,20 @@ public final class AEAArchive: Sendable {
     public let rootHeader: AEARootHeader
     /// The segments in order. Their decompressed bytes, concatenated, are an Apple Archive stream.
     public let segments: [AEASegment]
-    public let signer: AEASigner
+    /// Who signed it, verified: `nil` on the unsigned profiles (1, 3, 5).
+    public let signer: AEASigner?
     /// SHA-256 of the prologue as stored: what `aea id` prints.
     public let identifier: [UInt8]
+    /// The archive file.
+    public let path: FilePath
 
     /// Each segment's checksum, `rootHeader.checksum.byteCount` bytes apiece.
     let checksums: [UInt8]
-    /// Each segment's stored MAC and its key, 32 bytes apiece.
+    /// Each segment's stored MAC, 32 bytes apiece, and its keys.
     let segmentMACs: [UInt8]
-    let segmentKeys: [Key32]
+    let segmentKeys: [DataKey]
+    /// Whether segments (and headers) are encrypted: every profile but 0.
+    public let isEncrypted: Bool
     let descriptor: FileDescriptor
     /// The largest compressed segment, for sizing read buffers.
     public let largestCompressedSegment: Int
@@ -33,7 +38,7 @@ public final class AEAArchive: Sendable {
     ///   - signingKey: Where the signing key comes from; by default the certificate chain in the archive,
     ///     evaluated as trusted.
     /// - Throws: ``AEAError``: not an archive, an unsupported profile, a bad signature or MAC, a truncated file.
-    public init(path: FilePath, signingKey: AEASigningKey = .certificateChain) throws(AEAError) {
+    public init(path: FilePath, signingKey: AEASigningKey = .certificateChain, decryptionKey: AEADecryptionKey? = nil) throws(AEAError) {
         let descriptor: FileDescriptor
         do {
             descriptor = try FileDescriptor.open(path, .readOnly, options: [.closeOnExec])
@@ -41,67 +46,120 @@ public final class AEAArchive: Sendable {
             throw .fileSystem("open \(path)", error as? Errno ?? .ioError)
         }
         self.descriptor = descriptor
-        do {
+        self.path = path
+        do throws(AEAError) {
             let fileSize = try Self.fileSize(descriptor)
             guard fileSize >= AEAPrologue.fixedByteCount else { throw AEAError.notAnAEAFile }
             var fixed = [UInt8](repeating: 0, count: AEAPrologue.fixedByteCount)
             try Self.read(descriptor, at: 0, into: &fixed)
             let prologueCount = try AEAPrologue.byteCount(parsing: fixed.span.bytes)
+            // The auth data's size is a u32 from the file: no allocation past what the file holds.
+            guard prologueCount <= fileSize else { throw AEAError.truncated }
             var prologueBytes = [UInt8](repeating: 0, count: prologueCount)
             try Self.read(descriptor, at: 0, into: &prologueBytes)
             let prologue = try AEAPrologue(parsing: prologueBytes.span.bytes)
-            guard prologue.profile == .signed else { throw AEAError.unsupportedProfile(prologue.profile.rawValue) }
             self.prologue = prologue
             identifier = SHA256.hash(prologueBytes.span.bytes).span.withUnsafeBytes { unsafe Array($0) } // Copies a local digest: safe.
+            let encrypted = prologue.profile != .signed
+            isEncrypted = encrypted
 
-            signer = try AEASignature.verify(prologue, bytes: prologueBytes, key: signingKey)
-            let mainKey = AEAKeys.mainKey(prologue, signingPublicKey: signer.publicKey)
-            let rootKey = AEAKeys.derive(mainKey, info: Array("AEA_RHEK".utf8))
+            // The signer first: its public key is part of the main key's derivation.
+            if !prologue.profile.isSigned {
+                // A key given explicitly for an unsigned archive would verify nothing: say so rather than succeed.
+                switch signingKey {
+                case .publicKey, .certificateChainTrusting:
+                    throw AEAError.untrustedSigningKey("the archive isn't signed (profile \(prologue.profile.rawValue))")
+                case .certificateChain, .untrustedCertificateChain:
+                    break
+                }
+            }
+            let signing = prologue.profile.isSigned ? try AEASignature.signer(prologue, signingKey) : nil
+            let mainKey = try AEAKeys.mainKey(prologue, signingPublicKey: signing?.publicKey ?? [], decryptionKey: decryptionKey)
+            if let signing {
+                try AEASignature.verify(prologue, bytes: prologueBytes, signer: signing, mainKey: mainKey)
+            }
+            signer = signing
+
+            let rootKey = AEAKeys.deriveDataKey(mainKey, KeyInfo("AEA_RHEK"))
             let rootMAC = AEAKeys.mac(
-                rootKey,
+                rootKey.mac,
                 associatedData: prologue.firstClusterMAC.span.bytes, prologue.authData.span.bytes,
                 data: prologue.rootHeaderBytes.span.bytes
             )
             guard AEAKeys.equal(rootMAC, prologue.rootHeaderMAC.span.bytes) else {
-                throw AEAError.authenticationFailed("root header")
+                // On an encrypted profile, a wrong key fails here first.
+                throw encrypted ? AEAError.authenticationFailed("root header (wrong key?)") : AEAError.authenticationFailed("root header")
             }
-            let root = try AEARootHeader(parsing: prologue.rootHeaderBytes.span.bytes)
+            var rootBytes = prologue.rootHeaderBytes
+            if encrypted { rootKey.crypt(&rootBytes) }
+            let root = try AEARootHeader(parsing: rootBytes.span.bytes)
             rootHeader = root
             guard root.containerSize == fileSize else {
                 throw fileSize < root.containerSize ? AEAError.truncated : AEAError.invalidHeader("container size \(root.containerSize), file size \(fileSize)")
             }
 
             // Walk the clusters: each header's MAC is in the one before it (the prologue for the first).
+            let checksumCount = root.checksum.byteCount
+            // The per-segment tables at their final size, allocated once: the segments the root header promises, as
+            // many as the file can hold (each takes at least a byte of data and its info and MAC in a header), so a
+            // forged size can't reserve more than the file's size.
+            let promised = (root.rawSize - 1) / root.segmentSize + 1
+            let segmentCount = min(promised, fileSize / (8 + checksumCount + 32 + 1))
             var segments: [AEASegment] = []
+            segments.reserveCapacity(segmentCount)
             var checksums: [UInt8] = []
+            checksums.reserveCapacity(segmentCount * checksumCount)
             var segmentMACs: [UInt8] = []
-            var segmentKeys: [Key32] = []
-            var expectedMAC = prologue.firstClusterMAC
+            segmentMACs.reserveCapacity(segmentCount * 32)
+            var segmentKeys: [DataKey] = []
+            segmentKeys.reserveCapacity(segmentCount)
+            var expectedMAC = Key32(repeating: 0)
+            for index in 0..<32 { expectedMAC[index] = prologue.firstClusterMAC[index] }
             var offset = prologue.byteCount
             var rawOffset = 0
             var cluster = 0
-            let checksumCount = root.checksum.byteCount
+            var largest = 0
             let infoCount = root.segmentsPerCluster * (8 + checksumCount)
             var header = [UInt8](repeating: 0, count: root.clusterHeaderByteCount)
             while rawOffset < root.rawSize {
                 guard offset + header.count <= fileSize else { throw AEAError.truncated }
                 try Self.read(descriptor, at: offset, into: &header)
-                let clusterKey = AEAKeys.derive(mainKey, info: AEAKeys.info("AEA_CK", index: UInt32(cluster)))
-                let headerKey = AEAKeys.derive(clusterKey, info: Array("AEA_CHEK".utf8))
-                let headerSpan = header.span.bytes
-                let infos = headerSpan.extracting(0..<infoCount)
-                let nextMAC = headerSpan.extracting(infoCount..<(infoCount + 32))
-                let macs = headerSpan.extracting((infoCount + 32)..<header.count)
-                let mac = AEAKeys.mac(headerKey, associatedData: nextMAC, macs, data: infos)
-                guard AEAKeys.equal(mac, expectedMAC.span.bytes) else {
-                    throw AEAError.authenticationFailed("cluster \(cluster) header")
+                // The cluster key's HKDF extract and keyed HMAC, once for its header key and every segment's key.
+                let clusterKey = KeyExpander(AEAKeys.derive(mainKey, KeyInfo("AEA_CK", index: UInt32(cluster))))
+                let headerKey = AEAKeys.expandDataKey(clusterKey, KeyInfo("AEA_CHEK"))
+                do {
+                    let headerSpan = header.span.bytes
+                    let nextMAC = headerSpan.extracting(infoCount..<(infoCount + 32))
+                    let macs = headerSpan.extracting((infoCount + 32)..<headerSpan.byteCount)
+                    let mac = AEAKeys.mac(headerKey.mac, associatedData: nextMAC, macs, data: headerSpan.extracting(0..<infoCount))
+                    guard AEAKeys.equal(expectedMAC, mac.span.bytes) else {
+                        throw AEAError.authenticationFailed("cluster \(cluster) header")
+                    }
                 }
                 offset += header.count
-                var reader = AlignedBytesReader(infos)
+                // The segment infos, decrypted in place on encrypted profiles (MACed as stored); the MACs after them
+                // stay as stored.
+                if encrypted {
+                    header.withUnsafeMutableBytes { bytes in
+                        // The header array's first `infoCount` bytes (fewer than its count), used only in this call: safe.
+                        var infoBytes = unsafe MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(rebasing: bytes[0..<infoCount]))
+                        headerKey.crypt(&infoBytes)
+                    }
+                }
+                let headerSpan = header.span.bytes
+                let macs = headerSpan.extracting((infoCount + 32)..<headerSpan.byteCount)
+                var reader = AlignedBytesReader(headerSpan.extracting(0..<infoCount))
                 for index in 0..<root.segmentsPerCluster where rawOffset < root.rawSize {
-                    let raw = try Int(reader.read(Byte4.self, .littleEndian))
-                    let compressed = try Int(reader.read(Byte4.self, .littleEndian))
-                    let checksum = try reader.read(byteCount: checksumCount)
+                    // The infos are exactly `segmentsPerCluster` entries (the header's size comes from them): these
+                    // reads fail only on a bug.
+                    let sizes: SegmentSizes, checksum: RawSpan
+                    do throws(BytesError) {
+                        sizes = try reader.read(SegmentSizes.self)
+                        checksum = try reader.read(byteCount: checksumCount)
+                    } catch {
+                        throw AEAError.invalidHeader("cluster \(cluster) segment \(index) info: \(error)")
+                    }
+                    let raw = sizes.raw, compressed = sizes.stored
                     guard raw > 0, raw <= root.segmentSize, compressed > 0, compressed <= raw + raw / 16 + 4096,
                           rawOffset + raw <= root.rawSize, offset + compressed <= fileSize
                     else { throw AEAError.invalidHeader("segment \(segments.count) sizes") }
@@ -111,11 +169,12 @@ public final class AEAArchive: Sendable {
                     ))
                     checksum.withUnsafeBytes { unsafe checksums.append(contentsOf: $0) } // Copies from a borrowed span: safe.
                     macs.extracting((index * 32)..<(index * 32 + 32)).withUnsafeBytes { unsafe segmentMACs.append(contentsOf: $0) } // Same.
-                    segmentKeys.append(AEAKeys.derive(clusterKey, info: AEAKeys.info("AEA_SK", index: UInt32(index))))
+                    segmentKeys.append(AEAKeys.expandDataKey(clusterKey, KeyInfo("AEA_SK", index: UInt32(index))))
+                    largest = max(largest, compressed)
                     offset += compressed
                     rawOffset += raw
                 }
-                expectedMAC = nextMAC.withUnsafeBytes { unsafe Array($0) } // Copies from a borrowed span: safe.
+                for index in 0..<32 { expectedMAC[index] = header[infoCount + index] }
                 cluster += 1
             }
 
@@ -124,9 +183,10 @@ public final class AEAArchive: Sendable {
             if offset < fileSize {
                 var padding = [UInt8](repeating: 0, count: fileSize - offset)
                 try Self.read(descriptor, at: offset, into: &padding)
-                var hmac = HMAC<SHA256>(key: AEAKeys.derive(mainKey, info: Array("AEA_PAK".utf8)).span.bytes)
+                var hmac = HMAC<SHA256>(key: AEAKeys.derive(mainKey, KeyInfo("AEA_PAK")).span.bytes)
                 hmac.update(padding.span.bytes)
-                guard AEAKeys.equal(AEAKeys.finalize(&hmac), expectedMAC.span.bytes) else {
+                let mac = AEAKeys.finalize(&hmac)
+                guard AEAKeys.equal(expectedMAC, mac.span.bytes) else {
                     throw AEAError.authenticationFailed("padding")
                 }
             }
@@ -134,10 +194,10 @@ public final class AEAArchive: Sendable {
             self.checksums = checksums
             self.segmentMACs = segmentMACs
             self.segmentKeys = segmentKeys
-            largestCompressedSegment = segments.map(\.compressedSize).max() ?? 0
+            largestCompressedSegment = largest
         } catch {
             try? descriptor.close()
-            throw error as? AEAError ?? .invalidHeader("cluster header")
+            throw error
         }
     }
 
@@ -146,8 +206,8 @@ public final class AEAArchive: Sendable {
     }
 
     /// Opens and verifies an archive.
-    public convenience init(url: URL, signingKey: AEASigningKey = .certificateChain) throws(AEAError) {
-        try self.init(path: FilePath(url.path(percentEncoded: false)), signingKey: signingKey)
+    public convenience init(url: URL, signingKey: AEASigningKey = .certificateChain, decryptionKey: AEADecryptionKey? = nil) throws(AEAError) {
+        try self.init(path: FilePath(url.path(percentEncoded: false)), signingKey: signingKey, decryptionKey: decryptionKey)
     }
 
     // MARK: Reading

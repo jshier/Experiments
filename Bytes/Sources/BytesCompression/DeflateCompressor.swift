@@ -381,11 +381,6 @@ struct DeflateCompressor: ~Copyable {
         Self.stagingCapacity &- stagingEnd >= byteCount &+ BitWriter.slack &+ 16
     }
 
-    /// The most bytes a block of `length` input bytes can take, any type, plus a dynamic header.
-    static func worstCase(blockLength length: Int) -> Int {
-        length &+ 5 &* (length / 65535 &+ 1) &+ 512
-    }
-
     /// Stages bytes written outside a block (a container header or trailer). The writer must be aligned.
     mutating func stage(_ bytes: RawSpan) {
         precondition(pendingBitCount == 0 && hasRoom(bytes.byteCount))
@@ -413,6 +408,8 @@ struct DeflateCompressor: ~Copyable {
 
     /// Writes an empty stored block: a sync flush, after which everything so far can be decoded.
     mutating func writeSyncMarker() {
+        // Unsafe: an unchecked flush of 7 bytes at most. Safe: written between blocks, whose output the staging
+        // buffer holds with room to spare (``stagingCapacity``: twice the largest block's worst case).
         withWriter { writer in
             writer.add(0, bitCount: 3) // Not final, stored.
             writer.alignToByte()
@@ -466,6 +463,7 @@ struct DeflateCompressor: ~Copyable {
     /// Writes an empty final block (a stream of no data).
     mutating func writeEmptyFinalBlock() {
         let fixed = fixedCodes
+        // Unsafe and safe as `writeSyncMarker()`: 10 bits.
         withWriter { writer in
             writer.add(0b011, bitCount: 3) // Final, fixed Huffman.
             writer.add(UInt64(fixed.literalLengthCodewords[256]), bitCount: Int(fixed.literalLengthLengths[256]))
@@ -597,8 +595,72 @@ struct DeflateCompressor: ~Copyable {
         var run: UInt32 = 0
         var count = 0
         let mask = (1 << 15) &- 1
+        let longest = Deflate.maximumMatch
 
         while position < blockEnd && count < Self.fastMaximumSequences {
+            // Where the per-position checks below always pass: a full-length match and its insertions' hashes
+            // fit before `dataEnd` (so `maxLength` is 258, at least 5, and every match's positions get inserted),
+            // and a match's last position stays below 32 KB past the base (no rebase). There, a loop without
+            // them, which checks the sequence count only after a match (literals don't add sequences); the
+            // same steps, so the same output.
+            let fastEnd = min(min(blockEnd, dataEnd &- (longest &+ 5)), base &+ Self.windowSize &- longest)
+            if position < fastEnd {
+                repeat {
+                    let current = position &- base
+                    let cutoff = current &- Self.windowSize
+                    let bucket = (nextHash & mask) &<< 1
+                    nextHash = Self.hash(Self.load32(buffer, position &+ 1), bits: 15)
+                    let sequence = Self.load32(buffer, position)
+                    let first = Int(table[bucket])
+                    let second = Int(table[bucket | 1])
+                    table[bucket] = Int16(truncatingIfNeeded: current)
+                    table[bucket | 1] = Int16(truncatingIfNeeded: first)
+                    var length = 0
+                    var distance = 0
+                    if first > cutoff {
+                        let candidate = base &+ first
+                        if Self.load32(buffer, candidate) == sequence {
+                            length = Self.extend(buffer, position, candidate, from: 4, maxLength: longest)
+                            distance = position &- candidate
+                        }
+                        if second > cutoff && length < niceLength {
+                            let candidate = base &+ second
+                            if Self.load32(buffer, candidate) == sequence {
+                                let other = Self.extend(buffer, position, candidate, from: 4, maxLength: longest)
+                                if other > length {
+                                    length = other
+                                    distance = position &- candidate
+                                }
+                            }
+                        }
+                    }
+                    if length >= 4 {
+                        frequencies.literalLength[257 &+ Int(lengthSlots[length])] &+= 1
+                        frequencies.distance[Self.distanceSlot(distance)] &+= 1
+                        sequences[count] = UInt64(run) | UInt64(length) &<< 32 | UInt64(distance) &<< 48
+                        count &+= 1
+                        run = 0
+                        var inserted = position &+ 1
+                        var current = current &+ 1
+                        for _ in 1..<length {
+                            let bucket = (nextHash & mask) &<< 1
+                            table[bucket | 1] = table[bucket]
+                            table[bucket] = Int16(truncatingIfNeeded: current)
+                            inserted &+= 1
+                            current &+= 1
+                            nextHash = Self.hash(Self.load32(buffer, inserted), bits: 15)
+                        }
+                        position &+= length
+                        if count == Self.fastMaximumSequences { break }
+                    } else {
+                        frequencies.literalLength[Int(Self.byte(buffer, position))] &+= 1
+                        run &+= 1
+                        position &+= 1
+                    }
+                } while position < fastEnd
+                continue
+            }
+            // The rest, a position at a time: near the data's end and the window's.
             let maxLength = min(Deflate.maximumMatch, dataEnd &- position)
             var length = 0
             var distance = 0
@@ -971,6 +1033,8 @@ struct DeflateCompressor: ~Copyable {
 
     /// Writes stored blocks for `buffer[start..<end]` (at most 65,535 bytes each).
     private mutating func writeStoredBlock(_ buffer: RawSpan, from start: Int, to end: Int, isFinal: Bool) {
+        // Unsafe: unchecked flushes. Safe: the block's worst case, which stored data is, fits (`hasRoom`, as the
+        // file's comment says).
         withWriter { writer in
             var offset = start
             repeat {
@@ -1096,6 +1160,8 @@ struct DeflateCompressor: ~Copyable {
         distanceCodewords: Span<UInt32>, distanceLengths: Span<UInt8>,
         lengthCodes: Span<UInt32>, lengthBits: Span<UInt8>, _ writer: inout BitWriter
     ) {
+        // Unsafe: unchecked flushes. Safe: the writer is the staging buffer's, checked by `hasRoom` for the
+        // block's worst case before the block began (see the file's comment).
         precondition(literalCodewords.count == 288 && literalLengths.count == 288 && distanceCodewords.count == 32
             && distanceLengths.count == 32 && lengthCodes.count == 259 && lengthBits.count == 259)
         var position = start
@@ -1244,6 +1310,8 @@ struct DynamicHeader {
 
     /// Writes the header after the block type.
     func write(to writer: inout BitWriter) {
+        // Unsafe: unchecked flushes. Safe: a dynamic header is part of its block's worst case, which the staging
+        // buffer was checked for (`DeflateCompressor.hasRoom`).
         writer.add(UInt64(literalCount &- 257) | UInt64(distanceCount &- 1) &<< 5 | UInt64(codeLengthCount &- 4) &<< 10, bitCount: 14)
         unsafe writer.unsafeFlush()
         let order = Deflate.codeLengthOrder

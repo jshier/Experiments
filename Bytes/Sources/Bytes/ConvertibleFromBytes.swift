@@ -228,6 +228,7 @@ public extension GenericBytesReader {
         let size = MemoryLayout<T>.size
         if likely(_bitOffset == 0) {
             guard likely(span.byteCount &- _byteOffset >= size) else { throw .insufficientData }
+            // Unsafe: an unchecked load. Safe: `size` bytes remain (just checked).
             return unsafe Load.rawBytes(T.self, from: span, at: _byteOffset)
         }
         guard remainingByteCount >= size else { throw .insufficientData }

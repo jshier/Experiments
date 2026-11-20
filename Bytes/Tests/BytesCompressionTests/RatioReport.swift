@@ -1,5 +1,6 @@
 import Bytes
 import BytesCompression
+import BytesTestSupport
 import CLibDeflate
 import Compression
 import Foundation
@@ -10,10 +11,7 @@ import zlib
 /// Opt in: `COMPRESSION_REPORT=1 swift test -c release --filter RatioReport` prints a tab-separated table.
 @Suite(.enabled(if: ProcessInfo.processInfo.environment["COMPRESSION_REPORT"] != nil))
 struct RatioReport {
-    static var corpusRoot: URL {
-        if let path = ProcessInfo.processInfo.environment["EXPERIMENTS_CORPUS"] { return URL(filePath: path) }
-        return FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Caches/Experiments/corpus")
-    }
+    static var corpusRoot: URL { Corpus.root }
 
     static let files = ["silesia/dickens", "silesia/xml", "silesia/x-ray", "silesia/samba", "web/Main.js", "web/Main.css"]
 

@@ -10,18 +10,17 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 
 | Project | What | Record |
 |---|---|---|
-| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work; `BytesAsync` (async buffers, pipelines, parallel codecs); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions; Zstandard decoding, XXH64; LZMA, LZMA2, and `.xz` decoding, CRC-64); `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR on ARM's AES/PMULL instructions via the `CBytesCrypto` C target, SHA-1/256/384/512, HMAC, PBKDF2, HKDF, TLS 1.3's key schedule and record layer, sealing in parallel) | `Benchmarks/RESULTS.md` |
+| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work; `BytesBase64` (vectorized Base64 encoding and decoding: NEON `tbl`/`tbx` block kernels, auto-vectorized `ld3`/`st4` group kernels; whitespace-skipping decoding for PEM; was the `Base64` package, record `RESULTS-base64.md`); `BytesAsync` (async buffers, pipelines, parallel codecs); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions; Zstandard decoding, XXH64; LZMA, LZMA2, and `.xz` decoding, CRC-64; bzip2 decoding; Apple's LZFSE, LZVN, LZ4, LZBITMAP, and LZRAVEN decoding, and LZFSE, LZVN, and LZBITMAP encoding (all three byte for byte as Compression's; the open references' parse as an option)); `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR on ARM's AES/PMULL instructions via the `CBytesCrypto` C target, SHA-1/256/384/512, HMAC, PBKDF2, HKDF, scrypt, TLS 1.3's key schedule and record layer, sealing in parallel; P-256 and P-384 ECDSA verification and ECDH (keys and signatures in DER and PEM, both ways), HPKE; RSA PKCS #1 v1.5 verification (1024–4096-bit keys, SHA-1/256/384/512); DER, PEM, and X.509 parsing, and certificate signatures (`isSigned(by:)`, RSA and ECDSA)) | `Benchmarks/RESULTS.md` (and its `RESULTS-*.md`) |
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
 | `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
-| `Base64` | Vectorized Base64 encoder on Bytes (`tbl` kernel, auto-vectorized `ld3`/`st4` kernel) | `Benchmarks/RESULTS.md` |
 | `NativeZipArchive` | ZIP: stored, DEFLATE, Deflate64, bzip2, LZMA, xz, Zstandard; ZipCrypto and WinZip AES (on BytesCrypto, decrypted as streamed); `ZipExtractor` (many archives, one worker pool); `nunzip` (Info-ZIP unzip's options) | `Benchmarks/RESULTS.md` |
-| `NativeAEA` | Apple Encrypted Archives (`.aea`, Xcode's): the signed container verified (ECDSA, certificate chain, HKDF/HMAC chain, SHA-256), segments decoded in parallel (BytesCompression's LZMA2), the Apple Archive stream walked across segments with no copies, files written as `aa extract` writes them (APFS `decmpfs` compression) by writers outside a file system semaphore; `unaea`; FORMAT.md documents the format | `RESULTS.md` |
+| `NativeAEA` | Apple Encrypted Archives (`.aea`: Xcode's, iOS IPSWs' disk images) and Apple Archives (`.aar`, plain or `pbz`): all six AEA profiles (signatures and certificate chains, symmetric, ECDH, and scrypt keys, IPSWs' WKMS keys by HPKE), all on BytesCrypto; segments and blocks decoded in parallel with BytesCompression; the Apple Archive stream walked with no copies; files written as `aa extract` writes them, byte for byte (APFS `decmpfs` compression with BytesCompression's encoders, extended attributes, ACLs, hard links, FIFOs, quarantine) by writers outside a file system semaphore; decryption to a file, with ranges; Xcode's `.xip` too (XAR TOC, RSA signature and chain to Apple Root CA on BytesCrypto, pbzx blocks of xz, the cpio stream walked into the same extractor, files stored as `xip --expand` stores them); `nunarchiver` (was `unaea`); FORMAT.md documents the formats, ARCHITECTURE.md the pipeline and its threads | `RESULTS.md`, `XIP-REPORT.md` |
 | `BinaryParsingComparison` | Bytes vs swift-binary-parsing | `RESULTS.md` |
 | `NativeISO8601`, `*Benchmark` | Smaller benchmarks | READMEs |
 
 Benchmarks use [ordo-one/package-benchmark](https://github.com/ordo-one/package-benchmark); saved baselines are in
 each package's `.benchmarkBaselines/`, allocation thresholds in `Thresholds/`. Compiler bug reports and
-reproducers live outside the repo, in `~/Downloads/swift-bugs/` (numbered `NN-swift-…md` with a
+reproducers live outside the repo, in `~/Scratch/swift-bugs/` (numbered `NN-swift-…md` with a
 `repro-NN-…/` directory, a zip in `attachments/`, and an index row in its READMEs).
 
 ## Ground rules
@@ -57,6 +56,10 @@ reproducers live outside the repo, in `~/Downloads/swift-bugs/` (numbered `NN-sw
   Python); never `rm -rf "$VAR"` without checking the variable is set and points where you expect.
 - Test files aren't checked in, only the scripts that make them: `Tools/test-data` downloads or generates them
   into the ignored `TestData/`, and nothing that writes test data writes or deletes outside it (below).
+- Files outside the repository live in `~/Scratch`: the user's example files (Xcode's `.xip` and `.aea` archives),
+  the compiler bug reports (`~/Scratch/swift-bugs`), and anything large an experiment makes that should outlast a
+  session. Never read or write `~/Downloads`, `~/Desktop`, or `~/Documents`: there's no permission to, and a
+  privacy prompt there hangs the program. Tests' own files stay in `TestData/` (below).
 - Temporary files go in the session scratchpad (or `mktemp -d`), never the workspace root. SwiftPM runs
   `swiftc` from the workspace root, so relative output paths passed with `-Xswiftc` land in `Experiments/`:
   always pass absolute paths.
@@ -128,8 +131,8 @@ depth, mix and a verdict: `vector128`, `vector64` (often a vectorizer epilogue),
 `--require`/`--forbid` make it an assertion (exit 1):
 
 ```sh
-Tools/loops --target Base64 Base64 encodeBlocks --require tbl,zip --forbid mov.b,ins
-Tools/loops --target Base64 Base64 'encode\(_:into:alphabet:\)' --require ld3.16b,st4.16b
+Tools/loops --target Bytes BytesBase64 encodeBlocks --require tbl,zip --forbid mov.b,ins
+Tools/loops --target Bytes BytesBase64 'encode\(_:into:alphabet:\)' --require ld3.16b,st4.16b
 ```
 PATTERN is a regex on simplified demangled names, which don't include parameter types: anchor it (`…:\)`)
 or overloads and similarly named functions match too and must each pass.
@@ -197,6 +200,10 @@ moves, not executor checks (`swift_task_switch` fast paths change no state): pai
 **`Tools/bench-table PKG [--metric R] [--filter R] [--percentile p50] BASELINE...`** — baselines side by side
 with change, units normalized (counts unscaled, times in µs).
 
+**`Tools/slim-baselines [--check] [--min-size SIZE] PATH...`** — shrinks saved baselines (`results.json`) about 9x
+(the repository's 421: 4.4 GB → 477 MB; the largest, 405 MB → 5.7 MB) without changing anything they report: each metric's HDR histogram is rebased to start at its smallest recorded
+value and end at its largest, with every bin keeping its bounds. Run it after every `baseline update`.
+
 **`Tools/debuggable PROGRAM`** — prints `PROGRAM-debuggable`, signed with `get-task-allow`.
 
 **`Tools/socket-ceiling [--pairs N] [--bytes SIZE] [--write SIZE] [--buffer SIZE] [--unix] [--runs N]`** — the
@@ -211,8 +218,10 @@ programs (`--runtime`), and tests (`test`) with one. See Toolchains below.
 need a missing set fail saying which `fetch` to run. Two kinds of set:
 - **Downloaded**, pinned to a revision and checked by SHA-256: `swift-binary-parsing` (its PNG, QOI, ELF, PCAPNG,
   and binary plist samples, read by BinaryParsingComparison after its own `Data/`), `wycheproof` (C2SP's AEAD,
-  HMAC, and HKDF vectors, for BytesCrypto), `rfc8448` (TLS 1.3's example handshake traces, for the key schedule
-  and record tests).
+  HMAC, HKDF, ECDSA, and ECDH vectors, for BytesCrypto), `rfc8448` (TLS 1.3's example handshake traces, for the key
+  schedule and record tests), `rfc9180` (HPKE's test vectors), `c-references` (the lzfse and libzbitmap sources
+  BytesCompression's LZFSE, LZVN, and LZBITMAP coders were compared against; not built now: Bytes'
+  RESULTS-lz4-lzfse.md and RESULTS-lzbitmap.md say how to add them back as targets).
 - **Generated** by a checked-in script, run with the output directory as its argument and made again when any
   file in the script's directory changes: `swift-help-lz4` (`BinaryParsingComparison/TestDataGenerators`:
   swift-binary-parsing's `ELF/swift-help` through `lz4 -9`; lz4 1.11.1 reproduces the benchmarked file byte for
@@ -254,7 +263,7 @@ Tool honor it), and never on PATH (the shell profile doesn't add them).
   Tools/toolchain SocketStream -- swift run --package-path SocketStream -c release socket-stream
   Tools/toolchain SocketStream -- swift package --package-path SocketStream --disable-sandbox benchmark
   Tools/toolchain SocketStream test             # tests against the toolchain's runtime
-  Tools/toolchain pr-91981 -- Tools/loops --target Base64 Base64 encodeBlocks   # codegen with another compiler
+  Tools/toolchain pr-91981 -- Tools/loops --target Bytes BytesBase64 encodeBlocks   # codegen with another compiler
   ```
 - **The toolchain's runtime:** code using APIs newer than the OS's Concurrency/stdlib must load the
   toolchain's runtime. `swift test` and the benchmark plugin replace `DYLD_LIBRARY_PATH` for the processes
@@ -295,7 +304,7 @@ There are two different LLVMs on this machine; don't mix up what they tell you.
 
 ## Lessons (vectorization, allocation, concurrency)
 
-Vectorization on ARM64 with Swift 6.4 (details and numbers: `Base64/Benchmarks/RESULTS.md`,
+Vectorization on ARM64 with Swift 6.4 (details and numbers: `Bytes/Benchmarks/RESULTS-base64.md`,
 `Bytes/Benchmarks/RESULTS.md`):
 
 - Loops from one typed span to another (`Span<InlineArray<3, UInt8>>` → `MutableSpan<InlineArray<4,
@@ -434,7 +443,7 @@ Compression and crypto (details: `Bytes/Benchmarks/RESULTS.md`, `SocketStream/RE
   `withUnsafeBytes`, `func f<R>(_: () throws -> R) rethrows -> R`). Swift 6.4.2 throws the wrong error,
   silently: the closure throws an `any Error` box as an `E`, and the caller catches the box's address as the
   enum (a `BytesError` printed `()`). With a `Void` or tuple result the compiler crashes instead.
-  `~/Downloads/swift-bugs/25-…`, swiftlang/swift#90291. Use Bytes' `array.withOutputRawSpan { … }` (or
+  `~/Scratch/swift-bugs/25-…`, swiftlang/swift#90291. Use Bytes' `array.withOutputRawSpan { … }` (or
   `array.mutableSpan.withUnsafeMutableBytes`), which are generic over the error type and keep it. A span of
   a class instance's stored array lasts only for that property access: bind the array to a local `let` (a
   retain, no copy). A `~Copyable` stored property (a `ByteBuffer`) can't be bound that way: pass it `inout`
@@ -519,7 +528,7 @@ API design and code generation (the 2026-11-17 proposals pass; numbers in `Bytes
   fields (`flags[ConnectFlags.userName]`) matched hand shifts; a `BitPattern` literal folded to its two masks only
   with `@inline(__always)` on both initializers (otherwise a run-time parse per call).
 - **The standard library's `ByteOrder.==` is a call** (derived `==` of any other module's `@frozen` enum is:
-  `~/Downloads/swift-bugs/26`). `switch` over the order instead; a byte-ordered writer went 71 → 53 instructions.
+  `~/Scratch/swift-bugs/26`). `switch` over the order instead; a byte-ordered writer went 71 → 53 instructions.
 - **Store a checked value unmasked.** An enum field setter with `assert` + mask cost MQTT's PUBLISH encoding 0.8%;
   `precondition(raw <= mask)` then an unmasked store folds both away when the enum's raw values are visible.
 - **An empty default closure isn't free, and compilers disagree about it.** MQTT's properties validation with a
@@ -542,7 +551,7 @@ API design and code generation (the 2026-11-17 proposals pass; numbers in `Bytes
   takes integer literals (they default to `Int`) unless `@_disfavoredOverload`; a bare `writer.write(7)` is ambiguous
   between `Byte`, `UInt8`, and `Int8`, which is right: state the width.
 - **`.macro` targets need `import CompilerPluginSupport`**; without it the manifest fails as a type-check timeout
-  (`~/Downloads/swift-bugs/27`).
+  (`~/Scratch/swift-bugs/27`).
 - **Cross-toolchain checks:** SocketStream builds with a PR toolchain whose inliner differs; a change that helps MQTT
   under Xcode's compiler can hurt SocketStream. Track both.
 
@@ -578,7 +587,7 @@ The 2026-11-18 pass (Zstandard, native crypto and TLS, parallel sealing; numbers
 - **Bytes' crypto types share CryptoKit's names** (`SHA256`, `HMAC`, `HKDF`, `AES`, `HashFunction`): qualify with the
   module in code importing both (`CryptoKit.AES.GCM`).
 - **Don't take `.span` of a throwing call's result directly**: at `-Onone` the LLVM verifier crashed
-  (`~/Downloads/swift-bugs/28`). Bind the result to a local first.
+  (`~/Scratch/swift-bugs/28`). Bind the result to a local first.
 - **Test reads that end exactly at the data's end.** `read(_:asciiDigits:)`'s two-load path lacked a `count > 8`
   condition, so short reads near the end loaded 8 bytes past the data (unchecked loads); every test with bytes after
   the field passed. Every fast path with wide loads gets a test whose input ends where the field does.
@@ -628,7 +637,127 @@ NativeAEA/FORMAT.md):
   the script failed to compile (the `;` ran `cp` anyway), and the new package wasn't in git yet. Chain every step
   with `&&`, or use Edit.
 
-A second machine (M1 Max, 2026-11-19; `Writeups/M1-Max-vs-M3-Ultra.md`, `Bytes/OPTIMIZATION.md` section 15):
+Apple's formats, curves, and running five agents at once (2026-11-18; NativeAEA/RESULTS.md, Bytes' RESULTS-*.md):
+
+- **CommonCrypto's CTR mode (`kCCModeOptionCTR_BE`) counts only the block's last 8 bytes**, wrapping with no carry
+  into the first 8 (checked from an IV at 2⁶⁴ − 1). Apple Encrypted Archives use it: `AES.Counter(bigEndian64BitCounterIn:)`.
+  The difference from a 128-bit counter shows only when the low word wraps, so test IVs about to wrap.
+- **Undocumented Apple codecs can be read from libcompression**: `ipsw dyld extract` pulls the dylib from the shared
+  cache; its local symbols (`_rav_decode_buffer`, `RavGetLitLamContext(unsigned char)::lut`) name the functions and
+  tables. Transcribe to a C reference first and check it decodes Compression's output exactly; then write Swift.
+- **Generic standard-library SIMD conversions are inlined only while they have few callers**: `SIMD8<UInt16>(
+  truncatingIfNeeded:)` in LZBITMAP's decoder was inlined until the LZFSE and LZVN encoders, in the same module,
+  used SIMD conversions too; then it stayed a call (6 per 16 groups), and decoding ran 12–15% more instructions
+  with no change to the decoder's file. Found by bisecting the module's files in a copy of the package. In hot
+  code, widen with a byte zip (lane picks of two vectors: `zip1`/`zip2`) and narrow with Bytes' `_lowBytes`
+  (`Builtin.trunc`: one `xtn`, or `shrn` after a shift); picking even bytes to narrow was merged by LLVM into
+  lane moves. Recheck hot loops with `Tools/calls --callee 'specialized SIMD'` after adding code to their module.
+- **An encoder's output can depend on the room it's given**: Compression's LZBITMAP (and Bytes' copy of it) needs
+  working room beyond its result, so a chunk given exactly its own size can fail, or come out larger, where 64 KiB
+  of room compresses it. `aa extract` gives every APFS chunk 64 KiB; giving each its own size left 1,604 of Xcode's
+  files stored differently. Compare stored bytes, not just storage forms, and find such rules from the data (fit
+  the rule against every file: NativeAEA/RESULTS.md, 2026-11-19).
+- **Probe a decoder with crafted streams, and expect two rule sets**: Compression's LZBITMAP decoder has a fast loop
+  and a careful one for a chunk's end, which disagree on corrupt input. Its buffer API also stops once the output
+  is full and returns that count, so it "decodes" streams missing their end; 0 is its only failure.
+- **Vectorize independent work, not a dependent chain**: Salsa20/8 as `SIMD4<UInt32>` diagonals was clean
+  `vector128` code and 3x slower than scalar (each step 4 dependent vector instructions). And SLP turns a scalar
+  kernel's 16 loads or stores into vector ops with lane moves: load and store `UInt64` pairs (−6%); check with
+  `Tools/loops --forbid mov.s,fmov,ins,umov`.
+- **Write out fixed-count loops of multi-limb arithmetic**: LLVM left Montgomery's row loop rolled with the
+  accumulator in memory (P-384 −13% time written out). A field multiply that wins alone (wide integers, special
+  reductions) can lose inlined into point formulas: measure the whole operation. Constant-time ladders: Jacobian
+  formulas with the special cases selected by masks beat complete formulas (−28%).
+- **Spans and Swift Testing**: `#expect`, `#require`, and `Optional.map` don't take `~Escapable` values (compute a
+  `Bool` first, use `if let`). `array[i].span` is a temporary's (bind `let x = array[i]`), and so is the span of a `let`
+  assigned inside a `switch` ("lifetime-dependent value escapes its scope"): bind it to another constant.
+- **Typed throws**: `do { } catch` around a typed-throws call boxes the error (`swift_allocError`) unless written
+  `do throws(E)`.
+- **C references in SwiftPM build at `-Os` without `NDEBUG`**: their asserts stay in (lzfse's cost 18%): set
+  `cSettings: [.define("NDEBUG")]` before comparing. Release tests with `@testable` need `-Xswiftc -enable-testing`;
+  elliptic-curve code in debug is hundreds of times slower.
+- **`Darwin.membership` is an explicit submodule** (`mbr_identifier_to_uuid` for ACL qualifiers): `import
+  Darwin.membership`, no shim needed.
+- **`aa archive` hangs on a FIFO in the tree** (it opens it to read). `pbz` blocks have no checksums: damage to a
+  stored block isn't detected (by `aa` either); test corruption on a compressed block.
+- **The first URLSession request to a new domain waits on a security prompt** (the program hangs, curl doesn't): tell
+  the user to look for it, as for the attach prompt.
+- **zsh's `status` is read-only**: `local status=$?` aborts a zsh script; name it `rc`.
+- **Agent worktrees stay locked by the parent session** (`git worktree remove` refuses: "locked working tree, lock
+  reason: claude agent"): once the agent has finished and its files are merged, `git worktree unlock` then remove.
+  Before removing old worktrees, compare each changed file's added lines with main, not just whole files.
+- **Five agents benchmarking under one lock**: their timed runs queue (an hour of a three-hour task was waiting), and
+  each run still meets the others' builds. Judge by instruction counts during the work; time on an idle machine after.
+
+Xcode's `.xip`, bzip2, RSA, and Compression's LZVN (2026-11-19; NativeAEA/XIP-REPORT.md, FORMAT.md §4, Bytes'
+RESULTS-bzip2.md, RESULTS-rsa.md, RESULTS-lz4-lzfse.md):
+
+- **Find an Apple tool's storage rule from every file, in its units.** `xip --expand` compresses files over 16 KiB
+  that aren't PNGs when the fork saves a fifth of the **4 KiB blocks** (`ceil(fork/4096)×5 ≤ ceil(size/4096)×4`); by
+  bytes, ratios from 0.787 to 0.864 went both ways. `aa extract`'s rule is in bytes (93%). The room differs too: `xip`
+  gives each LZVN chunk only its own size (LZVN needs 1–10 bytes beyond its stream, so 42 short last chunks were stored
+  raw where 64 KiB of room compressed them), `aa` gives every LZBITMAP chunk 64 KiB.
+- **`fchflags(UF_COMPRESSED)` sets the file's modification time to now**: set times after the flags (and locking flags
+  after the times).
+- **Compression's LZVN (0x900) is the open lzvn reference with another hash**: `((v & 0xFFFFFF) × 0x9E3779B1) >> 18`
+  against the reference's `× 4161 >> 12`, and every room check the reference's (1–10 bytes beyond the stream; under 8
+  bytes of input it returns 0). Compression's LZFSE differs from the reference in one constant (pending literals pushed
+  past 945, not 2,520). Read the library's code (`ipsw dyld extract`, Binary Ninja) and check a patched C reference on
+  every corpus file and capacity before writing Swift; Bytes' encoders now match both byte for byte.
+- **A `.xip`'s signature is RSA PKCS #1 v1.5 of the TOC checksum itself** (the 20 SHA-1 bytes as the `DigestInfo`
+  digest), chained to the 2006 Apple Root CA; check the certificates' validity at the TOC's `creation-time`. This
+  macOS's `xar` no longer signs (`--sign` is gone): tests write their XAR archives in Swift and sign with `openssl
+  pkeyutl`.
+- **APFS spends ~280 µs of kernel CPU on every `linkat`** (first or later link, plain or compressed file, measured
+  alone): Xcode's 26,000 later names cost 2.6 s on 6 threads, and links made during the writes slowed the writers by
+  as much. Hard links are the xip's largest serial phase.
+- **bzip2 decoding**: a nested function that captures the decoder's state is heap-boxed (7 allocations a block); hot
+  loops with any call spill their registers; loading the bit buffer's refill one symbol ahead takes a load off each
+  symbol's critical path; the inverse BWT (a dependent load per byte) runs 24 interleaved walks of ~1 KB segments.
+- **A program blocked in `open` at 0% CPU on a file in ~/Downloads (or Desktop, Documents; why example files are in
+  `~/Scratch` now) waits on a privacy
+  prompt**, whatever binary opens it, tests included (a `.enabled(if:)` trait that lists the folder blocks too): tell
+  the user to look for it. A `gtimeout`ed `swift test` can leave `swiftpm-testing-helper` behind: find it by its
+  `--test-bundle-path` and kill it by PID.
+
+Threads to structured concurrency (2026-11-19; NativeAEA/RESULTS.md, ARCHITECTURE.md §9):
+
+- **Mark internal async functions `nonisolated(nonsending)`**, and the public entry points `@concurrent`: without it
+  NativeAEA's walker made about 4 `swift_task_switch` checks per entry (21,374 → 1,481 for 1,001 files).
+- **Waits are `Mutex` state plus a continuation, taken synchronously under the lock when nothing has to wait**; check
+  again under the lock inside the continuation's body, remove a waiter under the lock, resume it outside. A
+  `CheckedContinuation` allocates per wait: `UnsafeContinuation` in release builds for waits that happen per file.
+- **One `withTaskCancellationHandler` per operation** that closes the pools and queues (every waiter wakes) beats a
+  handler per await; workers still drain queued jobs after a failure, to release what the jobs hold.
+- **CPU-bound tasks filling the cooperative pool didn't starve the others** (32 decoders, one walker, 24 writers):
+  yields and priorities measured no different. Measure before adding an executor.
+- **An async main task runs at priority 21**, not user-initiated: start the work in a child task with a priority.
+- **`sending` closures can't append to a caller's local** that's read afterwards; a plain closure parameter can.
+- **A buffer sized for the largest item stays resident at that size**: `madvise(MADV_FREE_REUSABLE)` past a floor
+  after each use, `MADV_FREE_REUSE` before (32 read buffers of 16 MiB: −170 to −230 MB, no system time).
+- **`stat`'s block counts of freshly extracted `decmpfs` files vary run to run**: compare contents and sizes.
+- **`xargs -P` interleaves its children's output lines**: hash files serially, or one output file per process.
+
+Bytes cleanup (2026-11-19, later; Bytes' RESULTS.md):
+
+- **Offload synchronous work with a `@concurrent` function taking a non-escaping `@Sendable` closure**
+  (`BytesAsync`'s `perform(_:)`, `ByteTransform.concurrently()`): off any actor, no thread switch from a nonisolated
+  task, nothing allocated. DEFLATE level 1 in 64 KiB calls: same time as in place, a Dispatch queue hop +7%. A generic
+  `@concurrent` function called on a type parameter warns that its conformance "may be isolated" under
+  `InferIsolatedConformances`, even with `SendableMetatype`; the closure form doesn't. APIs that borrow caller storage
+  (`inout`, spans) stay `nonisolated(nonsending)` and move only their workers off the caller.
+- **Values mutated by `@inline(__always)` nested functions can stay in memory behind `swift_beginAccess`**: SHA-512's
+  state and schedule as captured variables cost 12 access checks a block (638 instructions); as structs with mutating
+  methods, 519, then 489. Prefer structs with mutating methods to nested functions over captured `var`s in kernels.
+- **A table that becomes a compile-time constant can make LLVM rematerialize its address in the loop**: CRC-32's
+  literal tables (no more `swift_once`) cost 64-byte checksums +10.7% until the inner update was `@inline(never)`
+  (the address opaque again). Measure after removing a lazy global, not just `Tools/calls`.
+- **Literal `static let` arrays and `InlineArray`s are statically initialized** (no `swift_once`): only computed
+  initializers (`(0..<n).map`, closures) are lazy. Check with `nm` (no once token) or `Tools/calls --callee swift_once`.
+- **A stitched decrypt-and-authenticate must restore the buffer on a bad tag** (re-encrypt with the same counter):
+  AES-GCM open in one pass, −12% instructions, TLS open −14%; every forged case leaves the buffer byte-identical.
+
+A second machine (M1 Max, 2026-11-19; `Writeups/M1-Max-vs-M3-Ultra.md`, `Bytes/OPTIMIZATION.md`, Part III "The second machine"):
 
 - **One core is the clock** (1.31x time for 1.25x clock, over 773 benchmarks with identical instruction counts); more
   cores change parallel work by the lane count. Keep Instructions beside times when comparing machines: they show whether
@@ -646,10 +775,36 @@ A second machine (M1 Max, 2026-11-19; `Writeups/M1-Max-vs-M3-Ultra.md`, `Bytes/O
 - **Measure a core's instructions rather than assuming:** `tbl` with 3 or 4 table registers is 2–3 vector slots and `tbx`
   with 4 is 4 (8 cycles of latency) on the M1 Max; 1–2 registers are full speed.
 
+## Tests
+
+- **Two sets.** `swift test` (debug) runs the fast set; `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`
+  adds the bulk sweeps (`--filter BulkTests` for only those). Default runs (2026-11-19): Bytes ~40 s (was 429),
+  NativeZipArchive ~14 s (71), NativeAEA ~13 s (23), SocketStream ~2.5 s (9).
+- **Where a new expensive test goes:** large inputs, corpora, every capacity/size/vector, thousands of mutations go in a
+  `@Suite(.bulk) struct XxxBulkTests` (the trait is Bytes' `BytesTesting` product; packages not yet moved to it
+  define it in their test target's `Bulk.swift`) sharing a static helper with the fast test.
+- **Shared helpers are Bytes' support products**, not copies: `BytesTestSupport` (no Swift Testing, so benchmarks and
+  sources can use it: `SplitMix64(seed:)`, `SampleBytes`, `Lazy`, `TestData.file(set:name:)`, `Corpus.root`,
+  `TemporaryDirectory`, `ExternalTool.run`, `hex`), `BytesTesting` (`.bulk`, `runsBulkTests`), and
+  `BytesReferenceCodecs` (zlib's and Compression's buffer APIs as references: `Zlib`, `AppleCompression`). The fast form keeps every edge case: boundary sizes, block remainders, one vector of each Wycheproof
+  (result, flags) class. Fast plus bulk must check everything.
+- **No `.serialized`, no `@MainActor` or other global actor in tests**: per-test temporary directories, port 0,
+  immutable `static let` fixtures. Never set process-wide state (umask, working directory, environment), not even to
+  read it: NativeAEA's `umask(0); umask(old)` raced between parallel extractions (now `getumask()`, macOS 27).
+- **In debug builds, test helpers can cost more than the code tested**: decode into uninitialized room
+  (`UnsafeMutableRawBufferPointer.allocate`), not `[UInt8](repeating: 0, count: huge)` (a DEFLATE helper zero-filled
+  about 1 GB per call, half a test's time); build samples, archives, keys, and decoded vector files once in `static
+  let`s. Debug codec and crypto code runs 30–250x slower than release: that's why bulk runs in release.
+
 ## Benchmarks (ordo-one/package-benchmark)
 
 - Run: `swift package --disable-sandbox benchmark [--filter REGEX]`; save: `… baseline update NAME`;
   compare: `… baseline compare A B` or `Tools/bench-table PKG A B`. Thresholds: `… thresholds update`.
+- **Slim every baseline before committing it: `Tools/slim-baselines PKG`.** package-benchmark saves each metric as an
+  HDR histogram of about 21,500 slots, almost all zero, so a full suite's baseline was 60–400 MB (GitHub refuses
+  files over 100 MB). Slimmed, `baseline read`, `compare`, and `bench-table` print the same numbers (checked: every
+  percentile, mean, and standard deviation in `--format histogram`). `Tools/slim-baselines --check .` lists any
+  left unslimmed.
 - Bytes has three builds, chosen by package traits, each benchmarked with `Bytes/bench BUILD [benchmark
   args]`, which gives each its own build directory: `optimized` (default, the C modules' NEON and CRC
   instructions), `portable` (`--traits Portable`: the C modules' fallbacks for other CPUs, on Apple
@@ -657,6 +812,40 @@ A second machine (M1 Max, 2026-11-19; `Writeups/M1-Max-vs-M3-Ultra.md`, `Bytes/O
   its C headers themselves, so a Swift target needs `-Xcc -DBYTES_PORTABLE` too for a portable build.
 - `baseline read --filter` is ignored (bench-table filters itself). JMH export requires the built-in
   throughput metric. Markdown units vary (K/M, μs/ms): bench-table normalizes.
+- **A benchmark costs a few seconds at most, and one run is enough.** No 30-minute suites, no repeated runs unless
+  asked for, and no waiting for a quiet machine to run them (2026-11-19):
+  - package-benchmark starts the benchmark executable once to list the benchmarks and again for **each** benchmark,
+    and every start runs the whole `benchmarks` closure (`--filter` and `list` too). That closure only registers:
+    fixtures are made lazily in a benchmark's `setup:` (which runs only in that benchmark's process, unmeasured), and
+    so are result checks (run the operation once there and check it: that's the warmup too). Base64's eager
+    fixtures cost 3 s per start: 340 s a suite, 53 s lazy; Bytes' CompressionBenchmarks 20 s per start (RSA key
+    generation, every codec's checks), 830 starts: 5.6 hours, 6.6 minutes lazy. No data-derived counts in names
+    (they need the data in every process). Check registration stays in milliseconds: `time
+    .build/release/TARGET --filter NOTHING`. The `Lazy` box and `register` helper in
+    `Bytes/Benchmarks/CompressionBenchmarks/Fixtures.swift` are the pattern; slow or random fixtures (RSA keys,
+    compressed corpora) are cached in the corpus cache.
+  - Code in the benchmark closure before `startMeasurement()` runs for every sample and counts toward
+    `maxDuration`: a 32 MB random buffer made per sample left NativeZip's CRC benchmarks with 2 samples.
+  - Size iterations by the work: about 100 iterations or 0.5–1 s for work up to a millisecond, 20 for 5–50 ms, 1–3
+    for whole archives and socket transfers. Instruction p50s match a 1,000-iteration run (within 0.3% for
+    single-threaded work). Don't change `scalingFactor` on an existing benchmark: its printed numbers change.
+  - Whole-archive benchmarks need no warmup iteration: read the input once in `setup:` to fill the page cache.
+    Deleting an extracted tree costs about as much as extracting it (APFS: about 70 µs an entry; parallel `rm`
+    saves 10–15%): for a large tree, extract each sample into its own directory and remove them once in
+    `teardown`, with no `chmod -R` unless removal fails. (For 2,000 small files, deleting after each sample,
+    unmeasured, was faster than deferring.)
+  - What one run can't tell: file-system benchmarks vary 20–40% between samples (their instruction counts include
+    the kernel's), all-core and transfer times ±20% or more on a loaded machine, and instruction counts under about
+    100 K per iteration ±10% between processes. Judge by the larger single-threaded counts.
+  - Every plugin invocation costs about 25 s of build before anything runs (it relinks its tool each time): batch
+    filters into one invocation (several `--filter` flags work). It builds the source on disk when it starts: don't
+    edit a package while a run of it is queued.
+- **No lazy globals inside a measured loop.** A global or `static let` read in the loop checks its `swift_once`
+  token every iteration, and for tens of milliseconds after first use libdispatch hasn't marked it done (it stores a
+  generation until the quiescent counter moves), so each check calls `swift_once` → `dispatch_once_f` (~36
+  instructions). Bytes' "Runs: … 3-byte" rows were bimodal for this (78 K and 104 K instructions; the p50 floated
+  with load, and looked like a regression). Capture fixtures as locals or parameters. A row whose p0 and p50 differ
+  by a constant per element is the sign.
 - **Only the work goes inside `for _ in benchmark.scaledIterations`**: no clocks, no `benchmark.measurement`
   calls, no fixture lookups (dictionaries, removing and reinserting buffers), no result checks. Prepare
   fixtures before registering (Base64's `Fixture`: inputs and raw output buffers made once), check results
@@ -689,8 +878,9 @@ can't be trusted then, even serialized: other agents' builds load the machine (u
 
 - Judge changes by instruction counts, allocation counts, and codegen (`Tools/loops`, `Tools/calls`); re-run
   timed benchmarks one package at a time afterwards on an idle machine.
-- Serialize anything timing-sensitive with a shared lock:
-  `lockf -k "$SCRATCH_ROOT/bench.lock" swift package --disable-sandbox benchmark …`.
+- Don't queue benchmark runs behind a shared lock or wait for a quiet machine (four agents sharing one lock spent
+  most of an hour waiting, 2026-11-19): run them, compare instruction counts, and label wall times as taken under
+  load. A lock only for a final timing the user asked for.
 - Give each agent its own packages to edit; a shared dependency (Bytes) stays read-only while others
   compile against it, and new API for it is proposed (prototyped in the consumer), not added mid-run.
 - Give each agent its own scratch subdirectory; agents overwrote each other's helper scripts in a shared one.
@@ -779,7 +969,7 @@ Script gotchas met on this machine:
 Search before writing: `gh search issues --repo swiftlang/swift "…"` and `gh search prs` (the search API
 rate-limits: space out queries), plus the forums. For the source, a sparse, shallow clone of swiftlang/swift
 (`git clone --filter=blob:none --sparse --depth 1`, then `git sparse-checkout set lib/IRGen …`) or
-`raw.githubusercontent.com` for single files. Reports follow the format in `~/Downloads/swift-bugs/` (a
+`raw.githubusercontent.com` for single files. Reports follow the format in `~/Scratch/swift-bugs/` (a
 summary, a minimal reproducer with `repro.sh` and expected output, analysis down to the pass, workarounds,
 timing). `Tools/sil-trace` finds the pass; `-Xllvm -sil-disable-pass` confirms it.
 

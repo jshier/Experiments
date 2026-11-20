@@ -404,7 +404,7 @@ public struct ByteBuffer: ~Copyable, @unchecked Sendable {
         let free = unsafe UnsafeMutableRawBufferPointer(rebasing: _storage[_end...])
         var output = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
         let result: R
-        do {
+        do throws(E) {
             result = try body(&output)
         } catch {
             _end &+= unsafe output.finalize(for: free)

@@ -1,5 +1,6 @@
 import Bytes
 @testable import BytesCrypto
+import BytesTestSupport
 import CommonCrypto
 import CryptoKit
 import Foundation
@@ -14,17 +15,6 @@ typealias HashFunction = BytesCrypto.HashFunction
 typealias SHA256 = BytesCrypto.SHA256
 typealias HMAC<H: BytesCrypto.HashFunction> = BytesCrypto.HMAC<H>
 typealias HKDF<H: BytesCrypto.HashFunction> = BytesCrypto.HKDF<H>
-
-func hex(_ string: String) -> [UInt8] {
-    var bytes: [UInt8] = []
-    var index = string.startIndex
-    while index < string.endIndex {
-        let next = string.index(index, offsetBy: 2)
-        bytes.append(UInt8(string[index..<next], radix: 16)!)
-        index = next
-    }
-    return bytes
-}
 
 extension InlineArray where Element == UInt8 {
     var array: [UInt8] { (0..<count).map { self[$0] } }
@@ -58,7 +48,7 @@ func hashed<H: HashFunction>(_ type: H.Type, _ bytes: [UInt8], splits: [Int]) ->
 
     @Test(arguments: [0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 129, 1000, 4097])
     func matchesCryptoKit(length: Int) {
-        var rng = SplitMix64(state: UInt64(length))
+        var rng = SplitMix64(seed: UInt64(length))
         let bytes = randomBytes(length, using: &rng)
         let sha1 = Array(Insecure.SHA1.hash(data: bytes))
         let sha256 = Array(CryptoKit.SHA256.hash(data: bytes))
@@ -73,7 +63,7 @@ func hashed<H: HashFunction>(_ type: H.Type, _ bytes: [UInt8], splits: [Int]) ->
     }
 
     @Test func portableBlockFunctionsMatch() {
-        var rng = SplitMix64(state: 9)
+        var rng = SplitMix64(seed: 9)
         let blocks = randomBytes(64 * 33, using: &rng)
         var hardware1 = SHA1().state, portable1 = SHA1().state
         SHA1.compress(&hardware1, blocks: blocks.span.bytes)
@@ -93,7 +83,7 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
 @Suite struct KeyDerivationTests {
     @Test(arguments: [0, 1, 20, 63, 64, 65, 200])
     func hmacMatchesCryptoKit(keyLength: Int) {
-        var rng = SplitMix64(state: UInt64(keyLength) &+ 100)
+        var rng = SplitMix64(seed: UInt64(keyLength) &+ 100)
         let key = randomBytes(keyLength, using: &rng)
         let message = randomBytes(300, using: &rng)
         var sha1 = HMAC<SHA1>(key: key.span.bytes)
@@ -122,7 +112,7 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
         #expect(derive(Array("passwordPASSWORDpassword".utf8), Array("saltSALTsaltSALTsaltSALTsaltSALTsalt".utf8), 4096, 25)
             == hex("3d2eec4fe41c849b80c8d83662c0e44a8b291a964cf2f07038"))
 
-        var rng = SplitMix64(state: 7)
+        var rng = SplitMix64(seed: 7)
         for (keyBits, password) in [(128, "secret"), (192, "a longer pass phrase"), (256, "")] {
             let salt = randomBytes(keyBits / 16, using: &rng)
             let count = 2 * keyBits / 8 + 2
@@ -192,7 +182,7 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
 
     @Test(arguments: [16, 24, 32])
     func counterModeInPieces(keyLength: Int) {
-        var rng = SplitMix64(state: UInt64(keyLength))
+        var rng = SplitMix64(seed: UInt64(keyLength))
         let key = randomBytes(keyLength, using: &rng)
         let message = randomBytes(1000, using: &rng)
         let aes = AES(key: key.span.bytes)
@@ -213,7 +203,7 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
 
         for splits in [[], [1], [15, 16, 17], [128, 129], [300, 777], Array(stride(from: 7, to: 1000, by: 7))] {
             for (stream, wideCounter) in [(wideStream, true), (narrowStream, false)] {
-                var counter = wideCounter ? AES.Counter(littleEndianFrom: 1) : AES.Counter(bigEndianCounterIn: start.span.bytes)
+                var counter = wideCounter ? AES.Counter(littleEndianFrom: 1) : AES.Counter(bigEndian32BitCounterIn: start.span.bytes)
                 var output = [UInt8](repeating: 0, count: message.count)
                 var begin = 0
                 for split in splits + [message.count] where split >= begin {
@@ -225,6 +215,52 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
                 }
                 let expected = (0..<message.count).map { message[$0] ^ stream[$0] }
                 #expect(output == expected, "\(wideCounter ? "little-endian" : "big-endian") counter, split at \(splits.prefix(5))")
+            }
+        }
+    }
+
+    /// The 64-bit big-endian counter against CommonCrypto's own CTR mode, from IVs whose low 32 bits (a carry GCM's
+    /// layout wouldn't make) and low 64 bits (a wrap with no carry further) are about to overflow, across batch
+    /// boundaries and in pieces.
+    @Test(arguments: [16, 32])
+    func bigEndianLowWordCounterMatchesCommonCrypto(keyLength: Int) {
+        var rng = SplitMix64(seed: UInt64(keyLength) &+ 77)
+        let key = randomBytes(keyLength, using: &rng)
+        let message = randomBytes(5_000, using: &rng)
+        let aes = AES(key: key.span.bytes)
+        let prefix = randomBytes(8, using: &rng)
+        for iv in [
+            randomBytes(16, using: &rng),
+            prefix + [0x01, 0x02, 0x03, 0x04, 0xFF, 0xFF, 0xFF, 0xFD], // The low 32 bits wrap after 3 blocks.
+            prefix + [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF9], // The low 64 bits wrap mid-batch.
+            [UInt8](repeating: 0xFF, count: 15) + [0xF0], // The whole block wraps to zero.
+        ] {
+            var expected = [UInt8](repeating: 0, count: message.count)
+            var cryptor: CCCryptorRef?
+            // Unsafe: CommonCrypto's pointers and lengths, each describing an array valid for the call.
+            let created = key.withUnsafeBytes { k in iv.withUnsafeBytes { i in
+                unsafe CCCryptorCreateWithMode(CCOperation(kCCEncrypt), CCMode(kCCModeCTR), CCAlgorithm(kCCAlgorithmAES), CCPadding(ccNoPadding),
+                                               i.baseAddress, k.baseAddress, k.count, nil, 0, 0, CCModeOptions(kCCModeOptionCTR_BE), &cryptor)
+            } }
+            #expect(created == kCCSuccess)
+            var moved = 0
+            _ = message.withUnsafeBytes { m in expected.withUnsafeMutableBytes { o in
+                unsafe CCCryptorUpdate(cryptor, m.baseAddress, m.count, o.baseAddress, o.count, &moved)
+            } }
+            unsafe CCCryptorRelease(cryptor)
+
+            for splits in [[], [1], [129], [300, 777, 2_049]] {
+                var counter = AES.Counter(bigEndian64BitCounterIn: iv.span.bytes)
+                var output = [UInt8](repeating: 0, count: message.count)
+                var begin = 0
+                for split in splits + [message.count] where split >= begin {
+                    var span = output.mutableSpan
+                    var raw = MutableRawSpan(mutating: &span)
+                    var piece = raw._mutatingExtracting(begin..<split)
+                    aes.counterMode(message.span.bytes.extracting(begin..<split), into: &piece, counter: &counter)
+                    begin = split
+                }
+                #expect(output == expected, "IV \(iv.suffix(8)), split at \(splits)")
             }
         }
     }

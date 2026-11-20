@@ -28,10 +28,18 @@ let package = Package(
             ],
             swiftSettings: settings
         ),
-        .testTarget(name: "WorkloadsTests", dependencies: ["Workloads"], swiftSettings: settings),
+        .testTarget(
+            name: "WorkloadsTests",
+            dependencies: ["Workloads", .product(name: "BytesTestSupport", package: "Bytes")],
+            swiftSettings: settings
+        ),
         .executableTarget(
             name: "ComparisonBenchmarks",
-            dependencies: ["Workloads", .product(name: "Benchmark", package: "benchmark")],
+            dependencies: [
+                "Workloads",
+                .product(name: "BytesTestSupport", package: "Bytes"),
+                .product(name: "Benchmark", package: "benchmark"),
+            ],
             path: "Benchmarks/ComparisonBenchmarks",
             swiftSettings: settings,
             plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]

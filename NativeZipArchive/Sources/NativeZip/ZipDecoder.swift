@@ -208,7 +208,7 @@ public struct ZipDecoder: ~Copyable {
     ///   - consume: Called with each chunk in a child task, one at a time, in order.
     /// - Throws: The errors of ``decode(_:entry:password:_:)``; whatever `consume` throws.
     /// - Precondition: `payload` stays valid for the whole call (it points into a ``MappedFile``).
-    mutating func decodePipelined(
+    nonisolated(nonsending) mutating func decodePipelined(
         _ payload: UnsafeRawBufferPointer,
         entry: ZipEntry,
         password: String?,
@@ -245,6 +245,8 @@ public struct ZipDecoder: ~Copyable {
             defer { handoff.close() }
             var target = 0
             while true {
+                // Large entries only (several chunks): stop promptly when the task is cancelled.
+                try Task.checkCancellation()
                 let (output, finished) = try unsafe step(into: target, path: entry.path)
                 if unsafe !output.isEmpty {
                     // `send` returns once the consumer has finished the previous chunk and taken this one: so the
@@ -681,10 +683,15 @@ public struct ZipDecoder: ~Copyable {
 /// A rendezvous between a decoder making chunks and the one task consuming them, in order: the decoder's `send`
 /// returns once the consumer has finished the previous chunk and taken the new one. Nothing is allocated per
 /// chunk: waits are unchecked continuations, which live in the waiting task.
+///
+/// The NativeAEA discipline: what doesn't have to wait is decided synchronously under the lock, without
+/// suspending; a wait checks again under the lock inside the continuation's body (so no wakeup is lost); and
+/// continuations are taken out of the state under the lock and resumed after it's released.
 @safe
 final class ChunkHandoff: Sendable {
     // Unsafe: chunks and unchecked continuations in the state. Safe: each continuation is resumed exactly once
-    // (taken out of the state as it's resumed), and a chunk is used by one consumer at a time (see `send`).
+    // (taken out of the state, under the lock, by whoever resumes it), and a chunk is used by one consumer at a
+    // time (see `send`).
     @safe private struct State: @unchecked Sendable {
         /// The consumer, waiting for a chunk.
         var consumer: UnsafeContinuation<ZipDecoder.Chunk?, Never>?
@@ -694,6 +701,41 @@ final class ChunkHandoff: Sendable {
         var closed = false
         /// The consumer threw: chunks are refused.
         var failed = false
+
+        /// What `send` does now; a waiting consumer is taken out.
+        mutating func send() -> Send {
+            if failed { return .refused }
+            guard let waiting = unsafe consumer else { return .wait }
+            unsafe consumer = nil
+            return unsafe .handed(waiting)
+        }
+
+        /// What `receive` does now; a waiting decoder is taken out.
+        mutating func receive() -> Receive {
+            guard let (waiting, chunk) = unsafe producer else { return closed ? .closed : .wait }
+            unsafe producer = nil
+            return unsafe .taken(chunk, producer: waiting)
+        }
+    }
+
+    /// What `send` does, decided under the lock.
+    @safe private enum Send {
+        /// Refused (the consumer failed).
+        case refused
+        /// Taken by the waiting consumer, which is to be resumed with it.
+        case handed(UnsafeContinuation<ZipDecoder.Chunk?, Never>)
+        /// The consumer is busy: wait for it.
+        case wait
+    }
+
+    /// What `receive` does, decided under the lock.
+    @safe private enum Receive {
+        /// A waiting decoder's chunk; the decoder is to be resumed with `true`.
+        case taken(ZipDecoder.Chunk, producer: UnsafeContinuation<Bool, Never>)
+        /// No more chunks.
+        case closed
+        /// Nothing yet: wait for the decoder.
+        case wait
     }
 
     private let state = Mutex(State())
@@ -702,18 +744,28 @@ final class ChunkHandoff: Sendable {
     ///
     /// - Returns: `false` if the consumer failed (the chunk wasn't taken).
     @unsafe
-    func send(_ chunk: ZipDecoder.Chunk) async -> Bool {
-        await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<Bool, Never>) in
-            state.withLock { state in
-                if state.failed {
-                    unsafe continuation.resume(returning: false)
-                } else if let consumer = unsafe state.consumer {
-                    unsafe state.consumer = nil
-                    unsafe consumer.resume(returning: chunk)
-                    unsafe continuation.resume(returning: true)
-                } else {
-                    unsafe state.producer = (continuation, chunk)
-                }
+    nonisolated(nonsending) func send(_ chunk: ZipDecoder.Chunk) async -> Bool {
+        // Fast path: the consumer is already waiting (or has failed): no suspension.
+        switch state.withLock({ $0.send() }) {
+        case .refused: return false
+        case let .handed(consumer):
+            unsafe consumer.resume(returning: chunk)
+            return true
+        case .wait: break
+        }
+        return await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<Bool, Never>) in
+            // Again under the lock: the consumer may have come (or failed) since.
+            let ready = state.withLock { state in
+                let now = state.send()
+                if case .wait = now { unsafe state.producer = (continuation, chunk) }
+                return now
+            }
+            switch ready {
+            case .refused: unsafe continuation.resume(returning: false)
+            case let .handed(consumer):
+                unsafe consumer.resume(returning: chunk)
+                unsafe continuation.resume(returning: true)
+            case .wait: break // Stored: `receive` or `fail` resumes it.
             }
         }
     }
@@ -721,42 +773,50 @@ final class ChunkHandoff: Sendable {
     /// The next chunk, waiting for one; `nil` once the decoder is done. Calling it again means the previous
     /// chunk is finished with.
     @unsafe
-    func receive() async -> ZipDecoder.Chunk? {
-        await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<ZipDecoder.Chunk?, Never>) in
-            state.withLock { state in
-                if let (producer, chunk) = unsafe state.producer {
-                    unsafe state.producer = nil
-                    unsafe continuation.resume(returning: chunk)
-                    unsafe producer.resume(returning: true)
-                } else if state.closed {
-                    unsafe continuation.resume(returning: nil)
-                } else {
-                    unsafe state.consumer = continuation
-                }
+    nonisolated(nonsending) func receive() async -> ZipDecoder.Chunk? {
+        // Fast path: the decoder is already waiting with a chunk (or done): no suspension.
+        switch state.withLock({ $0.receive() }) {
+        case let .taken(chunk, producer):
+            unsafe producer.resume(returning: true)
+            return unsafe chunk
+        case .closed: return nil
+        case .wait: break
+        }
+        return await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<ZipDecoder.Chunk?, Never>) in
+            // Again under the lock: the decoder may have sent (or closed) since.
+            let ready = state.withLock { state in
+                let now = state.receive()
+                if case .wait = now { unsafe state.consumer = continuation }
+                return now
+            }
+            switch ready {
+            case let .taken(chunk, producer):
+                unsafe producer.resume(returning: true)
+                unsafe continuation.resume(returning: chunk)
+            case .closed: unsafe continuation.resume(returning: nil)
+            case .wait: break // Stored: `send` or `close` resumes it.
             }
         }
     }
 
     /// No more chunks: a waiting consumer gets `nil`.
     func close() {
-        state.withLock { state in
+        let consumer = unsafe state.withLock { state in
             state.closed = true
-            if let consumer = unsafe state.consumer {
-                unsafe state.consumer = nil
-                unsafe consumer.resume(returning: nil)
-            }
+            defer { unsafe state.consumer = nil }
+            return unsafe state.consumer
         }
+        unsafe consumer?.resume(returning: nil)
     }
 
     /// The consumer failed: a waiting decoder gets `false`, and so does every later `send`.
     func fail() {
-        state.withLock { state in
+        let producer = unsafe state.withLock { state in
             state.failed = true
-            if let (producer, _) = unsafe state.producer {
-                unsafe state.producer = nil
-                unsafe producer.resume(returning: false)
-            }
+            defer { unsafe state.producer = nil }
+            return unsafe state.producer?.continuation
         }
+        unsafe producer?.resume(returning: false)
     }
 }
 

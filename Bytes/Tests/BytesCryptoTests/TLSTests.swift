@@ -1,5 +1,6 @@
 import Bytes
 @testable import BytesCrypto
+import BytesTestSupport
 import Foundation
 import Testing
 
@@ -13,10 +14,7 @@ struct RFC8448 {
     let lines: [Substring]
 
     init() throws {
-        let url = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../../TestData/rfc8448/rfc8448.txt")
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else {
-            throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "rfc8448.txt is missing: run Tools/test-data fetch rfc8448"])
-        }
+        let text = try String(contentsOf: TestData.file(set: "rfc8448", name: "rfc8448.txt"), encoding: .utf8)
         lines = text.split(separator: "\n", omittingEmptySubsequences: false)
     }
 
@@ -170,7 +168,7 @@ func openRecord(_ protection: inout TLSRecordProtection, _ record: [UInt8]) thro
         let secret = TLSSecret([UInt8](repeating: 7, count: suite.hashByteCount).span.bytes, suite: suite)
         var sealer = TLSRecordSealer(secret: secret)
         var opener = TLSRecordOpener(secret: secret)
-        var rng = SplitMix64(state: UInt64(suite.rawValue))
+        var rng = SplitMix64(seed: UInt64(suite.rawValue))
         let message = randomBytes(40_000, using: &rng)
         var wire: [UInt8] = []
         _ = try sealer.transform(message.span.bytes.extracting(0..<10), appending: &wire, flush: .flush)
@@ -198,7 +196,7 @@ func openRecord(_ protection: inout TLSRecordProtection, _ record: [UInt8]) thro
     @Test(arguments: [nil, 7] as [UInt64?])
     func parallelSealingMatchesSerial(recordLimit: UInt64?) throws {
         let secret = TLSSecret([UInt8](repeating: 9, count: 32).span.bytes, suite: .aes128GCMSHA256)
-        var rng = SplitMix64(state: 17)
+        var rng = SplitMix64(seed: 17)
         // 20 full records and a partial one, in pieces that end mid-record, then a flush.
         let message = randomBytes(20 * TLSRecord.maximumPlaintext + 1_000, using: &rng)
         func seal(lanes: Int) throws -> [UInt8] {

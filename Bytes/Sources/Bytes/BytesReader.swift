@@ -22,6 +22,10 @@ public enum BytesError: Error, Hashable, Sendable {
     case invalidValue
     /// ``GenericBytesReader/expectEnd()`` found unread bytes in a section that should have been fully consumed.
     case trailingData
+    /// The calling task was cancelled: an async parallel codec (in `BytesAsync`) stopped handing out chunks or
+    /// segments and returned early. The output is incomplete; what was written stays written. Synchronous calls
+    /// never throw it.
+    case cancelled
 }
 
 /// A ``BytesError`` with the byte offset of the read that threw it, from ``GenericBytesReader/located(_:)``.
@@ -470,6 +474,7 @@ public extension GenericBytesReader {
         _assumeInvariant()
         if likely(_bitOffset == 0) {
             guard likely(span.byteCount &- _byteOffset >= T.byteCount) else { throw .insufficientData }
+            // Unsafe: an unchecked load. Safe: `T.byteCount` bytes remain (just checked).
             return unsafe Load.group(T.self, from: span, at: _byteOffset)
         }
         guard remainingByteCount >= T.byteCount else { throw .insufficientData }
@@ -611,6 +616,7 @@ public extension GenericBytesReader {
         _assumeInvariant()
         if likely(_bitOffset == 0) {
             guard likely(_byteOffset < span.byteCount) else { throw .insufficientData }
+            // Unsafe: an unchecked load. Safe: `_byteOffset` is below the byte count (just checked).
             return Byte(_unchecked: unsafe Load.native(UInt8.self, from: span, at: _byteOffset))
         }
         guard likely(remainingBitCount >= 8) else { throw .insufficientData }
@@ -698,6 +704,7 @@ public extension BytesReader {
         _assumeInvariant()
         if width == 8, likely(_bitOffset == 0) {
             guard likely(_byteOffset < span.byteCount) else { throw .insufficientData }
+            // Unsafe: an unchecked load. Safe: `_byteOffset` is below the byte count (just checked).
             return Bits(_unchecked: unsafe Load.native(UInt8.self, from: span, at: _byteOffset))
         }
         guard likely(remainingBitCount >= width) else { throw .insufficientData }
@@ -1734,7 +1741,11 @@ public extension String {
         // allocated, and the initializer gets back the count written, which the writer keeps within them.
         // The initializer rethrows `body`'s error as it is. (Capturing it in a variable instead, and throwing
         // it after, cost more on the success path: Base64's `encodedString`, +1.2% at 40 bytes.)
-        do {
+        // Not swiftlang/swift#90291 (a typed closure through an untyped generic `rethrows` API): this
+        // initializer isn't generic over its result, and the compiler boxes `E` into the `any Error` it
+        // throws and casts it back (checked with `-sil-verify-all` at -O and -Onone, 2026-11-19; the tests
+        // throw an error with a payload through it).
+        do throws(E) {
             self = try String(unsafeUninitializedCapacity: utf8Capacity) { buffer throws(E) in
                 var writer = unsafe AlignedBytesWriter(MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(buffer)))
                 try body(&writer)

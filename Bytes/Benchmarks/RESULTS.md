@@ -6,6 +6,12 @@ Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (r
 other benchmarks running); the 2026-11-12 sections have newer full runs. Compare any two with
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 
+## Base64 (`BytesBase64`, `Base64Benchmarks`)
+
+Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module here, with the same API. Its log is
+[RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
+thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
+
 ## 2026-11-19, M1 Max against M3 Ultra (baselines `d2-final` → `m1max`, `trk-final-portable*` → `m1max-portable*`; Swift 6.4.4)
 
 The repository moved to a new machine, and every package's suite was run again there. Same code, same compiler (Xcode
@@ -359,6 +365,89 @@ alignment (offsets 0–240 bytes) changed nothing. The idle re-run of NativeZip 
   a `tbx` four with 8-cycle latency, so a window of 2-register lookups may rank differently; not tried.
 - ChaCha20's eight-block layout, AES-GCM aggregation, Brotli's tag filter: unchanged, ranking on the M1 Max not tested.
 
+## 2026-11-19, bzip2 decoding (for NativeAEA's `.xip` expansion)
+
+`BZip2Decoder`: `.bz2` streams (`BZh1`–`BZh9`, concatenated streams, randomized blocks), every block and stream CRC
+checked (CRC-32/BZIP2 by slicing-by-8 and `pmull` folding): [RESULTS-bzip2.md](RESULTS-bzip2.md) (API, tests, every
+version measured). Against libbzip2 1.0.8 (macOS's, `CBZip2`, tests and benchmarks only), baseline `bzip2-final`:
+3.2–5.3x faster on Silesia files (dickens 275 against 58.6 MB/s, x-ray 160 against 49.3), 2.1x on 1.6 KB of JSON;
+62.9 against 105.9 instructions per byte on dickens. No allocations after the decoder's 7.8 MB workspace. What made it:
+a 10-bit Huffman table with the refill loaded one symbol ahead, the move-to-front list's front 16 bytes in a register,
+and the inverse-BWT walk (a dependent load per byte) split into 24 interleaved walks for blocks of 32 KB or more.
+
+## 2026-11-19, RSA signature verification (for NativeAEA's `.xip` expansion)
+
+`RSA.PublicKey` (DER, PEM, certificates; 1024–4096 bits) and PKCS #1 v1.5 verification with SHA-1/256/384/512, and
+`X509Certificate.isSigned(by:)` for RSA and ECDSA chains: [RESULTS-rsa.md](RESULTS-rsa.md) (API, tests, every version
+measured). Montgomery multiplication by product scanning with a dedicated square, in Swift; nothing allocates. Verifies
+Xcode `.xip` signatures and their chain to Apple Root CA. Against Security (`SecKeyVerifySignature`, key from DER):
+2048-bit verification 13 µs against 19, 4096-bit 42 against 65; parse and verify 17 against 24 µs (baseline
+`rsa-final`).
+
+## 2026-11-18, Apple's compression formats, NIST curves, HPKE, scrypt, and X.509 (for NativeAEA)
+
+Five parallel pieces of work, each with its own record (method, every version measured, what didn't work):
+[RESULTS-lz4-lzfse.md](RESULTS-lz4-lzfse.md), [RESULTS-lzbitmap.md](RESULTS-lzbitmap.md),
+[RESULTS-lzraven.md](RESULTS-lzraven.md) (and the format, reverse-engineered from libcompression:
+[LZRAVEN-FORMAT.md](LZRAVEN-FORMAT.md)), [RESULTS-ecc.md](RESULTS-ecc.md),
+[RESULTS-scrypt-x509.md](RESULTS-scrypt-x509.md). All are Swift on Bytes' readers. C appeared only as test and
+benchmark references while they were written (`CLZFSE`, the lzfse sources at e634ca5; `CZBitmap`, libzbitmap at
+2fcb080), removed on 2026-11-19 after a final comparison; `Tools/test-data fetch c-references` has their source, and
+RESULTS-lz4-lzfse.md and RESULTS-lzbitmap.md say how to build them again. Every decoder and every verify, ECDH, and HPKE open allocates nothing after it's made (thresholds
+at 0). The timings were taken under the shared lock while other agents built, ±5–10%; instruction counts are exact.
+
+| Codec | Bytes vs Compression (speed) | Instructions | Notes |
+|---|---|---|---|
+| LZFSE (`LZFSEDecoder`, with LZVN blocks) | 0.90–1.16x | same or fewer | 1.2–1.4x the lzfse reference |
+| LZ4 raw and `bv41` frames (`LZ4Decoder`) | 0.72–1.03x | −11 to +20% | x-ray 7.2 against 9.9 GB/s: long literal runs |
+| LZVN (`LZVNDecoder`) | — | ±5% of the reference | 1.1–1.35x the reference; streams with an end opcode only |
+| LZBITMAP (`LZBitmapDecoder`) | 0.94–1.08x on 16 MB streams, 0.65–1.07x on 64 KB (`lzbdec-final`) | 2.7–3.5 per byte | `vector128` group loop, one `tbl` a group; libzbitmap is ~13x slower |
+| LZRAVEN (`LZRAVENDecoder`) | 0.99–1.05x | −7 to −11% | 8-way interleaved rANS, LZMA-like model, ARM64/x86 filters |
+| LZBITMAP encode (`LZBitmapEncoder`, later the same day) | 1.10–1.17x | 0.64–0.74x | Compression's bytes and failures exactly (read out of libcompression) |
+| LZFSE encode (`LZFSEEncoder`) | 1.24–1.52x (2.2x on 1.6 KB) | 0.82–0.88x | the lzfse reference's streams byte for byte; within 0.012% of Compression's size |
+| LZVN encode (`LZVNEncoder`) | — (1.05–1.89x the reference) | 0.70–0.94x the reference | raw LZVN, the reference's streams byte for byte |
+
+| Crypto | Bytes | CryptoKit / reference |
+|---|---|---|
+| ECDSA verify P-256 / P-384 | 54 / 206 µs | 91 / 227 µs |
+| ECDH P-256 / P-384 (constant-time ladder) | 52 / 189 µs | 89 / 244 µs |
+| HPKE open (DHKEM P-256, AES-256-GCM, 32 bytes) | 61 µs, 0 mallocs | 105 µs, 150 mallocs |
+| scrypt N=2^14 / 2^20, r=8, p=1 | 17 ms / 1.17 s | OpenSSL 25.6 ms / 1.78 s |
+| X.509 parse, Apple Root CA - G3 | 0.40 µs, 0 mallocs | Security 1.76 µs |
+
+Checks: Wycheproof's ECDSA (1,530 vectors) and ECDH (2,014) files, RFC 9180's HPKE vectors for three AEADs,
+RFC 7914's scrypt vectors and 40 random parameter sets against OpenSSL, 151 system roots and Xcode's chain field by
+field against `openssl x509` and Security; round trips of Compression's (and the references') encodings at every
+size class, truncation at every byte, and thousands of corruptions against the references (they never crash; where
+Compression decodes a corrupt stream, the outputs agree, or the difference is documented).
+
+`AES.Counter(bigEndian64BitCounterIn:)` (beside GCM's `bigEndian32BitCounterIn:`), a third counter layout: CommonCrypto's `kCCModeOptionCTR_BE` counts only the
+block's last 8 bytes, wrapping with no carry (checked against CommonCrypto from IVs about to wrap at 32 and 64 bits);
+Apple Encrypted Archives use it.
+
+Review fixes, later the same day (no timing change expected; the crypto tests, 76, and NativeAEA's, 31, pass):
+- **HPKE (RFC 9180, 5.2):** a failed `open` no longer advances the sequence, so one forged message doesn't make every
+  later genuine one fail; `exportSecret` takes any context length (a manual HKDF-Expand, so the labeled info isn't
+  limited to one buffer) and throws for more than 255 × 32 bytes; `Sender` and `Recipient` are `~Copyable`, so a
+  context (and its sequence) can't be duplicated into nonce reuse.
+- **One DER reader and one PEM:** the keys' `DERReader` and `DER` are gone. Keys and signatures read with
+  `AlignedBytesReader.readASN1Contents(_:)` and X.509's header parser, `ASN1Tag`s, integer and bit-string checks,
+  and `ASN1ObjectIdentifier` constants. `PEM.decode` and `decodeAll` use the strict Base64 that certificates used
+  (zero padding bits, padding only at the end), and certificates go through it too.
+- **Outputs:** P-256 and P-384 public keys, private keys, and signatures gain `derRepresentation` (and keys
+  `pemRepresentation`), byte-identical to CryptoKit's (tested on random keys); public keys and signatures are
+  `Equatable`.
+- **Names:** `AES.Counter(bigEndian32BitCounterIn:)` (GCM) and `(bigEndian64BitCounterIn:)` (CommonCrypto), where
+  `bigEndianCounterIn` and `bigEndianLowWordIn` didn't say which was which.
+- **Constant time, checked in the machine code:** ECDH's ladder (`JacobianPoint.multiply`, `doubled`, `affineX`,
+  and the inversion's `power`) branches only on loop counters, the first window, the public exponent, and the stack
+  guard; the table reads are `csel`s (the comment in `ECKeys.swift` lists them).
+- **Two instruction regressions found and fixed:** LZ4 decoding +10–17% from the encoder work's bounds fix (offsets
+  recomputed per sequence; now clamped pointers with strict comparisons, back to the earlier counts:
+  RESULTS-lz4-lzfse.md), and LZBITMAP decoding +12–15% from a generic SIMD conversion that stopped being inlined once
+  the new encoders shared the module (RESULTS-lzbitmap.md).
+- **scrypt** clears the scratch it allocates with `memset_s` (a plain store before `deallocate` may be dropped) and
+  documents that ROMix's data-dependent reads aren't cache-timing safe, as in every scrypt.
 
 ## 2026-11-18, LZMA, LZMA2, and .xz decoding: `LZMA2Decoder` against Compression and liblzma 5.8.4 (baselines `lzma-1`, `lzma-2`; Swift 6.4.4)
 
@@ -2497,3 +2586,186 @@ while `ByteReader` advances a pointer field by field (`csel`, then post-incremen
   exits here). The SIMD version, written with `SIMD16<UInt8>`, lowers directly to `ldr q`/`ldur q`,
   two `cmeq.16b`, `and.16b`, `umaxv.16b`: 16 candidate offsets per ~9 instructions. No builtins needed.
 - Constants such as `[0x50, 0x4B, 0x05, 0x06] as Byte4` fold to a single `mov`/`movk` pair at the use site.
+
+## Benchmark coverage pass (2026-11-19): rows retired, rows added, gates combined
+
+The suites were trimmed to the rows that tell something apart and filled where Bytes had no row. The retired rows'
+numbers stay in the saved baselines (`.benchmarkBaselines/*/speed-after`, `m1max-2`, and earlier), which the tables
+and lines below cite; they are no longer registered, so a new baseline won't have them.
+
+Retired (CompressionBenchmarks 830 → 744 rows, BytesBenchmarks 483 → 237, Base64Benchmarks 99 → 87):
+
+| Group | Rows | Cited by |
+|---|---|---|
+| `Bandwidth:`/`Write:` `memory (512 MB), 1 core`, except the references, `Byte4`, `Byte16` | 96 | §"Read bandwidth" and write bandwidth (~2221, ~2470), the portable table (~1637), M1 Max outliers (~139–144) |
+| `Bandwidth:`/`Write:` all cores, except the references, `Byte`, `Bits<5>` (reads), `Bits<3>` (writes) | 43 | §"Read bandwidth", IMPROVEMENTS.md:102 |
+| `Allocations:Read: …` / `Allocations:Write: …`, one gate per workload | 102 | (gates: replaced by `Allocations:Read_all_workloads` and `Allocations:Write_all_workloads`; `Read: for-in Bytes (UInt8)`, threshold 1, kept alone) |
+| Base64's `Allocations:Encode_<size>` / `Decode_<size>` | 18 | (replaced by `Allocations:Encode_all_sizes`, `Decode_all_sizes`) |
+| `Parallel …`: every xml row; async forms at 8 lanes; async deflate but level 1 samba and dickens 256 KB, async inflate but samba and 256 KB, async Brotli but q1 samba (all at the performance cores) | 62 | the parallel scheduler table (~1189), M1 Max lane comparison (~119; the sync rows it pairs remain) |
+| `LZMA decode -9e …` and Apple seg130/seg200 | 21 | the LZMA table (484–491) |
+| `Deflate N gzip …: Bytes` but `Deflate 6 gzip Main.js` and `… JSON (1.6 KB)` | 16 | |
+| `Deflate 6`/`9 … streaming 64 KB` but `Deflate 6 Main.js` | 9 | DEFLATE encode notes (~1280) |
+| `Zstd decode` streaming at L1, L19, `long=27` (L3 streaming kept) | 22 | |
+| `Zstd decode L19` small inputs at 1, 16, 64 KB (L19 4 KB kept) | 24 | |
+| `scrypt` 2^16, 2^18 (both forms), 2^20 allocating | 5 | RESULTS-scrypt-x509.md (~53–58) |
+| `LZVN encode …: Bytes, reference parse` but JSON and dickens 64 KB × 16 | 9 | RESULTS-lz4-lzfse.md (the "reference parse" columns) |
+| `Inflate gzip …: zlib`/`libdeflate` but Main.js and xml | 12 | |
+| `(before)` rows: Runs, Literals, Span copies, LEB128, Array builder, Prefixed sections | 19 | §§ on runs, literal copies, span copies, LEB128, builders, sections (~134) |
+| `forEach(Byte2/4/8 …)` order pairs; `ASCII: 20,000 chunk types, hex literals` (the same function as `Byte4(ascii:)`) | 7 | |
+
+The replaced code of the `(before)` rows and the hex-literal parser stay as references: each new form's setup checks
+it against them. Renamed: `CRC-32 hardware, 256 KB` is now `CRC-32 checksum(_:), 256 KB` (the public API, which is the
+table path in portable builds).
+
+Added (all run once, setups' checks passing; times under load, instructions exact):
+
+- Checksums: CRC-32 1 MB, 1,000,003 B, 64 B × 16 K (zlib, libdeflate); CRC-64 1 MB and 64 B × 16 K (liblzma); XXH64
+  1 MB and 64 B × 16 K (libzstd's `ZSTD_XXH64`, found with `dlsym`).
+- Crypto: AES-256-CTR (CommonCrypto); SHA-512 1 MB; SHA-256 and HMAC-SHA256 64 B × 16,384; HMAC-SHA256 1 MB;
+  HKDF-SHA256 × 1,000 (CryptoKit); AES-128-GCM and ChaCha20-Poly1305 open at 1 KB × 1,024 and 16 KB × 64
+  (CryptoKit; Bytes copies each ciphertext in first, as it opens in place); AES-256-GCM seal 16 KB × 64; seal of
+  1,500 B × 699 for both AEADs; TLS open 4 MB for both suites, one lane; PEM P-256 key parse (CryptoKit) and X.509
+  PEM decode and parse.
+- Incompressible input (1 MB of SplitMix64): Deflate 1 and 6 (zlib, libdeflate), Inflate (libdeflate), Brotli q5
+  (Google), LZFSE/LZVN/LZBITMAP encode 64 KB × 16 (Compression), Zstd L3 decode (libzstd).
+- Consumers' configurations: SocketStream's two senders (Brotli q1 window 18, and the parallel DEFLATE encoder in
+  64 KB chunks, each `.then` a TLS sealer, 256 KB batches); Inflate and Brotli decode in 4 KB pieces; Brotli encode
+  in 64 KB pieces; the zlib format both ways; `OffloadedTransform` (DEFLATE 1 on a queue, 64 KB pieces);
+  `LZVN decode …: Compression` (raw LZVN, algorithm 0x900).
+- BytesBenchmarks: `Fields: LittleEndianBytesReader`; per-value `BigEndianBytesWriter` and `AlignedBytesWriter`
+  writes, `LittleEndianBytesReader` reads; `BitFlag`/`BitField` against shifts and masks; `Scan:` rows
+  (`firstByteOffset(where:)`, `containsByte(where:)`, `bytesEqual`, `commonPrefixLength` and its unsafe form,
+  `firstByteOffset(of:)`, each against the loop it replaces, 16 operations per iteration); `ByteBuffer` streaming.
+- Base64: 16 KB in 76-column lines with `decode(ignoringWhitespaceIn:into:)` (Foundation's
+  `.ignoreUnknownCharacters`), and URL-safe unpadded encoding.
+- Zero-malloc gates (all at 0): DEFLATE encode L1 and L6 streaming, Inflate raw and gzip streaming, Brotli encode q5
+  and q1 streaming, decode and decode streaming, the deflate + TLS pipeline both ways, TLS seal + open, AES-GCM and
+  ChaCha20-Poly1305 seal + open, the hashes with HMAC and HKDF, PBKDF2, `Fields: LittleEndianBytesReader`,
+  `ByteBuffer`, Base64 16 KB in lines.
+
+Other changes: the timed configurations no longer count mallocs (the interposer biased comparisons with libraries
+that allocate per call: Google's Brotli decode of 1.6 KB 7 → 3.6 µs p50 without it, CryptoKit's ChaCha20 64 B
+19 → 18 ms; Bytes' array-builder rows −4.5% instructions, bulk reads into new arrays −16%); encoder setups now check
+their output decodes (zlib, Google's brotli, Bytes' LZ decoders) or, streamed, that its size is the one-shot
+encoding's; ECC keys are derived from labels and signatures and HPKE encapsulations cached (`ecc-*` in the corpus
+cache), so instruction counts no longer vary with random keys; registration makes nothing (CRC's 256 K
+`UInt8.random` calls, the scrypt scratch, the field fixtures). Estimated full runs: CompressionBenchmarks 6.7 → 5.5
+minutes, BytesBenchmarks 2.6 → 1.2 (rows' times from `speed-after`, 0.19 s a process start).
+
+`./bench portable` and `portable-no-c` run `Benchmarks/portable-subset.txt` (about 240 rows: the portable
+baselines' rows, the scans, checksums, AES, ChaCha20, SHA) unless given a `--filter`.
+
+## Crypto cleanup (2026-11-19): SHA-512 instructions, one-pass AES-GCM open, HKDF expander
+
+Instruction counts (p50, `p2crypto-before` → `p2crypto-after`, one filtered run each; other agents were building,
+so times are indicative only).
+
+| Row | Before | After | Change |
+|---|---|---|---|
+| SHA-512 1 MB: Bytes | 38 M (1.60 ms) | 4.01 M (0.64 ms) | −89% (CryptoKit: 4.34 M, 0.64 ms) |
+| AES-128-GCM open 1 KB (x1024): Bytes | 4.64 M | 4.10 M | −11.7% |
+| AES-128-GCM open 16 KB (x64): Bytes | 3.46 M | 3.03 M | −12.5% (CryptoKit: 3.67 M) |
+| TLS open 4 MB AES-128-GCM (1 lane): Bytes | 14 M (867 µs) | 12 M (566 µs) | −14% |
+| ECDSA verify P-384: Bytes | 2.818 M | 2.814 M | −0.1% (its SHA-384 is a few blocks) |
+| HKDF-SHA256 32 B (x1000): Bytes | 2.574 M | 2.576 M | (one expand per key: no change expected) |
+| NativeAEA "Open and verify: synthetic" | 1.958 M | 1.919 M | −2.0% |
+
+Unchanged within resolution: SHA-256 1 MB, HMAC-SHA256 64 B, AES-128-GCM seal 16 KB, TLS seal, ECDH P-384, HPKE open,
+X.509 parse and read. Zero-malloc gates for the AEADs, TLS, the hashes with HMAC and HKDF, PBKDF2, ECDSA/ECDH P-384,
+HPKE, and the TLS pipelines: all still 0.
+
+- **SHA-512/384 on ARM's SHA-512 instructions** (`sha512h`/`sha512h2` for two rounds, `sha512su0`/`sha512su1` for two
+  schedule words; ARMv8.2, every Apple silicon Mac). Swift's importer defines `__ARM_FEATURE_SHA512` on arm64 macOS;
+  `CBytesCrypto.h` exposes it as the constant `BYTES_HAS_SHA512_INSTRUCTIONS`, which folds, under the existing
+  `HardwareCrypto` trait. 489 instructions a block, no calls (`Tools/loops … 'SHA512Core.compressWithInstructions'
+  --require sha512h,sha512su1`). The first version kept the state and schedule in variables that `@inline(__always)`
+  nested functions mutated: they lived in memory behind 12 `swift_beginAccess` calls a block (519 instructions with
+  them gone, 638 with). Structs with mutating methods (`SHA512Pairs`, `SHA512Window`) fixed it; SHA-1's and SHA-256's
+  nested functions, capturing fewer variables, don't show it. A loop condition of whole blocks
+  (`byteCount - offset >= 128`) took 30 more.
+- **The portable SHA-512 block function** (Portable and no-C builds) was a rolled 80-round loop with the schedule in
+  an `InlineArray` and a `round >= 16` test per round: now five groups of sixteen rounds written out, the schedule in
+  sixteen locals (a struct), constants from the table: about 2,570 instructions a block statically (`Tools/loops` on
+  the Portable build: 513 for the first group, 515 per later group) against about 4,600. The `static let` round
+  constants are statically initialized (no `swift_once` in any SHA function).
+- **AES-GCM open in one pass** (`openBatches`): each group of eight blocks hashed (from memory, before it's
+  overwritten) while its keystream is made, as sealing was. On a tag mismatch the stitched part is encrypted back with
+  the same counter, so the buffer holds the ciphertext it was given when `open` throws, as ChaCha20-Poly1305's open
+  does; messages under 128 bytes are still checked before anything is decrypted. During the call a forged message's
+  decryption may be in the buffer (the DocC says so). Tests: forgeries of every kind at 16 lengths and three key sizes,
+  and every Wycheproof vector forged, leave the buffer byte for byte as it was.
+- **`HKDF<H>.Expander`**: the HMAC keyed with the pseudorandom key once, `expand(info:into:)` any number of times
+  (`init(pseudorandomKey:)`, `init(salt:inputKeyMaterial:)`); `HKDF.expand` uses it. TLS traffic keys expand the key
+  and IV from one expander (two compressions saved per direction); NativeAEA's `KeyExpander` prototype is now a
+  typealias of it.
+- **`TLSSecret.expandLabel`** built its HkdfLabel in 320 bytes while allowing 514 (a 255-byte label and context):
+  a 249-byte label with a 66-byte context trapped. The buffer is 514 bytes; a test expands the longest label and
+  context for both hashes against the label built by hand.
+
+## Cleanup and improvements (2026-11-19)
+
+The Phase 2 units (core, compression, crypto, async, tests) worked in copies of the tree, were merged file by file, and
+were checked together afterwards. Instruction counts are p50 from one filtered run per baseline; times are under load
+(five agents building at once) and only indicative. Before: each unit's `p2*-before` (`p2core-*`, `p2core-comp-*`,
+`p2comp-*`, `p2crypto-*`, copied into `.benchmarkBaselines/`); after: the merged tree, `p3-spot` (`p3-a`, `p3-x509`
+for the rows changed in the merge).
+
+| Row | Before | After | Change | What |
+|---|---|---|---|---|
+| Write: per-value write(_:) Nibble, in cache (4 MB) | 227 M | 159 M | −30.0% | sub-byte write fast path |
+| Write: per-value write(_:) Nibble, least significant first | 227 M | 164 M | −27.8% | 〃 |
+| Write: per-value write(_:) Bit, in cache (4 MB) | 860 M | 571 M | −33.6% | 〃 |
+| Write: per-value write(_:) Crumb, in cache (4 MB) | 541 M | 344 M | −36.4% | 〃 |
+| CRC-32 tables, 64 B | 150 M | 145 M | −3.3% | CRC-32 tables as literals (statically initialized) |
+| Deflate 1 Main.js (3.8 MB): Bytes | 135 M | 111 M | −17.8% | DEFLATE level 1's inner loop |
+| Deflate 1 (corpus: JSON 119 KB, Main.css, dickens, samba, x-ray, xml, random) | | | −12.7 to −18.8% | 〃 |
+| Parallel deflate 1 (Main.js, dickens, samba; 8 and 24 lanes, sync) | | | −12.5 to −17.0% | 〃, per lane |
+| XXH64 64 B (×16 K): Bytes | 3.79 M | 2.44 M | −35.5% | one-shot XXH64 (no streaming state) |
+| Brotli encode q5 random (1.0 MB): Bytes | 37 M | 31 M | −16% | Google's `ShouldCompress`: near-literal meta-blocks stored without building codes |
+| SHA-512 1 MB: Bytes | 38 M | 4.01 M | −89% | ARM's SHA-512 instructions |
+| AES-128-GCM open 16 KB (x64): Bytes | 3.46 M | 3.03 M | −12.5% | one-pass open |
+| AES-128-GCM open 1 KB (x1024): Bytes | 4.64 M | 4.10 M | −11.7% | 〃 |
+| TLS open 4 MB AES-128-GCM (1 lane): Bytes | 14 M | 12 M | −14% | 〃 |
+| Parallel inflate (dickens, samba 9.7/20.6 MB, 24 lanes, sync) | 145 M, 189 M | 147 M, 192 M | +1.4%, +1.6% | up to 4 segments a lane: more fixed costs, lanes finish together (time −50 to −80% under load, to be re-timed) |
+
+Unchanged (within ±0.3%, against `speed-after` or the units' before): Bandwidth/Write Byte in cache, per-value Byte
+writes, CRC-32 256 KB, CRC-64 1 MB and 64 B, Adler-32 (its −25 to −51% against `speed-after` is the M1 Max work before
+Phase 2, `m1max-adler`), Inflate Main.js, Brotli q5 Main.js (540 M), Zstd L3 dickens, LZMA −6 dickens, SHA-256, AES-GCM
+seal, ChaCha20-Poly1305 seal, X.509 parse and parse-and-read, Base64 encode/decode 1 KB. ECDSA verify P-256 moved
+827 K → 819 K (−1.0%) against `speed-after`, not attributed to a unit. The async parallel encoders' new stop check
+(below) left the sync rows where Phase 2 put them (`Parallel deflate 1 Main.js … 8 lanes, sync` 118 M, inflate 30 M,
+Brotli q5 727 M).
+
+New API: `[UInt8](hexadecimal:)`, `String(hexadecimal:)`, and `write(hexadecimal:)` (eight digits a word, no table;
+`Hex:` rows); `read(_:asciiOctalDigits:)` (1–21 digits, one or two 8-byte loads) and `read(_:asciiDigitsUpTo:)`;
+`UTCDateTime` (checked civil dates, Hinnant's day counts both ways, leap seconds where a format allows them, and
+`UTCDateTime.secondsSince1970(year:month:day:hour:minute:second:)` for types that keep their own fields);
+`HKDF<H>.Expander`; BytesAsync's `concurrently()` (the structured default: a `@concurrent` stage on the global
+executor in the calling task) beside `offloaded(to:)`; `BytesError.cancelled`.
+
+Merge-time changes:
+
+- **Cancellation for the async parallel codecs.** `ChunkScheduler` has a stop flag (`Atomic<Bool>`, read relaxed when
+  a worker claims its next chunk); BytesAsync's `compressAllConcurrently`, `compressAll(_:into:on:)` (DEFLATE and
+  Brotli), and `ParallelDeflateDecoder.decompressAll(_:into:on:)` (a `StopFlag` checked as each segment is taken) set
+  it from a task cancellation handler. Chunks under way finish; the call then throws `BytesError.cancelled`, keeping
+  the typed throws (an encoder writes no trailer, the decoder writes nothing; a sequential decode, once started, runs
+  to its end; a call that had delivered everything returns normally). Synchronous calls never throw it and their
+  instruction counts didn't move. Tests: `ParallelCancellationTests`.
+- **Adopted in consumers.** NativeAEA's XAR `creation-time` reads through `AlignedBytesReader` and `UTCDateTime`
+  (February 31st was accepted before; a leap second still is), checksums through `[UInt8](hexadecimal:)`; cpio
+  headers through `read(_:asciiOctalDigits:)`: `Cpio.parseHeader` 625 → 266 instructions statically, its 74
+  per-digit branches gone (no benchmark covers cpio). BytesCrypto's `X509Time.secondsSince1970` is
+  `UTCDateTime`'s computation and its day check `UTCDateTime.dayCount(inMonth:year:)`. Validating through a whole
+  `UTCDateTime` (which also checks the year) cost the G3 certificate's parse 16 instructions in 8,131: the fields are
+  checked in place instead (8,135, noise).
+
+Tried and reverted:
+
+- **CRC-64's table as a literal** (`CRC64TableData.swift`): LLVM folded the literal's address into every lookup, so it
+  needed a `nonisolated(unsafe) var` to keep one base register, and still ran +1.0% instructions on CRC-64 64 B × 16 K
+  (4.79 M against 4.74 M) next to the lazy `static let` (whose `swift_once` check is one load per call). The lazy table
+  is back (4.74 M).
+- **Brotli's last-distance check by four bytes at once** (q5): −24% instructions on random input, but +1.1 to +2.0% on
+  the text and binary corpus at q5 and +6–8% at q9. `ShouldCompress` keeps most of the random-input gain (−16%) without
+  the cost.

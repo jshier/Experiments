@@ -405,14 +405,10 @@ struct InflateStream: ~Copyable {
                 let isName = if case .gzipName = stage { true } else { false }
                 if gzipFlags[isName ? GzipFlags.name : GzipFlags.comment] { // Zero-terminated.
                     let rest = reader.remainingBytes
-                    var zero = -1
-                    for index in 0..<rest.byteCount where rest.load(fromByteOffset: index, as: UInt8.self) == 0 {
-                        zero = index
-                        break
-                    }
-                    let count = zero < 0 ? rest.byteCount : zero &+ 1
+                    let zero = rest.firstByteOffset { $0.matching(0) }
+                    let count = zero.map { $0 &+ 1 } ?? rest.byteCount
                     headerCRC.update(try reader.read(byteCount: count))
-                    if zero < 0 {
+                    if zero == nil {
                         position = reader.bitPosition
                         return false
                     }

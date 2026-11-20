@@ -1,6 +1,8 @@
 import CBrotli
 import CLibDeflate
+import CLZMA
 import Compression
+import Darwin
 import zlib
 
 // The reference codecs, each holding its state across iterations as the Bytes codecs do, so benchmarks
@@ -164,6 +166,17 @@ enum GoogleBrotli {
         }
     }
 
+    /// For checks: the decoded size, or -1 if the stream doesn't decode in one call into `output`.
+    static func decompressIfValid(_ input: [UInt8], into output: inout [UInt8]) -> Int {
+        input.withUnsafeBufferPointer { input in
+            output.withUnsafeMutableBufferPointer { output in
+                var size = output.count
+                let result = BrotliDecoderDecompress(input.count, input.baseAddress, &size, output.baseAddress)
+                return result == BROTLI_DECODER_RESULT_SUCCESS ? size : -1
+            }
+        }
+    }
+
     static func compress(_ input: [UInt8], quality: Int32, into output: inout [UInt8]) -> Int {
         input.withUnsafeBufferPointer { input in
             output.withUnsafeMutableBufferPointer { output in
@@ -180,10 +193,38 @@ enum ZlibChecksums {
     static func adler32(_ bytes: [UInt8], continuing value: UInt32 = 1) -> UInt32 {
         bytes.withUnsafeBufferPointer { UInt32(zlib.adler32(uLong(value), $0.baseAddress, uInt($0.count))) }
     }
+
+    static func crc32(_ bytes: [UInt8], continuing value: UInt32 = 0) -> UInt32 {
+        bytes.withUnsafeBufferPointer { UInt32(zlib.crc32(uLong(value), $0.baseAddress, uInt($0.count))) }
+    }
 }
 
 enum LibDeflateChecksums {
     static func adler32(_ bytes: [UInt8], continuing value: UInt32 = 1) -> UInt32 {
         bytes.withUnsafeBytes { libdeflate_adler32(value, $0.baseAddress, $0.count) }
+    }
+
+    static func crc32(_ bytes: [UInt8], continuing value: UInt32 = 0) -> UInt32 {
+        bytes.withUnsafeBytes { libdeflate_crc32(value, $0.baseAddress, $0.count) }
+    }
+}
+
+/// liblzma's CRC-64 (`.xz`'s), and libzstd's XXH64. libzstd exports `ZSTD_XXH64` (its bundled xxHash, namespaced) but
+/// declares it in no public header, so it's looked up once by name.
+enum ReferenceHashes {
+    static func crc64(_ bytes: [UInt8], continuing value: UInt64 = 0) -> UInt64 {
+        bytes.withUnsafeBufferPointer { lzma_crc64($0.baseAddress, $0.count, value) }
+    }
+
+    typealias XXH64Function = @convention(c) (UnsafeRawPointer?, Int, UInt64) -> UInt64
+
+    /// `ZSTD_XXH64(input, length, seed)`, or `nil` if this libzstd doesn't export it.
+    static let zstdXXH64: XXH64Function? = {
+        guard let symbol = dlsym(UnsafeMutableRawPointer(bitPattern: -2), "ZSTD_XXH64") else { return nil } // RTLD_DEFAULT
+        return unsafeBitCast(symbol, to: XXH64Function.self)
+    }()
+
+    static func xxh64(_ bytes: [UInt8], seed: UInt64 = 0) -> UInt64 {
+        bytes.withUnsafeBytes { zstdXXH64!($0.baseAddress, $0.count, seed) }
     }
 }

@@ -132,11 +132,25 @@ public struct TLSSecret: Sendable {
     ///
     /// - Parameters:
     ///   - label: The label, without the `"tls13 "` prefix (at most 249 bytes of ASCII).
-    ///   - context: The context: a transcript hash, or empty.
+    ///   - context: The context: a transcript hash, or empty (at most 255 bytes).
     ///   - output: Where the output goes.
+    /// - Precondition: `label` is at most 249 bytes, `context` at most 255, and `output` at most 65,535.
     public func expandLabel(_ label: StaticString, context: RawSpan, into output: inout MutableRawSpan) {
-        // HkdfLabel: uint16 length, opaque label<7..255> = "tls13 " + label, opaque context<0..255>.
-        var info = InlineArray<320, UInt8>(repeating: 0)
+        switch suite {
+        case .aes128GCMSHA256, .chaCha20Poly1305SHA256:
+            Self.expandLabel(label, context: context, into: &output, with: HKDF<SHA256>.Expander(pseudorandomKey: bytes))
+        case .aes256GCMSHA384:
+            Self.expandLabel(label, context: context, into: &output, with: HKDF<SHA384>.Expander(pseudorandomKey: bytes))
+        }
+    }
+
+    /// `HKDF-Expand-Label` with an expander already keyed with the secret, for several labels from one secret.
+    static func expandLabel<H: HashFunction>(
+        _ label: StaticString, context: RawSpan, into output: inout MutableRawSpan, with expander: HKDF<H>.Expander
+    ) {
+        // HkdfLabel: uint16 length, opaque label<7..255> = "tls13 " + label, opaque context<0..255>: 514 bytes at
+        // most.
+        var info = InlineArray<514, UInt8>(repeating: 0)
         let fullLabel = "tls13 \(label)"
         let labelLength = fullLabel.utf8.count
         precondition(labelLength <= 255 && context.byteCount <= 255 && output.byteCount <= 0xFFFF, "HkdfLabel fields too long")
@@ -144,7 +158,7 @@ public struct TLSSecret: Sendable {
         do {
             var span = info.mutableSpan
             var writer = AlignedBytesWriter(MutableRawSpan(mutating: &span))
-            // Can't throw: 2 + 1 + 255 + 1 + 255 bytes at most, in 320.
+            // Can't throw: 2 + 1 + 255 + 1 + 255 = 514 bytes at most, checked above, in 514.
             try! writer.write(UInt16(output.byteCount), as: Byte2.self, .bigEndian)
             try! writer.write(UInt8(labelLength))
             try! writer.write(fullLabel.utf8Span.span.bytes)
@@ -152,13 +166,7 @@ public struct TLSSecret: Sendable {
             try! writer.write(context)
             count = writer.byteOffset
         }
-        let infoBytes = info.span.bytes.extracting(first: count)
-        switch suite {
-        case .aes128GCMSHA256, .chaCha20Poly1305SHA256:
-            HKDF<SHA256>.expand(pseudorandomKey: bytes, info: infoBytes, into: &output)
-        case .aes256GCMSHA384:
-            HKDF<SHA384>.expand(pseudorandomKey: bytes, info: infoBytes, into: &output)
-        }
+        expander.expand(info: info.span.bytes.extracting(first: count), into: &output)
     }
 
     /// `Derive-Secret(Secret, Label, Messages)` with the messages' transcript hash: `HKDF-Expand-Label(Secret,
@@ -232,13 +240,24 @@ public struct TLSTrafficKeys: Sendable {
         suite = secret.suite
         key = InlineArray(repeating: 0)
         iv = InlineArray(repeating: 0)
+        // Both from one expander: the HMAC keyed with the secret once.
+        switch suite {
+        case .aes128GCMSHA256, .chaCha20Poly1305SHA256:
+            expand(with: HKDF<SHA256>.Expander(pseudorandomKey: secret.bytes))
+        case .aes256GCMSHA384:
+            expand(with: HKDF<SHA384>.Expander(pseudorandomKey: secret.bytes))
+        }
+    }
+
+    /// Fills in the key and IV with `expander`, keyed with the traffic secret.
+    private mutating func expand<H: HashFunction>(with expander: HKDF<H>.Expander) {
         var keySpan = key.mutableSpan
         var keyRaw = MutableRawSpan(mutating: &keySpan)
         var keyUsed = keyRaw._mutatingExtracting(0..<suite.keyByteCount)
-        secret.expandLabel("key", context: RawSpan(), into: &keyUsed)
+        TLSSecret.expandLabel("key", context: RawSpan(), into: &keyUsed, with: expander)
         var ivSpan = iv.mutableSpan
         var ivRaw = MutableRawSpan(mutating: &ivSpan)
-        secret.expandLabel("iv", context: RawSpan(), into: &ivRaw)
+        TLSSecret.expandLabel("iv", context: RawSpan(), into: &ivRaw, with: expander)
     }
 
     /// The keys for a ChaCha20-Poly1305 traffic secret given as bytes.

@@ -1,6 +1,6 @@
-import SwiftSyntax
-import SwiftSyntaxBuilder
-import SwiftSyntaxMacros
+public import SwiftSyntax
+internal import SwiftSyntaxBuilder
+public import SwiftSyntaxMacros
 
 /// `@BinaryRecord(.littleEndian)`: a fixed-layout record, its fields in order. `@BinaryRecord` without a byte
 /// order: the same, its integers in the byte order of the cursor that reads it.
@@ -64,8 +64,8 @@ public struct BinaryRecordMacro: MemberMacro, ExtensionMacro {
             case nil:
                 // A nested record (anything FixedSizeBinary & BinaryParsable & BinaryWritable), or Padding/Reserved.
                 return Field(name: property.name, type: property.type, kind: kind, group: nil, expected: nil)
-            default:
-                throw MacroError("@\(property.markerName!) belongs in a @BitFields type", at: property.declaration)
+            case let name?:
+                throw MacroError("@\(name) belongs in a @BitFields type", at: property.declaration)
             }
         }
     }

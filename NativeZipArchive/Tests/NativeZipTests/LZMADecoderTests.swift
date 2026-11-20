@@ -1,3 +1,5 @@
+import BytesTestSupport
+import BytesTesting
 import Foundation
 @testable import NativeZip
 import Testing
@@ -17,7 +19,7 @@ struct LZMAVector: CustomTestStringConvertible, Sendable {
 
     var testDescription: String { name }
 
-    static let directory = testDataDirectory("nativezip-lzma")
+    static let directory = TestData.directory(set: "nativezip-lzma")
 
     static let all: [LZMAVector] = {
         let manifest = (try? String(contentsOf: directory.appending(path: "vectors.tsv"), encoding: .utf8)) ?? ""
@@ -35,29 +37,24 @@ struct LZMAVector: CustomTestStringConvertible, Sendable {
 
     var payload: [UInt8] { [UInt8]((try? Data(contentsOf: Self.directory.appending(path: name + ".lzma"))) ?? Data()) }
 
-    var expected: [UInt8] { LZMAInputs.generate(generator, size: size, seed: seed) }
+    var expected: [UInt8] { Self.expectedByName[name]! }
+
+    /// Every vector's decoded bytes, generated once: several tests decode the same megabytes.
+    private static let expectedByName: [String: [UInt8]] = Dictionary(
+        uniqueKeysWithValues: all.map { ($0.name, LZMAInputs.generate($0.generator, size: $0.size, seed: $0.seed)) }
+    )
 }
 
-/// The generators in `make-lzma-vectors.py`, repeated: the same random numbers make the same bytes.
+/// The generators in `make-lzma-vectors.py`, repeated: the same random numbers (its SplitMix64 is Bytes') make the
+/// same bytes.
 enum LZMAInputs {
-    struct SplitMix64 {
-        var state: UInt64
-        mutating func next() -> UInt64 {
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
-    }
-
     static let words: [[UInt8]] = [
         "swift", "byte", "span", "lzma", "range", "coder", " ", "\n", "the", "a", "dictionary", "match", "literal",
         "probability", ", ", ".",
     ].map { Array($0.utf8) }
 
     static func generate(_ generator: String, size: Int, seed: UInt64) -> [UInt8] {
-        var rng = SplitMix64(state: seed)
+        var rng = SplitMix64(seed: seed)
         switch generator {
         case "text": return text(size, &rng)
         case "random": return random(size, &rng)
@@ -103,7 +100,7 @@ enum LZMAInputs {
     }
 
     static func random(_ size: Int, _ rng: inout SplitMix64) -> [UInt8] {
-        (0..<size).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
+        rng.bytes(size)
     }
 }
 
@@ -148,10 +145,13 @@ enum LZMAOutcome: Equatable {
 }
 
 @Suite struct LZMADecoderTests {
-    @Test func vectorsArePresent() {
-        #expect(LZMAVector.all.count >= 18, "\(MissingTestData(set: "nativezip-lzma", name: "vectors.tsv"))")
+    @Test func vectorsArePresent() throws {
+        // `TestData.Missing` names the command that makes a missing file.
+        _ = try TestData.file(set: "nativezip-lzma", name: "vectors.tsv")
+        #expect(LZMAVector.all.count >= 18)
         for vector in LZMAVector.all {
-            #expect(!vector.payload.isEmpty, "\(MissingTestData(set: "nativezip-lzma", name: vector.name + ".lzma"))")
+            _ = try TestData.file(set: "nativezip-lzma", name: vector.name + ".lzma")
+            #expect(!vector.payload.isEmpty, "\(vector.name)")
         }
     }
 
@@ -270,32 +270,57 @@ enum LZMAOutcome: Equatable {
         #expect(throws: LZMAError.unsupportedHeader) { _ = try decoder.decode(badSize.span.bytes, into: &bytes) }
     }
 
-    /// Every cut, near the end, and a sample elsewhere: always `truncated`, never a trap or a short success.
-    @Test func rejectsTruncatedPayloads() {
-        for name in ["text-marker", "text-nomarker", "one-nomarker", "empty-marker", "empty-nomarker", "runs",
-                     "records-lc1-lp3-pb1", "sentences-1m-dict4k"] {
-            let vector = LZMAVector.named(name)
-            let payload = vector.payload
-            let cuts = Set(Array(max(0, payload.count - 64)..<payload.count) + stride(from: 0, to: payload.count, by: 997))
-            for cut in cuts.sorted() {
-                let outcome = LZMAOutcome { () throws(LZMAError) in
-                    try lzmaDecode(Array(payload.prefix(cut)), size: vector.size, hasEndMarker: vector.hasEndMarker, bufferSize: 4_096)
-                }
-                #expect(outcome == .failed(.truncated), "\(name) cut to \(cut) of \(payload.count) bytes")
+    /// The cuts every payload gets in the default run: the header (13 bytes) and the range coder's first bytes
+    /// after it, the last 16 (the coder's 5-byte flush and the end marker), and every 997th of payloads up to
+    /// 20 KB (every 9,973rd of larger ones). `LZMADecoderBulkTests` makes the rest of the full sweep's cuts.
+    static func fastCuts(_ count: Int) -> Set<Int> {
+        let header = (0...19).filter { $0 < count }
+        let end = Array(max(0, count - 16)..<count)
+        return Set(header + end + stride(from: 0, to: count, by: count <= 20_000 ? 997 : 9_973))
+    }
+
+    /// The full sweep's cuts: the last 64 bytes, and every 997th elsewhere.
+    static func allCuts(_ count: Int) -> Set<Int> {
+        Set(Array(max(0, count - 64)..<count) + stride(from: 0, to: count, by: 997))
+    }
+
+    static let truncatedNames = [
+        "text-marker", "text-nomarker", "one-nomarker", "empty-marker", "empty-nomarker", "runs", "records-lc1-lp3-pb1",
+        "sentences-1m-dict4k",
+    ]
+
+    static func checkTruncated(_ name: String, cuts: (Int) -> Set<Int>) {
+        let vector = LZMAVector.named(name)
+        let payload = vector.payload
+        for cut in cuts(payload.count).sorted() {
+            let outcome = LZMAOutcome { () throws(LZMAError) in
+                try lzmaDecode(Array(payload.prefix(cut)), size: vector.size, hasEndMarker: vector.hasEndMarker, bufferSize: 4_096)
             }
+            #expect(outcome == .failed(.truncated), "\(name) cut to \(cut) of \(payload.count) bytes")
         }
     }
 
+    /// Cuts in the header, near the end, and a sample elsewhere: always `truncated`, never a trap or a short
+    /// success.
+    @Test(arguments: Self.truncatedNames)
+    func rejectsTruncatedPayloads(_ name: String) {
+        Self.checkTruncated(name, cuts: Self.fastCuts)
+    }
+
     /// Changed bytes: decoding throws or produces some output of the right size, never traps. With an end
-    /// marker, most changes are caught.
+    /// marker, most changes are caught. 25 changes per vector (`LZMADecoderBulkTests` makes 200).
     @Test func survivesCorruptPayloads() {
-        var rng = LZMAInputs.SplitMix64(state: 99)
+        Self.checkCorruptPayloads(perVector: 25)
+    }
+
+    static func checkCorruptPayloads(perVector: Int) {
+        var rng = SplitMix64(seed: 99)
         var rejected = 0
         var total = 0
         for name in ["text-marker", "text-nomarker", "random", "runs", "records-lc0-lp0-pb0", "sentences-1m-lc1-lp1-pb1"] {
             let vector = LZMAVector.named(name)
             let payload = vector.payload
-            for _ in 0..<200 {
+            for _ in 0..<perVector {
                 var corrupt = payload
                 for _ in 0..<(1 + rng.next() % 3) {
                     let index = 14 + Int(rng.next() % UInt64(payload.count - 14))
@@ -316,7 +341,7 @@ enum LZMAOutcome: Equatable {
 
     /// Random bytes after valid headers, with every lc/lp/pb byte: no traps.
     @Test func survivesRandomStreams() {
-        var rng = LZMAInputs.SplitMix64(state: 5)
+        var rng = SplitMix64(seed: 5)
         for properties in 0..<225 {
             var payload: [UInt8] = [9, 20, 5, 0, UInt8(properties), 0x00, 0x10, 0x00, 0x00, 0x00]
             payload += (0..<(64 + Int(rng.next() % 2_000))).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
@@ -332,7 +357,7 @@ enum LZMAOutcome: Equatable {
     /// Streams liblzma won't make: lc + lp above 4, up to lc 8, lp 4, pb 4.
     @Test(arguments: [(8, 4, 4), (8, 0, 0), (4, 4, 2), (5, 3, 0), (0, 0, 4), (3, 0, 2)])
     func decodesTestEncoderStreams(lc: Int, lp: Int, pb: Int) throws {
-        var rng = LZMAInputs.SplitMix64(state: UInt64(lc * 25 + lp * 5 + pb))
+        var rng = SplitMix64(seed: UInt64(lc * 25 + lp * 5 + pb))
         let input = LZMAInputs.text(30_000, &rng) + LZMAInputs.random(2_000, &rng)
             + LZMAInputs.generate("records", size: 20_000, seed: 3) + LZMAInputs.text(30_000, &rng)
         for hasEndMarker in [false, true] {
@@ -375,6 +400,19 @@ enum LZMAOutcome: Equatable {
             let seconds = Double(best.components.attoseconds) / 1e18 + Double(best.components.seconds)
             print("LZMA \(name): \(size) bytes in \(best), \(Int(Double(size) / seconds / 1e6)) MB/s")
         }
+    }
+}
+
+@Suite(.bulk) struct LZMADecoderBulkTests {
+    /// The full sweep's cuts that `LZMADecoderTests` doesn't make.
+    @Test(arguments: LZMADecoderTests.truncatedNames)
+    func rejectsTruncatedPayloads(_ name: String) {
+        LZMADecoderTests.checkTruncated(name) { LZMADecoderTests.allCuts($0).subtracting(LZMADecoderTests.fastCuts($0)) }
+    }
+
+    /// 200 changes per vector.
+    @Test func survivesCorruptPayloads() {
+        LZMADecoderTests.checkCorruptPayloads(perVector: 200)
     }
 }
 

@@ -3,7 +3,7 @@
 2026-11-19. The Bytes experiments moved to a new machine, an Apple M1 Max. Every benchmark suite of every package that
 uses Bytes was run again there with the same compiler (Xcode 27.3, Swift 6.4.4) and compared with the M3 Ultra's latest
 saved baselines. Per-package tables are in each project's `RESULTS.md` (a section dated 2026-11-19); the hardware
-experiments are in `Bytes/Benchmarks/RESULTS.md` and `Bytes/OPTIMIZATION.md` section 15.
+experiments are in `Bytes/Benchmarks/RESULTS.md` and `Bytes/OPTIMIZATION.md` (Part III, "The second machine: M1 Max against M3 Ultra").
 
 ## The short version
 

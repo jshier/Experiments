@@ -172,6 +172,8 @@ public enum HKDF<H: HashFunction> {
 
     /// `HKDF-Expand(prk, info, L)`, with `L` the output's length.
     ///
+    /// For several outputs from one key, an ``Expander`` keys the HMAC once.
+    ///
     /// - Parameters:
     ///   - pseudorandomKey: The key from ``extract(salt:inputKeyMaterial:into:)``.
     ///   - info: Context binding the output to its use (TLS 1.3's `HkdfLabel`).
@@ -179,28 +181,77 @@ public enum HKDF<H: HashFunction> {
     /// - Precondition: `output` is at most `255 × H.digestByteCount` bytes.
     @inlinable
     public static func expand(pseudorandomKey: RawSpan, info: RawSpan, into output: inout MutableRawSpan) {
-        let digestByteCount = H.digestByteCount
-        precondition(output.byteCount <= 255 &* digestByteCount, "HKDF-Expand makes at most 255 digests")
-        let keyed = HMAC<H>(key: pseudorandomKey)
-        var previous = InlineArray<64, UInt8>(repeating: 0)
-        var previousCount = 0
-        var counter: UInt8 = 1
-        var offset = 0
-        while offset < output.byteCount {
-            // T(i) = HMAC(prk, T(i-1) ‖ info ‖ i).
-            var mac = keyed
-            mac.update(previous.span.bytes.extracting(first: previousCount))
-            mac.update(info)
-            let index = InlineArray<1, UInt8>(repeating: counter)
-            mac.update(index.span.bytes)
-            var span = previous.mutableSpan
+        Expander(pseudorandomKey: pseudorandomKey).expand(info: info, into: &output)
+    }
+
+    /// `HKDF-Expand` from one pseudorandom key, any number of times: the HMAC keyed with it is made once (two
+    /// compressions of the hash) and copied for each output, where ``HKDF/expand(pseudorandomKey:info:into:)``
+    /// keys a new one per call. For key schedules that derive several keys from one secret (TLS 1.3's traffic key
+    /// and IV, an archive's per-segment keys).
+    ///
+    /// ```swift
+    /// let expander = HKDF<SHA256>.Expander(salt: salt, inputKeyMaterial: sharedSecret)
+    /// expander.expand(info: keyLabel, into: &key)
+    /// expander.expand(info: ivLabel, into: &iv)
+    /// ```
+    public struct Expander: Sendable {
+        /// The HMAC keyed with the pseudorandom key.
+        @usableFromInline let keyed: HMAC<H>
+
+        /// An expander for a pseudorandom key: one from ``HKDF/extract(salt:inputKeyMaterial:into:)``, or a secret
+        /// that already is one (TLS 1.3's).
+        ///
+        /// - Parameter pseudorandomKey: The key.
+        @inlinable
+        public init(pseudorandomKey: RawSpan) {
+            keyed = HMAC(key: pseudorandomKey)
+        }
+
+        /// An expander for `HKDF-Extract(salt, ikm)`'s pseudorandom key.
+        ///
+        /// - Parameters:
+        ///   - salt: The salt (an empty salt is a string of zeros the digest's length, as HMAC pads it).
+        ///   - inputKeyMaterial: The secret, such as a Diffie–Hellman shared secret.
+        @inlinable
+        public init(salt: RawSpan, inputKeyMaterial: RawSpan) {
+            var key = InlineArray<64, UInt8>(repeating: 0) // The largest digest: SHA-512's.
+            var span = key.mutableSpan
             var bytes = MutableRawSpan(mutating: &span)
-            mac.finalize(into: &bytes)
-            previousCount = digestByteCount
-            let take = min(digestByteCount, output.byteCount &- offset)
-            output.copyBytes(from: previous.span.bytes.extracting(first: take), toByteOffset: offset)
-            offset &+= take
-            counter &+= 1
+            var used = bytes._mutatingExtracting(0..<H.digestByteCount)
+            HKDF.extract(salt: salt, inputKeyMaterial: inputKeyMaterial, into: &used)
+            keyed = HMAC(key: key.span.bytes.extracting(first: H.digestByteCount))
+        }
+
+        /// `HKDF-Expand(prk, info, L)`, with `L` the output's length.
+        ///
+        /// - Parameters:
+        ///   - info: Context binding the output to its use (TLS 1.3's `HkdfLabel`).
+        ///   - output: Where the keying material goes; at most 255 digests long.
+        /// - Precondition: `output` is at most `255 × H.digestByteCount` bytes.
+        @inlinable
+        public func expand(info: RawSpan, into output: inout MutableRawSpan) {
+            let digestByteCount = H.digestByteCount
+            precondition(output.byteCount <= 255 &* digestByteCount, "HKDF-Expand makes at most 255 digests")
+            var previous = InlineArray<64, UInt8>(repeating: 0)
+            var previousCount = 0
+            var counter: UInt8 = 1
+            var offset = 0
+            while offset < output.byteCount {
+                // T(i) = HMAC(prk, T(i-1) ‖ info ‖ i).
+                var mac = keyed
+                mac.update(previous.span.bytes.extracting(first: previousCount))
+                mac.update(info)
+                let index = InlineArray<1, UInt8>(repeating: counter)
+                mac.update(index.span.bytes)
+                var span = previous.mutableSpan
+                var bytes = MutableRawSpan(mutating: &span)
+                mac.finalize(into: &bytes)
+                previousCount = digestByteCount
+                let take = min(digestByteCount, output.byteCount &- offset)
+                output.copyBytes(from: previous.span.bytes.extracting(first: take), toByteOffset: offset)
+                offset &+= take
+                counter &+= 1
+            }
         }
     }
 }

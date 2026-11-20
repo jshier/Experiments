@@ -63,6 +63,7 @@ extension GenericBytesReader {
         precondition(_bitOffset == 0, "Reading LEB128 requires byte alignment: call alignToByte() first")
         _assumeInvariant()
         guard likely(_byteOffset < span.byteCount) else { throw .insufficientData }
+        // Unsafe: an unchecked load. Safe: `_byteOffset` is below the byte count (just checked).
         let first = unsafe Load.native(UInt8.self, from: span, at: _byteOffset)
         if likely(first < 0x80) {
             _byteOffset &+= 1
@@ -680,6 +681,8 @@ public extension GenericBytesWriter {
         var written = 0
         let result = try _writeSection(from: sectionStart, written: &written, body)
         guard let length = L.Integer(exactly: written), length <= L._mask else { throw .invalidValue }
+        // Unsafe: an unchecked store. Safe: the prefix's `L.byteCount` bytes were free at `prefixOffset` (checked
+        // above), and the body wrote only after them.
         unsafe Store.group(L(length, byteOrder), to: &_bytes, at: prefixOffset)
         _byteOffset = sectionStart &+ written
         return result

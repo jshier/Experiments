@@ -16,6 +16,9 @@ internal import CBytesCRC
 /// On Apple silicon it folds 128 bytes per step with carry-less multiplies (`pmull`), eight 16-byte
 /// lanes at a time, and finishes with the CPU's CRC32 instructions: faster than zlib's `crc32`. Elsewhere
 /// it uses tables, five interleaved CRCs over 40 bytes per step, as zlib does.
+// Not `@inlinable`, unlike most public API here: each call does enough work (a loop over the bytes, with the
+// hardware path chosen at build time) that a call costs nothing measurable, and keeping it out of clients keeps
+// the C module (`CBytesCRC`, imported `internal`) and the tables out of their builds.
 public struct CRC32: Hashable, Sendable {
     /// The checksum of everything added so far.
     public private(set) var value: UInt32
@@ -142,9 +145,10 @@ public struct CRC32: Hashable, Sendable {
 extension CRC32 {
     // Folding constants for the reflected polynomial: x^(n + 32) and x^(n − 32) mod P, bit-reflected and
     // shifted left one, for folding 16 bytes forward by n bits (the low half has 64 bits further to go).
-    // The 128- and 512-bit ones match Linux's (`crc32-pclmul_asm.S`); see the tests for their derivation.
-    static var fold1024: SIMD16<UInt8> { bitCast(SIMD2<UInt64>(0x1_E88E_F372, 0x1_4A7F_E880), to: SIMD16<UInt8>.self) }
-    static var fold128: SIMD16<UInt8> { bitCast(SIMD2<UInt64>(0x1_7519_97D0, 0x0_CCAA_009E), to: SIMD16<UInt8>.self) }
+    // The 128- and 512-bit ones match Linux's (`crc32-pclmul_asm.S`); see the tests for their derivation
+    // (`package` for them, in release builds too).
+    package static var fold1024: SIMD16<UInt8> { bitCast(SIMD2<UInt64>(0x1_E88E_F372, 0x1_4A7F_E880), to: SIMD16<UInt8>.self) }
+    package static var fold128: SIMD16<UInt8> { bitCast(SIMD2<UInt64>(0x1_7519_97D0, 0x0_CCAA_009E), to: SIMD16<UInt8>.self) }
 
     /// Inputs this long or longer are folded; shorter ones take the CRC32 instructions 8 bytes at a time
     /// (one per 3 cycles, a dependency chain) rather than pay for combining the eight lanes.
@@ -174,6 +178,9 @@ extension CRC32 {
     ///   - reader: The bytes to fold; advanced past the folded blocks.
     /// - Returns: The register after the folded bytes.
     static func _fold(_ state: UInt32, _ reader: inout BytesReader) -> UInt32 {
+        // The `try!`s here can't trap: the caller checked that 128 bytes remain, the loop checks before each
+        // further 128, each block's eight loads take exactly its 128 bytes, and the last loop's loads check
+        // that 16 remain.
         var block = BytesReader(try! reader.read(byteCount: 128))
         // Always inlined: as a call, each load spilled the eight accumulators (3.5x slower).
         @inline(always) func next(_ block: inout BytesReader) -> SIMD16<UInt8> { try! block.load(SIMD16<UInt8>.self) }
@@ -221,33 +228,7 @@ extension CRC32 {
     /// words: enough independent lookup chains to keep the loads busy.
     static var braids: Int { 5 }
 
-    /// Two sets of eight 256-entry tables, in one array. In each set, table `k` gives the register
-    /// contribution of byte `b` at position `k` of an 8-byte word, advanced to a later position: the CRC of
-    /// `b` followed by `7 - k` zero bytes (slicing-by-8, to the next word), then for the braid set by the
-    /// other braids' words too, `8 * (braids - 1)` more (to the same braid's next word).
-    static let tables: [UInt32] = {
-        var tables = [UInt32](repeating: 0, count: 16 * 256)
-        var single = [UInt32](repeating: 0, count: 256)
-        for byte in 0..<256 {
-            var crc = UInt32(byte)
-            for _ in 0..<8 {
-                crc = crc[bit: 0] ? crc >> 1 ^ 0xEDB8_8320 : crc >> 1
-            }
-            single[byte] = crc
-        }
-        for k in 0..<8 {
-            for byte in 0..<256 {
-                var crc = single[byte]
-                for zeros in 1...(7 - k + 8 * (braids - 1)) {
-                    crc = crc >> 8 ^ single[Int(crc[Byte.self, at: 0])]
-                    if zeros == 7 - k { tables[k * 256 + byte] = crc }
-                }
-                if k == 7 { tables[k * 256 + byte] = single[byte] }
-                tables[(8 + k) * 256 + byte] = crc
-            }
-        }
-        return tables
-    }()
+    // `tables`: CRC32Tables.swift.
 
     /// One set of eight tables (see ``tables``): a pointer to each, so each table's address is a register
     /// and a lookup is one load (`ldr w, [table, index, lsl #2]`).
@@ -308,7 +289,11 @@ extension CRC32 {
     ///   - bytes: The bytes to add.
     ///   - storage: The start of ``tables``' storage.
     /// - Returns: The updated register.
-    @unsafe @inline(__always)
+    ///
+    /// Not inlined: with the tables a constant (CRC32Tables.swift), an inlined copy saw their address and
+    /// rematerialized each table's base inside the loops instead of keeping eight in registers (64-byte
+    /// inputs +10.7% instructions, −21% throughput). As a parameter, the address is opaque again.
+    @unsafe @inline(never)
     static func _tableUpdate(_ state: UInt32, _ bytes: RawSpan, _ storage: UnsafePointer<UInt32>) -> UInt32 {
         let slicing = unsafe _Tables(storage, first: 0)
         var state = state
@@ -349,12 +334,11 @@ extension CRC32 {
         return state
     }
 
-    /// Computes the checksum with the tables that other CPUs use, for benchmarking it on this one.
+    /// Computes the checksum with the tables that other CPUs use, for benchmarking and testing it on this one.
     ///
     /// - Parameter bytes: The bytes to checksum.
     /// - Returns: The CRC-32 of `bytes`.
-    @_spi(Benchmarking)
-    public static func tableChecksum(_ bytes: RawSpan) -> UInt32 {
+    package static func tableChecksum(_ bytes: RawSpan) -> UInt32 {
         ~_tableUpdate(~0, bytes)
     }
 }

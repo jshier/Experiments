@@ -1,3 +1,4 @@
+import BytesTestSupport
 import Foundation
 import Testing
 import Workloads
@@ -5,9 +6,9 @@ import Workloads
 /// A test file: from the package's Data/, or from the repository's TestData/ (swift-binary-parsing's samples and
 /// swift-help.lz4, made by `Tools/test-data fetch swift-binary-parsing swift-help-lz4`).
 func dataFile(_ name: String) throws -> [UInt8] {
-    let package = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../..")
-    for directory in ["Data", "../TestData/swift-binary-parsing", "../TestData/swift-help-lz4"] {
-        if let data = try? Data(contentsOf: package.appending(path: "\(directory)/\(name)")) { return Array(data) }
+    let local = URL(filePath: #filePath).deletingLastPathComponent().appending(path: "../../Data/\(name)")
+    for url in [local] + ["swift-binary-parsing", "swift-help-lz4"].map({ TestData.directory(set: $0).appending(path: name) }) {
+        if let data = try? Data(contentsOf: url) { return Array(data) }
     }
     throw MissingTestFile(name: name)
 }

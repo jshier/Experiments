@@ -4,9 +4,10 @@ public import System
 public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     /// The file doesn't start with `AEA1`.
     case notAnAEAFile
-    /// The archive's profile needs a key this reader doesn't take (only profile 0, signed and unencrypted, is
-    /// read).
+    /// The profile number isn't one of the six.
     case unsupportedProfile(Int)
+    /// The archive is encrypted and no key, or the wrong kind, was given: what it needs.
+    case missingKey(String)
     /// A field of the prologue, root header, or a cluster header is invalid or cut short.
     case invalidHeader(String)
     /// The archive ends before its last segment.
@@ -30,11 +31,14 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     case unsafePath(String)
     /// A file system call failed.
     case fileSystem(String, Errno)
+    /// The task was cancelled: the operation stopped early.
+    case cancelled
 
     public var description: String {
         switch self {
         case .notAnAEAFile: "not an Apple Encrypted Archive"
-        case .unsupportedProfile(let profile): "unsupported profile \(profile) (only profile 0, signed and unencrypted)"
+        case .unsupportedProfile(let profile): "unknown profile \(profile)"
+        case .missingKey(let what): "the archive is encrypted: it needs \(what)"
         case .invalidHeader(let what): "invalid header: \(what)"
         case .truncated: "the archive is truncated"
         case .invalidSignature: "the signature doesn't verify"
@@ -46,6 +50,13 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
         case .invalidArchive(let why): "invalid Apple Archive stream: \(why)"
         case .unsafePath(let path): "unsafe path: \(path)"
         case .fileSystem(let what, let errno): "\(what): \(errno)"
+        case .cancelled: "cancelled"
         }
+    }
+
+    /// A file system error with the path it happened at; other errors as they are.
+    func at(_ path: String) -> AEAError {
+        if case .fileSystem(let what, let code) = self { return .fileSystem("\(what) \(path)", code) }
+        return self
     }
 }

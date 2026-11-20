@@ -1,5 +1,4 @@
 import Bytes
-import BytesAsync
 import Testing
 
 /// Copies into spans and output spans, output spans over arrays, and `ByteBuffer`.
@@ -192,30 +191,5 @@ import Testing
             }
         }
         #expect([UInt8](copying: buffer.unread) == [1, 2])
-    }
-
-    @Test func byteBufferReceive() async throws {
-        var buffer = ByteBuffer(capacity: 16)
-        var source = Chunks(chunks: [[1, 2, 3], [4, 5], []])
-        var total = 0
-        while true {
-            let count = try await buffer.receive { output throws(BytesError) in try await source.read(into: &output) }
-            if count == 0 { break }
-            total += count
-        }
-        #expect(total == 5)
-        #expect([UInt8](copying: buffer.unread) == [1, 2, 3, 4, 5])
-    }
-
-    /// A stand-in for a socket: each read suspends, then delivers the next chunk.
-    struct Chunks {
-        var chunks: [[UInt8]]
-
-        mutating func read(into output: inout OutputRawSpan) async throws(BytesError) -> Int {
-            await Task.yield()
-            let chunk = chunks.removeFirst()
-            output.append(copying: chunk.span)
-            return chunk.count
-        }
     }
 }

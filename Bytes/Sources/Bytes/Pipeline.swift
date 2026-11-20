@@ -521,7 +521,7 @@ extension MappedErrorTransform: ByteTransform where Base: ~Copyable {
     /// - Throws: The base stage's error, converted.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(Failure) -> TransformProgress {
-        do {
+        do throws(Base.Failure) {
             return try base.transform(input, into: &output, flush: flush)
         } catch {
             throw map(error)

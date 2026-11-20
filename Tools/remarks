@@ -26,7 +26,7 @@
 #
 # examples:
 #   Tools/remarks Probe.swift -- -enable-experimental-feature Lifetimes
-#   Tools/remarks --target Base64 Base64 --function encode
+#   Tools/remarks --target Bytes BytesBase64 --function encode
 source "$(dirname "$0")/lib/common.sh"
 have yq || die "needs yq: brew install yq"
 

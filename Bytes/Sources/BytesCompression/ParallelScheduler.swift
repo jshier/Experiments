@@ -52,19 +52,25 @@ final class ChunkScheduler: Sendable {
         var checksum: UInt32 = 0
         /// Set when the output ran out of room: workers stop taking chunks.
         var failed = false
+        /// The call's chunks: a stop counts as a cancellation only if it left some undelivered.
+        var chunkCount = 0
     }
 
     let state = Mutex(State())
     let next = Atomic(0)
+    /// Set by ``stop()`` (an async call's cancellation handler): workers take no more chunks. Checked once per
+    /// chunk, as a worker claims it; chunks already claimed are finished and delivered.
+    let stopped = Atomic(false)
 
     init() {}
 
-    /// Prepares for a call: no chunks taken or delivered, every slot empty (a slot still naming a chunk of
-    /// the last call would look ready).
-    func start(checksum: UInt32, slots: UnsafeLanes<ChunkSlot>) {
+    /// Prepares for a call: no chunks taken or delivered, not stopped, every slot empty (a slot still naming a
+    /// chunk of the last call would look ready).
+    func start(checksum: UInt32, chunkCount: Int, slots: UnsafeLanes<ChunkSlot>) {
         next.store(0, ordering: .relaxed)
+        stopped.store(false, ordering: .relaxed)
         state.withLock { state in
-            state = State(checksum: checksum)
+            state = State(checksum: checksum, chunkCount: chunkCount)
             // Unsafe: writes the slots. Safe: no worker is running.
             for slot in unsafe slots.buffer.indices {
                 unsafe slots.buffer[slot].index = -1
@@ -78,7 +84,7 @@ final class ChunkScheduler: Sendable {
         _ job: Lane.Job, chunkCount: Int, format: DeflateFormat, lanes: UnsafeLanes<Lane>, slots: UnsafeLanes<ChunkSlot>,
         input: LentBytes, output: LentMutableBytes, checksum: UInt32
     ) -> ChunkBatch {
-        unsafe start(checksum: checksum, slots: slots)
+        unsafe start(checksum: checksum, chunkCount: chunkCount, slots: slots)
         let workers = min(unsafe lanes.buffer.count, chunkCount)
         // Unsafe: lane `w` from worker `w`, slots and output as the protocol in `work` allows; the input and
         // output are lent for as long as the batch runs.
@@ -87,8 +93,37 @@ final class ChunkScheduler: Sendable {
         }
     }
 
+    /// Runs a call over lent input and output on `concurrentPerform`, which returns when every chunk is
+    /// delivered (or the output is full): ``batch(_:chunkCount:format:lanes:slots:input:output:checksum:)``'s
+    /// workers called directly, without a ``ChunkBatch`` (whose escaping closure is an allocation per call).
+    func run<Lane: ChunkLane & ~Copyable>(
+        _ job: Lane.Job, chunkCount: Int, format: DeflateFormat, lanes: UnsafeLanes<Lane>, slots: UnsafeLanes<ChunkSlot>,
+        input: LentBytes, output: LentMutableBytes, checksum: UInt32
+    ) -> ChunkDelivery {
+        unsafe start(checksum: checksum, chunkCount: chunkCount, slots: slots)
+        let workers = min(unsafe lanes.buffer.count, chunkCount)
+        // Unsafe: as in `batch`. Safe: `concurrentPerform` returns only once every worker has.
+        DispatchQueue.concurrentPerform(iterations: workers) { w in
+            unsafe self.work(w, job, chunkCount: chunkCount, format: format, lanes: lanes, slots: slots, input: input, output: output)
+        }
+        return finish()
+    }
+
+    /// Stops the call: workers take no more chunks, and ``finish()`` reports it cancelled unless every chunk was
+    /// already delivered. Safe from any thread, during the call or before it runs (after
+    /// ``start(checksum:chunkCount:slots:)``, which clears it).
+    func stop() {
+        stopped.store(true, ordering: .relaxed)
+    }
+
     fileprivate func finish() -> ChunkDelivery {
-        state.withLock { ChunkDelivery(produced: $0.produced, checksum: $0.checksum, failed: $0.failed) }
+        let stopped = stopped.load(ordering: .relaxed)
+        return state.withLock {
+            ChunkDelivery(
+                produced: $0.produced, checksum: $0.checksum, failed: $0.failed,
+                cancelled: stopped && $0.delivered < $0.chunkCount
+            )
+        }
     }
 
     /// Worker `w`'s loop: take a chunk, compress it in lane `w`, wait for its slot, hand the output over,
@@ -106,7 +141,7 @@ final class ChunkScheduler: Sendable {
         let source = unsafe input.span
         while true {
             let index = next.wrappingAdd(1, ordering: .relaxed).oldValue
-            guard index < chunkCount else { break }
+            guard index < chunkCount, !stopped.load(ordering: .relaxed) else { break }
             unsafe lanes.buffer[w].compress(source, index: index, job: job)
             // Wait for the slot: its previous chunk, `index - slotCount`, delivered. Rare with a few spare slots;
             // meanwhile, deliver what's ready (the chunk this one waits for may be).
@@ -173,6 +208,24 @@ final class ChunkScheduler: Sendable {
     }
 }
 
+/// A request to stop a parallel call early, shared with its workers: set from any thread (an async call's task
+/// cancellation handler), checked as each worker takes its next piece of work.
+package final class StopFlag: Sendable {
+    private let stopped = Atomic(false)
+
+    package init() {}
+
+    /// Asks the call to stop.
+    package func stop() {
+        stopped.store(true, ordering: .relaxed)
+    }
+
+    /// Whether ``stop()`` was called.
+    package var isStopped: Bool {
+        stopped.load(ordering: .relaxed)
+    }
+}
+
 /// What one call of a parallel encoder delivered.
 package struct ChunkDelivery: Sendable {
     /// Output bytes delivered, from the start of the lent output.
@@ -181,11 +234,14 @@ package struct ChunkDelivery: Sendable {
     package var checksum: UInt32
     /// Whether the output ran out of room.
     package var failed: Bool
+    /// Whether the call was stopped (``ChunkBatch/stop()``) before every chunk was delivered.
+    package var cancelled: Bool
 
-    package init(produced: Int = 0, checksum: UInt32 = 0, failed: Bool = false) {
+    package init(produced: Int = 0, checksum: UInt32 = 0, failed: Bool = false, cancelled: Bool = false) {
         self.produced = produced
         self.checksum = checksum
         self.failed = failed
+        self.cancelled = cancelled
     }
 }
 
@@ -209,6 +265,12 @@ package struct ChunkBatch: Sendable {
     /// Runs worker `index`, 0 through ``workerCount`` - 1: chunks until none are left.
     package func work(_ index: Int) {
         worker(index)
+    }
+
+    /// Stops the call early: the workers take no more chunks (those under way finish), and ``finish()`` reports
+    /// it cancelled. For an async call's task cancellation handler; safe from any thread.
+    package func stop() {
+        scheduler.stop()
     }
 
     /// What the workers delivered, once they've all returned.

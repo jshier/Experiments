@@ -375,15 +375,18 @@ means "more input, please".
 Where the input arrives over time, from a socket, use the `BytesAsync` product: ``ByteBuffer`` gets
 `receive` (the asynchronous `fill`, for a read that suspends), and `AsyncByteTransform` is
 `ByteTransform` with `async` calls. Any stage becomes one with `synchronously()` (calls run in place) or
-`offloaded(to:)` (calls run on a Dispatch queue, so a heavy compressor doesn't hold a thread of Swift's
-cooperative pool); the parallel codecs have `async` entry points the same way.
+`concurrently()`, the structured default for heavy work: calls run in a `@concurrent` function, on Swift's
+global executor in the calling task, so never on the caller's actor, with the task's priority and
+task-locals, and without a thread switch for a caller that's already off any actor. Where work must stay off
+the cooperative pool's threads, or run on a queue of its own, `offloaded(to:)` runs the calls on a Dispatch
+queue instead (two thread switches per call). The parallel codecs have `async` entry points too, which stop
+when their task is cancelled.
 
 ```swift
 import BytesAsync
-import Dispatch
 
 func gzip(_ message: [UInt8]) async throws(BytesError) -> [UInt8] {
-    var stage = DeflateEncoder(format: .gzip, level: 9).offloaded(to: .global(qos: .utility))
+    var stage = DeflateEncoder(format: .gzip, level: 9).concurrently()
     var compressed: [UInt8] = []
     _ = try await stage.transform(message.span.bytes, appending: &compressed, flush: .finish)
     return compressed

@@ -158,7 +158,7 @@ import Testing
                 #expect(try checked.read(LEB128.self, maxByteCount: 4, requiringMinimal: true) == minimal)
                 #expect(value == minimal)
             } else {
-                #expect(throws: BytesError.invalidValue) { try checked.read(LEB128.self, maxByteCount: 4, requiringMinimal: true) }
+                #expect(throws: BytesError.invalidValue) { _ = try checked.read(LEB128.self, maxByteCount: 4, requiringMinimal: true) }
                 let unmoved = checked.byteOffset
                 #expect(unmoved == 0, "\(bytes)")
             }

@@ -1,5 +1,6 @@
 #if NEONShuffle
-import CBytesNEON
+// Public: inlinable shuffles call the header's `static inline` functions.
+public import CBytesNEON
 
 /// Packing and unpacking runs of 3-, 5-, 6-, and 7-byte groups with NEON table lookups (`tbl`, through the
 /// CBytesNEON C module, enabled by the `NEONShuffle` package trait).

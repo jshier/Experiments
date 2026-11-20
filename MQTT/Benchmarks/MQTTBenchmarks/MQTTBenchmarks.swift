@@ -289,6 +289,19 @@ func encodePublishesConventionally(_ publishes: [ConventionalPublish]) -> [UInt8
     return output
 }
 
+/// The Bytes encoders' output, checked against `publishStream` once per process that runs one of them.
+let checkedBytesEncoders: Void = {
+    encodePublishes(copy: 0)
+    precondition(Array(UnsafeRawBufferPointer(rebasing: encodeBuffers[..<publishStream.count])) == publishStream)
+    encodePublishesDirectly(copy: 0)
+    precondition(Array(UnsafeRawBufferPointer(rebasing: encodeBuffers[..<publishStream.count])) == publishStream)
+}()
+
+/// The conventional encoder's output, checked the same way.
+let checkedConventionalEncoder: Void = {
+    precondition(encodePublishesConventionally(conventionalPublishes) == publishStream)
+}()
+
 /// A benchmark workload: one pass over one copy of a fixture.
 struct Workload {
     let name: String
@@ -297,6 +310,9 @@ struct Workload {
     let packetCount: Int
     /// Whether it must not allocate, so it also gets an allocation check.
     let isAllocationFree: Bool
+    /// Checks the workload's results once, as its benchmark's setup: only in the process that runs it, not in
+    /// every process the benchmark tool starts (one to list the benchmarks, then one per benchmark).
+    var prepare: @Sendable () -> Void = {}
     let run: @Sendable (_ copy: Int) -> Void
 }
 
@@ -316,16 +332,24 @@ let workloads: [Workload] = [
     Workload(name: "Parse mixed stream: Bytes views", byteCount: mixedStream.count, packetCount: packetCount,
              isAllocationFree: true, run: parseMixedStream),
     Workload(name: "Encode PUBLISH: Bytes writer", byteCount: publishStream.count, packetCount: packetCount,
-             isAllocationFree: true, run: encodePublishes),
+             isAllocationFree: true, prepare: { checkedBytesEncoders }, run: encodePublishes),
     Workload(name: "Encode PUBLISH: MQTTPublish.write(to:)", byteCount: publishStream.count, packetCount: packetCount,
-             isAllocationFree: true, run: encodePublishesDirectly),
+             isAllocationFree: true, prepare: { checkedBytesEncoders }, run: encodePublishesDirectly),
     Workload(name: "Encode PUBLISH: conventional ([UInt8] appends)", byteCount: publishStream.count,
-             packetCount: packetCount, isAllocationFree: false) { blackHole(encodePublishesConventionally(conventionalPublishCopies[$0])) },
+             packetCount: packetCount, isAllocationFree: false, prepare: { checkedConventionalEncoder; _ = conventionalPublishCopies }) {
+        blackHole(encodePublishesConventionally(conventionalPublishCopies[$0]))
+    },
 ]
 
 // MARK: - Benchmarks
 
 let benchmarks: @Sendable () -> Void = {
+    // The benchmark tool starts this executable once to list the benchmarks and again for each one it runs,
+    // and every start runs this closure: it only registers. Fixtures are globals, made on first use (in a
+    // benchmark's warmup), and results are checked in the setup of the benchmarks that need them.
+    //
+    // One core: 0.3–4 ms per iteration, 100 samples in at most 0.5 s. Against 1,000 samples (2026-11-19):
+    // the same instruction medians, times within 3.5%.
     Benchmark.defaultConfiguration = .init(
         // Only the work runs inside `scaledIterations`. Bandwidth and packet rate are the framework's
         // throughput (iterations per second) times a workload's bytes and packets per iteration: 10,000
@@ -333,33 +357,32 @@ let benchmarks: @Sendable () -> Void = {
         metrics: [.wallClock, .instructions, .mallocCountTotal, .throughput],
         warmupIterations: 3,
         scalingFactor: .one,
-        maxDuration: .seconds(1),
-        maxIterations: 1_000
+        maxDuration: .milliseconds(500),
+        maxIterations: 100
     )
-
-    // The encoders' output, checked once rather than on every iteration.
-    encodePublishes(copy: 0)
-    precondition(Array(UnsafeRawBufferPointer(rebasing: encodeBuffers[..<publishStream.count])) == publishStream)
-    precondition(encodePublishesConventionally(conventionalPublishes) == publishStream)
 
     // One core: 10,000 packets from copy 0, which stays in cache.
     for workload in workloads {
-        Benchmark(workload.name) { benchmark in
+        Benchmark(workload.name, closure: { benchmark in
             for _ in benchmark.scaledIterations {
                 workload.run(0)
             }
-        }
+        }, setup: { workload.prepare() })
     }
 
     // Every core: all `copyCount` copies (4 per core, 100–150 MB), so the total throughput of the machine,
-    // from memory.
+    // from memory. 2–45 ms per iteration: 100 samples or a second. Every core's time depends on whatever else
+    // the machine runs: compare these only from an idle machine.
+    var allCores = Benchmark.defaultConfiguration
+    allCores.maxDuration = .seconds(1)
+    allCores.maxIterations = 100
     let cores = ProcessInfo.processInfo.activeProcessorCount
     for workload in workloads {
-        Benchmark("\(workload.name), \(cores) cores") { benchmark in
+        Benchmark("\(workload.name), \(cores) cores", configuration: allCores, closure: { benchmark in
             for _ in benchmark.scaledIterations {
                 DispatchQueue.concurrentPerform(iterations: copyCount, execute: workload.run)
             }
-        }
+        }, setup: { workload.prepare() })
     }
 
     // Allocation checks: the workloads that must not allocate, registered again as "Allocations:<name>",

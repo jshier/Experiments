@@ -1,28 +1,19 @@
 import Bytes
 import BytesCompression
+import BytesReferenceCodecs
+import BytesTestSupport
 import zlib
 
-// Shared helpers: reference streams from zlib, sample data, and drivers that run the codecs one-shot and in
-// pieces.
-
-struct SplitMix64: RandomNumberGenerator {
-    var state: UInt64
-    mutating func next() -> UInt64 {
-        state &+= 0x9E37_79B9_7F4A_7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-        return z ^ (z >> 31)
-    }
-}
+// Shared helpers: reference streams from zlib (BytesReferenceCodecs), sample data, and drivers that run the codecs
+// one-shot and in pieces.
 
 extension DeflateFormat {
     /// zlib's `windowBits` for this container.
     var zlibWindowBits: Int32 {
         switch self {
-        case .raw: -MAX_WBITS
-        case .zlib: MAX_WBITS
-        case .gzip: MAX_WBITS + 16
+        case .raw: Zlib.Container.raw.windowBits
+        case .zlib: Zlib.Container.zlib.windowBits
+        case .gzip: Zlib.Container.gzip.windowBits
         }
     }
 }
@@ -31,22 +22,7 @@ extension DeflateFormat {
 func zlibCompress(
     _ data: [UInt8], format: DeflateFormat = .raw, level: Int32 = Z_DEFAULT_COMPRESSION, strategy: Int32 = Z_DEFAULT_STRATEGY
 ) -> [UInt8] {
-    var stream = z_stream()
-    precondition(deflateInit2_(&stream, level, Z_DEFLATED, format.zlibWindowBits, 8, strategy, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK)
-    defer { deflateEnd(&stream) }
-    var output = [UInt8](repeating: 0, count: Int(deflateBound(&stream, uLong(data.count))) + 64)
-    var input = data
-    let status = input.withUnsafeMutableBufferPointer { input in
-        output.withUnsafeMutableBufferPointer { output in
-            stream.next_in = input.baseAddress
-            stream.avail_in = uInt(input.count)
-            stream.next_out = output.baseAddress
-            stream.avail_out = uInt(output.count)
-            return deflate(&stream, Z_FINISH)
-        }
-    }
-    precondition(status == Z_STREAM_END)
-    return Array(output[..<Int(stream.total_out)])
+    Zlib.compress(data, windowBits: format.zlibWindowBits, level: level, strategy: strategy)
 }
 
 enum Outcome: Equatable {
@@ -56,35 +32,24 @@ enum Outcome: Equatable {
 
 /// zlib's decoding of `data`, which must be one whole stream with nothing after it.
 func zlibDecompress(_ data: [UInt8], format: DeflateFormat = .raw) -> Outcome {
-    var stream = z_stream()
-    precondition(inflateInit2_(&stream, format.zlibWindowBits, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK)
-    defer { inflateEnd(&stream) }
-    var result: [UInt8] = []
-    var chunk = [UInt8](repeating: 0, count: 1 << 16)
-    var input = data
-    return input.withUnsafeMutableBufferPointer { input in
-        stream.next_in = input.baseAddress
-        stream.avail_in = uInt(input.count)
-        while true {
-            let (status, produced) = chunk.withUnsafeMutableBufferPointer { output in
-                stream.next_out = output.baseAddress
-                stream.avail_out = uInt(output.count)
-                let status = inflate(&stream, Z_NO_FLUSH)
-                return (status, output.count - Int(stream.avail_out))
-            }
-            result += chunk[..<produced]
-            switch status {
-            case Z_STREAM_END: return stream.avail_in == 0 ? .decoded(result) : .failed
-            case Z_OK: continue
-            default: return .failed // Including Z_BUF_ERROR: truncated.
-            }
-        }
-    }
+    Zlib.decompress(data, windowBits: format.zlibWindowBits).map { .decoded($0) } ?? .failed
 }
 
-/// Inputs that exercise every block type and match shape.
-func samples() -> [(name: String, bytes: [UInt8])] {
-    var rng = SplitMix64(state: 7)
+/// Inputs that exercise every block type and match shape: empty, one byte, text (200 KB), random (100 KB), runs,
+/// periodic, and large (3 MB, last).
+func samples() -> [(name: String, bytes: [UInt8])] { sampleSet }
+
+/// ``samples()`` without the large one: what the fast tests loop over (bulk tests take the large one).
+func smallSamples() -> [(name: String, bytes: [UInt8])] { sampleSet.dropLast() }
+
+/// The large sample: several megabytes, so output spans windows and back-references reach across them.
+func largeSample() -> [UInt8] { sampleSet.last!.bytes }
+
+/// Made once: in a debug build, generating the 3 MB sample took longer than many of the tests using it.
+private let sampleSet: [(name: String, bytes: [UInt8])] = makeSamples()
+
+private func makeSamples() -> [(name: String, bytes: [UInt8])] {
+    var rng = SplitMix64(seed: 7)
     let words = ["swift", "byte", "span", "inflate", "huffman", "window", " ", "\n", "the", "a"]
     var text: [UInt8] = []
     while text.count < 200_000 {
@@ -108,18 +73,17 @@ func samples() -> [(name: String, bytes: [UInt8])] {
 /// Decodes a whole stream with `decompressAll`, into exactly `capacity` bytes (by default, plenty).
 func decodeAll(_ data: [UInt8], format: DeflateFormat, capacity: Int? = nil) -> Outcome {
     var decoder = DeflateDecoder(format: format)
-    var output = [UInt8](repeating: 0, count: capacity ?? max(1 << 16, data.count * 1100))
-    // Errors handled inside the closure: a typed-throws closure returning a tuple, passed to
-    // `withUnsafeMutableBytes`, crashed Swift 6.4.2's SIL generation ("unsupported collection upcast kind").
-    let produced: Int? = output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-        guard let consumed = try? decoder.decompressAll(data.span.bytes, into: &span), consumed == data.count else {
-            return nil
-        }
-        return span.finalize(for: buffer)
+    // Uninitialized: the default room is up to DEFLATE's 1032:1 expansion (a gigabyte for a megabyte stream), which
+    // zero-filling would write in full; untouched pages of a large allocation are never mapped.
+    let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: capacity ?? max(1 << 16, data.count * 1100), alignment: 1)
+    defer { buffer.deallocate() }
+    var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    guard let consumed = try? decoder.decompressAll(data.span.bytes, into: &span), consumed == data.count else {
+        _ = span.finalize(for: buffer)
+        return .failed
     }
-    guard let produced else { return .failed }
-    return .decoded(Array(output[..<produced]))
+    let produced = span.finalize(for: buffer)
+    return .decoded(Array(UnsafeRawBufferPointer(rebasing: buffer[..<produced])))
 }
 
 /// Decodes a stream fed in pieces of up to `chunk` bytes, into an output buffer of `outputChunk` bytes

@@ -1,8 +1,8 @@
-import SwiftCompilerPlugin
-import SwiftDiagnostics
-import SwiftSyntax
-import SwiftSyntaxBuilder
-import SwiftSyntaxMacros
+internal import SwiftCompilerPlugin
+internal import SwiftDiagnostics
+public import SwiftSyntax
+internal import SwiftSyntaxBuilder
+public import SwiftSyntaxMacros
 
 @main
 struct BytesMacrosPlugin: CompilerPlugin {

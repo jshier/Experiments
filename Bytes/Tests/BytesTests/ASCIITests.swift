@@ -1,4 +1,5 @@
 import Bytes
+import BytesTestSupport
 import Testing
 
 /// ASCII character classes, tags, and numbers written as digits, against plain definitions.
@@ -64,14 +65,8 @@ import Testing
 
     @Test(arguments: [false, true])
     func digitsReadEveryWidth(nearTheEnd: Bool) throws {
-        var state: UInt64 = 41
-        func next() -> UInt64 { // SplitMix64
-            state &+= 0x9E37_79B9_7F4A_7C15
-            var z = state
-            z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-            z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-            return z ^ (z >> 31)
-        }
+        var generator = SplitMix64(seed: 41)
+        func next() -> UInt64 { generator.next() }
         for digitCount in 1...19 {
             var power: UInt64 = 1
             for _ in 0..<digitCount { power = power &* 10 }

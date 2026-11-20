@@ -1,113 +1,221 @@
 import Benchmark
+import BytesTestSupport
 import Foundation
 @_spi(Benchmarking) import NativeAEA
 import System
 
-/// The synthetic archive `Tools/test-data fetch nativeaea-synthetic` makes, and optionally a real one (Xcode's)
-/// named by `NATIVEAEA_ARCHIVE` (with `NATIVEAEA_SIGN_PUB` if its certificate chain isn't Apple's).
+// How package-benchmark runs this executable: once to list the benchmarks, then once more for each benchmark it runs,
+// and every start runs the registration closure (`benchmarks`, below). So registration only names benchmarks;
+// everything a benchmark needs (the opened archive, its first segment decoded) is made in its `setup`, in the one
+// process that runs it.
+//
+// Iterations are set per group, so that one run gives stable numbers in a few seconds a benchmark:
+// - Single-threaded operations report instructions and mallocs, which don't vary between iterations; the iterations
+//   are there for the time's p50 (up to 1,000, or half a second).
+// - Decoding segment 0 (about 0.1 s): 10 iterations.
+// - Whole archives (listing: about 1.3 s for the synthetic archive; extraction: 1.3–2.3 s) run without warmup
+//   iterations (`setup` reads the archive into the page cache instead), 3 and 2 times. A real archive runs once.
+
+/// The synthetic archive `Tools/test-data fetch nativeaea-synthetic` makes, and optionally a real one named by
+/// `NATIVEAEA_ARCHIVE` (with `NATIVEAEA_SIGN_PUB` if its certificate chain isn't Apple's). The real one isn't in the
+/// repository: Xcode's (`Xcode_27.3_beta_2.aea`, about 10 s an extraction) was kept in `~/Scratch`:
+///
+///     NATIVEAEA_ARCHIVE=~/Scratch/Xcode_27.3_beta_2.aea swift package --disable-sandbox benchmark
 enum Fixtures {
-    static let directory = URL(fileURLWithPath: #filePath)
-        .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
-        .appending(path: "TestData/nativeaea-synthetic")
+    static let directory = TestData.directory(set: "nativeaea-synthetic")
     static let synthetic = directory.appending(path: "synthetic.aea")
     static let syntheticKey = directory.appending(path: "signing.pub.pem")
-    /// Extractions go here, each iteration into its own directory, removed after the benchmark.
+    /// Extractions go here, each iteration into its own directory, removed after the benchmark (not between
+    /// iterations, so removing one doesn't overlap the next one's measurement).
     static let output = URL(fileURLWithPath: NSTemporaryDirectory()).appending(path: "NativeAEABenchmarks.noindex")
 
     static func open(_ url: URL, key: URL?) throws -> AEAArchive {
         try AEAArchive(url: url, signingKey: key.map { try AEASigningKey.publicKey(contentsOf: $0) } ?? .certificateChain)
     }
 
-    static var archives: [(name: String, url: URL, key: URL?)] {
-        var archives: [(String, URL, URL?)] = []
+    static var archives: [ArchiveFixture] {
+        var archives: [ArchiveFixture] = []
         if FileManager.default.fileExists(atPath: synthetic.path) {
-            archives.append(("synthetic", synthetic, syntheticKey))
+            archives.append(ArchiveFixture(name: "synthetic", url: synthetic, key: syntheticKey, isReal: false))
         } else {
             print("NativeAEABenchmarks: run `Tools/test-data fetch nativeaea-synthetic` for the synthetic archive's benchmarks")
         }
         if let path = ProcessInfo.processInfo.environment["NATIVEAEA_ARCHIVE"] {
-            archives.append(("Xcode", URL(fileURLWithPath: path), ProcessInfo.processInfo.environment["NATIVEAEA_SIGN_PUB"].map { URL(fileURLWithPath: $0) }))
+            let key = ProcessInfo.processInfo.environment["NATIVEAEA_SIGN_PUB"].map { URL(fileURLWithPath: $0) }
+            archives.append(ArchiveFixture(name: "Xcode", url: URL(fileURLWithPath: path), key: key, isReal: true))
         }
         return archives
     }
 
     static func removeOutput() {
         guard FileManager.default.fileExists(atPath: output.path) else { return }
-        // Extracted files and directories can be read-only.
-        let chmod = Process()
-        chmod.executableURL = URL(fileURLWithPath: "/bin/chmod")
-        chmod.arguments = ["-R", "u+w", output.path]
-        try? chmod.run()
-        chmod.waitUntilExit()
+        // Removing takes about as long as extracting (2.2 s for the synthetic archive's 30,000 entries, 13 s for
+        // Xcode's 167,000), whatever the method: `rm -rf` on 4 or 8 subtrees at once saved 10–15%.
+        if (try? FileManager.default.removeItem(at: output)) != nil { return }
+        // Extracted directories can be read-only, which stops removing their entries: make those writable, then try
+        // again. (Only after a failure: walking Xcode's tree for them costs 2.8 s, and neither archive has any.)
+        _ = try? ExternalTool.run("/usr/bin/find", [output.path, "-type", "d", "!", "-perm", "-u+w", "-exec", "chmod", "u+w", "{}", "+"])
         try? FileManager.default.removeItem(at: output)
     }
 }
 
+/// An archive to benchmark, and what the benchmarks need from it, each made on first use (from a benchmark's
+/// `setup`, so never inside a measurement).
+///
+/// `@unchecked Sendable`: a process runs one benchmark, and its setup, iterations, and teardown run one after another,
+/// so the lazy properties are never made concurrently.
+final class ArchiveFixture: @unchecked Sendable {
+    let name: String
+    let url: URL
+    let key: URL?
+    /// A real archive (Xcode's): whole-archive benchmarks run it once (the synthetic one: listing 3 times, extraction
+    /// 2).
+    let isReal: Bool
+
+    init(name: String, url: URL, key: URL?, isReal: Bool) {
+        self.name = name
+        self.url = url
+        self.key = key
+        self.isReal = isReal
+    }
+
+    lazy var archive: AEAArchive = try! Fixtures.open(url, key: key)
+
+    /// Segment 0, stored and decoded, and the headers that start in it.
+    struct FirstSegment {
+        var stored: [UInt8]
+        var decoded: [UInt8]
+        /// The headers that end in the segment (their blobs may not).
+        var headerCount = 0
+        /// The paths of those headers' entries, as ranges of `decoded`.
+        var paths: [Range<Int>] = []
+    }
+
+    lazy var firstSegment: FirstSegment = {
+        let stored = try! archive.storedBytes(of: 0)
+        var segment = FirstSegment(stored: stored, decoded: [UInt8](repeating: 0, count: archive.segments[0].rawSize))
+        try! SegmentDecoding(archive, backend: .system).decode(stored, into: &segment.decoded)
+        var position = 0
+        segment.decoded.span.bytes.withUnsafeBytes { bytes in
+            while position + 6 <= bytes.count {
+                guard let size = try? AppleArchive.headerByteCount(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position...]))),
+                      position + size <= bytes.count,
+                      let header = try? AppleArchive.parseHeader(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position..<(position + size)])))
+                else { break }
+                if let path = header.path {
+                    segment.paths.append((position + path.offset)..<(position + path.offset + path.count))
+                }
+                position += size + header.blobByteCount
+                segment.headerCount += 1
+            }
+        }
+        return segment
+    }()
+
+    /// Reads the whole file once, so whole-archive benchmarks start from the page cache (their warmup iteration did
+    /// this before, at the cost of a whole iteration).
+    func warmPageCache() {
+        _ = archive
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return }
+        defer { try? handle.close() }
+        while let chunk = try? handle.read(upToCount: 16 << 20), !chunk.isEmpty {}
+    }
+}
+
+/// A segment decoder and its output buffer, made in the benchmark's setup.
+///
+/// `@unchecked Sendable`: used by one benchmark's setup and iterations, one after another.
+final class DecodeState: @unchecked Sendable {
+    var decoder: SegmentDecoding?
+    var output: [UInt8] = []
+}
+
 let benchmarks: @Sendable () -> Void = {
+    // Single-threaded, microseconds or less: instructions and mallocs are the same every iteration, and up to 1,000
+    // iterations give the time a stable p50.
     Benchmark.defaultConfiguration = .init(
         metrics: [.wallClock, .cpuTotal, .instructions, .mallocCountTotal, .peakMemoryResident],
         warmupIterations: 1,
         scalingFactor: .one,
-        maxDuration: .seconds(3),
-        maxIterations: 20
+        maxDuration: .milliseconds(500),
+        maxIterations: 1_000
     )
 
-    // No malloc counts where the pipeline's threads run: package-benchmark's malloc interposer traps when a thread
-    // exits (`count_free` → `_tlv_get_addr` → `calloc`, in `_pthread_tsd_cleanup`). The pipeline's allocations are
-    // counted per segment by the single-threaded benchmarks.
-    let threadedMetrics: [BenchmarkMetric] = [.wallClock, .cpuTotal, .peakMemoryResident]
+    // Malloc counts where the pipeline runs: package-benchmark's malloc interposer used to trap when a thread exited
+    // (`count_free` → `_tlv_get_addr` → `calloc`, in `_pthread_tsd_cleanup`), when the pipeline had threads of its
+    // own. On the cooperative pool, with malloc-interposer 977dc06 (2026-10-29), it doesn't (2026-11-19: about 1,700
+    // per synthetic extraction). The interposer adds its header to every allocation whether or not it counts, so
+    // counting adds only the per-thread increments.
+    let threadedMetrics: [BenchmarkMetric] = [.wallClock, .cpuTotal, .peakMemoryResident, .mallocCountTotal]
 
-    for (name, url, key) in Fixtures.archives {
+    for fixture in Fixtures.archives {
+        let name = fixture.name
+
         // MARK: Container
 
         Benchmark("Open and verify: \(name)") { benchmark in
             for _ in benchmark.scaledIterations {
-                blackHole(try Fixtures.open(url, key: key))
+                blackHole(try Fixtures.open(fixture.url, key: fixture.key))
             }
         }
 
         // MARK: Segments and headers
 
-        let archive = try! Fixtures.open(url, key: key)
-        let segment = 0
-        let stored = try! archive.storedBytes(of: segment)
-        var decoded = [UInt8](repeating: 0, count: archive.segments[segment].rawSize)
-        try! SegmentDecoding(archive, backend: .system).decode(stored, into: &decoded)
-
         for backend in SegmentDecoderBackend.allCases {
             // One 16 MiB segment, decoded: throughput is 16 MiB per iteration.
+            let state = DecodeState()
             Benchmark(
                 "Decode segment 0: \(name): \(backend)",
-                configuration: .init(metrics: [.wallClock, .cpuTotal, .instructions, .mallocCountTotal, .throughput])
+                configuration: .init(
+                    metrics: [.wallClock, .cpuTotal, .instructions, .mallocCountTotal, .throughput],
+                    warmupIterations: 1,
+                    maxDuration: .seconds(2),
+                    maxIterations: 10,
+                    setup: {
+                        let segment = fixture.firstSegment
+                        let decoder = SegmentDecoding(fixture.archive, backend: backend)
+                        var output = [UInt8](repeating: 0, count: segment.decoded.count)
+                        try decoder.decode(segment.stored, into: &output)
+                        precondition(output == segment.decoded)
+                        state.decoder = decoder
+                        state.output = output
+                    }
+                )
             ) { benchmark in
-                let decoder = SegmentDecoding(archive, backend: backend)
-                var output = [UInt8](repeating: 0, count: decoded.count)
-                try decoder.decode(stored, into: &output)
-                precondition(output == decoded)
+                let decoder = state.decoder!
+                let stored = fixture.firstSegment.stored
                 benchmark.startMeasurement()
                 for _ in benchmark.scaledIterations {
-                    try decoder.decode(stored, into: &output)
+                    try decoder.decode(stored, into: &state.output)
                 }
             }
         }
 
-        // Headers in the first segment, parsed (blobs skipped): the walker's own work per entry.
-        let headerCount: Int = {
-            var count = 0
-            var position = 0
-            decoded.span.bytes.withUnsafeBytes { bytes in
-                while position + 6 <= bytes.count {
-                    guard let size = try? AppleArchive.headerByteCount(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position...]))),
-                          position + size <= bytes.count,
-                          let header = try? AppleArchive.parseHeader(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position..<(position + size)])))
-                    else { break }
-                    position += size + header.blobByteCount
-                    count += 1
+        // A decoder's state, made once per decoding task.
+        for backend in SegmentDecoderBackend.allCases {
+            Benchmark(
+                "Make segment decoder: \(name): \(backend)",
+                configuration: .init(setup: { _ = fixture.archive })
+            ) { benchmark in
+                let archive = fixture.archive
+                benchmark.startMeasurement()
+                for _ in benchmark.scaledIterations {
+                    blackHole(SegmentDecoding(archive, backend: backend))
                 }
             }
-            return count
-        }()
-        Benchmark("Parse \(headerCount) headers: \(name) segment 0") { benchmark in
+        }
+
+        // Headers in the first segment, parsed (blobs skipped): the walker's own work per entry. (The synthetic
+        // archive's segment 0 has 170 headers, Xcode 27.3 beta 2's 308. The count was in this benchmark's name, which
+        // would need the segment decoded in every process.)
+        Benchmark(
+            "Parse headers: \(name) segment 0",
+            configuration: .init(setup: { _ = fixture.firstSegment })
+        ) { benchmark in
+            let segment = fixture.firstSegment
+            let decoded = segment.decoded
+            let headerCount = segment.headerCount
+            benchmark.startMeasurement()
             for _ in benchmark.scaledIterations {
                 var position = 0
                 try decoded.span.bytes.withUnsafeBytes { bytes throws(AEAError) in
@@ -121,32 +229,76 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
 
+        // Each entry's parent lookup on the walker's thread (no directories opened, the default): the paths of the
+        // first segment's entries, 100 rounds. "Directory table" alone is making the table, once per extraction
+        // (no paths: it reads none).
+        Benchmark(
+            "Resolve parents x100: \(name) segment 0",
+            configuration: .init(setup: { _ = fixture.firstSegment })
+        ) { benchmark in
+            let segment = fixture.firstSegment
+            let decoded = segment.decoded
+            let paths = segment.paths
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                blackHole(DirectoryResolution.resolve(decoded, paths: paths, rounds: 100))
+            }
+        }
+        Benchmark("Directory table: \(name)") { benchmark in
+            for _ in benchmark.scaledIterations {
+                blackHole(DirectoryResolution.resolve([], paths: [], rounds: 0))
+            }
+        }
+
         // MARK: Whole archives
 
+        // Listing decodes on every core and writes nothing: its iterations spread 2–4% within a run, so 3 iterations'
+        // p50 (their median).
         for backend in SegmentDecoderBackend.allCases {
             Benchmark(
                 "List (decode, verify, parse): \(name): \(backend)",
-                configuration: .init(metrics: threadedMetrics, maxDuration: .seconds(20), maxIterations: 5)
-            ) { benchmark in
+                configuration: .init(
+                    metrics: threadedMetrics,
+                    warmupIterations: 0,
+                    maxDuration: .seconds(10),
+                    maxIterations: fixture.isReal ? 1 : 3,
+                    setup: { fixture.warmPageCache() }
+                )
+            ) { (benchmark: Benchmark) async throws in
                 var options = AEAReadOptions()
                 options.decoder = backend
+                let archive = fixture.archive
                 for _ in benchmark.scaledIterations {
-                    blackHole(try archive.forEachEntry(options: options) { _ in })
+                    blackHole(try await archive.forEachEntry(options: options) { _ in })
                 }
             }
         }
 
+        // Extraction is bound by the file system: its iterations spread 2–14% within a run whatever their number, so
+        // 2 iterations' p50 (their minimum). Each iteration extracts into its own directory, and the teardown removes
+        // them all (2.2 s per synthetic tree, 13 s per Xcode tree), outside the measurement.
         for mode in DiskCompressionMode.allCases {
             Benchmark(
                 "Extract: \(name): \(mode)",
-                configuration: .init(metrics: threadedMetrics, maxDuration: .seconds(60), maxIterations: 3, teardown: { Fixtures.removeOutput() })
-            ) { benchmark in
-                Fixtures.removeOutput()
+                configuration: .init(
+                    metrics: threadedMetrics,
+                    warmupIterations: 0,
+                    maxDuration: .seconds(10),
+                    maxIterations: fixture.isReal ? 1 : 2,
+                    setup: {
+                        Fixtures.removeOutput()
+                        fixture.warmPageCache()
+                    },
+                    teardown: { Fixtures.removeOutput() }
+                )
+            ) { (benchmark: Benchmark) async throws in
                 var options = AEAExtractionOptions()
                 options.diskCompression = mode
+                let destination = FilePath(Fixtures.output.appending(path: "\(benchmark.currentIteration)-\(UUID().uuidString)").path)
+                let archive = fixture.archive
                 benchmark.startMeasurement()
-                for iteration in benchmark.scaledIterations {
-                    blackHole(try archive.extract(to: FilePath(Fixtures.output.appending(path: "\(iteration)-\(UUID().uuidString)").path), options: options))
+                for _ in benchmark.scaledIterations {
+                    blackHole(try await archive.extract(to: destination, options: options))
                 }
             }
         }

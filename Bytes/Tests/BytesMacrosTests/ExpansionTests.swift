@@ -1,8 +1,20 @@
 import BytesMacrosPlugin
 import MacroTesting
+// `record: .missing`'s type (MacroTesting's dependency).
+import SnapshotTesting
 import Testing
 
-@Suite(.macros(["BitFields": BitFieldsMacro.self, "BinaryRecord": BinaryRecordMacro.self, "Flag": FieldMarkerMacro.self, "Field": FieldMarkerMacro.self], record: .missing))
+extension Trait where Self == _MacrosTestTrait {
+    /// Expands BytesMacros' macros, recording expansions that have no snapshot yet.
+    static var bytesMacros: Self {
+        .macros(
+            ["BitFields": BitFieldsMacro.self, "BinaryRecord": BinaryRecordMacro.self, "Flag": FieldMarkerMacro.self, "Field": FieldMarkerMacro.self],
+            record: .missing
+        )
+    }
+}
+
+@Suite(.bytesMacros)
 struct ExpansionTests {
     @Test func bitFieldsInAByte() {
         assertMacro {
@@ -131,7 +143,7 @@ struct ExpansionTests {
     }
 }
 
-@Suite(.macros(["BitFields": BitFieldsMacro.self, "BinaryRecord": BinaryRecordMacro.self, "Flag": FieldMarkerMacro.self, "Field": FieldMarkerMacro.self], record: .missing))
+@Suite(.bytesMacros)
 struct DiagnosticTests {
     @Test func unmarkedPropertyInBitFields() {
         assertMacro {

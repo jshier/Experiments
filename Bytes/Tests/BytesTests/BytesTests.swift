@@ -1,4 +1,5 @@
 import Bytes
+import BytesTestSupport
 import Testing
 
 /// A deliberately naive bit-at-a-time model of the stream, to check `BytesReader` against.
@@ -36,14 +37,8 @@ struct ReferenceStream {
 
 /// Deterministic pseudo-random bytes (SplitMix64).
 func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] {
-    var state = seed
-    return (0..<count).map { _ in
-        state &+= 0x9E37_79B9_7F4A_7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-        return UInt8(truncatingIfNeeded: z ^ (z >> 31))
-    }
+    var generator = SplitMix64(seed: seed)
+    return generator.bytes(count)
 }
 
 // MARK: - Bits
@@ -132,15 +127,15 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         // Too long for MQTT's 4 bytes, truncated, and past 64 bits: nothing consumed.
         let five: [UInt8] = [0x80, 0x80, 0x80, 0x80, 0x01]
         var reader = BytesReader(five.span)
-        #expect(throws: BytesError.invalidValue) { try reader.read(LEB128.self, maxByteCount: 4) }
+        #expect(throws: BytesError.invalidValue) { _ = try reader.read(LEB128.self, maxByteCount: 4) }
         #expect(try reader.read(LEB128.self) == 1 << 28)
         let truncated: [UInt8] = [0x80, 0x80]
         var short = BytesReader(truncated.span)
-        #expect(throws: BytesError.insufficientData) { try short.read(LEB128.self, maxByteCount: 4) }
+        #expect(throws: BytesError.insufficientData) { _ = try short.read(LEB128.self, maxByteCount: 4) }
         #expect(short.byteOffset == 0)
         let tooBig: [UInt8] = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x02]
         var big = BytesReader(tooBig.span)
-        #expect(throws: BytesError.invalidValue) { try big.read(LEB128.self) }
+        #expect(throws: BytesError.invalidValue) { _ = try big.read(LEB128.self) }
     }
 
     @Test func prefixedSectionsAndStrings() throws {
@@ -428,11 +423,11 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
         #expect(try reader.read(QualityOfService.self, as: Crumb.self) == .exactlyOnce)
         try reader.skip(bitCount: 6)
         #expect(try reader.read(Kind.self, as: Byte2.self, .bigEndian) == .large)
-        #expect(throws: BytesError.invalidValue) { try reader.read(QualityOfService.self, as: Crumb.self) }
+        #expect(throws: BytesError.invalidValue) { _ = try reader.read(QualityOfService.self, as: Crumb.self) }
         #expect(reader.byteOffset == 3 && reader.bitOffset == 0) // Nothing consumed.
         var little = BytesReader(bytes.span)
         try little.skip(byteCount: 1)
-        #expect(throws: BytesError.invalidValue) { try little.read(Kind.self, as: Byte2.self, .littleEndian) }
+        #expect(throws: BytesError.invalidValue) { _ = try little.read(Kind.self, as: Byte2.self, .littleEndian) }
     }
 }
 
@@ -526,11 +521,11 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
         #expect(parsed.samples == reading.samples && parsed.sensor == reading.sensor)
         // Truncated anywhere: `.truncated`. A bad unit (3): `.malformed`.
         for length in [0, 4, 7, bytes.count - 1] {
-            #expect(throws: ReadingError.truncated) { try parseReading(bytes.span.bytes.extracting(first: length)) }
+            #expect(throws: ReadingError.truncated) { _ = try parseReading(bytes.span.bytes.extracting(first: length)) }
         }
         var badUnit = bytes
         badUnit[2] |= 0b0000_1100
-        #expect(throws: ReadingError.malformed) { try parseReading(badUnit.span.bytes) }
+        #expect(throws: ReadingError.malformed) { _ = try parseReading(badUnit.span.bytes) }
     }
 }
 
@@ -594,7 +589,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
         // One byte short: throws without consuming.
         var reader = BytesReader(data.span)
         try reader.skip(byteCount: data.count - T.byteCount + 1)
-        #expect(throws: BytesError.insufficientData) { try reader.read(T.self) }
+        #expect(throws: BytesError.insufficientData) { _ = try reader.read(T.self) }
         #expect(reader.byteOffset == data.count - T.byteCount + 1)
     }
 }
@@ -633,7 +628,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
         }
         #expect(reader.remainingBitCount == data.count * 8 - position)
         let tooMany = reader.remainingBitCount + 1
-        #expect(throws: BytesError.insufficientData) { try reader.read(bitCount: tooMany) }
+        #expect(throws: BytesError.insufficientData) { _ = try reader.read(bitCount: tooMany) }
     }
 
     @Test func msbFirstExample() throws {
@@ -684,7 +679,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
         let name = try reader.read(byteCount: 2)
         let atEnd = reader.isAtEnd // `#expect` can't inspect properties of a ~Copyable, ~Escapable value.
         #expect(name.byteCount == 2 && atEnd)
-        #expect(throws: BytesError.insufficientData) { try reader.read(Byte2.self) }
+        #expect(throws: BytesError.insufficientData) { _ = try reader.read(Byte2.self) }
     }
 
     @Test func expectMismatchConsumesNothing() throws {
@@ -753,7 +748,7 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
                 let value = try reader.read(RawBytes<n>.self)
                 #expect(value.array == expected(index) && peeked == value, "RawBytes<\(n)> #\(index) shifted \(bitShift)")
             }
-            #expect(throws: BytesError.insufficientData) { try reader.read(RawBytes<n>.self) }
+            #expect(throws: BytesError.insufficientData) { _ = try reader.read(RawBytes<n>.self) }
 
             // forEach.
             var iterated: [RawBytes<n>] = []
@@ -843,14 +838,8 @@ struct RoundTrip {
 
 /// A random but reproducible sequence of mixed writes.
 func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
-    var state = seed
-    func next() -> UInt64 {
-        state &+= 0x9E37_79B9_7F4A_7C15
-        var z = state
-        z = (z ^ (z >> 30)) &* 0xBF58_476D_1CE4_E5B9
-        z = (z ^ (z >> 27)) &* 0x94D0_49BB_1331_11EB
-        return z ^ (z >> 31)
-    }
+    var generator = SplitMix64(seed: seed)
+    func next() -> UInt64 { generator.next() }
     func group<T: ByteGroup>(_: T.Type, _ value: UInt64, _ order: ByteOrder) -> RoundTrip {
         let mask = T.Integer.max >> (T.Integer.bitWidth - 8 * T.byteCount)
         let integer = T.Integer(truncatingIfNeeded: UInt128(value) << 64 | UInt128(value &* 31)) & mask
@@ -1020,7 +1009,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
 
 // MARK: - Bulk operations
 
-@Suite struct BulkTests {
+@Suite struct BulkOperationTests {
     @Test(arguments: [ByteOrder.littleEndian, .bigEndian])
     func decodeRuns(order: ByteOrder) throws {
         let data = randomBytes(1_001)
@@ -1273,11 +1262,11 @@ struct WideByte5: ByteGroup {
     @Test func overlongLEB128AtEndIsInvalid() {
         let data: [UInt8] = [0x80, 0x80, 0x80, 0x80]
         var reader = BytesReader(data.span)
-        #expect(throws: BytesError.invalidValue) { try reader.read(LEB128.self, maxByteCount: 4) }
+        #expect(throws: BytesError.invalidValue) { _ = try reader.read(LEB128.self, maxByteCount: 4) }
         #expect(reader.byteOffset == 0)
         let short: [UInt8] = [0x80, 0x80, 0x80]
         var incomplete = BytesReader(short.span)
-        #expect(throws: BytesError.insufficientData) { try incomplete.read(LEB128.self, maxByteCount: 4) }
+        #expect(throws: BytesError.insufficientData) { _ = try incomplete.read(LEB128.self, maxByteCount: 4) }
     }
 
     /// A length that can't fit in an `Int` is malformed, not incomplete.
@@ -1397,7 +1386,8 @@ struct WideByte5: ByteGroup {
     @Test(arguments: [BitOrder.leastSignificantFirst, .mostSignificantFirst])
     func readsMatchCursor(order: BitOrder) throws {
         let data = (0..<40).map { UInt8(truncatingIfNeeded: $0 &* 151 &+ 17) }
-        var rng = SystemRandomNumberGenerator()
+        let seed: UInt64 = 0xB17B_0FF0
+        var rng = SplitMix64(seed: seed)
         for start in 0..<16 {
             var reference = BytesReader(data.span, bitOrder: order)
             try reference.skip(bitCount: start)
@@ -1406,7 +1396,7 @@ struct WideByte5: ByteGroup {
             var buffer = BitBuffer(source)
             while reference.remainingBitCount > 0 {
                 let width = min(Int.random(in: 0...25, using: &rng), reference.remainingBitCount)
-                #expect(try buffer.read(bitCount: width) == (reference.read(bitCount: width)), "start \(start) width \(width)")
+                #expect(try buffer.read(bitCount: width) == (reference.read(bitCount: width)), "start \(start) width \(width), seed \(seed)")
             }
             let overrun = buffer.isOverrun
             #expect(!overrun)

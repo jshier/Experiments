@@ -102,6 +102,7 @@ public extension GenericBytesReader {
         precondition(size > 0, "\(T.self).RawBytes has no bytes") // Constant-folded.
         if likely(_bitOffset == 0) {
             guard likely(span.byteCount &- _byteOffset >= size) else { throw .insufficientData }
+            // Unsafe: an unchecked load. Safe: `size` bytes remain (just checked).
             return T(rawBytes: unsafe Load.rawBytes(T.RawBytes.self, from: span, at: _byteOffset))
         }
         guard remainingByteCount >= size else { throw .insufficientData }
@@ -154,6 +155,7 @@ public extension GenericBytesReader {
         var index = 0
         do throws(E) {
             while index < count {
+                // Unsafe: an unchecked load. Safe: `count` values of `size` bytes remain (checked above).
                 try body(T(rawBytes: unsafe Load.rawBytes(T.RawBytes.self, from: span, at: start &+ index &* size)))
                 index &+= 1
             }

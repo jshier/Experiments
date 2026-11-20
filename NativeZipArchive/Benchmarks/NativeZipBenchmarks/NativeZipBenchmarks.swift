@@ -3,20 +3,28 @@ import Foundation
 @_spi(Benchmarking) import NativeZip
 import System
 
+// The benchmark tool launches this executable once to list the benchmarks and again for every benchmark it runs,
+// so registration does no work: the fixtures are made or found in `Benchmark.setup` (before a benchmark runs, never
+// for a listing), one-time checks run in their benchmark's `setup`, and inputs every sample shares are made there too.
 let benchmarks: @Sendable () -> Void = {
+    // Under a millisecond a sample (parsing, CRC-32, verifying in parallel): 50 samples, a fraction of a second.
     Benchmark.defaultConfiguration = .init(
         metrics: [.wallClock, .cpuTotal, .instructions, .mallocCountTotal, .peakMemoryResident],
         warmupIterations: 1,
         scalingFactor: .one,
-        maxDuration: .seconds(2),
+        maxDuration: .seconds(1),
         maxIterations: 50
     )
+    // 5–35 ms a sample (32 MB decoded or extracted, 2,000 small files decoded): 20 samples, under a second. Their
+    // instruction p50s match 50 samples' within 1%; times are steady to a few percent.
+    let large = Benchmark.Configuration(maxDuration: .seconds(2), maxIterations: 20)
+    // 2,000 files created on disk, 80–200 ms a sample plus about 100 ms deleting them: as many samples as fit in 2 s
+    // (6–12). The file system sets their spread, not the sample count: samples differ by 20–40%, and with identical
+    // code two runs' p50s differed by up to 16% (instructions up to 9%, 30% for the floors: kernel work). Compare these
+    // only within one interleaved run, or by several runs.
+    let files = Benchmark.Configuration(maxDuration: .seconds(2), maxIterations: 12)
 
-    do {
-        try Fixtures.prepare()
-    } catch {
-        fatalError("Couldn't create benchmark fixtures: \(error)")
-    }
+    Benchmark.setup = { try Fixtures.prepare() }
 
     // MARK: Parsing
 
@@ -26,27 +34,14 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
-    // The `Bytes` parser above against the original `ByteReader` one, which must agree on every entry.
-    for url in [Fixtures.smallFiles, Fixtures.largeText, Fixtures.largeRandom] {
-        let archive = try! ZipArchive(url: url)
-        let original = try! ZipArchive.entriesUsingByteReader(of: url)
-        precondition(archive.entries.count == original.count)
-        for (new, old) in zip(archive.entries, original) {
-            precondition(
-                new.path == old.path && new.kind == old.kind && new.method == old.method && new.flags == old.flags
-                    && new.crc32 == old.crc32 && new.compressedSize == old.compressedSize
-                    && new.uncompressedSize == old.uncompressedSize && new.localHeaderOffset == old.localHeaderOffset
-                    && new.posixPermissions == old.posixPermissions && new.modificationDate == old.modificationDate,
-                "Parsers disagree on \(new.path)"
-            )
-            precondition(try! archive.payloadCount(of: new) == (try! archive.payloadCountUsingByteReader(of: old)))
-        }
-    }
-
+    // The `Bytes` parser above against the original `ByteReader` one, which must agree on every entry: checked once,
+    // before this benchmark runs.
     Benchmark("Parse central directory: original ByteReader") { benchmark in
         for _ in benchmark.scaledIterations {
             try blackHole(ZipArchive.entriesUsingByteReader(of: Fixtures.smallFiles))
         }
+    } setup: {
+        try Fixtures.checkParsersAgree()
     }
 
     Benchmark("Locate 2,000 payloads") { benchmark in
@@ -71,6 +66,8 @@ let benchmarks: @Sendable () -> Void = {
 
     // MARK: Decompression (no filesystem writes)
 
+    // Archives are opened in every sample (outside the measurement), so each sample maps them afresh and touches
+    // their pages for the first time inside the measurement, as a program extracting an archive does.
     func firstFile(_ archive: ZipArchive) -> ZipEntry {
         archive.entries.first { $0.kind == .file }!
     }
@@ -79,7 +76,7 @@ let benchmarks: @Sendable () -> Void = {
     for backend in [ZipDecoder.Backend.bytes, .zlib] {
         let suffix = backend == .bytes ? "Bytes" : "zlib"
 
-        Benchmark("Inflate + CRC 32 MB text: \(suffix)") { benchmark in
+        Benchmark("Inflate + CRC 32 MB text: \(suffix)", configuration: large) { benchmark in
             let archive = try ZipArchive(url: Fixtures.largeText)
             let entry = firstFile(archive)
             var decoder = ZipDecoder(backend: backend)
@@ -90,7 +87,7 @@ let benchmarks: @Sendable () -> Void = {
         }
 
         // Runs of 2- to 7-byte pixels: matches 2 to 7 bytes back, which copy a repeating pattern.
-        Benchmark("Inflate + CRC 32 MB raster: \(suffix)") { benchmark in
+        Benchmark("Inflate + CRC 32 MB raster: \(suffix)", configuration: large) { benchmark in
             let archive = try ZipArchive(url: Fixtures.raster)
             let entry = firstFile(archive)
             var decoder = ZipDecoder(backend: backend)
@@ -100,7 +97,7 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
 
-        Benchmark("Inflate + CRC 2,000 small files: \(suffix)") { benchmark in
+        Benchmark("Inflate + CRC 2,000 small files: \(suffix)", configuration: large) { benchmark in
             let archive = try ZipArchive(url: Fixtures.smallFiles)
             let files = archive.entries.filter { $0.kind == .file }
             var decoder = ZipDecoder(backend: backend)
@@ -121,8 +118,8 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
 
-        extractionBenchmark("Extract 32 MB text: \(suffix)", archive: Fixtures.largeText, backend: backend)
-        extractionBenchmark("Extract 2,000 small files: \(suffix)", archive: Fixtures.smallFiles, backend: backend)
+        extractionBenchmark("Extract 32 MB text: \(suffix)", archive: Fixtures.largeText, backend: backend, configuration: large)
+        extractionBenchmark("Extract 2,000 small files: \(suffix)", archive: Fixtures.smallFiles, backend: backend, configuration: files)
 
         // A stored entry is only a CRC: the backends' checksums end to end.
         Benchmark("Stored + CRC 32 MB random: \(suffix)") { benchmark in
@@ -136,25 +133,28 @@ let benchmarks: @Sendable () -> Void = {
         }
 
         // CRC-32 alone, at the sizes zip entries come in: a large file (from memory), a cache-resident
-        // buffer, small files, and tiny ones. Each runs enough bytes per iteration (32 MB) to time.
+        // buffer, small files, and tiny ones. Each runs enough bytes per iteration (32 MB) to time. The
+        // bytes are made once, in setup (CRC-32's work doesn't depend on them).
         for (label, size) in [("32 MB", 32 << 20), ("256 KB, in cache", 256 << 10), ("1 KB", 1 << 10), ("64 B", 64)] {
-            Benchmark("CRC-32 \(label): \(suffix)", configuration: .init(metrics: [.wallClock, .instructions, .throughput])) { benchmark in
-                var rng = SystemRandomNumberGenerator()
-                let bytes = (0..<size).map { _ in UInt8.random(in: 0...255, using: &rng) }
-                let repeats = (32 << 20) / size
-                benchmark.startMeasurement()
-                for _ in benchmark.scaledIterations {
-                    for _ in 0..<repeats {
-                        blackHole(DeflateBackends.crc32(bytes.span.bytes, backend: backend))
+            let repeats = (32 << 20) / size
+            Benchmark(
+                "CRC-32 \(label): \(suffix)",
+                configuration: .init(metrics: [.wallClock, .instructions, .throughput]),
+                closure: { (benchmark: Benchmark, bytes: [UInt8]) in
+                    for _ in benchmark.scaledIterations {
+                        for _ in 0..<repeats {
+                            blackHole(DeflateBackends.crc32(bytes.span.bytes, backend: backend))
+                        }
                     }
-                }
-            }
+                },
+                setup: { Fixtures.randomBytes(count: size) }
+            )
         }
     }
 
     // MARK: Building blocks
 
-    Benchmark("Backend: Compression.framework one-shot 32 MB") { benchmark in
+    Benchmark("Backend: Compression.framework one-shot 32 MB", configuration: large) { benchmark in
         let archive = try ZipArchive(url: Fixtures.largeText)
         let entry = firstFile(archive)
         // Grab the raw payload once via the archive's own bytes; decode it repeatedly.
@@ -170,25 +170,32 @@ let benchmarks: @Sendable () -> Void = {
 
     // MARK: Extraction to disk
 
-    func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil, backend: ZipDecoder.Backend = .bytes) {
-        Benchmark(name) { benchmark in
+    // Each sample extracts into a new directory under `Fixtures.output` (a `.noindex` directory, which Spotlight
+    // skips). Many small files are removed after each sample, outside the measurement; one large file is kept until
+    // teardown (see `Fixtures.remove(_:)` for the measurements behind each).
+    func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil, backend: ZipDecoder.Backend = .bytes,
+                             configuration: Benchmark.Configuration) {
+        let removeEachSample = url == Fixtures.smallFiles
+        Benchmark(name, configuration: configuration) { benchmark in
             let archive = try ZipArchive(url: url)
             var options = ExtractionOptions()
             options.backend = backend
             if let maxConcurrency { options.maxConcurrency = maxConcurrency }
             for _ in benchmark.scaledIterations {
-                let destination = Fixtures.scratchDirectory()
+                let destination = Fixtures.outputDirectory()
                 benchmark.startMeasurement()
                 try await archive.extract(to: FilePath(destination.path), options: options)
                 benchmark.stopMeasurement()
-                Fixtures.removeScratch(destination)
+                if removeEachSample { Fixtures.remove(destination) }
             }
+        } teardown: {
+            Fixtures.removeOutput()
         }
     }
 
     // Zstandard (method 93, the `zstd` command at level 3) against the DEFLATE rows above, on the same 32 MB.
     for (label, url) in [("text", Fixtures.zstdText), ("raster", Fixtures.zstdRaster)] {
-        Benchmark("Zstd + CRC 32 MB \(label)") { benchmark in
+        Benchmark("Zstd + CRC 32 MB \(label)", configuration: large) { benchmark in
             let archive = try ZipArchive(url: url)
             let entry = firstFile(archive)
             var decoder = ZipDecoder()
@@ -198,21 +205,21 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
     }
-    extractionBenchmark("Extract 32 MB text: Zstd", archive: Fixtures.zstdText)
+    extractionBenchmark("Extract 32 MB text: Zstd", archive: Fixtures.zstdText, configuration: large)
 
     for workers in [1, 2, 4, 8] {
         extractionBenchmark("Extract 2,000 small files (\(workers) worker\(workers == 1 ? "" : "s"))",
-                            archive: Fixtures.smallFiles, maxConcurrency: workers)
+                            archive: Fixtures.smallFiles, maxConcurrency: workers, configuration: files)
     }
 
     // The kernel cost of creating the same files with no decoding at all: a floor for extraction.
-    Benchmark("Floor: create + write 2,000 files (no decoding)") { benchmark in
+    Benchmark("Floor: create + write 2,000 files (no decoding)", configuration: files) { benchmark in
         let archive = try ZipArchive(url: Fixtures.smallFiles)
         let files = archive.entries.filter { $0.kind == .file }
         let directories = Set(files.map { FilePath($0.path).removingLastComponent() })
         let payload = [UInt8](repeating: 0x61, count: 10_000)
         for _ in benchmark.scaledIterations {
-            let destination = Fixtures.scratchDirectory()
+            let destination = Fixtures.outputDirectory()
             let root = FilePath(destination.path)
             for directory in directories {
                 try FileManager.default.createDirectory(atPath: root.pushing(directory).string, withIntermediateDirectories: true)
@@ -224,19 +231,19 @@ let benchmarks: @Sendable () -> Void = {
                 try descriptor.closeAfter { _ = try descriptor.writeAll(payload) }
             }
             benchmark.stopMeasurement()
-            Fixtures.removeScratch(destination)
+            Fixtures.remove(destination)
         }
     }
 
     // Same, but each file is opened relative to an already-open descriptor for its directory (openat),
     // so the kernel resolves one path component instead of the whole absolute path.
-    Benchmark("Floor: create + write 2,000 files via openat") { benchmark in
+    Benchmark("Floor: create + write 2,000 files via openat", configuration: files) { benchmark in
         let archive = try ZipArchive(url: Fixtures.smallFiles)
         let files = archive.entries.filter { $0.kind == .file }
         let directories = Set(files.map { FilePath($0.path).removingLastComponent() })
         let payload = [UInt8](repeating: 0x61, count: 10_000)
         for _ in benchmark.scaledIterations {
-            let destination = Fixtures.scratchDirectory()
+            let destination = Fixtures.outputDirectory()
             let root = FilePath(destination.path)
             var descriptors: [FilePath: FileDescriptor] = [:]
             for directory in directories {
@@ -253,28 +260,11 @@ let benchmarks: @Sendable () -> Void = {
             for descriptor in descriptors.values {
                 try descriptor.close()
             }
-            Fixtures.removeScratch(destination)
+            Fixtures.remove(destination)
         }
     }
 
-    extractionBenchmark("Extract 32 MB random", archive: Fixtures.largeRandom)
-
-    // Like the CLI: opening (mapping + parsing) is inside the measurement, so first-touch page faults count.
-    func openAndExtractBenchmark(_ name: String, archive url: URL) {
-        Benchmark(name) { benchmark in
-            for _ in benchmark.scaledIterations {
-                let destination = Fixtures.scratchDirectory()
-                benchmark.startMeasurement()
-                try await ZipArchive(url: url).extract(to: FilePath(destination.path))
-                benchmark.stopMeasurement()
-                Fixtures.removeScratch(destination)
-            }
-        }
-    }
-
-    openAndExtractBenchmark("Open + extract 2,000 small files", archive: Fixtures.smallFiles)
-    openAndExtractBenchmark("Open + extract 32 MB text", archive: Fixtures.largeText)
-    openAndExtractBenchmark("Open + extract 32 MB random", archive: Fixtures.largeRandom)
+    extractionBenchmark("Extract 32 MB random", archive: Fixtures.largeRandom, configuration: large)
 }
 
 /// Finds an entry's payload byte range by parsing its local header (benchmark-only helper).

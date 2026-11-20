@@ -61,8 +61,11 @@ struct FieldElement: Sendable, Equatable {
 /// try aead.open(&message, nonce: nonce, authenticating: header, tag: tag.span.bytes)  // throws `.mismatch` if forged
 /// ```
 ///
-/// Opening checks the tag over the ciphertext before decrypting anything: a forged message is never decrypted.
-/// Nonces must never repeat under one key (TLS's record nonces don't: they're the sequence number XOR a
+/// Opening releases no plaintext from a forged message: when the tag doesn't match, `open` throws with the buffer
+/// holding the ciphertext it was given. Messages of 128 bytes or more are hashed and decrypted in one pass, so
+/// during the call the buffer may hold a forged message's decryption, which is encrypted back before `open` throws;
+/// don't read the buffer from elsewhere while `open` runs (shorter messages are checked before anything is
+/// decrypted). Nonces must never repeat under one key (TLS's record nonces don't: they're the sequence number XOR a
 /// per-direction IV). A message is at most 2³⁶ − 32 bytes, SP 800-38D's limit.
 public struct AESGCM: Sendable {
     @usableFromInline let aes: AES
@@ -134,23 +137,48 @@ public struct AESGCM: Sendable {
         return finishTag(hash, aadByteCount: aad.byteCount, ciphertextByteCount: message.byteCount, j0: j0)
     }
 
-    /// Checks `tag` against `message` and `aad`, then decrypts `message` in place.
+    /// Checks `tag` against `message` and `aad`, and decrypts `message` in place.
     ///
     /// - Parameters:
-    ///   - message: The ciphertext, replaced by the plaintext if the tag matches; untouched otherwise.
+    ///   - message: The ciphertext, replaced by the plaintext if the tag matches; as it was otherwise.
     ///   - nonce: The 12-byte nonce it was sealed with.
     ///   - aad: The additional data it was sealed with.
     ///   - tag: The 16-byte tag.
     /// - Throws: ``BytesError/mismatch`` if the tag doesn't match (the message or data was altered, or the key or
-    ///   nonce is wrong); ``BytesError/invalidValue`` if `tag` isn't 16 bytes or the message is too long.
+    ///   nonce is wrong); ``BytesError/invalidValue`` if `tag` isn't 16 bytes or the message is too long. `message`
+    ///   then holds the ciphertext it was called with.
     /// - Precondition: `nonce` is 12 bytes.
     public func open(_ message: inout MutableRawSpan, nonce: RawSpan, authenticating aad: RawSpan, tag: RawSpan) throws(BytesError) {
         guard tag.byteCount == 16, message.byteCount <= Self.maximumMessageByteCount else { throw .invalidValue }
         let (j0, counter) = Self.counterBlocks(nonce)
-        let expected = self.tag(aad: aad, ciphertext: message.bytes, j0: j0)
-        guard constantTimeEquals(expected.span.bytes, tag) else { throw .mismatch }
         var counterState = counter
-        aes.counterMode(&message, counter: &counterState)
+        var hash = FieldElement.zero
+        absorb(aad, into: &hash)
+        var done = 0
+        #if HardwareCrypto && arch(arm64) && !Portable
+        // Whole groups of eight blocks hashed and decrypted in one pass (stitched), and encrypted again below if the
+        // tag doesn't match; the rest hashed first and decrypted only once it does.
+        // Unsafe: the message's memory for the stitched loop. Safe: the loop stays within `byteCount`, and the
+        // pointer doesn't outlive the closure.
+        done = message.withUnsafeMutableBytes { buffer in
+            unsafe openBatches(buffer.baseAddress, count: buffer.count, counter: &counterState, hash: &hash)
+        }
+        #endif
+        absorb(message.bytes.extracting(done...), into: &hash)
+        let expected = finishTag(hash, aadByteCount: aad.byteCount, ciphertextByteCount: message.byteCount, j0: j0)
+        guard constantTimeEquals(expected.span.bytes, tag) else {
+            #if HardwareCrypto && arch(arm64) && !Portable
+            if done > 0 {
+                // The same keystream again: the ciphertext, as it was.
+                var restoring = counter
+                var stitched = message._mutatingExtracting(0..<done)
+                aes.counterMode(&stitched, counter: &restoring)
+            }
+            #endif
+            throw .mismatch
+        }
+        var rest = message._mutatingExtracting(done...)
+        aes.counterMode(&rest, counter: &counterState)
     }
 
     /// J₀ = nonce ‖ 0³¹ ‖ 1 as bytes, and the counter for the message, which starts at J₀ + 1.
@@ -159,17 +187,9 @@ public struct AESGCM: Sendable {
         var block = InlineArray<16, UInt8>(repeating: 0)
         for index in 0..<12 { block[index] = nonce.load(fromByteOffset: index, as: UInt8.self) }
         block[15] = 1
-        var counter = AES.Counter(bigEndianCounterIn: block.span.bytes)
+        var counter = AES.Counter(bigEndian32BitCounterIn: block.span.bytes)
         _ = counter.next() // J₀ itself encrypts the tag, below.
         return (block, counter)
-    }
-
-    /// The tag: GHASH over the padded `aad` and `ciphertext` and their bit lengths, XOR E(K, J₀).
-    func tag(aad: RawSpan, ciphertext: RawSpan, j0: InlineArray<16, UInt8>) -> InlineArray<16, UInt8> {
-        var hash = FieldElement.zero
-        absorb(aad, into: &hash)
-        absorb(ciphertext, into: &hash)
-        return finishTag(hash, aadByteCount: aad.byteCount, ciphertextByteCount: ciphertext.byteCount, j0: j0)
     }
 
     /// The tag from GHASH over the data so far: the bit lengths hashed in last, then XOR E(K, J₀).
@@ -353,6 +373,90 @@ public struct AESGCM: Sendable {
             }
             // Unsafe: in-place loads and stores of this group. Safe: `128 × (batch + 1) <= count`.
             let block = unsafe base + 128 &* batch
+            unsafe AES.finish(b0, lastKey, finalKey, block, block)
+            unsafe AES.finish(b1, lastKey, finalKey, block + 16, block + 16)
+            unsafe AES.finish(b2, lastKey, finalKey, block + 32, block + 32)
+            unsafe AES.finish(b3, lastKey, finalKey, block + 48, block + 48)
+            unsafe AES.finish(b4, lastKey, finalKey, block + 64, block + 64)
+            unsafe AES.finish(b5, lastKey, finalKey, block + 80, block + 80)
+            unsafe AES.finish(b6, lastKey, finalKey, block + 96, block + 96)
+            unsafe AES.finish(b7, lastKey, finalKey, block + 112, block + 112)
+        }
+        counter.block = bitCast(bytes_rev32_words(native), to: SIMD2<UInt64>.self)
+        hash = FieldElement(low: y[0], high: y[1])
+        return batches &* 128
+    }
+
+    /// Hashes and decrypts whole groups of eight blocks of `base` in place, in one pass: each group's ciphertext
+    /// hashed (one block per AES round, read before the group is overwritten) while its keystream is made, so the
+    /// AES and carry-less multiply units work at once, as in ``sealBatches(_:count:counter:hash:)``.
+    ///
+    /// - Returns: The bytes done: a multiple of 128.
+    @unsafe @inline(never)
+    func openBatches(_ base: UnsafeMutableRawPointer?, count: Int, counter: inout AES.Counter, hash: inout FieldElement) -> Int {
+        let batches = count / 128
+        guard batches > 0, let base = unsafe base else { return 0 }
+        let keys = aes.roundKeys
+        let k0 = keys[0], k1 = keys[1], k2 = keys[2], k3 = keys[3], k4 = keys[4], k5 = keys[5], k6 = keys[6], k7 = keys[7]
+        let k8 = keys[8], k9 = keys[9], k10 = keys[10], k11 = keys[11], k12 = keys[12], k13 = keys[13], k14 = keys[14]
+        let rounds = aes.rounds
+        let p = powers, s = powerSums
+        var y = SIMD2(hash.low, hash.high)
+        // GCM's counter: the block's words byte-swapped to native, so the last is the counter.
+        var native = bytes_rev32(bitCast(counter.block, to: SIMD16<UInt8>.self))
+        var low = SIMD2<UInt64>.zero, middle = SIMD2<UInt64>.zero, high = SIMD2<UInt64>.zero
+
+        /// One ciphertext block of the group at `group` into the sums (`first` adds the running hash).
+        @inline(__always) func accumulate(_ group: UnsafeRawPointer, _ index: Int, _ first: Bool) {
+            // Unsafe: an unchecked load. Safe: `group` is a whole group within `count`, not yet decrypted.
+            var x = bytes_reverse16(unsafe group.loadUnaligned(fromByteOffset: 16 &* index, as: SIMD16<UInt8>.self))
+            if first { x ^= y }
+            let power = 7 &- index
+            low ^= bytes_pmull_low(x, p[power])
+            high ^= bytes_pmull_high(x, p[power])
+            middle ^= bytes_pmull_low(x ^ AESGCM.swapped(x), s[power])
+        }
+
+        for batch in 0..<batches {
+            // Unsafe: this group's start. Safe: `128 × (batch + 1) <= count`.
+            let block = unsafe base + 128 &* batch
+            let ciphertext = UnsafeRawPointer(block)
+            low = .zero; middle = .zero; high = .zero
+            var b0 = bytes_rev32_words(native)
+            var b1 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 1))
+            var b2 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 2))
+            var b3 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 3))
+            var b4 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 4))
+            var b5 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 5))
+            var b6 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 6))
+            var b7 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 7))
+            native &+= SIMD4(0, 0, 0, 8)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k0); unsafe accumulate(ciphertext, 0, true)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k1); unsafe accumulate(ciphertext, 1, false)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k2); unsafe accumulate(ciphertext, 2, false)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k3); unsafe accumulate(ciphertext, 3, false)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k4); unsafe accumulate(ciphertext, 4, false)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k5); unsafe accumulate(ciphertext, 5, false)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k6); unsafe accumulate(ciphertext, 6, false)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k7); unsafe accumulate(ciphertext, 7, false)
+            AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k8)
+            y = AESGCM.reduceInVectors(low: low, middle: middle, high: high)
+            let lastKey: SIMD16<UInt8>, finalKey: SIMD16<UInt8>
+            switch rounds {
+            case 10:
+                (lastKey, finalKey) = (k9, k10)
+            case 12:
+                AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k9)
+                AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k10)
+                (lastKey, finalKey) = (k11, k12)
+            default:
+                AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k9)
+                AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k10)
+                AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k11)
+                AES.round8(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, k12)
+                (lastKey, finalKey) = (k13, k14)
+            }
+            // Unsafe: in-place loads and stores of this group, after it's hashed. Safe: within the group, above.
             unsafe AES.finish(b0, lastKey, finalKey, block, block)
             unsafe AES.finish(b1, lastKey, finalKey, block + 16, block + 16)
             unsafe AES.finish(b2, lastKey, finalKey, block + 32, block + 32)

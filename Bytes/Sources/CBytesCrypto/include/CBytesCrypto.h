@@ -1,5 +1,6 @@
-// ARMv8's cryptography instructions, one wrapper per instruction: AES rounds (`aese`, `aesmc`), SHA-1 and SHA-256
-// steps (`sha1c`/`sha1p`/`sha1m`/`sha1h`/`sha1su0`/`sha1su1`, `sha256h`/`sha256h2`/`sha256su0`/`sha256su1`),
+// ARMv8's cryptography instructions, one wrapper per instruction: AES rounds (`aese`, `aesmc`), SHA-1, SHA-256, and
+// SHA-512 steps (`sha1c`/`sha1p`/`sha1m`/`sha1h`/`sha1su0`/`sha1su1`, `sha256h`/`sha256h2`/`sha256su0`/`sha256su1`,
+// `sha512h`/`sha512h2`/`sha512su0`/`sha512su1`),
 // carry-less multiplication (`pmull`, for GHASH), and the byte reversals the hashes' big-endian words need. Swift
 // has no intrinsics and its `Builtin` module doesn't expose CPU-specific ones; everything else (key schedules,
 // rounds, modes, padding) is Swift, in `BytesCrypto`. Each wrapper is `static inline`, so Swift inlines it as the
@@ -96,7 +97,48 @@ BYTES_CRYPTO_INLINE bytes_crypto_u32x4 bytes_sha256su1(bytes_crypto_u32x4 tw, by
     return (bytes_crypto_u32x4)vsha256su1q_u32((uint32x4_t)tw, (uint32x4_t)w2, (uint32x4_t)w3);
 }
 
+// MARK: SHA-512
+
+// ARMv8.2's SHA-512 instructions (every Apple silicon Mac and A13-or-later device has them). Whether this build
+// has them is decided when the module is compiled (`__ARM_FEATURE_SHA512`, which Swift's importer defines for
+// arm64 macOS), and exposed to Swift as `BYTES_HAS_SHA512_INSTRUCTIONS`, a constant that folds. Without the
+// feature, the wrappers are still declared (with the feature as a target attribute, so they compile) for Swift
+// to type-check, and Swift takes its portable path instead of calling them.
+#if defined(__ARM_FEATURE_SHA512)
+#define BYTES_HAS_SHA512_INSTRUCTIONS 1
+#define BYTES_CRYPTO_SHA512_INLINE BYTES_CRYPTO_INLINE
+#else
+#define BYTES_HAS_SHA512_INSTRUCTIONS 0
+#define BYTES_CRYPTO_SHA512_INLINE static inline __attribute__((target("sha3")))
+#endif
+
+/// `sha512h`: the first half of two rounds. `sum` is GH plus the rounds' K + W (round i's in the high lane), `fg`
+/// and `de` the state words those lane pairs name; returns the two rounds' T1 values (round i's in the high lane).
+BYTES_CRYPTO_SHA512_INLINE bytes_crypto_u64x2 bytes_sha512h(bytes_crypto_u64x2 sum, bytes_crypto_u64x2 fg, bytes_crypto_u64x2 de) {
+    return (bytes_crypto_u64x2)vsha512hq_u64((uint64x2_t)sum, (uint64x2_t)fg, (uint64x2_t)de);
+}
+
+/// `sha512h2`: the second half of two rounds, from `sha512h`'s T1 values: the new AB.
+BYTES_CRYPTO_SHA512_INLINE bytes_crypto_u64x2 bytes_sha512h2(bytes_crypto_u64x2 t1, bytes_crypto_u64x2 cd, bytes_crypto_u64x2 ab) {
+    return (bytes_crypto_u64x2)vsha512h2q_u64((uint64x2_t)t1, (uint64x2_t)cd, (uint64x2_t)ab);
+}
+
+/// `sha512su0`: the first half of the message schedule update, two words: W[j] + σ0(W[j + 1]).
+BYTES_CRYPTO_SHA512_INLINE bytes_crypto_u64x2 bytes_sha512su0(bytes_crypto_u64x2 w0, bytes_crypto_u64x2 w1) {
+    return (bytes_crypto_u64x2)vsha512su0q_u64((uint64x2_t)w0, (uint64x2_t)w1);
+}
+
+/// `sha512su1`: the second half: adds σ1(W[j + 14]) and W[j + 9] (`w14` and `w9` are the pairs starting there).
+BYTES_CRYPTO_SHA512_INLINE bytes_crypto_u64x2 bytes_sha512su1(bytes_crypto_u64x2 partial, bytes_crypto_u64x2 w14, bytes_crypto_u64x2 w9) {
+    return (bytes_crypto_u64x2)vsha512su1q_u64((uint64x2_t)partial, (uint64x2_t)w14, (uint64x2_t)w9);
+}
+
 // MARK: Byte order and carry-less multiplication
+
+/// `rev64`: each 64-bit word's bytes reversed, as two words (big-endian words to native).
+BYTES_CRYPTO_INLINE bytes_crypto_u64x2 bytes_rev64_words(bytes_crypto_u8x16 bytes) {
+    return (bytes_crypto_u64x2)vreinterpretq_u64_u8(vrev64q_u8((uint8x16_t)bytes));
+}
 
 /// `rev32`: each 32-bit word's bytes reversed (big-endian words to native and back).
 BYTES_CRYPTO_INLINE bytes_crypto_u32x4 bytes_rev32(bytes_crypto_u8x16 bytes) {

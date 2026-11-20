@@ -3,24 +3,33 @@
 import CompilerPluginSupport
 import PackageDescription
 
-let strictSettings: [SwiftSetting] = [
-    .swiftLanguageMode(.v6),
-    .strictMemorySafety(),
+// Swift 6 language mode is the default at tools-version 6.4. Every target gets `commonSettings`: Swift 7's upcoming
+// features, so the code is written as Swift 7 will need it. Library targets also get strict memory safety
+// (`strictSettings`): every `unsafe` expression marked, with a comment saying why it's safe.
+let commonSettings: [SwiftSetting] = [
     // `@_lifetime`: `Bytes` is `~Escapable` and hands out spans that borrow the memory it reads.
     .enableExperimentalFeature("Lifetimes"),
     .enableUpcomingFeature("ExistentialAny"),
     .enableUpcomingFeature("MemberImportVisibility"),
+    // Imports are internal unless marked `public import` (inlinable code and public API need the module).
+    .enableUpcomingFeature("InternalImportsByDefault"),
+    // A plain `nonisolated async` function runs on its caller's executor; work meant to leave it is `@concurrent`.
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+    .enableUpcomingFeature("InferIsolatedConformances"),
+    .enableUpcomingFeature("ImmutableWeakCaptures"),
 ]
+let strictSettings: [SwiftSetting] = commonSettings + [.strictMemorySafety()]
 
 // The `Portable` trait defines `BYTES_PORTABLE` for the C headers. Swift modules compile the headers'
 // `static inline` functions themselves, including ones inlined from `Bytes` into the module using it, so
-// each Swift target here needs the define too (SwiftPM doesn't pass a C target's defines to its users).
+// each Swift target here needs the define too (SwiftPM doesn't pass a C target's defines to its users, and has no
+// Swift setting for a Clang define but `unsafeFlags`).
 let portableCSettings: [CSetting] = [.define("BYTES_PORTABLE", .when(traits: ["Portable"]))]
 let portableSwiftSettings: [SwiftSetting] = [.unsafeFlags(["-Xcc", "-DBYTES_PORTABLE"], .when(traits: ["Portable"]))]
 
 // `@BitFields` and `@BinaryRecord`: packed flags and fixed records that read and write themselves. (`.macro` needs
 // `import CompilerPluginSupport`; without it the manifest fails as "unable to type-check this expression in
-// reasonable time" rather than naming `.macro`: ~/Downloads/swift-bugs/27.)
+// reasonable time" rather than naming `.macro`: ~/Scratch/swift-bugs/27.)
 let macroTargets: [Target] = [
     .macro(
         name: "BytesMacrosPlugin",
@@ -28,7 +37,7 @@ let macroTargets: [Target] = [
             .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
             .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
         ],
-        swiftSettings: [.swiftLanguageMode(.v6)]
+        swiftSettings: commonSettings
     ),
     .target(
         name: "BytesMacros",
@@ -42,9 +51,29 @@ let macroTargets: [Target] = [
             "BytesMacros",
             "BytesMacrosPlugin",
             .product(name: "MacroTesting", package: "swift-macro-testing"),
-            .product(name: "SwiftSyntaxMacrosTestSupport", package: "swift-syntax"),
         ],
-        swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+        swiftSettings: commonSettings + portableSwiftSettings
+    ),
+]
+
+// Helpers for tests and benchmarks across the repository's packages: not library API. `BytesTestSupport` has no
+// Swift Testing dependency, so benchmark executables and other packages' sources (SocketStream's workloads) can use
+// it; `BytesTesting` adds what needs Swift Testing (the `.bulk` trait); `BytesReferenceCodecs` wraps the SDK's zlib
+// and Compression as reference codecs, apart so the others don't link them.
+let supportTargets: [Target] = [
+    .target(
+        name: "BytesTestSupport",
+        swiftSettings: strictSettings
+    ),
+    .target(
+        name: "BytesTesting",
+        dependencies: ["BytesTestSupport"],
+        swiftSettings: strictSettings
+    ),
+    .target(
+        name: "BytesReferenceCodecs",
+        // Not strict memory safety: it's C calls through and through.
+        swiftSettings: commonSettings
     ),
 ]
 
@@ -58,6 +87,11 @@ let package = Package(
         .library(name: "BytesAsync", targets: ["BytesAsync"]),
         .library(name: "BytesMacros", targets: ["BytesMacros"]),
         .library(name: "BytesFoundation", targets: ["BytesFoundation"]),
+        .library(name: "BytesBase64", targets: ["BytesBase64"]),
+        // Test and benchmark support (above).
+        .library(name: "BytesTestSupport", targets: ["BytesTestSupport"]),
+        .library(name: "BytesTesting", targets: ["BytesTesting"]),
+        .library(name: "BytesReferenceCodecs", targets: ["BytesReferenceCodecs"]),
     ],
     // Three builds, for measuring each (see Benchmarks/RESULTS.md):
     // - default: the C modules' NEON and CRC instructions (what Apple silicon gets);
@@ -74,7 +108,7 @@ let package = Package(
         ),
         .trait(
             name: "HardwareCrypto",
-            description: "AES, SHA-1, SHA-256, and GHASH with ARM's cryptography instructions (the CBytesCrypto C module)."
+            description: "AES, SHA-1, SHA-256, SHA-512, and GHASH with ARM's cryptography instructions (the CBytesCrypto C module)."
         ),
         .trait(
             name: "Portable",
@@ -105,7 +139,7 @@ let package = Package(
         ),
         .testTarget(
             name: "BytesTests",
-            dependencies: ["Bytes", "BytesAsync"],
+            dependencies: ["Bytes", "BytesTestSupport"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         // DEFLATE (raw, zlib, gzip) and Brotli, compressing and decompressing.
@@ -124,12 +158,29 @@ let package = Package(
         .testTarget(
             name: "BytesAsyncTests",
             dependencies: ["Bytes", "BytesCompression", "BytesAsync"],
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+            swiftSettings: strictSettings + portableSwiftSettings
         ),
         // `Data` with spans (standard library ones only), apart so `Bytes` needn't depend on Foundation.
         .target(
             name: "BytesFoundation",
-            dependencies: [],
+            swiftSettings: strictSettings
+        ),
+        .testTarget(
+            name: "BytesFoundationTests",
+            dependencies: ["BytesFoundation"],
+            swiftSettings: strictSettings
+        ),
+        // Base64 (RFC 4648), encoding and decoding, vectorized with `ByteLanes`. Its own module, not part of `Bytes`:
+        // adding code to a module can change how the rest of it inlines (LZBITMAP's decoder, 12–15%), so the core's
+        // codegen stays as it was.
+        .target(
+            name: "BytesBase64",
+            dependencies: ["Bytes"],
+            swiftSettings: strictSettings + portableSwiftSettings
+        ),
+        .testTarget(
+            name: "BytesBase64Tests",
+            dependencies: ["Bytes", "BytesBase64", "BytesTestSupport"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         // Authenticated encryption on spans: ChaCha20-Poly1305, and TLS 1.3 record protection.
@@ -137,15 +188,17 @@ let package = Package(
             name: "BytesCrypto",
             dependencies: [
                 "Bytes",
+                // PEM's Base64.
+                "BytesBase64",
                 .target(name: "CBytesCrypto", condition: .when(traits: ["HardwareCrypto"])),
             ],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         .testTarget(
             name: "BytesCryptoTests",
-            dependencies: ["Bytes", "BytesCompression", "BytesCrypto"],
+            dependencies: ["Bytes", "BytesCompression", "BytesCrypto", "BytesTestSupport", "BytesTesting"],
             // Not strict memory safety: CryptoKit, the reference, takes `Data`.
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+            swiftSettings: commonSettings + portableSwiftSettings
         ),
         // Reference implementations, for differential tests and comparison benchmarks only. Found through
         // pkg-config: `brew install libdeflate brotli zstd xz`. (zlib and Apple's Compression come with the SDK.)
@@ -153,11 +206,19 @@ let package = Package(
         .systemLibrary(name: "CBrotli", pkgConfig: "libbrotlienc", providers: [.brew(["brotli"])]),
         .systemLibrary(name: "CZstd", pkgConfig: "libzstd", providers: [.brew(["zstd"])]),
         .systemLibrary(name: "CLZMA", pkgConfig: "liblzma", providers: [.brew(["xz"])]),
+        // libbzip2, from the SDK.
+        .systemLibrary(name: "CBZip2"),
+        // (The lzfse and libzbitmap C references that BytesCompression's LZFSE, LZVN, and LZBITMAP coders were
+        // checked against are no longer built: `Tools/test-data fetch c-references` has their source, and
+        // Benchmarks/RESULTS-lz4-lzfse.md and RESULTS-lzbitmap.md say how to add them back as targets.)
         .testTarget(
             name: "BytesCompressionTests",
-            dependencies: ["Bytes", "BytesCompression", "BytesAsync", "CLibDeflate", "CBrotli", "CZstd", "CLZMA"],
+            dependencies: [
+                "Bytes", "BytesCompression", "BytesAsync", "CLibDeflate", "CBrotli", "CZstd", "CLZMA", "CBZip2",
+                "BytesTestSupport", "BytesTesting", "BytesReferenceCodecs",
+            ],
             // Not strict memory safety: the tests call the reference libraries' C APIs.
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings
+            swiftSettings: commonSettings + portableSwiftSettings
         ),
         .executableTarget(
             name: "CompressionBenchmarks",
@@ -169,21 +230,37 @@ let package = Package(
                 "CBrotli",
                 "CZstd",
                 "CLZMA",
+                "CBZip2",
+                "BytesTestSupport",
+                "BytesReferenceCodecs",
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/CompressionBenchmarks",
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings,
+            swiftSettings: commonSettings + portableSwiftSettings,
             plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
         ),
         .executableTarget(
             name: "BytesBenchmarks",
             dependencies: [
                 "Bytes",
+                "BytesTestSupport",
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/BytesBenchmarks",
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")] + portableSwiftSettings,
+            swiftSettings: commonSettings + portableSwiftSettings,
             plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
         ),
-    ] + macroTargets
+        // Named as when Base64 was its own package, so its thresholds and baselines still match.
+        .executableTarget(
+            name: "Base64Benchmarks",
+            dependencies: [
+                "Bytes",
+                "BytesBase64",
+                .product(name: "Benchmark", package: "benchmark"),
+            ],
+            path: "Benchmarks/Base64Benchmarks",
+            swiftSettings: commonSettings + portableSwiftSettings,
+            plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
+        ),
+    ] + macroTargets + supportTargets
 )

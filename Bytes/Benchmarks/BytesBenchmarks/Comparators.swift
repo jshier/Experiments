@@ -295,6 +295,39 @@ enum CentralDirectory {
         return fields.checksum
     }
 
+    /// `parseWithBytes` with `LittleEndianBytesReader`: the byte order in the reader's type, integers read by type.
+    static func parseWithLittleEndianReader(_ span: RawSpan) throws(BytesError) -> UInt64 {
+        var reader = LittleEndianBytesReader(span)
+        var fields = Fields()
+        while !reader.isAtEnd {
+            try reader.expect(0x0201_4B50 as UInt32)
+            try fields.add(reader.read(UInt16.self)) // made by
+            try reader.skip(byteCount: 2)
+            try fields.add(reader.read(UInt16.self)) // flags
+            try fields.add(reader.read(UInt16.self)) // method
+            try fields.add(reader.read(UInt16.self)) // time
+            try fields.add(reader.read(UInt16.self)) // date
+            try fields.add(reader.read(UInt32.self)) // CRC
+            try fields.add(reader.read(UInt32.self)) // compressed
+            try fields.add(reader.read(UInt32.self)) // uncompressed
+            let nameLength = try reader.read(Int.self, as: Byte2.self)
+            let extraLength = try reader.read(Int.self, as: Byte2.self)
+            let commentLength = try reader.read(Int.self, as: Byte2.self)
+            try reader.skip(byteCount: 4)
+            try fields.add(reader.read(UInt32.self)) // external attributes
+            try fields.add(reader.read(UInt32.self)) // local header offset
+            try fields.add(reader.read(byteCount: nameLength).byteCount)
+            var extra = try reader.readSection(byteCount: extraLength)
+            try reader.skip(byteCount: commentLength)
+            try extra.forEachRecord(tag: Byte2.self, length: Byte2.self) { id, field throws(BytesError) in
+                if id == 0x5455, field.remainingByteCount >= 5, try field.read(Byte.self)[bit: 0] {
+                    try fields.add(field.read(Int32.self))
+                }
+            }
+        }
+        return fields.checksum
+    }
+
     static func parseWithByteReader(_ span: RawSpan) throws(ComparatorError) -> UInt64 {
         var reader = ByteReader(span)
         var fields = Fields()

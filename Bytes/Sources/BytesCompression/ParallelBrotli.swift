@@ -12,7 +12,8 @@ public import Bytes
 /// distance unknown (`BrotliEngine.forgetDistances()`): it uses the short distance codes only for
 /// distances of its own.
 ///
-/// The synchronous and async forms schedule chunks as ``ParallelDeflateEncoder``'s do (`ChunkScheduler`).
+/// The synchronous and async forms schedule chunks as ``ParallelDeflateEncoder``'s do (`ChunkScheduler`), and
+/// the async forms stop as its do when their task is cancelled (``BytesError/cancelled``).
 /// Lanes and output slots are allocated once, at initialization.
 @safe
 public struct ParallelBrotliEncoder: ~Copyable {
@@ -87,10 +88,13 @@ public struct ParallelBrotliEncoder: ~Copyable {
     ///   written).
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
         let job = job(byteCount: input.byteCount)
-        // Unsafe: the input and the output's free capacity lent to the workers. Safe: `run` returns only once
-        // every worker has.
+        // Unsafe: the input, the output's free capacity, and the lanes' and slots' storage lent to the workers.
+        // Safe: `run` returns only once every worker has, and the storage keeps its size meanwhile.
         let delivery = unsafe input.withLent(output: &output) { source, target in
-            unsafe batch(job, input: source, output: target).run()
+            let (lanes, slots) = unsafe buffers()
+            return unsafe scheduler.run(
+                job, chunkCount: job.chunkCount, format: .raw, lanes: lanes, slots: slots, input: source, output: target, checksum: 0
+            )
         }
         try Self.end(delivery)
     }
@@ -99,6 +103,7 @@ public struct ParallelBrotliEncoder: ~Copyable {
 
     /// The workers of a call over lent input and output, to run.
     package mutating func batch(_ job: Job, input: LentBytes, output: LentMutableBytes) -> ChunkBatch {
+        // Unsafe and safe as `ParallelDeflateEncoder.batch`.
         let (lanes, slots) = unsafe buffers()
         return unsafe scheduler.batch(
             job, chunkCount: job.chunkCount, format: .raw, lanes: lanes, slots: slots, input: input, output: output, checksum: 0
@@ -107,8 +112,10 @@ public struct ParallelBrotliEncoder: ~Copyable {
 
     /// Ends a call once its workers are done (the delivered bytes already counted in the output).
     ///
-    /// - Throws: ``BytesError/insufficientCapacity`` if the output ran out of room.
+    /// - Throws: ``BytesError/cancelled`` if the batch was stopped before the end,
+    ///   ``BytesError/insufficientCapacity`` if the output ran out of room.
     package static func end(_ delivery: ChunkDelivery) throws(BytesError) {
+        guard !delivery.cancelled else { throw .cancelled }
         guard !delivery.failed else { throw .insufficientCapacity }
     }
 

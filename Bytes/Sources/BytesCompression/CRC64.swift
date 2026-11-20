@@ -117,10 +117,10 @@ extension CRC64 {
     // product a bit short of where the block's frame puts it: the missing factor x is the 63 and -1 rather than
     // 64 and 0.) The tests check the folded CRC against liblzma's at every length to 600 bytes and beyond.
     private static var fold512: SIMD16<UInt8> {
-        unsafe unsafeBitCast(SIMD2<UInt64>(0x6AE3_EFBB_9DD4_41F3, 0x081F_6054_A784_2DF4), to: SIMD16<UInt8>.self)
+        bitCast(SIMD2<UInt64>(0x6AE3_EFBB_9DD4_41F3, 0x081F_6054_A784_2DF4), to: SIMD16<UInt8>.self)
     }
     private static var fold128: SIMD16<UInt8> {
-        unsafe unsafeBitCast(SIMD2<UInt64>(0xE05D_D497_CA39_3AE4, 0xDABE_95AF_C787_5F40), to: SIMD16<UInt8>.self)
+        bitCast(SIMD2<UInt64>(0xE05D_D497_CA39_3AE4, 0xDABE_95AF_C787_5F40), to: SIMD16<UInt8>.self)
     }
 
     /// Folds the whole 16-byte blocks of `count` bytes (at least 128) at `input` into one, four accumulators
@@ -134,7 +134,7 @@ extension CRC64 {
         @inline(always) func load(_ offset: Int) -> SIMD16<UInt8> {
             unsafe input.loadUnaligned(fromByteOffset: offset, as: SIMD16<UInt8>.self)
         }
-        var x0 = unsafe load(0) ^ unsafeBitCast(SIMD2<UInt64>(crc, 0), to: SIMD16<UInt8>.self)
+        var x0 = load(0) ^ bitCast(SIMD2<UInt64>(crc, 0), to: SIMD16<UInt8>.self)
         var x1 = load(16), x2 = load(32), x3 = load(48)
         var index = 64
         let fold512 = Self.fold512

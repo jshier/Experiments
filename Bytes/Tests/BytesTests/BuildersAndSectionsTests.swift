@@ -16,7 +16,7 @@ import Testing
         #expect(lsb == [0x0A])
 
         #expect(throws: BytesError.insufficientCapacity) {
-            try [UInt8](byteCapacity: 1) { writer in try writer.write(0x01_02 as Byte2) }
+            _ = try [UInt8](byteCapacity: 1) { writer in try writer.write(0x01_02 as Byte2) }
         }
     }
 

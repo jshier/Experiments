@@ -1,5 +1,7 @@
 import Bytes
 import BytesCompression
+import BytesTesting
+import BytesTestSupport
 import CZstd
 import Testing
 
@@ -146,7 +148,7 @@ func zstdDecodeBothWays(_ data: [UInt8], capacity: Int, chunk: Int = 1 << 16, ou
 /// Inputs for Zstandard: the shared samples, plus ones that make RLE blocks, incompressible blocks, and
 /// matches at the edges of small windows.
 func zstdSamples() -> [(name: String, bytes: [UInt8])] {
-    var rng = SplitMix64(state: 93)
+    var rng = SplitMix64(seed: 93)
     var mixed: [UInt8] = []
     while mixed.count < 600_000 {
         switch rng.next() % 4 {
@@ -176,7 +178,7 @@ func zstdSamples() -> [(name: String, bytes: [UInt8])] {
 /// Random letters, some far more common than others: no matches, and literals that compress to about half,
 /// which the decoder decodes with double-symbol Huffman tables.
 func skewedLetters(_ count: Int) -> [UInt8] {
-    var rng = SplitMix64(state: UInt64(count))
+    var rng = SplitMix64(seed: UInt64(count))
     return (0..<count).map { _ in
         let roll = rng.next() % 64
         return roll < 32 ? UInt8(ascii: "e") + UInt8(roll % 4) : UInt8(ascii: "a") + UInt8(roll % 26)
@@ -386,7 +388,7 @@ struct ZstdDecoderTests {
 
     /// `zstd --long=27`: a 128 MB window, matches tens of megabytes back.
     @Test func decodesLongWindows() {
-        var rng = SplitMix64(state: 27)
+        var rng = SplitMix64(seed: 27)
         let block = (0..<(1 << 20)).map { _ in UInt8(truncatingIfNeeded: rng.next() % 7 &* 37) }
         var data: [UInt8] = []
         for round in 0..<6 { data += block.map { $0 &+ UInt8(round & 1) } } // Repeats 1 and 2 MB back.
@@ -482,11 +484,11 @@ struct ZstdDecoderTests {
 
     /// Every byte of small frames changed, and every truncation: decoding throws or succeeds, never traps
     /// or reads outside the input; with a checksum, success means the original content.
-    @Test func survivesCorruption() {
+    static let corruptionFrames: [(name: String, content: [UInt8], frame: [UInt8])] = {
         let text = Array(zstdSamples().first { $0.name == "text" }!.bytes.prefix(3_000))
         let mixed = Array(zstdSamples().first { $0.name == "mixed" }!.bytes.prefix(2_000))
         let letters = skewedLetters(12_000)
-        let frames: [(name: String, content: [UInt8], frame: [UInt8])] = [
+        return [
             ("text 1", text, zstdCompress(text, level: 1, parameters: [(ZSTD_c_checksumFlag, 1)])),
             ("text 19", text, zstdCompress(text, level: 19, parameters: [(ZSTD_c_checksumFlag, 1)])),
             ("mixed small blocks", mixed, zstdCompress(mixed, level: 9, parameters: [(ZSTD_c_checksumFlag, 1), (zstdMaxBlockSize, 1024)])),
@@ -494,9 +496,20 @@ struct ZstdDecoderTests {
             ("text no checksum", text, zstdCompress(text, level: 6)),
             ("letters, double-symbol tables", letters, zstdCompress(letters, level: 3, parameters: [(ZSTD_c_checksumFlag, 1)])),
         ]
+    }()
+
+    /// Every byte flipped and every cut in each frame's first 64 bytes (frame and block headers, table
+    /// descriptions) and last 16 (the checksum, the last sequences), and every 9th byte between; every byte in
+    /// ZstdBulkTests.
+    @Test(arguments: 0..<6)
+    func survivesCorruption(frame: Int) {
+        Self.checkSurvivesCorruption(Self.corruptionFrames[frame]) { index, count in index < 64 || index >= count - 16 || index % 9 == 0 }
+    }
+
+    static func checkSurvivesCorruption(_ sample: (name: String, content: [UInt8], frame: [UInt8]), at positions: (_ index: Int, _ count: Int) -> Bool) {
         var decoder = ZstdDecoder()
-        for (name, content, frame) in frames {
-            for index in 0..<frame.count {
+        for (name, content, frame) in [sample] {
+            for index in 0..<frame.count where positions(index, frame.count) {
                 for mask: UInt8 in content.count > 10_000 ? [0xFF, 0x01] : [0xFF, 0x01, 0x80, 0x10] {
                     var corrupt = frame
                     corrupt[index] ^= mask
@@ -508,7 +521,7 @@ struct ZstdDecoderTests {
                     }
                 }
             }
-            for length in 0..<frame.count {
+            for length in 0..<frame.count where positions(length, frame.count) {
                 let truncated = Array(frame.prefix(length))
                 #expect(zstdDecodeAll(truncated, capacity: content.count, decoder: &decoder) == .failure(.insufficientData), "\(name) cut at \(length)")
                 #expect(zstdDecodeStreaming(truncated, chunk: 97, outputChunk: 500, decoder: &decoder) == .failure(.insufficientData), "\(name) streamed, cut at \(length)")
@@ -517,7 +530,7 @@ struct ZstdDecoderTests {
     }
 
     @Test func survivesRandomInput() {
-        var rng = SplitMix64(state: 404)
+        var rng = SplitMix64(seed: 404)
         var decoder = ZstdDecoder()
         for size in [0, 1, 5, 6, 10, 20, 100, 1000, 20_000] {
             for _ in 0..<200 {
@@ -536,7 +549,7 @@ struct ZstdDecoderTests {
         // Published values for XXH64 with seed 0.
         #expect(XXHash64.hash([UInt8]().span.bytes) == 0xEF46_DB37_51D8_E999)
         // Every length up to 300, whole and in pieces, against the checksum libzstd writes into frames.
-        var rng = SplitMix64(state: 64)
+        var rng = SplitMix64(seed: 64)
         let bytes = (0..<300).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
         for length in 0...300 {
             let data = Array(bytes.prefix(length))
@@ -554,5 +567,13 @@ struct ZstdDecoderTests {
             }
             #expect(UInt32(truncatingIfNeeded: hasher.digest) == expected, "length \(length) in pieces")
         }
+    }
+}
+
+/// Every byte of every corruption frame flipped and every cut.
+@Suite(.bulk) struct ZstdBulkTests {
+    @Test(arguments: 0..<6)
+    func survivesCorruption(frame: Int) {
+        ZstdDecoderTests.checkSurvivesCorruption(ZstdDecoderTests.corruptionFrames[frame]) { _, _ in true }
     }
 }

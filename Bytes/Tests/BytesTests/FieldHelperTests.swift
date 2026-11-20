@@ -34,7 +34,7 @@ import Testing
         #expect(try reader.read(Int32.self, asSigned: Byte3.self, .bigEndian) == -2)
         #expect(try reader.read(Int.self, asSigned: Byte3.self, .bigEndian) == 127)
         #expect(reader.remainingByteCount == 0)
-        #expect(throws: BytesError.insufficientData) { try reader.read(Int16.self, asSigned: Byte2.self, .bigEndian) }
+        #expect(throws: BytesError.insufficientData) { _ = try reader.read(Int16.self, asSigned: Byte2.self, .bigEndian) }
     }
 
     @Test func signedBitReads() throws {
@@ -227,7 +227,7 @@ import Testing
         let partial = try String(utf8Capacity: 64) { writer throws(BytesError) in try writer.write(0x6F_6B as Byte2) }
         #expect(partial == "ok")
         #expect(throws: BytesError.insufficientCapacity) {
-            try String(utf8Capacity: 1) { writer throws(BytesError) in try writer.write(0x6F_6B as Byte2) }
+            _ = try String(utf8Capacity: 1) { writer throws(BytesError) in try writer.write(0x6F_6B as Byte2) }
         }
     }
 

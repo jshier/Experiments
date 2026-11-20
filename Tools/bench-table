@@ -18,7 +18,7 @@
 # Save baselines with: swift package --disable-sandbox benchmark baseline update NAME [--filter …] --no-progress
 #
 # example:
-#   Tools/bench-table Base64 --metric 'Throughput|Instructions' --filter 'Bytes \(' v1 tbl zip final
+#   Tools/bench-table Bytes --metric 'Throughput|Instructions' --filter '^Encode.*Bytes \(' v1 tbl zip final
 source "$(dirname "$0")/lib/common.sh"
 
 metric='.' filter='.' percentile=p50 baselines=()

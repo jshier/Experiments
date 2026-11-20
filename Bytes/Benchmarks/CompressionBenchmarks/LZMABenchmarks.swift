@@ -1,6 +1,7 @@
 import Benchmark
 import Bytes
 import BytesCompression
+import BytesTestSupport
 import CLZMA
 import Compression
 import Foundation
@@ -8,7 +9,7 @@ import Foundation
 // .xz decoding: Bytes' `LZMA2Decoder` against liblzma 5.8 (Homebrew's XZ Utils) and Apple's Compression
 // (`COMPRESSION_LZMA`), single-threaded, one call each, whole file into a whole buffer.
 //
-// Inputs: Silesia files compressed as `xz -6` and `xz -9e` would (liblzma's preset encoder, CRC-64 checks, which
+// Inputs: Silesia files compressed as `xz -6` would (liblzma's preset encoder, CRC-64 checks, which
 // all three decoders verify; cached in the corpus directory as `NAME-SIZE.xz-5.8-PRESET`), and segments of
 // Apple's `.aea` archives (Xcode's payload: 16 MB xz streams, LZMA2 with an 8 MB dictionary, no check), which
 // are local only: copy them to `CORPUS/aea/seg*.xz` and they're registered.
@@ -58,13 +59,16 @@ enum LZMAFixtures {
         return Array(output[..<size])
     }
 
-    /// The `.aea` segments in the corpus directory, by name.
-    static func appleSegments() -> [(name: String, bytes: [UInt8])] {
+    /// The names of the `.aea` segments in the corpus directory.
+    static func appleSegmentNames() -> [String] {
         let directory = Fixtures.corpusRoot.appending(path: "aea")
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
-        return names.filter { $0.hasSuffix(".xz") }.sorted().compactMap { name in
-            FileManager.default.contents(atPath: directory.appending(path: name).path).map { (String(name.dropLast(3)), [UInt8]($0)) }
-        }
+        return names.filter { $0.hasSuffix(".xz") }.sorted().map { String($0.dropLast(3)) }
+    }
+
+    /// The `.aea` segment `name`.
+    static func appleSegment(_ name: String) -> [UInt8] {
+        [UInt8](FileManager.default.contents(atPath: Fixtures.corpusRoot.appending(path: "aea/\(name).xz").path)!)
     }
 }
 
@@ -77,45 +81,44 @@ func lzmaDecodeXZ(_ decoder: inout LZMA2Decoder, _ input: [UInt8], into output: 
     }
 }
 
-/// Registers the three decoders on each input, after checking that each decodes it exactly.
+/// Registers the three decoders on each input; each benchmark's setup checks that its decoder decodes the input
+/// exactly (liblzma's output being the reference for Apple's segments).
 func registerLZMABenchmarks() {
-    var decoder = LZMA2Decoder()
-    let apple = AppleLZMA()
-    var inputs: [(label: String, compressed: [UInt8], size: Int)] = []
+    var inputs: [(label: String, fixture: Lazy<DecodeFixture<LZMA2Decoder>>)] = []
     for name in LZMAFixtures.files {
-        guard let sample = ZstdFixtures.silesia(name) else { continue }
-        for (label, key, preset) in [("-6", "6", UInt32(6)), ("-9e", "9e", 9 | 0x8000_0000)] {
-            let compressed = Fixtures.cached("\(name)-\(sample.bytes.count).xz-5.8-\(key)") {
-                LZMAFixtures.compress(sample.bytes, preset: preset)
+        guard let sample = Fixtures.silesia(name) else { continue }
+        // (`-9e` decoded at `-6`'s rate, RESULTS.md's LZMA table: its rows were retired on 2026-11-19, with the Apple
+        // segments seg130 and seg200.)
+        for (label, key, preset) in [("-6", "6", UInt32(6))] {
+            let fixture = Lazy {
+                let compressed = Fixtures.cached("\(name)-\(sample.byteCount).xz-5.8-\(key)") {
+                    LZMAFixtures.compress(sample.bytes, preset: preset)
+                }
+                return DecodeFixture(original: sample.bytes, compressed: compressed, outputCount: sample.byteCount, decoder: LZMA2Decoder())
             }
-            inputs.append(("\(label) \(sample.label)", compressed, sample.bytes.count))
+            inputs.append(("\(label) \(sample.label)", fixture))
         }
     }
-    for (name, compressed) in LZMAFixtures.appleSegments() {
-        var output = [UInt8](repeating: 0, count: 64 << 20)
-        let size = liblzmaDecode(compressed, into: &output)
-        inputs.append(("Apple \(name) (16.0 MB)", compressed, size))
+    for name in LZMAFixtures.appleSegmentNames() where !["seg130", "seg200"].contains(name) {
+        let fixture = Lazy {
+            let compressed = LZMAFixtures.appleSegment(name)
+            var reference = [UInt8](repeating: 0, count: 64 << 20)
+            reference.removeLast(reference.count - liblzmaDecode(compressed, into: &reference))
+            return DecodeFixture(original: reference, compressed: compressed, outputCount: reference.count, decoder: LZMA2Decoder())
+        }
+        inputs.append(("Apple \(name) (16.0 MB)", fixture))
     }
-    for (label, compressed, size) in inputs {
-        var output = [UInt8](repeating: 0, count: size)
-        var reference = [UInt8](repeating: 0, count: size)
-        precondition(liblzmaDecode(compressed, into: &reference) == size)
-        precondition(lzmaDecodeXZ(&decoder, compressed, into: &output) == size && output == reference, "Bytes: \(label)")
-        precondition(apple.decode(compressed, into: &output) == size && output == reference, "Compression: \(label)")
-        Benchmark("LZMA decode \(label): Bytes") { benchmark in
-            for _ in benchmark.scaledIterations {
-                blackHole(lzmaDecodeXZ(&decoder, compressed, into: &output))
-            }
+    let apple = Lazy { AppleLZMA() }
+    for (label, fixture) in inputs {
+        let configuration = Fixtures.largeConfiguration
+        register("LZMA decode \(label): Bytes", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+            lzmaDecodeXZ(&f.decoder, f.compressed, into: &f.output)
         }
-        Benchmark("LZMA decode \(label): liblzma") { benchmark in
-            for _ in benchmark.scaledIterations {
-                blackHole(liblzmaDecode(compressed, into: &output))
-            }
+        register("LZMA decode \(label): liblzma", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+            liblzmaDecode(f.compressed, into: &f.output)
         }
-        Benchmark("LZMA decode \(label): Compression") { benchmark in
-            for _ in benchmark.scaledIterations {
-                blackHole(apple.decode(compressed, into: &output))
-            }
+        register("LZMA decode \(label): Compression", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+            apple.value.decode(f.compressed, into: &f.output)
         }
     }
 }
@@ -125,22 +128,15 @@ func registerLZMABenchmarks() {
 ///
 ///     swift package --disable-sandbox benchmark thresholds check --filter 'Allocations:LZMA.*'
 func registerLZMAAllocationBenchmarks() {
-    let configuration = Benchmark.Configuration(
-        metrics: [.mallocCountTotal],
-        warmupIterations: 1,
-        maxIterations: 10,
-        thresholds: [.mallocCountTotal: BenchmarkThresholds(absolute: [.p0: 0, .p50: 0, .p90: 0, .p100: 0])]
-    )
-    let content = Array(Fixtures.json(count: 1_200)) + Array(Fixtures.json(count: 16))
-    var output = [UInt8](repeating: 0, count: content.count)
-    var decoder = LZMA2Decoder()
     for preset: UInt32 in [0, 6] {
-        let compressed = LZMAFixtures.compress(content, preset: preset)
-        precondition(lzmaDecodeXZ(&decoder, compressed, into: &output) == content.count && output == content)
-        Benchmark("Allocations:LZMA_decode_xz_\(preset)", configuration: configuration) { benchmark in
-            for _ in benchmark.scaledIterations {
-                blackHole(lzmaDecodeXZ(&decoder, compressed, into: &output))
-            }
+        let fixture = Lazy {
+            let content = Array(Fixtures.json(count: 1_200)) + Array(Fixtures.json(count: 16))
+            return DecodeFixture(
+                original: content, compressed: LZMAFixtures.compress(content, preset: preset), outputCount: content.count, decoder: LZMA2Decoder()
+            )
+        }
+        register("Allocations:LZMA_decode_xz_\(preset)", configuration: Fixtures.allocationConfiguration, fixture, check: { $0.decodedAll($1) }) { f in
+            lzmaDecodeXZ(&f.decoder, f.compressed, into: &f.output)
         }
     }
 }

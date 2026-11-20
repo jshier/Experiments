@@ -913,6 +913,10 @@ extension BrotliEngine {
     private mutating func writeMetablock(_ buffer: RawSpan, from start: Int, to end: Int, commandCount: Int) -> Bool {
         let length = end &- start
         guard length > 0 else { return true }
+        if !Self.shouldCompress(buffer, from: start, to: end, commands.span.extracting(0..<commandCount)) {
+            writeUncompressedMetablock(buffer, from: start, to: end)
+            return false
+        }
         var literalCounts = InlineArray<256, UInt32>(repeating: 0)
         var commandCounts = InlineArray<704, UInt32>(repeating: 0)
         var distanceCounts = InlineArray<64, UInt32>(repeating: 0)
@@ -979,6 +983,9 @@ extension BrotliEngine {
             return false
         }
 
+        // Unsafe: unchecked flushes, here and in the functions writing the codes and commands. Safe: the
+        // meta-block is written compressed only when its estimate is smaller than storing it, and the staging
+        // buffer holds that (see `withWriter`).
         var span = staging.mutableSpan
         var writer = BitWriter(MutableRawSpan(mutating: &span), byteOffset: stagingEnd, bits: pendingBits, bitCount: pendingBitCount)
         Self.writeMetablockLength(length, isUncompressed: false, to: &writer)
@@ -999,8 +1006,50 @@ extension BrotliEngine {
         return true
     }
 
+    /// Google's `ShouldCompress`: false for a meta-block of almost only literals (fewer commands than one per 256
+    /// bytes, over 99% literals) whose literals, sampled every 13th byte, carry more than 7.92 bits each. Such a
+    /// block is stored without counting every literal and building its codes, which incompressible input otherwise
+    /// paid for each meta-block before storing it anyway.
+    static func shouldCompress(_ buffer: RawSpan, from start: Int, to end: Int, _ commands: Span<BrotliCommand>) -> Bool {
+        let length = end &- start
+        guard commands.count < (length &>> 8) &+ 2 else { return true }
+        var literals = 0
+        for index in commands.indices {
+            literals &+= Int(commands[index].insert)
+        }
+        guard literals &* 100 > length &* 99 else { return true }
+        let sampleRate = 13
+        var histogram = InlineArray<256, UInt32>(repeating: 0)
+        var position = start
+        var samples = 0
+        while position < end {
+            histogram[Int(DeflateCompressor.byte(buffer, position))] &+= 1
+            position &+= sampleRate
+            samples &+= 1
+        }
+        // Shannon's bits for the sample, at least one a symbol (Google's `BitsEntropy`).
+        var bits = Double(samples) * log2(Double(samples))
+        for symbol in 0..<256 where histogram[symbol] != 0 {
+            let count = Double(histogram[symbol])
+            bits -= count * log2(count)
+        }
+        return max(bits, Double(samples)) <= Double(length) * 7.92 / Double(sampleRate)
+    }
+
+    /// log2 of a positive `x`, to about 1e-6: the exponent, plus the significand's from the series
+    /// ln m = 2 atanh((m - 1) / (m + 1)).
+    static func log2(_ x: Double) -> Double {
+        let m = x.significand
+        let z = (m - 1) / (m + 1)
+        let z2 = z * z
+        let ln = 2 * z * (1 + z2 * (1.0 / 3 + z2 * (1.0 / 5 + z2 * (1.0 / 7 + z2 * (1.0 / 9)))))
+        return Double(x.exponent) + ln * 1.442_695_040_888_963_4
+    }
+
     /// ISLAST 0, MNIBBLES, MLEN - 1, ISUNCOMPRESSED.
     private static func writeMetablockLength(_ length: Int, isUncompressed: Bool, to writer: inout BitWriter) {
+        // Unsafe: an unchecked flush. Safe: the writer is the staging buffer's, which has room for the meta-block
+        // this header starts (see `withWriter`).
         let value = length &- 1
         let nibbles = value < 1 &<< 16 ? 4 : value < 1 &<< 20 ? 5 : 6
         writer.add(UInt64(nibbles &- 4) &<< 1, bitCount: 3)
@@ -1025,6 +1074,8 @@ extension BrotliEngine {
         literals: borrowing BrotliCode<256>, commands commandCode: borrowing BrotliCode<704>,
         distances: borrowing BrotliCode<64>, to writer: inout BitWriter
     ) {
+        // Unsafe: unchecked flushes. Safe: the meta-block's estimate, which these bits are, fits the staging
+        // buffer (see `writeMetablock` and `withWriter`).
         let literalCodewords = literals.codewords.span
         let literalLengths = literals.lengths.span
         let commandCodewords = commandCode.codewords.span
@@ -1130,6 +1181,8 @@ struct BrotliCode<let size: Int> {
     }
 
     private func storeSimple(to writer: inout BitWriter) {
+        // Unsafe: unchecked flushes. Safe: a code's description is part of its meta-block's estimate, which fits
+        // the staging buffer (see `BrotliEngine.withWriter`); so for `storeComplex`.
         let count = max(symbolCount, 1)
         writer.add(1 | UInt64(count &- 1) &<< 2, bitCount: 4) // HSKIP 1, NSYM - 1
         for index in 0..<count {

@@ -413,6 +413,7 @@ enum ChaCha20 {
         #else
         let value = words ^ keystream.byteSwapped
         #endif
+        // Unsafe: the store back to the 16 bytes just loaded (as above).
         unsafe message.storeBytes(of: value, toUncheckedByteOffset: offset, as: SIMD4<UInt32>.self)
     }
 }

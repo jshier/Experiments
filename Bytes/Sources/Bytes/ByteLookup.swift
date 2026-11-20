@@ -1,5 +1,6 @@
 #if NEONShuffle
-import CBytesNEON
+// Public: inlinable lookups call the header's `static inline` functions.
+public import CBytesNEON
 #endif
 
 // MARK: - Looking up 16 bytes at once

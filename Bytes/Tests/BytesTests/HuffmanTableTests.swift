@@ -1,4 +1,5 @@
 import Bytes
+import BytesTestSupport
 import Testing
 
 /// Canonical Huffman codes (RFC 1951, 3.2.2) for `lengths`, and an encoder for messages in them.
@@ -78,7 +79,8 @@ struct ReferenceCode {
     /// Random messages in random complete codes decode to themselves, in both bit orders.
     @Test(arguments: shapes)
     func decodesRandomCodes(shape: Shape) throws {
-        var rng = SystemRandomNumberGenerator()
+        let seed = UInt64(shape.symbolCount &* 1_000_003 &+ shape.used &* 1009 &+ shape.maximumLength &* 31 &+ shape.rootBits)
+        var rng = SplitMix64(seed: seed)
         for order in [BitOrder.leastSignificantFirst, .mostSignificantFirst] {
             var table = HuffmanTable(symbolCount: shape.symbolCount, maximumCodeLength: shape.maximumLength, rootBits: shape.rootBits)
             for _ in 0..<20 {
@@ -98,7 +100,7 @@ struct ReferenceCode {
                     }
                     return decoded
                 }
-                #expect(decoded == message, "\(order)")
+                #expect(decoded == message, "\(order), seed \(seed)")
             }
         }
     }
@@ -144,12 +146,12 @@ struct ReferenceCode {
         #expect(try table.decode(&buffer) == 1)
         buffer = BitBuffer(BytesReader(one.span, bitOrder: order))
         buffer.refill()
-        #expect(throws: BytesError.invalidValue) { try table.decode(&buffer) }
+        #expect(throws: BytesError.invalidValue) { _ = try table.decode(&buffer) }
 
         try table.build(codeLengths: [0, 0, 0].span, bitOrder: order)
         buffer = BitBuffer(BytesReader(zero.span, bitOrder: order))
         buffer.refill()
-        #expect(throws: BytesError.invalidValue) { try table.decode(&buffer) }
+        #expect(throws: BytesError.invalidValue) { _ = try table.decode(&buffer) }
 
         var entries = [UInt16](repeating: 0, count: 1 << 7)
         var span = entries.mutableSpan

@@ -1,5 +1,7 @@
 import Bytes
 import BytesCompression
+import BytesTesting
+import BytesTestSupport
 import Testing
 import zlib
 
@@ -9,11 +11,14 @@ import zlib
 @Suite struct DeflateDecoderTests {
     static let formats: [DeflateFormat] = [.raw, .zlib, .gzip]
 
-    @Test(arguments: [Z_DEFAULT_STRATEGY, Z_FILTERED, Z_HUFFMAN_ONLY, Z_RLE, Z_FIXED])
-    func decodesWhatZlibEncodes(strategy: Int32) {
-        for (name, bytes) in samples() {
+    static let strategies = [Z_DEFAULT_STRATEGY, Z_FILTERED, Z_HUFFMAN_ONLY, Z_RLE, Z_FIXED]
+
+    static func checkDecodesWhatZlibEncodes(
+        _ samples: [(name: String, bytes: [UInt8])], strategy: Int32, formats: (_ level: Int32) -> [DeflateFormat] = { _ in DeflateDecoderTests.formats }
+    ) {
+        for (name, bytes) in samples {
             for level: Int32 in [0, 1, 6, 9] {
-                for format in Self.formats {
+                for format in formats(level) {
                     let compressed = zlibCompress(bytes, format: format, level: level, strategy: strategy)
                     #expect(decodeAll(compressed, format: format) == .decoded(bytes), "\(name), level \(level), \(format)")
                 }
@@ -21,10 +26,21 @@ import zlib
         }
     }
 
-    /// Input split anywhere and small output buffers: every resumption point.
-    @Test(arguments: [(1, 1), (1, 7), (3, 300), (17, 1), (500, 64), (4096, 100_000), (65_536, 4096)])
-    func decodesInPieces(chunk: Int, outputChunk: Int) {
-        for (name, bytes) in samples() where bytes.count <= (chunk < 16 ? 100_000 : 4 << 20) {
+    /// Every strategy and level on the samples under 1 MB, raw, and in zlib and gzip (which wrap the same blocks) at
+    /// level 6; the large one once (its window-crossing matches). Every way in DeflateDecoderBulkTests.
+    @Test(arguments: Self.strategies)
+    func decodesWhatZlibEncodes(strategy: Int32) {
+        Self.checkDecodesWhatZlibEncodes(smallSamples(), strategy: strategy) { $0 == 6 ? Self.formats : [.raw] }
+        if strategy == Z_DEFAULT_STRATEGY {
+            let large = largeSample()
+            #expect(decodeAll(zlibCompress(large, format: .gzip, level: 6), format: .gzip) == .decoded(large))
+        }
+    }
+
+    static let pieces = [(1, 1), (1, 7), (3, 300), (17, 1), (500, 64), (4096, 100_000), (65_536, 4096)]
+
+    static func checkDecodesInPieces(_ samples: [(name: String, bytes: [UInt8])], chunk: Int, outputChunk: Int) {
+        for (name, bytes) in samples {
             for format in Self.formats {
                 for strategy in [Z_DEFAULT_STRATEGY, Z_FIXED] {
                     let compressed = zlibCompress(bytes, format: format, strategy: strategy)
@@ -33,6 +49,17 @@ import zlib
                 }
             }
         }
+    }
+
+    /// Input split anywhere and small output buffers: every resumption point. Byte-at-a-time pieces of each sample's
+    /// first 20,000 bytes (every block type and several blocks), and larger pieces of the samples under 1 MB; the whole
+    /// samples in DeflateDecoderBulkTests.
+    @Test(arguments: Self.pieces)
+    func decodesInPieces(chunk: Int, outputChunk: Int) {
+        let inputs = chunk < 16
+            ? smallSamples().map { (name: "\($0.name) (first 20,000 bytes)", bytes: Array($0.bytes.prefix(20_000))) }
+            : smallSamples()
+        Self.checkDecodesInPieces(inputs, chunk: chunk, outputChunk: outputChunk)
     }
 
     @Test func storedBlocksInPieces() {
@@ -108,17 +135,22 @@ import zlib
         }
     }
 
-    /// Mutated streams: the decoder must accept exactly what zlib accepts, with the same output.
+    /// Mutated streams: the decoder must accept exactly what zlib accepts, with the same output. The first 1,000
+    /// mutations of each format's sequence; all 10,000 in DeflateDecoderBulkTests.
     @Test(arguments: Self.formats)
     func corruptStreamsMatchZlib(format: DeflateFormat) {
-        var rng = SplitMix64(state: 42)
+        Self.checkCorruptStreams(format: format, iterations: 1_000)
+    }
+
+    static func checkCorruptStreams(format: DeflateFormat, iterations: Int) {
+        var rng = SplitMix64(seed: 42)
         let seeds = samples().filter { $0.bytes.count <= 200_000 }.flatMap { sample in
             [zlibCompress(sample.bytes, format: format), zlibCompress(sample.bytes, format: format, strategy: Z_FIXED),
              zlibCompress(sample.bytes, format: format, level: 0)]
         }.map { Array($0.prefix(2_000)) + [] } // Short streams keep the test fast; truncation is a mutation too.
         var accepted = 0
         var rejected = 0
-        for iteration in 0..<10_000 {
+        for iteration in 0..<iterations {
             var bytes = seeds.randomElement(using: &rng)!
             guard !bytes.isEmpty else { continue }
             for _ in 0..<Int.random(in: 1...4, using: &rng) {
@@ -149,6 +181,27 @@ import zlib
         #expect(decodeAll([0x78, 0x9C], format: .zlib) == .failed) // Header only.
         #expect(decodeAll([0x78, 0x9D, 0x03, 0x00], format: .zlib) == .failed) // Bad header check.
         #expect(decodeAll([0x1F, 0x8C, 0x08, 0, 0, 0, 0, 0, 0, 3, 0x03, 0x00], format: .gzip) == .failed) // Bad magic.
+    }
+}
+
+/// The full sweeps the fast tests above sample: every sample (the 3 MB one included) at every strategy, level, and
+/// format; whole samples in every piece size; 10,000 mutations per format.
+@Suite(.bulk) struct DeflateDecoderBulkTests {
+    @Test(arguments: DeflateDecoderTests.strategies)
+    func decodesWhatZlibEncodes(strategy: Int32) {
+        DeflateDecoderTests.checkDecodesWhatZlibEncodes(samples(), strategy: strategy)
+    }
+
+    @Test(arguments: DeflateDecoderTests.pieces)
+    func decodesInPieces(chunk: Int, outputChunk: Int) {
+        DeflateDecoderTests.checkDecodesInPieces(
+            samples().filter { $0.bytes.count <= (chunk < 16 ? 100_000 : 4 << 20) }, chunk: chunk, outputChunk: outputChunk
+        )
+    }
+
+    @Test(arguments: DeflateDecoderTests.formats)
+    func corruptStreamsMatchZlib(format: DeflateFormat) {
+        DeflateDecoderTests.checkCorruptStreams(format: format, iterations: 10_000)
     }
 }
 

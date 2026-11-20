@@ -142,6 +142,7 @@ struct LZMARangeDecoder {
     ) {
         self.range = range
         self.code = code
+        // Unsafe: storing pointers. Safe: the caller's input, end, and model, valid while it decodes.
         unsafe self.input = input
         unsafe self.end = end
         unsafe self.probabilities = probabilities
@@ -153,6 +154,7 @@ struct LZMARangeDecoder {
     /// The same decoder in another mode.
     @inline(__always)
     func with(careful: Bool) -> LZMARangeDecoder {
+        // Unsafe: copies this decoder's pointers. Safe: as valid as they are.
         unsafe LZMARangeDecoder(range: range, code: code, input: input, end: end, probabilities: probabilities, careful: careful)
     }
 
@@ -568,6 +570,9 @@ enum LZMALoop {
         _ registers: inout LZMARegisters, _ decoder: inout LZMARangeDecoder, dictionary: UnsafeMutablePointer<UInt8>,
         limit: Int, inputLimit: UnsafePointer<UInt8>, dictionarySize: Int, allowsEndMarker: Bool
     ) throws(BytesError) -> Bool {
+        // Unsafe: the loop's unchecked reads and writes. Safe: `decode` calls the fast loops only with
+        // `inputLimit` the input's end less the most one symbol reads, and `limit` within the dictionary; the
+        // loop checks matches' distances against what's decoded.
         var localRegisters = registers
         var localDecoder = decoder
         let endMarker = try unsafe run(
@@ -586,6 +591,7 @@ enum LZMALoop {
         _ registers: inout LZMARegisters, _ decoder: inout LZMARangeDecoder, dictionary: UnsafeMutablePointer<UInt8>,
         limit: Int, inputLimit: UnsafePointer<UInt8>, model: LZMAModel, allowsEndMarker: Bool
     ) throws(BytesError) -> Bool {
+        // Unsafe and safe as `fastDefault`.
         var localRegisters = registers
         var localDecoder = decoder
         let endMarker = try unsafe run(
@@ -605,6 +611,8 @@ enum LZMALoop {
         _ registers: inout LZMARegisters, _ decoder: inout LZMARangeDecoder, dictionary: UnsafeMutablePointer<UInt8>,
         limit: Int, model: LZMAModel, allowsEndMarker: Bool, overrun: BytesError
     ) throws(BytesError) -> Bool {
+        // Unsafe: the loop's pointers. Safe: in careful mode it checks every input byte against `decoder.end` and
+        // every match against `limit` and what's decoded.
         var localRegisters = registers
         var localDecoder = decoder
         let endMarker = try unsafe run(
@@ -628,6 +636,7 @@ enum LZMALoop {
         limit: Int, model: LZMAModel, allowsEndMarker: Bool, overrun: BytesError
     ) throws(BytesError) -> Bool {
         if registers.position == 0 && limit > 0 {
+            // Unsafe and safe as `careful`.
             if try unsafe careful(
                 &registers, &decoder, dictionary: dictionary, limit: 1, model: model, allowsEndMarker: allowsEndMarker,
                 overrun: overrun

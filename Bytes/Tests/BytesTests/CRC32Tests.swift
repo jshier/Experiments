@@ -1,10 +1,5 @@
-// `@testable` (for the folding constants) only where Bytes is built for testing: `swift build -c release
-// --build-tests` builds it without `-enable-testing`, and the import would fail.
-#if DEBUG
-@_spi(Benchmarking) @testable import Bytes
-#else
-@_spi(Benchmarking) import Bytes
-#endif
+import Bytes
+import BytesTestSupport
 import Testing
 
 @Suite struct CRC32Tests {
@@ -20,9 +15,13 @@ import Testing
         return ~state
     }
 
+    /// Fixed seeds, so a failure reproduces: the messages name them.
+    static let dataSeed: UInt64 = 0xC4C3_2000
+    static let splitSeed: UInt64 = 0xC4C3_2001
+
     static func random(_ count: Int) -> [UInt8] {
-        var rng = SystemRandomNumberGenerator()
-        return (0..<count).map { _ in UInt8.random(in: 0...255, using: &rng) }
+        var rng = SplitMix64(seed: dataSeed)
+        return rng.bytes(count)
     }
 
     @Test func checkValues() {
@@ -39,8 +38,8 @@ import Testing
             for count in stride(from: 0, through: data.count - offset, by: offset == 0 ? 1 : 37) {
                 let slice = Array(data[offset..<(offset + count)])
                 let expected = Self.reference(slice)
-                #expect(CRC32.checksum(slice.span.bytes) == expected, "offset \(offset), \(count) bytes")
-                #expect(CRC32.tableChecksum(slice.span.bytes) == expected, "tables: offset \(offset), \(count) bytes")
+                #expect(CRC32.checksum(slice.span.bytes) == expected, "offset \(offset), \(count) bytes, seed \(Self.dataSeed)")
+                #expect(CRC32.tableChecksum(slice.span.bytes) == expected, "tables: offset \(offset), \(count) bytes, seed \(Self.dataSeed)")
             }
         }
     }
@@ -49,7 +48,7 @@ import Testing
     @Test func incremental() {
         let data = Self.random(100_000)
         let whole = CRC32.checksum(data.span.bytes)
-        var rng = SystemRandomNumberGenerator()
+        var rng = SplitMix64(seed: Self.splitSeed)
         for _ in 0..<50 {
             var crc = CRC32()
             var start = 0
@@ -59,12 +58,12 @@ import Testing
                 start = end
                 crc = CRC32(continuing: crc.value)
             }
-            #expect(crc.value == whole)
+            #expect(crc.value == whole, "seeds \(Self.dataSeed), \(Self.splitSeed)")
         }
         #expect(whole == Self.reference(data))
     }
 
-    #if arch(arm64) && HardwareCRC && !Portable && DEBUG
+    #if arch(arm64) && HardwareCRC && !Portable
     /// The folding constants: x^(n ± 32) mod P, bit-reflected, shifted left one.
     @Test func foldingConstants() {
         func constant(_ exponent: Int) -> UInt64 {

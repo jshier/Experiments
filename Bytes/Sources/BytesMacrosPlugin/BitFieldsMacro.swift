@@ -1,6 +1,6 @@
-import SwiftSyntax
-import SwiftSyntaxBuilder
-import SwiftSyntaxMacros
+public import SwiftSyntax
+internal import SwiftSyntaxBuilder
+public import SwiftSyntaxMacros
 
 /// `@BitFields(Byte.self, reserved: 0...0)`: a struct of flags and fields packed into one value.
 ///

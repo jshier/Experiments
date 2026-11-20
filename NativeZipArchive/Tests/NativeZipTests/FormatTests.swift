@@ -1,3 +1,4 @@
+import BytesTestSupport
 import Foundation
 import NativeZip
 import System
@@ -9,14 +10,7 @@ import Testing
 // it, so `verify` checks the decoders against data that doesn't come from them.
 
 private func fixture(_ name: String) throws -> ZipArchive {
-    try ZipArchive(url: testDataFile("nativezip-formats", name))
-}
-
-/// A fresh directory for one test's output, removed by the caller.
-private func temporaryDirectory() throws -> URL {
-    let url = FileManager.default.temporaryDirectory.appending(path: "NativeZipTests-\(UUID().uuidString)")
-    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-    return url
+    try ZipArchive(url: TestData.file(set: "nativezip-formats", name: name))
 }
 
 private func contents(_ url: URL) throws -> String {
@@ -25,13 +19,7 @@ private func contents(_ url: URL) throws -> String {
 
 /// Runs /usr/bin/zip in `directory` with `arguments`.
 private func zip(_ arguments: [String], in directory: URL) throws {
-    let process = Process()
-    process.executableURL = URL(filePath: "/usr/bin/zip")
-    process.arguments = ["-q"] + arguments
-    process.currentDirectoryURL = directory
-    try process.run()
-    process.waitUntilExit()
-    #expect(process.terminationStatus == 0)
+    try ExternalTool.run("/usr/bin/zip", ["-q"] + arguments, in: directory)
 }
 
 @Suite struct FormatTests {
@@ -83,15 +71,16 @@ private func zip(_ arguments: [String], in directory: URL) throws {
     }
 
     @Test func detectsTamperedAESData() async throws {
-        var bytes = try [UInt8](Data(contentsOf: testDataFile("nativezip-formats", "bsdtar-aes256.zip")))
+        var bytes = try [UInt8](Data(contentsOf: TestData.file(set: "nativezip-formats", name: "bsdtar-aes256.zip")))
         let archive = try fixture("bsdtar-aes256.zip")
         // Flip a byte of ciphertext: after the local header, its name, the 16-byte salt and 2-byte verifier.
         let header = Int(archive.entries[0].localHeaderOffset)
         let nameLength = Int(bytes[header + 26]) | Int(bytes[header + 27]) << 8
         let extraLength = Int(bytes[header + 28]) | Int(bytes[header + 29]) << 8
         bytes[header + 30 + nameLength + extraLength + 18 + 5] ^= 0x01
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
         let tampered = directory.appending(path: "tampered.zip")
         try Data(bytes).write(to: tampered)
 
@@ -112,8 +101,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
 
 @Suite struct ExtractionTests {
     @Test func makesUnsafePathsSafe() async throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
         var adjusted: [String] = []
         var options = ExtractionOptions()
         options.onEvent = { event in
@@ -130,8 +120,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
 
     @Test func resolvesDuplicateNames() async throws {
         for (policy, expected) in [(OverwritePolicy.always, "second\n"), (.never, "first\n")] {
-            let directory = try temporaryDirectory()
-            defer { try? FileManager.default.removeItem(at: directory) }
+            let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+            defer { temporary.remove() }
+            let directory = temporary.url
             var options = ExtractionOptions()
             options.overwrite = policy
             var skipped = 0
@@ -143,8 +134,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
     }
 
     @Test func extractsSeveralArchivesTogether() async throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
         let failures = try await ZipExtractor.extract { extractor in
             for name in ["bzip2.zip", "xz.zip", "deflate64.zip", "symlink.zip"] {
                 try extractor.add(fixture(name), to: FilePath(directory.path))
@@ -159,8 +151,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
 
     /// Large encrypted entries, decrypted in pieces as they're extracted (the 5 MB entries take the pipelined path).
     @Test func extractsLargeEncryptedEntries() async throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
         var options = ExtractionOptions()
         options.password = "secret"
         let names = ["large-zipcrypto-stored.zip", "large-zipcrypto-deflated.zip", "large-aes256-store.zip", "large-aes256-deflate.zip"]
@@ -179,8 +172,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
     }
 
     @Test func collectsFailuresAndExtractsTheRest() async throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
         let failures = try await ZipExtractor.extract { extractor in
             try extractor.add(fixture("ppmd.zip"), to: FilePath(directory.appending(path: "ppmd").path))
             try extractor.add(fixture("zipcrypto.zip"), to: FilePath(directory.appending(path: "crypto").path))
@@ -193,9 +187,10 @@ private func zip(_ arguments: [String], in directory: URL) throws {
 
     /// A stored entry big enough to be copied in pieces, intact and then with one byte changed.
     @Test func copiesLargeStoredEntriesInPieces() async throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
-        var rng = SplitMix64(state: 11)
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
+        var rng = SplitMix64(seed: 11)
         var data = [UInt8](repeating: 0, count: 40 << 20 | 12_345)
         for index in stride(from: 0, to: data.count - 8, by: 8) {
             data.withUnsafeMutableBytes { $0.storeBytes(of: rng.next(), toByteOffset: index, as: UInt64.self) }
@@ -221,10 +216,11 @@ private func zip(_ arguments: [String], in directory: URL) throws {
     /// Entries over the pipelining threshold (DEFLATE and bzip2): decoded in one task, written and checksummed
     /// in another.
     @Test func pipelinesLargeEntries() async throws {
-        let directory = try temporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: directory) }
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
         var text = [UInt8]()
-        var rng = SplitMix64(state: 3)
+        var rng = SplitMix64(seed: 3)
         let words = ["zip", "entry", "pipeline", "chunk", "deflate", " ", "\n"]
         while text.count < 6 << 20 { text += Array(words.randomElement(using: &rng)!.utf8) }
         try Data(text).write(to: directory.appending(path: "text.txt"))

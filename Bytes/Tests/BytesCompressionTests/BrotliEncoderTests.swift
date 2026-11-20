@@ -1,5 +1,6 @@
 import Bytes
 import BytesCompression
+import BytesTestSupport
 import CBrotli
 import Testing
 
@@ -16,7 +17,7 @@ func brotliEncodeAll(_ data: [UInt8], quality: Int, windowBits: Int = 22) -> [UI
 
 func brotliEncodeStreaming(
     _ data: [UInt8], quality: Int, windowBits: Int = 18, chunk: Int, outputChunk: Int, flush: TransformFlush = .none
-) -> [UInt8] {
+) throws(BytesError) -> [UInt8] {
     var encoder = BrotliEncoder(quality: quality, windowBits: windowBits)
     var result: [UInt8] = []
     var buffer = [UInt8](repeating: 0, count: outputChunk)
@@ -26,12 +27,10 @@ func brotliEncodeStreaming(
         var piece = Array(data[offset..<end])
         let mode: TransformFlush = end == data.count ? .finish : flush
         while true {
-            let progress: TransformProgress = buffer.withUnsafeMutableBytes { raw in
-                var span = OutputRawSpan(buffer: raw, initializedCount: 0)
-                let progress = try! encoder.compress(piece.span.bytes, into: &span, flush: mode)
-                result += raw[..<span.finalize(for: raw)]
-                return progress
+            let (progress, produced) = try buffer.withOutputRawSpan { span throws(BytesError) in
+                (try encoder.compress(piece.span.bytes, into: &span, flush: mode), span.byteCount)
             }
+            result += buffer[..<produced]
             piece.removeFirst(progress.consumed)
             if progress.status == .finished || (progress.status == .needsInput && piece.isEmpty) { break }
         }
@@ -58,22 +57,22 @@ func brotliEncodeStreaming(
     }
 
     @Test(arguments: [1, 5, 9])
-    func streamingRoundTrips(quality: Int) {
+    func streamingRoundTrips(quality: Int) throws {
         for (name, bytes) in samples() where bytes.count <= 1 << 20 {
             for (chunk, outputChunk) in [(1000, 7), (4096, 333), (100_000, 65_536), (300_000, 1 << 20)] {
-                let compressed = brotliEncodeStreaming(bytes, quality: quality, chunk: chunk, outputChunk: outputChunk)
+                let compressed = try brotliEncodeStreaming(bytes, quality: quality, chunk: chunk, outputChunk: outputChunk)
                 #expect(googleBrotliDecompress(compressed) == .decoded(bytes), "\(name), quality \(quality), chunks \(chunk)/\(outputChunk)")
             }
         }
         let large = samples().last!.bytes
-        let compressed = brotliEncodeStreaming(large, quality: quality, windowBits: 16, chunk: 70_000, outputChunk: 50_000)
+        let compressed = try brotliEncodeStreaming(large, quality: quality, windowBits: 16, chunk: 70_000, outputChunk: 50_000)
         #expect(googleBrotliDecompress(compressed) == .decoded(large))
     }
 
     /// After each flush, everything so far decodes: messages over one compressed stream.
     @Test(arguments: [1, 5])
-    func flushMakesEachMessageDecodable(quality: Int) {
-        var rng = SplitMix64(state: 5)
+    func flushMakesEachMessageDecodable(quality: Int) throws {
+        var rng = SplitMix64(seed: 5)
         let text = samples()[2].bytes
         var encoder = BrotliEncoder(quality: quality, windowBits: 18)
         var decoder = BrotliDecoder()
@@ -82,18 +81,18 @@ func brotliEncodeStreaming(
         for _ in 0..<200 {
             let start = Int.random(in: 0..<(text.count - 3000), using: &rng)
             let message = Array(text[start..<(start + Int.random(in: 1...3000, using: &rng))])
-            let compressed: [UInt8] = buffer.withUnsafeMutableBytes { raw in
-                var span = OutputRawSpan(buffer: raw, initializedCount: 0)
-                let progress = try! encoder.compress(message.span.bytes, into: &span, flush: .flush)
+            let compressedCount = try buffer.withOutputRawSpan { span throws(BytesError) in
+                let progress = try encoder.compress(message.span.bytes, into: &span, flush: .flush)
                 #expect(progress.status == .needsInput && progress.consumed == message.count)
-                return Array(raw[..<span.finalize(for: raw)])
+                return span.byteCount
             }
-            let output: [UInt8] = decoded.withUnsafeMutableBytes { raw in
-                var span = OutputRawSpan(buffer: raw, initializedCount: 0)
-                let progress = try! decoder.decompress(compressed.span.bytes, into: &span)
+            let compressed = Array(buffer[..<compressedCount])
+            let outputCount = try decoded.withOutputRawSpan { span throws(BytesError) in
+                let progress = try decoder.decompress(compressed.span.bytes, into: &span)
                 #expect(progress.status == .needsInput && progress.consumed == compressed.count)
-                return Array(raw[..<span.finalize(for: raw)])
+                return span.byteCount
             }
+            let output = Array(decoded[..<outputCount])
             #expect(output == message)
         }
     }

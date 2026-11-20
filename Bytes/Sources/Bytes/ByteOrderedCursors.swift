@@ -13,6 +13,7 @@ public extension GenericBytesReader where Mode: ByteOrderedCursorMode {
     func peek<I: FixedWidthInteger & ConvertibleFromBytes>(_ type: I.Type) throws(BytesError) -> I {
         _assumeInvariant()
         guard likely(span.byteCount &- _byteOffset >= MemoryLayout<I>.size) else { throw .insufficientData }
+        // Unsafe: an unchecked load. Safe: `MemoryLayout<I>.size` bytes remain (just checked).
         let raw = unsafe Load.rawBytes(I.self, from: span, at: _byteOffset)
         // A switch, not `==`: the synthesized `==` stayed an out-of-line call in specialized code.
         return switch Mode.byteOrder { case .bigEndian: I(bigEndian: raw); case .littleEndian: I(littleEndian: raw) }

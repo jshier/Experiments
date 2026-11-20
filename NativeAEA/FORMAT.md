@@ -6,7 +6,8 @@ derivation below was checked against Apple's own tools: `aea decrypt` and `aea i
 `aea encrypt` and `aa archive` made in the tests (every segment compression, checksum, and segment size).
 
 There are three layers: the **container** (`AEA1`: signature, keys, MACs, compressed segments), the **Apple Archive
-stream** inside it (`AA01` entries), and how Apple's extractor **writes files** (APFS compression).
+stream** inside it (`AA01` entries), and how Apple's extractor **writes files** (APFS compression). Section 4 covers Xcode's
+other download, the `.xip` (a signed XAR archive of a cpio stream in pbzx blocks), and what `xip --expand` writes.
 
 ## 1. The container
 
@@ -37,7 +38,8 @@ Profile 0's prologue is 316 bytes plus the auth data: Xcode's is 4,118 (`0x1016`
 starts after an 18,464-byte cluster header.
 
 **Profiles** (`AEAProfiles`): 0 `hkdf_sha256_hmac__none__ecdsa_p256` (signed, not encrypted: Xcode), 1 symmetric
-key, 2 symmetric + signed, 3 ECDHE, 4 ECDHE + signed, 5 scrypt password. NativeAEA reads profile 0.
+key (iOS IPSWs' disk images), 2 symmetric + signed, 3 ECDHE, 4 ECDHE + signed, 5 scrypt password. NativeAEA reads
+all six (keys below).
 
 **Auth data** is a key-value list: entries of `size u32 (including itself) | key, NUL-terminated | value`. Xcode's
 has one, `com.apple.ias.signature.certificate-chain`: three PEM certificates, leaf first (an Apple-issued leaf,
@@ -71,9 +73,11 @@ Otherwise:
   decodes).
 - `4`: raw LZ4 blocks (Compression's `COMPRESSION_LZ4_RAW`, not its `bv41` frames).
 - `e`, `b`, `m`: LZFSE, LZBITMAP, and LZRAVEN streams as Compression writes them (`COMPRESSION_LZRAVEN`, buffer
-  API only, macOS 27).
-- `f`: LZVN. `aea encrypt` can't make it and Compression's public API has no LZVN decoder; NativeAEA reports it as
-  unsupported.
+  API only, macOS 27). LZRAVEN is undocumented; Bytes' `LZRAVEN-FORMAT.md` describes it (read from libcompression).
+- `f`: LZVN, a raw stream ending with LZVN's end-of-stream opcode. The `aea` and `aa` tools don't offer it, but
+  libAppleArchive writes it given libcompression's private LZVN constant, 0x900 (`AEA_CONTEXT_FIELD_COMPRESSION_ALGORITHM`
+  in C; `ArchiveCompression(rawValue: 0x900)` in Swift): `f` segments in AEA, `pbzf` blocks in Apple Archive streams.
+  NativeAEA's tests make both that way.
 
 `aea encrypt -b` makes segments of at least 16 KiB.
 
@@ -95,9 +99,39 @@ segment key j         HKDF(cluster key, no salt, "AEA_SK" | j)        j counts w
 padding key           HKDF(main key, no salt, "AEA_PAK")
 ```
 
-On encrypted profiles the same derivations produce 80 bytes (MAC key, AES-256 key, CTR IV) and the main key's input is
-the symmetric key or an ECDH secret; on profile 0 the key material is stored in the clear, so anyone can derive every
-key. That's fine: the MACs only chain everything to the prologue, and the signature authenticates the prologue.
+On profile 0 the key material is stored in the clear, so anyone can derive every key. That's fine: the MACs only chain
+everything to the prologue, and the signature authenticates the prologue.
+
+**Encrypted profiles** (1–5) derive the same keys at 80 bytes: HMAC key (32) | AES-256 key (32) | IV (16). The root
+header, each cluster header's segment infos, and each segment are MACed as stored (ciphertext) and then decrypted
+with AES-256 in counter mode. The counter is the IV's last 8 bytes, big-endian, wrapping without a carry into the
+first 8. That's CommonCrypto's `kCCModeOptionCTR_BE`, checked against CommonCrypto. A segment stored uncompressed
+decrypts straight to its raw bytes. The main key's inputs per profile:
+
+```
+input key material                  salt                     info after "AEA_AMK" | profile word
+0  key material (prologue, 32)      prologue salt            signing public key
+1  symmetric key (32)               prologue salt            —
+2  symmetric key                    prologue salt            signing public key
+3  ECDH(recipient private, ephemeral public in the prologue: x-coordinate, 32)
+                                    prologue salt            ephemeral public | recipient public
+4  as 3                             prologue salt            ephemeral public | recipient public | signing public
+5  scrypt(password, salt: E[0..<32], N: 0x4000 << (2 × strength), r: 8, p: 1, 32 bytes)
+                                    E[32..<64]               —
+   where E = HKDF(prologue salt, no salt, "AEA_SCRYPT", 64)
+```
+
+Public keys are X9.63 (65 bytes); the decrypting side computes the recipient's from its private key. **Signatures on
+profiles 2 and 4** are encrypted: the 160-byte field is `AES-CTR(SEK, DER signature padded to 128) | MAC(SEK, those
+128 bytes)` (no associated data), with `SEK = HKDF(HKDF(main key, -, "AEA_SEK", 32), -, "AEA_SEK2", 80)`. The signature
+covers the prologue as stored (root header encrypted) with all 160 bytes zeroed. A wrong key fails at the root
+header's MAC (or the signature's).
+
+These derivations come from two open-source readers that agree (kinnay/AEA's FORMAT.md and aea.py,
+mrowlinson/applearchive-cleanroom). NativeAEA checks them against archives `aea encrypt` makes for profiles 1–5 at
+test time. iOS IPSWs' root file system images (`.dmg.aea`) are profile 1. Their auth data carries
+`com.apple.wkms.fcs-response`: an HPKE-sealed copy of the key, opened with a private key from the URL in
+`com.apple.wkms.fcs-key-url`.
 
 Every MAC is `HMAC-SHA256(key, associated data | data | u64 size of the associated data)`:
 
@@ -108,8 +142,8 @@ Every MAC is `HMAC-SHA256(key, associated data | data | u64 size of the associat
 | Segment | segment key | — | stored (compressed) bytes | its cluster header |
 | Padding | padding key | (plain HMAC, no size) | padding | last cluster's next-header slot |
 
-**The signature** is ECDSA P-256 with SHA-256 over the whole prologue with the signature field zeroed, DER-encoded,
-zero-padded to 128 bytes. The public key is the leaf certificate's (or one given with `aea -sign-pub`). **The archive
+**The signature** (profile 0) is ECDSA P-256 with SHA-256 over the whole prologue with the signature field zeroed,
+DER-encoded, zero-padded to 128 bytes. The public key is the leaf certificate's (or one given with `aea -sign-pub`). **The archive
 identifier** `aea id` prints is SHA-256 of the prologue as stored.
 
 So one signature check authenticates everything: signature → prologue → root header (MAC) → first cluster header
@@ -138,8 +172,35 @@ A field is a 3-letter key and a 1-character subtype that gives the value's size:
 Keys (`AADefs.h`): `TYP` type (`F` file, `D` directory, `L` link, …), `PAT` path, `LNK` link target, `UID`, `GID`,
 `MOD` (the header says the low 12 bits of `st_mode`; Xcode's carry the whole of it, type bits included: 0x81ED for
 a 0755 file, 0x41ED for a directory), `FLG` (`st_flags`), `MTM`/`CTM`/`BTM` times, `DAT` contents, `XAT` extended attributes, `ACL`,
-`SIZ`, `SH2` …, `HLC`/`CLC`/`SLC` hard-link, clone, and same-data cluster ids. `aa archive` writes `TYP1 PATP UID2 GID1
-MOD2 FLG1 CTMT MTMT [DATA|DATB]` per entry, and a first entry with an empty path (the destination itself).
+`SIZ`, `SH2` …, `HLC`/`CLC`/`SLC` hard-link, clone, and same-data cluster ids, `DEV` a device's `st_rdev`. `aa archive`
+writes `TYP1 PATP UID2 GID1 MOD2 FLG1 CTMT MTMT [DATA|DATB] [XATA] [ACLA] [HLC1]` per entry, and a first entry with an
+empty path (the destination itself).
+
+The metadata blobs (`AAEntryXATBlob.h`, `AAEntryACLBlob.h`, checked against `aa archive` output):
+
+```
+XAT   entries of: size u32 (the entry's, itself included) | name, NUL-terminated | value (the rest)
+ACL   entries of: size u32 (22 + the qualifier's) | type ('A' allow, 'D' deny) | flags u64 | permissions u64
+                  | qualifier type ('U' user name, 'G' group name, 'I' UUID text, 'S' SID text) | qualifier
+```
+
+ACL flags and permissions are macOS's `acl_flag_t` and `acl_perm_t` bits: `list,add_file` is 6, inheritance
+`file_inherit,directory_inherit,limit_inherit` is 0xE0. The header warns they might not match other SDKs. A
+hard-link cluster's members each carry the contents (`DAT`). `aa extract` writes the first and links the rest.
+
+**Compressed streams** (`aa archive`'s default output, and what `aa archive -a ALGORITHM` writes) wrap the stream in
+independently compressed blocks:
+
+```
+"pbz" | algorithm (u8) | block size (u64, big-endian)
+per block: raw size (u64 BE) | stored size (u64 BE) | stored bytes     (sizes equal: stored as is)
+```
+
+The algorithm letters are AEA's: `e` LZFSE, `x` an xz stream, `z` zlib (RFC 1950), `b` LZBITMAP, `m` LZRAVEN, `f` LZVN, and `4`
+LZ4 as Compression's `bv41` frames (not raw blocks as in AEA segments). An AEA container may hold such a stream
+(`aea encrypt -i archive.aar`); NativeAEA detects the magic in the first segment. Blocks carry no checksums: a damaged
+compressed block fails to decode, but damage to a stored block can't be detected (by `aa` either), unless the entries
+carry hashes (`SH2` and the like) or the stream is in an AEA container.
 
 **Xcode's stream** is 167,541 entries, directories before their contents: 30,082 directories (`TYP1 PATP UID1 GID1
 MOD2`), 126,205 files (`… DATA|DATB FLG1 AFT1`, all with `FLG1` = 0x20 and `AFT1` = 14), and 11,254 links (`… LNKP`).
@@ -164,13 +225,95 @@ and 12 for LZFSE. A type 14 resource fork is a table of chunk count + 1 u32 offs
 chunks: each 64 KiB of the file compressed on its own (Compression's LZBITMAP stream, `ZBM\t…`). A chunk, or
 inline data, that doesn't compress is stored as `0xFF` and the raw bytes.
 
+The encoder's room matters, not just its algorithm: Compression's LZBITMAP output depends on the destination size it
+gets (its compressed path needs working room beyond its result: a 321-byte file compresses to 277 bytes with 337 of
+room and fails with 321). `aa extract` gives every chunk **64 KiB of room**, a file's short last chunk and small files
+included, and stores a chunk raw unless the result is smaller. With that rule NativeAEA's LZBITMAP encoder (Compression's
+bytes exactly) stores every one of Xcode's files byte for byte as `aa` does, `decmpfs` attribute and fork included.
+
 Apple's choices, measured on Xcode (and matched by NativeAEA file for file):
 
 - **Inline** (type 13) when the attribute, header included, is at most **3,584 bytes**: 88,006 files.
 - **Resource fork** (type 14) otherwise: 37,881 files, 9.45 GB raw in 3.12 GB.
 - **Plain** when the fork would be **93% or more** of the raw size (the highest ratio it compressed was 0.9293; the
   lowest it left plain, 0.9304): 318 files, 0.72 GB (packages, asset catalogs, PNGs). Inline files never fall back.
+  The ratio is the whole file's: a file whose first MiB compresses and whose whole doesn't is plain, and the other
+  way around (checked with `aa extract` on streams made to differ).
 - Permissions from `MOD` on files, directories, and links (18 links have 0644); files and directories are 3.9 GB on
   disk in all.
 
-`aa extract` also copies the source archive's quarantine attribute onto every item; NativeAEA doesn't.
+`aa extract` also copies the source archive's `com.apple.quarantine` attribute onto every item, links included, and
+onto the destination directory itself for a plain `.aar` (not for an `.aea`). It restores `XAT` attributes on files, directories, and links, and `ACL`s. NativeAEA
+does all of this by default (`--no-quarantine` skips the quarantine).
+
+## 4. Xcode's `.xip`
+
+Xcode's other download (`Xcode_27.2_Release_Candidate.xip`, and 27.1 RC and 27.3 beta, all read the same way) is a
+signed XAR archive of two members. Worked out from those three files, `xar`'s TOC dump, and `xip --expand`'s output,
+compared item by item with NativeAEA's.
+
+### The XAR container
+
+```
+"xar!" | header size u16 (28) | version u16 (1) | TOC compressed size u64 | TOC size u64 | checksum algorithm u32 (1: SHA-1)
+TOC: zlib (RFC 1950) XML, then the heap
+heap: TOC checksum (SHA-1 of the compressed TOC: offset 0, 20 bytes) | signature (offset 20, 256 bytes) | members
+```
+
+All big-endian. The TOC (27.2's: 3,945 bytes compressed, 6,997 as XML) gives:
+
+- `checksum` (`style="sha1"`) and `signature` (`style="RSA"`) places in the heap, and the signer's chain, leaf first, as
+  base64 `X509Certificate`s: **Software Update** (RSA 2048, extended key usage 1.2.840.113635.100.4.1, Apple's software
+  update signing, valid 2019–2029) ← **Apple Software Update Certification Authority** ← **Apple Root CA** (SHA-256
+  `b0b1730e…f024`, the 2006 root).
+- `creation-time` (UTC, no zone: `2026-10-16T17:24:05`).
+- Per member: `name`, `data/offset` (from the heap), `length` (stored), `size` (decoded), `encoding`, and SHA-1s of the
+  stored and decoded bytes (`archived-checksum`, `extracted-checksum`). Ownership, times, inode numbers of the
+  originals: unused.
+
+The **signature** is RSA PKCS #1 v1.5 of the TOC checksum itself: the 20 bytes go in SHA-1's `DigestInfo` as the
+digest (the TOC isn't hashed again). Since the TOC holds the members' checksums, the signature covers everything.
+`xip --expand` checks none of it ("validation not attempted"); `pkgutil --check-signature` checks the chain.
+
+### `Content` and `Metadata`
+
+- **`Content`** (2.05 GB in 27.2) is stored (`application/octet-stream`, length = size) at heap offset 276, right after
+  the signature. It's a **pbzx** stream: the `pbz` block layout of §2 with algorithm `x`, 16 MiB blocks, each an xz
+  stream (a block whose sizes are equal would be stored raw).
+- **`Metadata`** (303 bytes, `application/x-bzip2`) is a property list: `FileSystemCompressionFormat` `10.10` (the APFS
+  compression to use: LZVN, which came with OS X 10.10), `UncompressedSize` (the cpio stream's size, 10,347,643,285
+  bytes for 27.2), `Version` 1, `xbs_sortcpio` true.
+
+Decoded, `Content` is a **cpio** archive in the POSIX "odc" format (`070707`): per entry a 76-byte header of octal
+ASCII fields (`dev ino mode uid gid nlink rdev` of 6 digits, `mtime` of 11, `namesize` 6, `filesize` 11), the
+NUL-terminated name (`./Xcode.app/…`, `.` for the root), then the contents, no padding; a symbolic link's contents are
+its target. `TRAILER!!!` ends it. Hard links are entries sharing `dev` and `ino`, each carrying the contents (27.2:
+32,009 hard-linked names, 26,062 of them later names of 5,947 files). The order (`xbs_sortcpio`) puts each directory
+before its entries.
+
+### What `xip --expand` writes
+
+Measured on 27.2's 167,193 items, 126,027 of them regular files (Apple's expansion against NativeAEA's, compared with
+`stat`, `xattr`, and the stored `decmpfs` bytes: identical, but for the times of directories and links):
+
+- **Times:** regular files get their cpio `mtime`; directories and symbolic links are left at the extraction's time.
+  No extended attributes, no quarantine; owner is the extracting user, mode from the cpio (`& 07777`).
+- **Compression:** `decmpfs` type **8** (LZVN in the resource fork; never type 7, inline) for exactly the files
+  - larger than **16,384 bytes** (every smaller file is plain, however well it compresses),
+  - that **aren't PNGs** (the 8-byte PNG signature: all 146 PNGs over 16 KiB are plain),
+  - whose fork **saves at least a fifth of the 4 KiB blocks**: `ceil(fork / 4096) × 5 ≤ ceil(size / 4096) × 4` (by
+    bytes, ratios from 0.787 to 0.864 went both ways; by blocks, all 27,035 files over 16 KiB fit).
+- **The fork:** a table of chunk count + 1 u32 offsets, then 64 KiB chunks, each Compression's LZVN
+  (`COMPRESSION_LZVN`, 0x900) of the chunk, or `0x06` and the raw bytes when that's no smaller or fails. The encoder
+  gets the **chunk's own size** as room (`aa extract` gives LZBITMAP a whole chunk's, §3). LZVN's stream doesn't
+  depend on the room, but the encoder needs 1–10 bytes beyond it, so a chunk that shrinks by less fails and is stored
+  raw: in 27.2, the short last chunks (20–1,564 bytes) of 42 files. Every full chunk that compresses comes out the
+  same with any room (153,662 of 154,171; the other 509 are stored raw either way).
+- **Order of calls:** `fchflags(UF_COMPRESSED)` sets the file's modification time to now, so the times are set after
+  the flag (NativeAEA's writer: owner, mode, flags, times, then any locking flags).
+
+NativeAEA reads the TOC (inflated with Bytes' DEFLATE, parsed by a small XML scanner), checks the TOC checksum and
+the signature and chain (Bytes' RSA and X.509, pinned to Apple Root CA, at the archive's `creation-time`), decodes the
+pbzx blocks in parallel with Bytes' xz decoder, hashes `Content` with SHA-1 on a thread of its own while it's decoded,
+and walks the cpio stream into the same extractor as Apple Archives (`CpioWalker`), so files are written with the
+rules above.

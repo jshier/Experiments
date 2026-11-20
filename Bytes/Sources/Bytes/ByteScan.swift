@@ -128,7 +128,7 @@ public struct ByteMatches: Sendable {
         // whose bit 3 happened to be set, as `matching(_:)` leaves 'p' (0x70), read as a match.)
         let full = bitCast(bitCast(highBits, to: SIMD16<Int8>.self) &>> 7, to: SIMD16<UInt8>.self)
         let pairs = bitCast(full, to: SIMD8<UInt16>.self)
-        let narrowed = SIMD8<UInt8>(truncatingIfNeeded: pairs &>> 4)
+        let narrowed = (pairs &>> 4)._lowBytes
         return bitCast(narrowed, to: UInt64.self) & 0x8888_8888_8888_8888
         #else
         // Lane i in bit i, spread to bit 4i + 3.

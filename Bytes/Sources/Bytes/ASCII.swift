@@ -256,6 +256,130 @@ public extension GenericBytesReader {
         return (fours &* (10_000 &<< 32 &+ 1)) &>> 32
     }
 
+    /// Reads a number written as 1 through `maximumDigitCount` ASCII digits, most significant first, stopping
+    /// before the first byte that isn't a digit (or at the end of the data): a length or a port in text, such as
+    /// HTTP's `Content-Length: 1024\r\n`.
+    ///
+    /// ```swift
+    /// let length = try reader.read(Int.self, asciiDigitsUpTo: 10)
+    /// try reader.expect(0x0D_0A as Byte2)   // "\r\n"
+    /// ```
+    ///
+    /// Up to 8 digits are one 8-byte load while 8 bytes remain, as for ``read(_:asciiDigits:)``.
+    ///
+    /// - Parameters:
+    ///   - type: The integer type to read, such as `Int.self`.
+    ///   - maximumDigitCount: The most digits to read, 1 through 19; a digit after them is left unread.
+    /// - Returns: The number.
+    /// - Throws: ``BytesError/insufficientData`` if no bytes remain; ``BytesError/invalidValue`` if the next byte
+    ///   isn't a digit, `maximumDigitCount` isn't 1 through 19, or `I` can't represent the number. Nothing is
+    ///   consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<I: FixedWidthInteger>(_ type: I.Type, asciiDigitsUpTo maximumDigitCount: Int) throws(BytesError) -> I {
+        guard maximumDigitCount >= 1 && maximumDigitCount <= 19 else { throw .invalidValue }
+        _assumeInvariant()
+        let start = position
+        let value: UInt64
+        if _bitOffset == 0 && maximumDigitCount <= 8 && likely(span.byteCount &- _byteOffset >= 8) {
+            // Unsafe: an unchecked load. Safe: 8 bytes remain (just checked).
+            let word = UInt64(littleEndian: unsafe Load.rawBytes(UInt64.self, from: span, at: _byteOffset))
+            let values = word ^ 0x3030_3030_3030_3030
+            // Bit 7 of each byte that isn't a digit (see `_areASCIIDigitValues`), and one past the limit.
+            let others = ((values &+ 0x7676_7676_7676_7676) | values) & 0x8080_8080_8080_8080
+            let limit: UInt64 = maximumDigitCount == 8 ? 0 : 0x80 &<< UInt64(8 &* maximumDigitCount)
+            let count = (others | limit).trailingZeroBitCount &>> 3 // 8 when all eight are digits.
+            guard count > 0 else { throw .invalidValue }
+            _byteOffset &+= count
+            value = Self._combineASCIIDigits(values &<< UInt64(64 &- 8 &* count))
+        } else {
+            guard remainingByteCount > 0 else { throw .insufficientData }
+            // Near the end of the data, past a bit boundary, or more than 8 digits: a digit at a time.
+            var number: UInt64 = 0
+            var count = 0
+            while count < maximumDigitCount, remainingByteCount > 0 {
+                // Can't throw: a byte remains (just checked).
+                let digit = try peek(Byte.self).rawValue &- 0x30
+                guard digit < 10 else { break }
+                try skip(byteCount: 1)
+                number = number &* 10 &+ UInt64(digit) // 19 digits fit in a `UInt64`.
+                count &+= 1
+            }
+            guard count > 0 else { throw .invalidValue }
+            value = number
+        }
+        guard let result = I(exactly: value) else {
+            rewind(to: start)
+            throw .invalidValue
+        }
+        return result
+    }
+
+    /// Reads a number written as exactly `digitCount` ASCII octal digits, `0` through `7`, most significant
+    /// first: a tar header's size, mode, and modification time, or a cpio header's fields.
+    ///
+    /// ```swift
+    /// let size = try reader.read(Int.self, asciiOctalDigits: 11)
+    /// ```
+    ///
+    /// Up to 8 digits are one 8-byte load while 8 bytes remain, checked and combined in a few word operations
+    /// (pairs by a shift of 3, fours of 6, eights of 12); up to 16, two.
+    ///
+    /// - Parameters:
+    ///   - type: The integer type to read, such as `Int.self`.
+    ///   - digitCount: How many digits, 1 through 21.
+    /// - Returns: The number.
+    /// - Throws: ``BytesError/insufficientData`` if fewer than `digitCount` bytes remain;
+    ///   ``BytesError/invalidValue`` if one isn't an octal digit, `digitCount` isn't 1 through 21, or `I` can't
+    ///   represent the number. Nothing is consumed either way.
+    @inlinable @inline(__always)
+    @_lifetime(self: copy self)
+    mutating func read<I: FixedWidthInteger>(_ type: I.Type, asciiOctalDigits digitCount: Int) throws(BytesError) -> I {
+        guard digitCount >= 1 && digitCount <= 21 else { throw .invalidValue }
+        _assumeInvariant()
+        let start = position
+        let remaining = span.byteCount &- _byteOffset
+        let value: UInt64
+        if _bitOffset == 0 && digitCount <= 8 && likely(remaining >= 8) {
+            // Unsafe: an unchecked load. Safe: 8 bytes remain (just checked).
+            let word = UInt64(littleEndian: unsafe Load.rawBytes(UInt64.self, from: span, at: _byteOffset))
+            // The digits' values, moved to the word's top: the bytes shifted in are leading zeros.
+            let digits = (word ^ 0x3030_3030_3030_3030) &<< UInt64(64 &- 8 &* digitCount)
+            guard digits & 0xF8F8_F8F8_F8F8_F8F8 == 0 else { throw .invalidValue }
+            _byteOffset &+= digitCount
+            value = _ASCIIDigits.combineOctal(digits)
+        } else if _bitOffset == 0 && digitCount > 8 && digitCount <= 16 && likely(remaining >= digitCount) {
+            // Two loads: the first `digitCount - 8` digits, then the last 8. Unsafe: unchecked loads. Safe:
+            // `digitCount` (9 or more) bytes remain, so both 8-byte loads are inside the span.
+            let first = UInt64(littleEndian: unsafe Load.rawBytes(UInt64.self, from: span, at: _byteOffset))
+            let last = UInt64(littleEndian: unsafe Load.rawBytes(UInt64.self, from: span, at: _byteOffset &+ digitCount &- 8))
+            let high = (first ^ 0x3030_3030_3030_3030) &<< UInt64(128 &- 8 &* digitCount)
+            let low = last ^ 0x3030_3030_3030_3030
+            guard (high | low) & 0xF8F8_F8F8_F8F8_F8F8 == 0 else { throw .invalidValue }
+            _byteOffset &+= digitCount
+            value = _ASCIIDigits.combineOctal(high) &<< 24 | _ASCIIDigits.combineOctal(low)
+        } else {
+            // Near the end of the data, past a bit boundary, or 17 to 21 digits: a digit at a time.
+            guard remainingByteCount >= digitCount else { throw .insufficientData }
+            var number: UInt64 = 0
+            for _ in 0..<digitCount {
+                // Can't throw: `digitCount` bytes remain. 21 octal digits are 63 bits, so nothing overflows.
+                let digit = try read(UInt8.self) &- 0x30
+                guard digit < 8 else {
+                    rewind(to: start)
+                    throw .invalidValue
+                }
+                number = number &<< 3 | UInt64(digit)
+            }
+            value = number
+        }
+        guard let result = I(exactly: value) else {
+            rewind(to: start)
+            throw .invalidValue
+        }
+        return result
+    }
+
     /// Consumes the next `T.byteCount` bytes if they're the integer `expected`, stored in `byteOrder`: a magic
     /// number as a format's specification writes it, with its byte order, rather than as bytes in memory order.
     ///
@@ -294,6 +418,15 @@ enum _ASCIIDigits {
             value = value &* 10 &+ UInt64(digit)
         }
         return value
+    }
+
+    /// Eight octal digit values, most significant in the low byte, as a number: pairs (shift 3), fours (6), then
+    /// all eight (12). Each step's halves have no bits in common, so an OR adds them.
+    @inlinable @inline(__always)
+    static func combineOctal(_ values: UInt64) -> UInt64 {
+        let pairs = (values & 0x00FF_00FF_00FF_00FF) &<< 3 | (values &>> 8) & 0x00FF_00FF_00FF_00FF
+        let fours = (pairs & 0x0000_FFFF_0000_FFFF) &<< 6 | (pairs &>> 16) & 0x0000_FFFF_0000_FFFF
+        return (fours & 0xFFFF_FFFF) &<< 12 | fours &>> 32
     }
 }
 

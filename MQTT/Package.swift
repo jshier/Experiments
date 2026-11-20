@@ -29,7 +29,11 @@ let package = Package(
         ),
         .testTarget(
             name: "MQTTTests",
-            dependencies: ["MQTT", .product(name: "Bytes", package: "Bytes")],
+            dependencies: [
+                "MQTT",
+                .product(name: "Bytes", package: "Bytes"),
+                .product(name: "BytesTestSupport", package: "Bytes"),
+            ],
             swiftSettings: strictSettings
         ),
         .executableTarget(

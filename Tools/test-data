@@ -15,10 +15,19 @@
 #                         samples), at the revision BinaryParsingComparison's Package.resolved pins. Used by
 #                         BinaryParsingComparison's tests and benchmarks.
 #   wycheproof            Project Wycheproof's (C2SP/wycheproof) test vectors for AES-GCM, ChaCha20-Poly1305,
-#                         HMAC-SHA1/SHA256, and HKDF-SHA256/SHA384: edge cases and known attacks. Used by
-#                         BytesCrypto's tests.
+#                         HMAC-SHA1/SHA256, HKDF-SHA256/SHA384, ECDSA P-256/SHA-256 and P-384/SHA-384 (DER and
+#                         P1363 signatures), ECDH P-256 and P-384, and RSA PKCS #1 v1.5 signatures (2048, 3072,
+#                         and 4096 bits with SHA-256/384/512, and the signature-generation sets' 1024–4096-bit
+#                         keys with SHA-1 among their hashes): edge cases and known attacks. Used by BytesCrypto's
+#                         tests.
 #   rfc8448               RFC 8448, "Example Handshake Traces for TLS 1.3": every secret, key, and protected record
 #                         of real handshakes. Used by BytesCrypto's TLS tests.
+#   rfc9180               RFC 9180's (HPKE) test vectors, from the CFRG draft's repository: every intermediate value
+#                         of each mode and suite's key schedule, and its encryptions. Used by BytesCrypto's HPKE tests.
+#   c-references          The C codecs BytesCompression's LZFSE, LZVN, and LZBITMAP coders were checked and benchmarked
+#                         against while they were written (lzfse at e634ca5, BSD; libzbitmap at 2fcb080, MIT), as
+#                         source tarballs. Not built by any package now; Bytes' RESULTS-lz4-lzfse.md and
+#                         RESULTS-lzbitmap.md have the comparisons and how to build them again.
 # Generated sets (the generator is run with the output directory as its argument):
 #   swift-help-lz4        swift-binary-parsing's ELF/swift-help compressed with `lz4 -9`, for BinaryParsingComparison's
 #                         LZ4 and ELF workloads (BinaryParsingComparison/TestDataGenerators; needs Homebrew's lz4).
@@ -57,7 +66,31 @@ wycheproof $WP/hmac_sha1_test.json b521c6180a862247986392d3cb49b511fc7fe790e75be
 wycheproof $WP/hmac_sha256_test.json 2d201cfa61d1bf95e6f5d07d96634b4a348b31e8eaa277ad7c8d09677b7a743f hmac_sha256_test.json
 wycheproof $WP/hkdf_sha256_test.json bb2b462a38b251cb52a2aede706d6d4b62b26864f4e80c95497507ddb07c5f1e hkdf_sha256_test.json
 wycheproof $WP/hkdf_sha384_test.json 69ff6ea3657bb9c1b8cdffbbb4e7832353d08fd15c0d9997b03f7a6b180e3678 hkdf_sha384_test.json
+wycheproof $WP/ecdsa_secp256r1_sha256_test.json 182db4f3e230f6f9fa9f800d2a614dede30284b8e8438bbfe1171905402e9332 ecdsa_secp256r1_sha256_test.json
+wycheproof $WP/ecdsa_secp256r1_sha256_p1363_test.json c60de693930e386c3a5472d08081623ef8504decc54b38ac01ec6b2a2575c986 ecdsa_secp256r1_sha256_p1363_test.json
+wycheproof $WP/ecdsa_secp384r1_sha384_test.json 8a5b3ae1760975143414811f13588c24d951d9d8c904195087ba327591dfe9cc ecdsa_secp384r1_sha384_test.json
+wycheproof $WP/ecdsa_secp384r1_sha384_p1363_test.json e27344bf6daae75fa19663620883809f91c79fc4b4420eff9eae8036b34476be ecdsa_secp384r1_sha384_p1363_test.json
+wycheproof $WP/ecdh_secp256r1_test.json cdb8bd5d1206fddb6618c69ffa18f303b4752caba321d348d4aacae3f20cbec4 ecdh_secp256r1_test.json
+wycheproof $WP/ecdh_secp256r1_ecpoint_test.json 648f16d077caf2400d02331ca51f44744c72c799830c8d0595d0b18b6dd9f886 ecdh_secp256r1_ecpoint_test.json
+wycheproof $WP/ecdh_secp384r1_test.json 25a9c41573dbea97c5b4be2dd00369fa68dc37ac8f41807d8e16226d188ec6a7 ecdh_secp384r1_test.json
+wycheproof $WP/rsa_signature_2048_sha256_test.json 94a917b01ff50fb874cfc05bf29b4af44868d944a6558201cf18380da93fb393 rsa_signature_2048_sha256_test.json
+wycheproof $WP/rsa_signature_2048_sha384_test.json c571c105d261c0ff588a2888a529f152563fb3b77894b7620d4e4f8f934f2c1d rsa_signature_2048_sha384_test.json
+wycheproof $WP/rsa_signature_2048_sha512_test.json 16ea24b039905d054bdb6004f5fd179374e150b7b6d73a7ba654b6d00eab12ef rsa_signature_2048_sha512_test.json
+wycheproof $WP/rsa_signature_3072_sha256_test.json 0f5f18cabfaad3e2792e82f7e9882f8999049b456714de924b8a5e202f61ca43 rsa_signature_3072_sha256_test.json
+wycheproof $WP/rsa_signature_3072_sha384_test.json 73499ee649d8fb703b3f0f455fa36f7682fde677c590a736958ebce05ab27dae rsa_signature_3072_sha384_test.json
+wycheproof $WP/rsa_signature_3072_sha512_test.json 09aa3336fdb7be216180ce944ca7b2a052e1de38c210435c19506327d4a36ebd rsa_signature_3072_sha512_test.json
+wycheproof $WP/rsa_signature_4096_sha256_test.json 957aca128e30bd02c8982f8ca482d6521d16683f4bbc3f193cdfd4c8f04bc667 rsa_signature_4096_sha256_test.json
+wycheproof $WP/rsa_signature_4096_sha384_test.json bc26f16b9fc9a90628864d3d1111ef48a4bd00b9d4870bfab88ff326e309e073 rsa_signature_4096_sha384_test.json
+wycheproof $WP/rsa_signature_4096_sha512_test.json 9d6e67b1eb0d7040db411835238efd20e9302399a258bdff82de3f38e0f2855a rsa_signature_4096_sha512_test.json
+wycheproof $WP/rsa_pkcs1_1024_sig_gen_test.json d29bb1d43016e8932937554291e997dc509455373b0d3cfe89ebffaee80ec9cd rsa_pkcs1_1024_sig_gen_test.json
+wycheproof $WP/rsa_pkcs1_1536_sig_gen_test.json 251da3f00f11cba07f8e89c94363e25ea16ef4b35aaa270063e4f763c283a8bd rsa_pkcs1_1536_sig_gen_test.json
+wycheproof $WP/rsa_pkcs1_2048_sig_gen_test.json 587b3d27d3429f2118cb02818da4d08eb3f36f50c747939eb550fae4337ccbf0 rsa_pkcs1_2048_sig_gen_test.json
+wycheproof $WP/rsa_pkcs1_3072_sig_gen_test.json 45153219d486fd135d35aa968a957a0c015c7829e8dc59bea5f87e6c30912677 rsa_pkcs1_3072_sig_gen_test.json
+wycheproof $WP/rsa_pkcs1_4096_sig_gen_test.json f13eadbec6c45291cb33e6b2fa0a0c2b862d0bd2eaec29f930d3b78067cd48c7 rsa_pkcs1_4096_sig_gen_test.json
 rfc8448 https://www.rfc-editor.org/rfc/rfc8448.txt 6564d1376d1ec744fc7a9993da15ebc1b9be361908b166091f47ef605c537fba rfc8448.txt
+c-references https://github.com/lzfse/lzfse/archive/e634ca58b4821d9f3d560cdc6df5dec02ffc93fd.tar.gz ca98aa6644d44500e3315858daa747ce15bd06d49e3edb12a5458e5525e8ebdb lzfse-e634ca5.tar.gz
+c-references https://github.com/eafer/libzbitmap/archive/2fcb0809f5879697c6f97df8058e9f7b1df96e0d.tar.gz 6ad591404538f0ea2dfcba9037333da6c890cf0085291d628834347f9acdcc24 libzbitmap-2fcb080.tar.gz
+rfc9180 https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-hpke/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json 61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6 test-vectors.json
 "
 GENERATED="
 swift-help-lz4 BinaryParsingComparison/TestDataGenerators/make-swift-help-lz4.sh

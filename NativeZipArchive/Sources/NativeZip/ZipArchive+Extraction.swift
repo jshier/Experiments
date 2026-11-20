@@ -110,6 +110,7 @@ extension ZipArchive {
     ///   - options: Path handling, timestamps, overwrite policy, password, progress events, concurrency.
     /// - Throws: The errors of ``contents(of:using:password:_:)`` for damaged entries; `Errno` or `CocoaError`
     ///   for file system failures.
+    @concurrent
     public func extract(_ entries: [ZipEntry]? = nil, to destination: FilePath, options: ExtractionOptions = .init()) async throws {
         _ = try await ZipExtractor.extract(maxConcurrency: options.maxConcurrency, stopOnFirstError: true) { extractor in
             try extractor.add(self, entries: entries, to: destination, options: options)
@@ -174,37 +175,45 @@ public struct ZipExtractor: ~Copyable {
     ///   - plan: Adds archives with ``add(_:entries:to:options:)``. It runs while files are written.
     /// - Returns: Every failure, in plan order (empty if everything was extracted).
     /// - Throws: Whatever `plan` throws; with `stopOnFirstError`, the first failure's error.
+    @concurrent
     public static func extract(
         maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount,
         stopOnFirstError: Bool = false,
         _ plan: (inout ZipExtractor) throws -> Void
     ) async throws -> [ExtractionFailure] {
         let maxConcurrency = max(1, maxConcurrency)
-        let queue = JobQueue()
+        let queue = JobQueue(workers: maxConcurrency)
         let log = FailureLog()
         var extractor = ZipExtractor(queue: queue, stopOnFirstError: stopOnFirstError)
         var planningError: (any Error)?
 
-        await withDiscardingTaskGroup { group in
-            for worker in 0..<maxConcurrency {
-                let takesSmallFiles = worker < fileCreationWidth
-                group.addTask {
-                    var decoders = WorkerDecoders()
-                    while let job = await queue.next(takingSmallFiles: takesSmallFiles) {
-                        await perform(job, decoders: &decoders, log: log, queue: queue, stopOnFirstError: stopOnFirstError)
+        // One cancellation handler for the whole pool: aborting the queue wakes every waiting worker (each ends
+        // after the file it's writing) and stops planning at its next entry.
+        await withTaskCancellationHandler {
+            await withDiscardingTaskGroup { group in
+                for worker in 0..<maxConcurrency {
+                    let takesSmallFiles = worker < fileCreationWidth
+                    group.addTask {
+                        var decoders = WorkerDecoders()
+                        while let job = await queue.next(takingSmallFiles: takesSmallFiles) {
+                            await perform(job, decoders: &decoders, log: log, queue: queue, stopOnFirstError: stopOnFirstError)
+                        }
                     }
                 }
+                do {
+                    try plan(&extractor)
+                } catch {
+                    planningError = error
+                    queue.abort()
+                }
+                queue.finish()
             }
-            do {
-                try plan(&extractor)
-            } catch {
-                planningError = error
-                queue.abort()
-            }
-            queue.finish()
+        } onCancel: {
+            queue.abort()
         }
         if stopOnFirstError, let error = log.firstError { throw error }
         if let planningError { throw planningError }
+        try Task.checkCancellation()
         return try await extractor.finish(log: log, maxConcurrency: maxConcurrency)
     }
 
@@ -427,7 +436,7 @@ public struct ZipExtractor: ~Copyable {
     // MARK: Running
 
     /// Writes one file for a worker, recording a failure; with `stopOnFirstError`, a failure stops the queue.
-    private static func perform(
+    nonisolated(nonsending) private static func perform(
         _ job: FileJob, decoders: inout WorkerDecoders, log: FailureLog, queue: JobQueue, stopOnFirstError: Bool
     ) async {
         guard job.start() else { return } // Replaced by a later entry.
@@ -440,12 +449,16 @@ public struct ZipExtractor: ~Copyable {
     }
 
     /// After the pool: deferred replacements, then symbolic links, then directories' metadata.
-    private consuming func finish(log: FailureLog, maxConcurrency: Int) async throws -> [ExtractionFailure] {
+    nonisolated(nonsending) private consuming func finish(log: FailureLog, maxConcurrency: Int) async throws -> [ExtractionFailure] {
         var decoders = WorkerDecoders()
         for job in deferred {
+            try Task.checkCancellation()
             await Self.perform(job, decoders: &decoders, log: log, queue: queue, stopOnFirstError: stopOnFirstError)
         }
         if stopOnFirstError, let error = log.firstError { throw error }
+        // The passes below stop claiming items when cancelled (`forEachConcurrently`): report it rather than
+        // returning as if they had finished.
+        try Task.checkCancellation()
 
         let linkOrder = files.count
         let symlinks = links.compactMap(\.self)
@@ -458,16 +471,19 @@ public struct ZipExtractor: ~Copyable {
             }
         }
         if stopOnFirstError, let error = log.firstError { throw error }
+        try Task.checkCancellation()
 
         // Deepest first, a level at a time, so setting a parent's attributes isn't undone by its children's.
         let levels = Dictionary(grouping: directoryMetadata.filter { !$0.metadata.isEmpty }, by: \.depth)
         for depth in levels.keys.sorted(by: >) {
+            try Task.checkCancellation()
             try await Self.forEachConcurrently(levels[depth]!, width: width, weight: { _ in 1 }) { job, _ in
                 // Like Info-ZIP, a directory whose metadata can't be applied isn't an error.
                 guard let descriptor = try? FileDescriptor.open(job.path, .readOnly, options: [.directory, .noFollow, .closeOnExec]) else { return }
                 try? descriptor.closeAfter { try descriptor.apply(job.metadata) }
             }
         }
+        try Task.checkCancellation()
         return failures + log.sorted()
     }
 
@@ -488,7 +504,7 @@ public struct ZipExtractor: ~Copyable {
     ///
     /// - Throws: `Errno` or `CocoaError` for file system failures, or the errors of
     ///   ``ZipArchive/contents(of:using:password:_:)``.
-    private static func write(_ job: FileJob, decoders: inout WorkerDecoders) async throws {
+    nonisolated(nonsending) private static func write(_ job: FileJob, decoders: inout WorkerDecoders) async throws {
         let options: FileDescriptor.OpenOptions = [.create, .truncate, .noFollow, .closeOnExec]
         let descriptor: FileDescriptor
         do {
@@ -575,17 +591,19 @@ public struct ZipExtractor: ~Copyable {
     /// Runs `body` for every item using up to `width` child tasks, each with its own decoders, largest first
     /// (longest-processing-time scheduling: one big entry doesn't start last and leave the other workers idle
     /// while it finishes). With one worker, or one item, everything runs inline, in order. If `body` throws,
-    /// the group cancels the other workers, which stop claiming items; items already started finish.
-    static func forEachConcurrently<Item: Sendable>(
+    /// the group cancels the other workers, which stop claiming items; items already started finish. So does
+    /// cancelling the calling task (callers check for it after).
+    nonisolated(nonsending) static func forEachConcurrently<Item: Sendable>(
         _ items: [Item],
         width: Int,
         weight: (Item) -> UInt64,
-        _ body: @escaping @Sendable (Item, inout WorkerDecoders) async throws -> Void
+        _ body: @escaping @concurrent @Sendable (Item, inout WorkerDecoders) async throws -> Void
     ) async throws {
         let width = min(max(width, 1), items.count)
         guard width > 1 else {
             var decoders = WorkerDecoders()
             for item in items {
+                if Task.isCancelled { return }
                 try await body(item, &decoders)
             }
             return
@@ -727,7 +745,9 @@ struct WorkerDecoders: ~Copyable {
         }
     }
 
-    mutating func withDecoder<R>(_ backend: ZipDecoder.Backend, _ body: (inout ZipDecoder) async throws -> R) async rethrows -> R {
+    nonisolated(nonsending) mutating func withDecoder<R>(
+        _ backend: ZipDecoder.Backend, _ body: nonisolated(nonsending) (inout ZipDecoder) async throws -> R
+    ) async rethrows -> R {
         switch backend {
         case .bytes:
             if bytes == nil { bytes = ZipDecoder(backend: .bytes) }
@@ -760,6 +780,10 @@ private final class FailureLog: Sendable {
 /// Files waiting for workers, filled while planning goes on. Large files (``ZipExtractor/largeEntrySize`` or
 /// more) are handed out largest first, so a big one doesn't start last and leave the other workers idle while
 /// it finishes; small files in plan order. Workers that don't take small files wait for large ones.
+///
+/// Waits follow NativeAEA's discipline: `next` takes a job synchronously under the lock when one is ready; a
+/// worker that must wait checks again under the lock inside its continuation's body; waiters are woken in the
+/// order they came (first in, first out), taken out of the state under the lock and resumed after it's released.
 final class JobQueue: Sendable {
     // Safe to use despite holding unsafe continuations: each is resumed exactly once (see below).
     @safe private struct State {
@@ -769,9 +793,15 @@ final class JobQueue: Sendable {
         var finished = false
         var aborted = false
         // Unsafe continuations: a checked one allocates its checker each time a worker waits. Each is resumed
-        // exactly once: immediately in `next`, or by `push` or `finish`, which remove it as they resume it.
-        var anyWaiters: [UnsafeContinuation<FileJob?, Never>] = unsafe []
-        var largeWaiters: [UnsafeContinuation<FileJob?, Never>] = unsafe []
+        // exactly once: immediately in `next`, or by `push` or `finish`, which remove it under the lock and
+        // resume it after. First in, first out (`Waiters`).
+        var anyWaiters: Waiters
+        var largeWaiters: Waiters
+
+        init(workers: Int) {
+            anyWaiters = Waiters(capacity: workers)
+            largeWaiters = Waiters(capacity: workers)
+        }
 
         enum Take {
             case job(FileJob), done, wait
@@ -792,49 +822,58 @@ final class JobQueue: Sendable {
         }
     }
 
-    private let state = Mutex(State())
+    private let state: Mutex<State>
 
-    /// Hands `job` to a waiting worker, or queues it.
+    /// A queue for `workers` workers: room for all of them to wait, reserved up front.
+    init(workers: Int) {
+        state = Mutex(State(workers: workers))
+    }
+
+    /// Hands `job` to a waiting worker (the one waiting longest), or queues it.
     func push(_ job: FileJob) {
         let isLarge = job.entry.uncompressedSize >= ZipExtractor.largeEntrySize
-        state.withLock { state in
-            // Unsafe: resuming an unchecked continuation. Safe: popped as it's resumed, so only once.
-            if isLarge, let waiter = unsafe state.largeWaiters.popLast() {
-                unsafe waiter.resume(returning: job)
-            } else if let waiter = unsafe state.anyWaiters.popLast() {
-                unsafe waiter.resume(returning: job)
-            } else if isLarge {
-                state.large.append(job)
-            } else {
-                state.small.append(job)
-            }
+        let waiter = unsafe state.withLock { state -> UnsafeContinuation<FileJob?, Never>? in
+            if isLarge, let waiter = unsafe state.largeWaiters.popFirst() { return unsafe waiter }
+            if let waiter = unsafe state.anyWaiters.popFirst() { return unsafe waiter }
+            if isLarge { state.large.append(job) } else { state.small.append(job) }
+            return nil
         }
+        // Unsafe: resuming an unchecked continuation. Safe: removed from the state above, so only once.
+        unsafe waiter?.resume(returning: job)
     }
 
     /// The next job for a worker, waiting for planning if none is ready; `nil` once everything is done.
-    func next(takingSmallFiles: Bool) async -> FileJob? {
-        if case let .job(job) = state.withLock({ $0.take(smallFiles: takingSmallFiles) }) { return job }
+    nonisolated(nonsending) func next(takingSmallFiles: Bool) async -> FileJob? {
+        switch state.withLock({ $0.take(smallFiles: takingSmallFiles) }) {
+        case let .job(job): return job
+        case .done: return nil
+        case .wait: break
+        }
         // Unsafe: an unchecked continuation. Safe: resumed exactly once, as the waiter lists' comment explains.
         return await unsafe withUnsafeContinuation { continuation in
-            state.withLock { state in
-                switch state.take(smallFiles: takingSmallFiles) {
-                case let .job(job): unsafe continuation.resume(returning: job)
-                case .done: unsafe continuation.resume(returning: nil)
-                case .wait:
+            let now = state.withLock { state in
+                let now = state.take(smallFiles: takingSmallFiles)
+                if case .wait = now {
                     if takingSmallFiles { unsafe state.anyWaiters.append(continuation) } else { unsafe state.largeWaiters.append(continuation) }
                 }
+                return now
+            }
+            switch now {
+            case let .job(job): unsafe continuation.resume(returning: job)
+            case .done: unsafe continuation.resume(returning: nil)
+            case .wait: break // Stored: `push` or `finish` resumes it.
             }
         }
     }
 
     /// No more jobs are coming: waiting workers finish once the queue is empty.
     func finish() {
-        state.withLock { state in
+        let waiters = unsafe state.withLock { state in
             state.finished = true
-            // Unsafe: resuming unchecked continuations. Safe: each is popped as it's resumed, so only once.
-            while let waiter = unsafe state.anyWaiters.popLast() { unsafe waiter.resume(returning: nil) }
-            while let waiter = unsafe state.largeWaiters.popLast() { unsafe waiter.resume(returning: nil) }
+            return unsafe state.anyWaiters.removeAll() + state.largeWaiters.removeAll()
         }
+        // Unsafe: resuming unchecked continuations. Safe: each was removed from the state above, so only once.
+        for unsafe waiter in unsafe waiters { unsafe waiter.resume(returning: nil) }
     }
 
     /// Stops handing out jobs (and planning, which checks ``isAborted``).
@@ -844,6 +883,43 @@ final class JobQueue: Sendable {
     }
 
     var isAborted: Bool { state.withLock { $0.aborted } }
+}
+
+/// Workers waiting for a job, first in, first out: an array with a moving head, its storage reserved for every
+/// worker, so waiting allocates nothing.
+@safe
+struct Waiters {
+    private var items: [UnsafeContinuation<FileJob?, Never>] = unsafe []
+    private var head = 0
+
+    init(capacity: Int) {
+        unsafe items.reserveCapacity(capacity)
+    }
+
+    mutating func append(_ waiter: UnsafeContinuation<FileJob?, Never>) {
+        if unsafe items.count == head {
+            // Empty: start over at the front, keeping the storage.
+            unsafe items.removeAll(keepingCapacity: true)
+            head = 0
+        }
+        unsafe items.append(waiter)
+    }
+
+    /// The longest-waiting worker, removed.
+    mutating func popFirst() -> UnsafeContinuation<FileJob?, Never>? {
+        guard unsafe items.count > head else { return nil }
+        defer { head += 1 }
+        return unsafe items[head]
+    }
+
+    /// Every waiting worker, in order, removed.
+    mutating func removeAll() -> [UnsafeContinuation<FileJob?, Never>] {
+        defer {
+            unsafe items.removeAll(keepingCapacity: true)
+            head = 0
+        }
+        return unsafe Array(items[head...])
+    }
 }
 
 /// `mkdir -p` that remembers what it has created, so each directory costs one syscall per extraction

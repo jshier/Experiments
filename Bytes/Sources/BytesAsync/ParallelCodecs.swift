@@ -5,24 +5,42 @@ public import Dispatch
 // The parallel codecs' asynchronous entry points: on a Dispatch queue (the calling task suspends, its thread
 // free), or as child tasks of a task group on Swift's cooperative pool. Each runs the same workers as the
 // synchronous `compressAll(_:into:)`, from `BytesCompression`'s `ChunkBatch`, over lent input and output.
+//
+// The entry points are `nonisolated(nonsending)`, not `@concurrent`: they borrow the caller's `inout` output span
+// and `self`, which can't cross isolation domains. What runs on the caller's executor is only the header, the
+// trailer, and the wait; the compression runs in child tasks (`…Concurrently`) or on the queue (`on:`), never on
+// the caller's actor.
+//
+// Cancellation: a task cancellation handler stops the call's workers (`ChunkBatch.stop()`, `StopFlag`), which then
+// take no more chunks or segments; those under way finish, since a chunk can't stop midway. The call then throws
+// `BytesError.cancelled`, keeping the entry points' typed throws: the output is incomplete (an encoder writes no
+// trailer, the decoder nothing), and the codec can be used again. A call that had delivered everything by the time
+// it was cancelled returns normally.
 
 extension ChunkBatch {
     /// Runs the workers as child tasks of a task group, one each; returns when every chunk is delivered (or the
-    /// output is full).
+    /// output is full, or the task is cancelled).
     nonisolated(nonsending) func runConcurrently() async -> ChunkDelivery {
-        await withDiscardingTaskGroup { group in
-            for w in 0..<workerCount {
-                group.addTask { work(w) }
+        await withTaskCancellationHandler {
+            await withDiscardingTaskGroup { group in
+                for w in 0..<workerCount {
+                    // A child task's closure isn't isolated to the caller: the workers run on the global executor.
+                    group.addTask { work(w) }
+                }
             }
+        } onCancel: {
+            stop()
         }
         return finish()
     }
 
-    /// Runs the workers from `queue` (on `concurrentPerform`), resuming the calling task when they're done.
+    /// Runs the workers from `queue` (on `concurrentPerform`), resuming the calling task when they're done (or
+    /// stopped by its cancellation).
     nonisolated(nonsending) func run(on queue: DispatchQueue) async -> ChunkDelivery {
-        // Unsafe: an unchecked continuation. Safe: resumed exactly once, by the closure.
-        await unsafe withUnsafeContinuation { continuation in
-            queue.async { unsafe continuation.resume(returning: run()) }
+        await withTaskCancellationHandler {
+            await perform(on: queue) { run() }
+        } onCancel: {
+            stop()
         }
     }
 }
@@ -36,7 +54,8 @@ public extension ParallelDeflateEncoder {
     ///   - output: Where to append the stream, header and trailer included.
     ///   - queue: Where to run: any queue (the workers themselves use Dispatch's worker threads).
     /// - Throws: `BytesError.insufficientCapacity` if `output` runs out of room (what was written stays
-    ///   written).
+    ///   written); `BytesError.cancelled` if the task is cancelled before every chunk is delivered (the workers
+    ///   take no more chunks; no trailer is written).
     nonisolated(nonsending) mutating func compressAll(
         _ input: RawSpan, into output: inout OutputRawSpan, on queue: DispatchQueue
     ) async throws(BytesError) {
@@ -83,7 +102,8 @@ public extension ParallelBrotliEncoder {
     ///   - input: The data.
     ///   - output: Where to append the stream.
     ///   - queue: Where to run.
-    /// - Throws: `BytesError.insufficientCapacity` if `output` runs out of room.
+    /// - Throws: `BytesError.insufficientCapacity` if `output` runs out of room; `BytesError.cancelled` if the
+    ///   task is cancelled before every chunk is delivered.
     nonisolated(nonsending) mutating func compressAll(
         _ input: RawSpan, into output: inout OutputRawSpan, on queue: DispatchQueue
     ) async throws(BytesError) {
@@ -137,7 +157,8 @@ public extension ParallelDeflateDecoder {
     ///   - output: Where to append the data.
     ///   - queue: Where to run.
     /// - Returns: The bytes of `input` the stream took.
-    /// - Throws: As `decompressAll(_:into:)`.
+    /// - Throws: As `decompressAll(_:into:)`; `BytesError.cancelled` if the task is cancelled before the
+    ///   segments are joined (nothing is written; a stream decoding sequentially runs to its end).
     nonisolated(nonsending) mutating func decompressAll(
         _ input: RawSpan, into output: inout OutputRawSpan, on queue: DispatchQueue
     ) async throws(BytesError) -> Int {
@@ -146,19 +167,26 @@ public extension ParallelDeflateDecoder {
         let decoder = withUnsafeMutablePointer(to: &self) { unsafe UnsafeDecoder(pointer: $0) }
         var consumed = 0
         var failure: BytesError?
+        let stop = StopFlag()
         // Unsafe: the input and the output's free capacity lent to a closure on `queue`. Safe: it's awaited.
         _ = await unsafe input.withLentBytes { source in
             await unsafe output.withLentFreeCapacity { target in
-                let result: Result<(consumed: Int, produced: Int), BytesError> = await unsafe withUnsafeContinuation { continuation in
-                    queue.async {
+                let result: Result<(consumed: Int, produced: Int), BytesError> = await withTaskCancellationHandler {
+                    await perform(on: queue) {
                         var output = unsafe OutputRawSpan(buffer: target.buffer, initializedCount: 0)
+                        let result: Result<(consumed: Int, produced: Int), BytesError>
                         do throws(BytesError) {
-                            let consumed = try unsafe decoder.pointer.pointee.decompressAll(source.span, into: &output)
-                            unsafe continuation.resume(returning: .success((consumed, unsafe output.finalize(for: target.buffer))))
+                            let consumed = try unsafe decoder.pointer.pointee.decompressAll(source.span, into: &output, stop: stop)
+                            result = .success((consumed, 0))
                         } catch {
-                            unsafe continuation.resume(returning: .failure(error))
+                            result = .failure(error)
                         }
+                        // Unsafe: checks `output` still covers the lent buffer. Safe: it was made over it.
+                        let produced = unsafe output.finalize(for: target.buffer)
+                        return result.map { ($0.consumed, produced) }
                     }
+                } onCancel: {
+                    stop.stop()
                 }
                 switch result {
                 case let .success((taken, produced)):

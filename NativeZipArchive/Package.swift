@@ -7,6 +7,8 @@ let strictSettings: [SwiftSetting] = [
     .strictMemorySafety(),
     // `@_lifetime` lets non-escapable types (Span, RawSpan, ByteReader) be returned and stored.
     .enableExperimentalFeature("Lifetimes"),
+    // Async functions run on the caller's executor unless marked `@concurrent` (every one here is annotated).
+    .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
 ]
 
 let package = Package(
@@ -48,7 +50,12 @@ let package = Package(
         ),
         .testTarget(
             name: "NativeZipTests",
-            dependencies: ["NativeZip"],
+            dependencies: [
+                "NativeZip",
+                .product(name: "BytesTestSupport", package: "Bytes"),
+                .product(name: "BytesTesting", package: "Bytes"),
+                .product(name: "BytesReferenceCodecs", package: "Bytes"),
+            ],
             // Archives and vectors the tests load from their own directory (#filePath).
             exclude: ["Fixtures"],
             // Not strict memory safety: the tests call zlib's C API directly to make reference streams.
@@ -58,6 +65,7 @@ let package = Package(
             name: "NativeZipBenchmarks",
             dependencies: [
                 "NativeZip",
+                .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/NativeZipBenchmarks",

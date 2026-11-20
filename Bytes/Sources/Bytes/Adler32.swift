@@ -13,6 +13,8 @@ internal import CBytesCRC
 /// Adler-32 is two sums modulo 65,521: `a`, of the bytes plus one, and `b`, of the successive values of
 /// `a`. `b` weights each byte by how many bytes follow it, so a block of bytes adds to it a weighted sum
 /// that vector code computes as column sums: 32 bytes per step in 16-bit lanes, reduced once per 2 KB.
+// Not `@inlinable`, unlike most public API here: a checksum is a loop over the bytes, so a call costs nothing
+// measurable, and the loop (with the build's hardware choice) stays compiled once, here.
 public struct Adler32: Hashable, Sendable {
     /// The checksum of everything added so far: `b << 16 | a`.
     public private(set) var value: UInt32
@@ -118,8 +120,8 @@ public struct Adler32: Hashable, Sendable {
                 odd1 &+= second &>> byteShift
                 // At most 4 · 255 · 64 = 65,280: fits, with `blocksPerChunk` 64.
                 let total = (even0 &+ odd0) &+ (even1 &+ odd1)
-                // Unsafe: reinterprets eight 16-bit lanes as four 32-bit ones. Safe: both are 16 plain bytes.
-                let pairs = unsafe unsafeBitCast(total, to: SIMD4<UInt32>.self)
+                // Eight 16-bit lanes as four 32-bit ones: the same 16 bytes.
+                let pairs = bitCast(total, to: SIMD4<UInt32>.self)
                 runningEven &+= pairs & halfMask
                 runningOdd &+= pairs &>> halfShift
                 offset &+= 32

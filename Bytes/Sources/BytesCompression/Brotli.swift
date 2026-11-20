@@ -63,13 +63,6 @@ enum Brotli {
         Int(maximumTableSizes[min((alphabetSize &+ 31) &>> 5, 22)])
     }
 
-    /// The dictionary's bytes, viewed from the static words.
-    @inline(__always)
-    static func withDictionary<R>(_ body: (RawSpan) -> R) -> R {
-        let words = brotliDictionaryWords // A local to borrow from: a span of the global can't outlive the access.
-        return body(words.span.bytes)
-    }
-
     /// Transforms dictionary word `word` (bytes of `dictionary`) with transform `transform` into `output`
     /// (RFC 7932, section 8): prefix, the word with its first or last bytes omitted or uppercased, suffix.
     ///

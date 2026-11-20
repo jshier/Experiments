@@ -1,5 +1,7 @@
 import Bytes
 import BytesCompression
+import BytesTesting
+import BytesTestSupport
 import CBrotli
 import Testing
 
@@ -43,15 +45,17 @@ func googleBrotliDecompress(_ data: [UInt8]) -> Outcome {
 
 func brotliDecodeAll(_ data: [UInt8], capacity: Int? = nil) -> Outcome {
     var decoder = BrotliDecoder()
-    // Brotli's ratio has no useful bound (a long copy is a few bytes): by default, room for every sample.
-    var output = [UInt8](repeating: 0, count: capacity ?? (4 << 20) + data.count * 1100)
-    let produced: Int? = output.withUnsafeMutableBytes { buffer in
-        var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-        guard let consumed = try? decoder.decompressAll(data.span.bytes, into: &span), consumed == data.count else { return nil }
-        return span.finalize(for: buffer)
+    // Brotli's ratio has no useful bound (a long copy is a few bytes): by default, room for every sample. Uninitialized:
+    // zero-filling that room (megabytes per call) cost more than decoding the corrupt-stream tests' short inputs.
+    let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: capacity ?? (4 << 20) + data.count * 1100, alignment: 1)
+    defer { buffer.deallocate() }
+    var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+    guard let consumed = try? decoder.decompressAll(data.span.bytes, into: &span), consumed == data.count else {
+        _ = span.finalize(for: buffer)
+        return .failed
     }
-    guard let produced else { return .failed }
-    return .decoded(Array(output[..<produced]))
+    let produced = span.finalize(for: buffer)
+    return .decoded(Array(UnsafeRawBufferPointer(rebasing: buffer[..<produced])))
 }
 
 func brotliDecodeStreaming(_ data: [UInt8], chunk: Int, outputChunk: Int, decoder: inout BrotliDecoder) -> Outcome {
@@ -86,22 +90,32 @@ func brotliDecodeStreaming(_ data: [UInt8], chunk: Int, outputChunk: Int) -> Out
 }
 
 @Suite struct BrotliDecoderTests {
-    @Test(arguments: 0...11)
-    func decodesWhatGoogleEncodes(quality: Int32) {
-        for (name, bytes) in samples() where quality < 10 || bytes.count <= 300_000 {
+    static func checkDecodesWhatGoogleEncodes(_ samples: [(name: String, bytes: [UInt8])], quality: Int32) {
+        for (name, bytes) in samples where quality < 10 || bytes.count <= 300_000 {
             let compressed = googleBrotliCompress(bytes, quality: quality)
             #expect(brotliDecodeAll(compressed) == .decoded(bytes), "\(name), quality \(quality)")
         }
     }
 
+    /// Every quality on the samples under 1 MB, and the large one at quality 5 (at every quality in
+    /// BrotliDecoderBulkTests).
+    @Test(arguments: 0...11)
+    func decodesWhatGoogleEncodes(quality: Int32) {
+        Self.checkDecodesWhatGoogleEncodes(smallSamples() + (quality == 5 ? [("large", largeSample())] : []), quality: quality)
+    }
+
+    static func checkWindowSizes(_ data: [UInt8], windowBits: Int32) {
+        for quality: Int32 in [1, 5, 9] {
+            let compressed = googleBrotliCompress(data, quality: quality, windowBits: windowBits)
+            #expect(brotliDecodeAll(compressed) == .decoded(data), "quality \(quality), window \(windowBits)")
+            #expect(brotliDecodeStreaming(compressed, chunk: 65_536, outputChunk: 100_000) == .decoded(data))
+        }
+    }
+
+    /// The 200 KB text sample, past the smaller windows; the 3 MB sample, past all of them, in BrotliDecoderBulkTests.
     @Test(arguments: [10, 16, 18, 22, 24] as [Int32])
     func windowSizes(windowBits: Int32) {
-        let large = samples().last!.bytes
-        for quality: Int32 in [1, 5, 9] {
-            let compressed = googleBrotliCompress(large, quality: quality, windowBits: windowBits)
-            #expect(brotliDecodeAll(compressed) == .decoded(large), "quality \(quality), window \(windowBits)")
-            #expect(brotliDecodeStreaming(compressed, chunk: 65_536, outputChunk: 100_000) == .decoded(large))
-        }
+        Self.checkWindowSizes(samples()[2].bytes, windowBits: windowBits)
     }
 
     @Test func textModeUsesTheDictionary() {
@@ -114,10 +128,21 @@ func brotliDecodeStreaming(_ data: [UInt8], chunk: Int, outputChunk: Int) -> Out
         }
     }
 
-    @Test(arguments: [(1, 1), (1, 9), (7, 64), (100, 1), (4096, 777), (65_536, 1 << 20)])
+    static let pieces = [(1, 1), (1, 9), (7, 64), (100, 1), (4096, 777), (65_536, 1 << 20)]
+
+    /// Byte-at-a-time pieces of each sample's first 20,000 bytes, larger pieces of the samples under 1 MB; the whole
+    /// samples in BrotliDecoderBulkTests.
+    @Test(arguments: Self.pieces)
     func decodesInPieces(chunk: Int, outputChunk: Int) {
+        let inputs = chunk < 16
+            ? smallSamples().map { (name: "\($0.name) (first 20,000 bytes)", bytes: Array($0.bytes.prefix(20_000))) }
+            : smallSamples()
+        Self.checkDecodesInPieces(inputs, chunk: chunk, outputChunk: outputChunk)
+    }
+
+    static func checkDecodesInPieces(_ samples: [(name: String, bytes: [UInt8])], chunk: Int, outputChunk: Int) {
         var decoder = BrotliDecoder()
-        for (name, bytes) in samples() where bytes.count <= (chunk < 16 ? 100_000 : 4 << 20) {
+        for (name, bytes) in samples {
             for quality: Int32 in [0, 1, 5, 11] where quality < 10 || bytes.count <= 300_000 {
                 let compressed = googleBrotliCompress(bytes, quality: quality)
                 let outcome = brotliDecodeStreaming(compressed, chunk: chunk, outputChunk: outputChunk, decoder: &decoder)
@@ -133,16 +158,21 @@ func brotliDecodeStreaming(_ data: [UInt8], chunk: Int, outputChunk: Int) -> Out
         #expect(brotliDecodeAll(compressed, capacity: bytes.count - 1) == .failed)
     }
 
-    /// Mutated streams: accepted exactly when Google's decoder accepts them, with the same output.
+    /// Mutated streams: accepted exactly when Google's decoder accepts them, with the same output. The sequence's first
+    /// 1,000 mutations; all 10,000 in BrotliDecoderBulkTests.
     @Test func corruptStreamsMatchGoogle() {
-        var rng = SplitMix64(state: 99)
+        Self.checkCorruptStreams(iterations: 1_000)
+    }
+
+    static func checkCorruptStreams(iterations: Int) {
+        var rng = SplitMix64(seed: 99)
         let seeds = samples().filter { $0.bytes.count <= 200_000 }.flatMap { sample in
             [googleBrotliCompress(sample.bytes, quality: 1), googleBrotliCompress(sample.bytes, quality: 5),
              googleBrotliCompress(sample.bytes, quality: 11, windowBits: 16)]
         }.map { Array($0.prefix(3_000)) + [] }
         var accepted = 0
         var rejected = 0
-        for iteration in 0..<10_000 {
+        for iteration in 0..<iterations {
             var bytes = seeds.randomElement(using: &rng)!
             guard !bytes.isEmpty else { continue }
             for _ in 0..<Int.random(in: 1...3, using: &rng) {
@@ -167,5 +197,30 @@ func brotliDecodeStreaming(_ data: [UInt8], chunk: Int, outputChunk: Int) -> Out
         #expect(brotliDecodeAll(googleBrotliCompress([])) == .decoded([]))
         #expect(brotliDecodeAll(googleBrotliCompress([0x41])) == .decoded([0x41]))
         #expect(brotliDecodeAll([]) == .failed)
+    }
+}
+
+/// The full sweeps the fast tests above sample: the large sample at every quality and window size, whole samples in
+/// every piece size, 10,000 mutations.
+@Suite(.bulk) struct BrotliDecoderBulkTests {
+    @Test(arguments: 0...11)
+    func decodesWhatGoogleEncodes(quality: Int32) {
+        BrotliDecoderTests.checkDecodesWhatGoogleEncodes(samples(), quality: quality)
+    }
+
+    @Test(arguments: [10, 16, 18, 22, 24] as [Int32])
+    func windowSizes(windowBits: Int32) {
+        BrotliDecoderTests.checkWindowSizes(largeSample(), windowBits: windowBits)
+    }
+
+    @Test(arguments: BrotliDecoderTests.pieces)
+    func decodesInPieces(chunk: Int, outputChunk: Int) {
+        BrotliDecoderTests.checkDecodesInPieces(
+            samples().filter { $0.bytes.count <= (chunk < 16 ? 100_000 : 4 << 20) }, chunk: chunk, outputChunk: outputChunk
+        )
+    }
+
+    @Test func corruptStreamsMatchGoogle() {
+        BrotliDecoderTests.checkCorruptStreams(iterations: 10_000)
     }
 }
