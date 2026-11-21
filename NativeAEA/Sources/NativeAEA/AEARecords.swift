@@ -46,21 +46,3 @@ struct PBZBlockHeader {
     @Field(Byte8.self) var raw: Int
     @Field(Byte8.self) var stored: Int
 }
-
-/// An `ACL` blob entry's fixed part; the qualifier (`size` − 22 bytes) follows.
-@BinaryRecord(.littleEndian)
-struct AccessControlEntryHead {
-    @Field(Byte4.self) var size: Int
-    @Field(Byte.self) var type: UInt8
-    @Field(Byte8.self) var flags: UInt64
-    @Field(Byte8.self) var permissions: UInt64
-    @Field(Byte.self) var qualifierType: UInt8
-}
-
-/// The `com.apple.decmpfs` attribute's header; inline data follows for the odd types.
-@BinaryRecord(.littleEndian)
-struct DecmpfsHeader {
-    @Field(Byte4.self, expecting: 0x636D_7066) var magic: UInt32 // "fpmc" on disk: 'cmpf' little-endian
-    @Field(Byte4.self) var type: UInt32
-    @Field(Byte8.self) var size: UInt64
-}

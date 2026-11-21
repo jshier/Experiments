@@ -1,0 +1,87 @@
+{
+  "originHash" : "3020dd3b4ba51e7894c2e7c037eb8dee92fcbc95e60dbc52b5ba6a03529c8686",
+  "pins" : [
+    {
+      "identity" : "swift-argument-parser",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-argument-parser",
+      "state" : {
+        "revision" : "6a52f3251125d74daf04fcbd5e6f08a75d074382",
+        "version" : "1.8.2"
+      }
+    },
+    {
+      "identity" : "swift-case-paths",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/swift-case-paths",
+      "state" : {
+        "branch" : "protocol-case-paths",
+        "revision" : "2d9c85a93542e1007221da684b73aeae986a2e2a"
+      }
+    },
+    {
+      "identity" : "swift-clocks",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/swift-clocks",
+      "state" : {
+        "branch" : "clocks-2",
+        "revision" : "0ff28f79525331bd134184abb229ff8f795e8264"
+      }
+    },
+    {
+      "identity" : "swift-collections",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-collections",
+      "state" : {
+        "revision" : "88754449ab766a739610b660e117762115fabc9c",
+        "version" : "1.7.6"
+      }
+    },
+    {
+      "identity" : "swift-custom-dump",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/swift-custom-dump",
+      "state" : {
+        "revision" : "4fb9e7cbb4b8f5a7354005db39447f570d6b3e19",
+        "version" : "1.7.3"
+      }
+    },
+    {
+      "identity" : "swift-debug-snapshots",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/swift-debug-snapshots",
+      "state" : {
+        "revision" : "f70e9e50527451c9e80103e0c0e4625c17e309bd",
+        "version" : "0.5.3"
+      }
+    },
+    {
+      "identity" : "swift-issue-reporting",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/pointfreeco/swift-issue-reporting",
+      "state" : {
+        "revision" : "b23bb4493c439d3e05152bc167014235ba3d47fc",
+        "version" : "2.1.2"
+      }
+    },
+    {
+      "identity" : "swift-syntax",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/swiftlang/swift-syntax",
+      "state" : {
+        "revision" : "79e4b74a295b6eb74a8b585e3a39d29e70c1dbd1",
+        "version" : "603.0.2"
+      }
+    },
+    {
+      "identity" : "tca26",
+      "kind" : "remoteSourceControl",
+      "location" : "git@github.com:pointfreeco/TCA26.git",
+      "state" : {
+        "branch" : "main",
+        "revision" : "b604392e6ed814caba20eadac72d6e15a5e417cd"
+      }
+    }
+  ],
+  "version" : 3
+}

@@ -17,7 +17,8 @@ internal import Dispatch
 ///
 /// Lanes (a compressor each) and output slots are allocated once, at initialization; Bytes' own code then
 /// allocates nothing per call (Dispatch and Swift concurrency allocate their own bookkeeping: tens of small
-/// blocks per call). The input is cut into equal chunks of at most ``chunkSize``, a whole number per lane.
+/// blocks per call). The input is cut into equal chunks of at most ``chunkSize``, a whole number per lane, and
+/// up to four per lane while they're 64 KB or more (so a slow lane holds the call up by a small chunk).
 /// One worker per lane takes the next chunk as it finishes the last, hands its output to a slot (swapping
 /// buffers, no copy), and whichever worker finishes the next chunk in order copies it to the output while
 /// the others go on compressing (`ChunkScheduler`). Three ways to run the workers:
@@ -75,6 +76,18 @@ public struct ParallelDeflateEncoder: ~Copyable {
     /// The largest chunk: the most a lane's staging buffer holds compressed, with every block's worst case.
     public static var maximumChunkSize: Int { 512 << 10 }
 
+    /// The fewest chunks per lane, when the input is large enough to cut that small: a lane that runs slow (an
+    /// efficiency core, or a core shared with other work) then holds the call up by a quarter of its share at
+    /// most, not by all of it. On an M3 Ultra (24 + 8 cores), Silesia's dickens and samba at level 6 on 28 and
+    /// 32 lanes took 5–15% less time than in two chunks per lane, for 0.03–0.1% more output; on 24 or fewer
+    /// lanes the same time.
+    static var chunksPerLane: Int { 4 }
+
+    /// The smallest chunk the input is cut into for ``chunksPerLane``: each primed chunk inserts the 32 KB
+    /// before it, and 40 KB chunks (a 3.8 MB script on 24 lanes) ran 28% more instructions at level 1 and took
+    /// longer than one chunk per lane.
+    static var smallestSplitChunk: Int { 64 << 10 }
+
     /// Creates an encoder.
     ///
     /// - Parameters:
@@ -82,8 +95,11 @@ public struct ParallelDeflateEncoder: ~Copyable {
     ///   - level: The compression level, 0 through 9 (clamped).
     ///   - chunkSize: The most bytes of input per chunk, 32 KB through ``maximumChunkSize`` (clamped).
     ///     Larger chunks lose less to chunk boundaries; smaller ones spread a short input over more lanes.
-    ///   - lanes: How many chunks to compress at once, at least 1: usually the number of performance cores
-    ///     (efficiency cores finish their chunks last, and the call waits for them).
+    ///   - lanes: How many chunks to compress at once, at least 1: usually every core. Workers take chunks one
+    ///     at a time, up to four a lane, so efficiency cores add their share instead of holding up the call
+    ///     (on an M3 Ultra, 32 lanes on its 24 + 8 cores took up to 23% less time than 24 on Silesia's larger
+    ///     files, 8% at the median). For streaming, where each round is one chunk per lane, the performance
+    ///     cores.
     ///   - independentChunks: Whether to compress each chunk without the previous one's history.
     public init(
         format: DeflateFormat = .raw, level: Int = 6, chunkSize: Int = 256 << 10, lanes: Int,
@@ -119,7 +135,10 @@ public struct ParallelDeflateEncoder: ~Copyable {
     /// - Parameter byteCount: The input's size.
     /// - Returns: A size no stream of that input exceeds.
     public func maximumCompressedSize(forByteCount byteCount: Int) -> Int {
-        let chunks = max(1, (byteCount &+ chunkSize &- 1) / chunkSize) &+ lanes.count
+        // Chunks of `chunkSize`, or up to `chunksPerLane` a lane of at least `smallestSplitChunk`.
+        let fullChunks = (byteCount &+ chunkSize &- 1) / chunkSize
+        let smallChunks = min(Self.chunksPerLane &* lanes.count, byteCount / Self.smallestSplitChunk)
+        let chunks = max(max(1, fullChunks), smallChunks) &+ lanes.count
         return byteCount &+ byteCount / 800 &+ chunks &* 1024 &+ 64
     }
 
@@ -207,10 +226,13 @@ public struct ParallelDeflateEncoder: ~Copyable {
 
     /// The job for `byteCount` bytes: chunks of equal size, at most ``chunkSize`` and at least 32 KB, a whole
     /// number per lane, so every worker has the same work: the call lasts as long as the busiest worker (with
-    /// rounds, a last round of 7 chunks on 16 lanes took as long as a full one).
-    func job(byteCount: Int, base: Int = 0, finishing: Bool = true) -> Job {
+    /// rounds, a last round of 7 chunks on 16 lanes took as long as a full one). Up to `chunksPerLane` a lane
+    /// while they're ``smallestSplitChunk`` or more.
+    func job(byteCount: Int, base: Int = 0, finishing: Bool = true, chunksPerLane: Int = Self.chunksPerLane) -> Job {
         let laneCount = lanes.count
-        let rounds = max(1, (byteCount &+ laneCount &* chunkSize &- 1) / (laneCount &* chunkSize))
+        // Up to `chunksPerLane` a lane while they're at least `smallestSplitChunk`.
+        let fewest = min(chunksPerLane, max(1, byteCount / (laneCount &* Self.smallestSplitChunk)))
+        let rounds = max(fewest, (byteCount &+ laneCount &* chunkSize &- 1) / (laneCount &* chunkSize))
         let size = max(32 << 10, (byteCount &+ rounds &* laneCount &- 1) / (rounds &* laneCount))
         return Job(
             base: base, byteCount: byteCount, size: size, chunkCount: max(1, (byteCount &+ size &- 1) / size),
@@ -375,7 +397,8 @@ public struct ParallelDeflateEncoder: ~Copyable {
     /// Compresses the window's input in one parallel round, then keeps its last 32 KB as history.
     private mutating func compressWindow(finishing: Bool) {
         let pending = windowEnd &- historyCount
-        let job = job(byteCount: pending, base: historyCount, finishing: finishing)
+        // One chunk per lane: lane `j` holds chunk `j`'s output until it's delivered.
+        let job = job(byteCount: pending, base: historyCount, finishing: finishing, chunksPerLane: 1)
         // Unsafe: the lanes' storage as a pointer. Safe: used only within this call, while `lanes` keeps its size.
         let lanes = unsafe laneBuffer()
         do {

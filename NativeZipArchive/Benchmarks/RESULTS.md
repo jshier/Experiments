@@ -5,6 +5,266 @@ Each step is saved as a named baseline in `.benchmarkBaselines/` and can be re-c
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 The 2026-11-19 section below compares this machine's numbers with an M1 Max's (baseline `m1max`).
 
+## 2026-11-21 (later): AppleDouble merged, links' times, decomposed names: Archive Utility's output (baselines `v1-before` → `v1-after`)
+
+Nunarchiver's output was compared with Archive Utility's, item by item (the corpus, the method, and the table by
+archive are in Disk/RESULTS.md, same date). Three things in a ZIP's expansion differed, and each is now an
+`ExtractionOptions` field:
+
+| Option | Default | What |
+|---|---|---|
+| `mergesAppleDouble` | on | `._NAME` beside `NAME`, or `__MACOSX/…/._NAME`, isn't extracted: its extended attributes, Finder info, resource fork, and ACL are set on `NAME` (a file or a directory). As Archive Utility, `ditto -x -k`, and macOS's `unzip`. |
+| `restoreLinkTimestamps` | off | Symbolic links get their archived times (Archive Utility's; Info-ZIP's `unzip` leaves them). |
+| `decomposesNames` | off | Names are written in the file system's decomposed form (`fileSystemRepresentation`), as Archive Utility writes them, instead of the archive's bytes. |
+
+The app sets all three; every ZIP in the comparison then matches Archive Utility in every item (names, types, modes,
+times, link targets, contents, extended attributes and their values, ACLs).
+
+**How AppleDouble entries are merged** (`AppleDouble.swift`, `ZipExtractor.readAppleDoubles`): in the planner, with
+Disk's attachments, not in a walk afterwards. Before an archive's entries are planned, one scan of their names finds
+candidates (a last component starting `._`, 26 bytes to 64 MB); an archive with none pays only that scan. With
+candidates, a table of the archive's files and directories by name pairs each with its item; the entry is decoded
+(the planner's decoder, as symbolic links are), parsed, and kept as an `XAT` blob and an `ACL` blob (Disk's
+`AccessControlListBlob(text:)` for `com.apple.acl.text`). The item is then planned with `attachments: true` and the
+blobs added to its token: Disk sets them in its deferred pass (files) and directory pass, in the file system lanes.
+Merged entries are taken off the progress totals. Directory entries under `__MACOSX` aren't made.
+
+What isn't merged stays a file: a `._` entry that doesn't parse as AppleDouble, one whose item isn't in the archive
+(beside it or under `__MACOSX`), one for a symbolic link. A resource fork for a directory is left out (`setxattr`
+refuses it with `EPERM`; the entry's other attributes are set). A `com.apple.quarantine` inside an AppleDouble entry is
+left out when the extraction sets its own. Archive Utility refuses an archive with such entries outright ("Error 79");
+`ditto -x -k` drops the unmatched ones.
+
+**Benchmarks** (`v1-before` → `v1-after`, one run each, **under load**): the archives measured have no AppleDouble
+entries, so this is the cost of the name scan and the new options' tests. Mallocs and system calls are the firm
+numbers; instructions on these rows include the kernel's and move ±10% between runs of unchanged code.
+
+| Benchmark | Mallocs | System calls | Instructions |
+|---|---|---|---|
+| Extract 20,000 small files | 1,004 → 1,005 | 120 K → 118 K | 23 G → 23 G |
+| Extract 20,000 small files, quarantined | 1,006 → 1,006 | 140 K → 139 K | 27 G → 26 G |
+| Extract 2,000 small files (1 worker) | 2,297 → 2,297 | 9,367 → 9,359 | 2,703 M → 2,609 M |
+| Extract 2,000 small files (8 workers) | 2,435 → 2,435 | 13 K → 13 K | 2,886 M → 2,936 M |
+| Extract 2,000 small files: Bytes | 2,659 → 2,659 | 13 K → 13 K | 2,812 M → 2,754 M |
+| Extract 32 MB text: Bytes | 116 → 117 | 134 → 134 | 263 M → 262 M |
+| Extract 32 MB random | 116 → 117 | 129 → 129 | 51 M → 50 M |
+| Extract 8 archives of 64 MB text (one pool) | 371 → 367 | 1,734 → 1,749 | 4,173 M → 4,171 M |
+
+Merging itself, outside the suite (`nunzip`, hyperfine, 5 runs, loaded machine): 2,000 small files, each with one
+extended attribute, archived by `ditto -c -k --sequesterRsrc` (4,001 entries, 2,000 of them AppleDouble) against the
+same files archived without (`--norsrc`):
+
+| | Wall |
+|---|---|
+| `nunzip`, no AppleDouble entries | 57 ms |
+| `nunzip`, 2,000 merged (decoded during planning, 2,000 `fsetxattr` in the deferred pass) | 84 ms |
+| `ditto -x -k`, the same archive | 1,100 ms |
+
+**Tests**: 50 tests in 11 suites (was 46 in 10). New, `AppleDoubleTests`: `ditto`'s four layouts (`--sequesterRsrc`
+or not, `--keepParent` or not) of a tree with attributes on files and a directory, Finder info, a 70,000-byte resource
+fork, and an ACL, extracted and compared with `ditto -x -k` item by item (every attribute's bytes, the ACL's text);
+off, the entries are files; names that only look like AppleDouble, items that aren't there, a link's, and a fork for a
+directory; links' times with the option and without. (The trees are listed with `readdir`: Foundation's enumerators
+leave `._` files out, so a listing made with one can't show that none is left.)
+
+## 2026-11-21: a quarantine option; the mapping and the handoff shared (baselines `cleanup-before` → `cleanup-after`)
+
+Extraction, parse, locate, and verify rows with the `SyscallCounting` trait. **Times under load**; counts are the firm
+numbers.
+
+**New: `ExtractionOptions.quarantine` and `ZipExtractor.extract(…quarantine:…)`** (Disk's `Quarantine`, `nil` by
+default as Info-ZIP's `unzip`). It goes to Disk's `DestinationOptions`: the writers set `com.apple.quarantine` on each
+file while it's open, and the passes after them on links and directories, including the parents an archive doesn't
+list (Disk makes those on the way to their files; it now quarantines them too: Disk/RESULTS.md). The destination
+directory itself is left alone. One attribute for the whole extraction (every archive a `ZipExtractor` adds).
+The Nunarchiver app passed nothing and walked the tree afterwards on one thread (+0.7 s on an 8,060-entry archive that
+expanded in 0.65 s); it passes the archive's quarantine now and the walk is gone.
+
+| Extract 20,000 small files (`cleanup-after`) | Instructions | `Disk syscalls` | Wall (loaded) |
+|---|---|---|---|
+| plain | 22 G | 81,000 | 510 ms | |
+| quarantined | 26 G | 101,000 | 602 ms | |
+
+`quarantinesWhatItExtracts` (an archive with and without directory entries, a read-only file, a symbolic link; through
+`ZipArchive.extract` and through a `ZipExtractor` into a subdirectory): every item beneath the destination has the
+attribute, the destination doesn't, and modes and contents are as without one.
+
+**Moved out:**
+
+| Was here | Now | Rows that would show a cost (`cleanup-before` → `cleanup-after`) |
+|---|---|---|
+| `MappedFile` (61 lines) | Disk's `MappedFile` (NativeAEA's `RawMapping` was the same; `stableBuffer` is `buffer`) | Parse central directory 4,293,000 → 4,293,000 instructions, 2,289 mallocs both; Locate 2,000 payloads 3.29 → 3.29 M, 0 mallocs; Verify 2,000 small files 268 → 268 M (Bytes), 252 → 251 M (zlib) |
+| `ChunkHandoff` (137 lines on raw `UnsafeContinuation`s) | BytesAsync's `AsyncHandoff<ZipDecoder.Chunk>` | Extract 32 MB text: Bytes 263 → 263 M, 116 mallocs both (the overlapped path: a chunk per MiB through the handoff); 8 archives of 64 MB 4.17 → 4.17 G, 365 → 373 mallocs |
+| `pathconf(_PC_CASE_SENSITIVE)` on the destination's path | `Destination.isCaseSensitive` | — |
+
+`Disk syscalls` are identical in every row, and mallocs identical in all but three (8 workers −1, verify with zlib −2,
+the 8-archive row +8 of 365: the runtime's own, which varied the same way between earlier runs of one build).
+`ZipDecoder.swift` 902 → 768 lines.
+
+**Left here, and why:** `WorkQueue` and `forEachConcurrently` (verification's, typed to a per-worker `ZipDecoder`: one
+user); `SourceState.waitUntilWritten` (a bitmap and a checked continuation for an archive that names one path twice:
+rare by design); the umask for entries without a mode (ZIP's rule: archived modes exact, defaults less the umask;
+Disk's policy is one or the other); making the destination path absolute (one line of caller policy); `ByteReader`
+(the benchmarks' reference parser).
+
+**Same output.** `nunzip` built before and after, on two archives of this repository's Bytes sources (231 items; one
+with directory entries, one without, links stored as links) and six fixtures (`duplicates`, `symlink`, `unsafe-paths`,
+`unicode-path`, `dos-backslash`, `zstd`): every item's type, mode, flags, size, link target, contents, and extended
+attributes identical; exit codes the same (1 for `unsafe-paths.zip`, 0 for the rest).
+
+`swift test`: 46 pass (debug); `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`: 46 pass. A build
+from scratch with tests has no warnings.
+
+## 2026-11-20 (follow-ups): Disk's fixes, workarounds removed (baselines `fu-before` → `fu-sized` → `fu-after`)
+
+Disk made what this package worked around (Disk/RESULTS.md, "follow-ups"). Extraction rows with the `SyscallCounting`
+trait (`--filter 'Extract.*'`); `fu-before` from a copy of the tree before these changes, `fu-sized` with every Disk change
+and NativeZip's sizing of Disk still in place, `fu-after` with only its writer cap left (below). **Times under load**;
+counts are the firm numbers.
+
+**What went** (`ZipContentSource.swift` 325 → 298 lines, `ZipArchive+Extraction.swift` 598 → 576):
+
+- **The tag-to-error table** (`SourceState.record`, `error(tag:)`, and `error(described:)`, which matched the stopping
+  failure by its description): `DiskError.source` carries the error now, so failures read `failure.error.sourceError`
+  and the extraction throws it as it is. `nunzip` exits as before: 81 for an unsupported method (`ppmd.zip`), 82 with
+  no password and with a wrong one (ZipCrypto and AES), 2 for a damaged entry, 0 otherwise (old and new binaries, same
+  archives).
+- **The check before the last write**, with its extra decode into the other buffer to see the stream's end first: Disk
+  finishes a file only after the source returns, so `writeInline` decodes, writes, and checks after the loop, and
+  `writeStored` no longer has a separate whole-entry branch. `failsSmallEntriesAfterTheirLastWrite` (stored and
+  deflated, the central directory's CRC-32 changed) checks the file is removed and the error is `crcMismatch`, thrown
+  and in the failures.
+- **Sizing Disk's setup**: the internal `extract(…files:)` overload that set the queue to the file count and one
+  large-file slot. Disk now makes writers' scratch, the job ring's pages, and large-file slots only when used. What
+  still pays is a cap of one writer per file in `ZipArchive.extract` (3 lines): an idle writer costs its task.
+
+  | Extract 32 MB random (one file) | Instructions | Mallocs | Process syscalls |
+  |---|---|---|---|
+  | `fu-before` (writers, queue, slots sized) | 51 M | 129 | 131 |
+  | `fu-sized` (Disk lazy, sizing kept) | 50 M | 124 | 131 |
+  | Disk lazy, nothing sized (24 writers) | 51 M | 263 | 156 |
+  | Disk lazy, writers capped at the file count | 51 M | 124 | 131 |
+  | `fu-after` (the same, and Disk's buffers made only when used) | 51 M | 116 | 131 |
+
+  So queue and slot sizing no longer pay; 23 idle writers cost about 140 mallocs and 25 process syscalls.
+- `record.expected` (the progress totals kept here to call `setExpected`): `ExtractionProgress.addExpected` adds each
+  archive's totals and takes skipped entries off.
+
+**Rows** (`fu-before` → `fu-after`):
+
+| Benchmark | Instructions | Mallocs | Process syscalls | `Disk syscalls` |
+|---|---|---|---|---|
+| Extract 20,000 small files | 23 → 23 G | 21,000 → **1,004** | 123 K → 119 K | 81 K → 81 K |
+| Extract 2,000 small files: Bytes | 2,963 → 2,850 M | 4,951 → 2,659 | 14 K → 13 K | 9,294 → 9,294 |
+| Extract 2,000 small files (1 worker) | 3,324 → 2,714 M | 4,311 → 2,297 | 9,407 → 9,367 | 9,294 → 9,294 |
+| Extract 32 MB text: Bytes | 263 → 262 M | 129 → 116 | 134 → 134 | 49 → 49 |
+| Extract 8 archives of 64 MB text (one pool) | 4,180 → 4,173 M | 627 → **360** | 2,071 → 1,716 | 538 → 538 |
+
+- **One allocation per file fewer** (2,000 fewer in every 2,000-file row, 20,000 in the 20,000-file one): the old
+  `ZipContentSource.write` boxed itself once per call. `nunzip` on the 2,000-file archive allocated 1,999 boxes of
+  `ZipContentSource` (`Tools/runtime-count --who swift_allocObject=x0`; on the new binary that tally crashed lldb), and on
+  the 20,000-file archive made 81,922 `swift_allocObject`s before and 61,901 after (−20,021), `malloc` 625 both.
+- The 8-archive row (`ZipExtractor`, which can't know the files in advance) lost 270 mallocs and 350 process syscalls of
+  Disk's setup: the +248 mallocs the migration cost it are gone.
+- Small-file rows' instructions moved −4 to −18%, within these rows' known spread between runs (±10–20%); not claimed.
+
+`swift test`: 45 pass (debug); `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`: 45 pass.
+
+## 2026-11-20: writing through Disk (baselines `mig-before` → `mig-after`; A/B `ab-old-4…6` / `ab-same-4…6`, `prog-1…3`)
+
+Extraction now writes through the `Disk` package (`../Disk`, extracted from NativeAEA and this package). **Every time
+here was taken under load** (other agents building and benchmarking, load average 9–32): instructions, mallocs, and
+call counts are the firm numbers; times are indicative, and the unchanged `Floor` rows moved −14.5% and +1.2% between
+the two baselines.
+
+**What moved.** `ZipExtractor` keeps planning (overwrite questions, freshen and update, claims, junk paths,
+lowercasing, events) and drives Disk's `Planner`; Disk's writers call a `ContentSource` (`ZipContentSource.swift`):
+- Names are cleaned by `EntryPath.sanitize` (Info-ZIP's rules) and checked by `EntryPath(validating:)`; parents not in
+  the archive are the planner's implicit directories; freshen and update ask `Destination.existingItem(at:)`.
+- Every entry is made relative to the destination's descriptor with `O_NOFOLLOW_ANY | O_RESOLVE_BENEATH`; an existing
+  item planning decided to replace is unlinked by Disk (`.replace`), never written through.
+- A job names its entry (`ArchiveJob` + index); each writer decodes with its own decoders (by `writerIndex`). Stored
+  entries are written from the mapping, whole or in 8 MiB pieces, each checksummed just before it's written; compressed
+  ones a 1 MB chunk at a time (`ZipDecoder.beginEntry`/`nextChunk`/`endEntry`, a pull interface replacing
+  `decodePipelined`), from 4 MB decoding in a child task while the writer writes the other buffer. The size and CRC-32
+  are checked before a file's last bytes are written (Disk closes a file written whole as it writes it); a streamed file
+  that fails is removed by Disk.
+- A later entry at a path an earlier file holds waits (in its writer) until the earlier one is written, then replaces it:
+  archive order, without the old "after the pool" pass. Symbolic links are recorded with Disk at the end of planning
+  (so a later entry can still cancel one); Disk makes them after the files, then directories' metadata, deepest first.
+- Deleted (Disk owns them): `JobQueue`/`Waiters`, `DirectoryCache`, `FileDescriptor.apply`, `FileJob`/`LinkJob`/
+  `DirectoryJob`, `WorkerDecoders`, `FailureLog`, the passes' `forEachConcurrently`, `relativePath`/`isClean`,
+  `copyStored`, `contentsPipelined`, `decodePipelined`.
+
+**API.** `ZipExtractor.extract(into:maxConcurrency:stopOnFirstError:progress:_:)` takes the destination, and
+`add(_:entries:into:options:)` (now `async`) a subdirectory inside it: Disk extracts into one destination, opened once.
+`ExtractionOptions.maxConcurrency` is optional (default: Disk's, one writer per performance core with a quarter of them
+in file system calls); `ExtractionOptions.progress` and `extract(…progress:)` take Disk's `ExtractionProgress`, its
+totals set from the central directory before anything is written (skipped entries come off them again). File system
+failures are `DiskError`s; a decoder's failure keeps its `ZipError`.
+
+**Sizing Disk for one archive.** Disk makes every writer's scratch, 128 large-file slots, and a 16,384-job ring when an
+extraction starts. For one 32 MB entry with 24 writers that was 1,029 mallocs against 264, 478 process syscalls against
+140, and 59 M instructions against 51 M (`Extract 32 MB random`). `ZipArchive.extract` now uses no more writers than
+files, a queue no longer than the files (64 to 16,384), and one large-file slot (nothing is planned in pieces): 129
+mallocs, 131 syscalls, 50 M instructions. `ZipExtractor` can't know the counts in advance (24 writers, 16,384 jobs):
+the 8-archive row keeps +12 M instructions (+0.3%) and +248 mallocs of setup.
+
+| Benchmark (p50) | Instructions | Mallocs | Process syscalls | Time (under load) |
+|---|---|---|---|---|
+| Extract 20,000 small files | 24 → 23 G | 103 K → 21 K | 82 K → 123 K | 598 → 534 ms |
+| Extract 8 archives of 64 MB text (one pool) | 4,169 → 4,182 M (+0.3%) | 371 → 619 | 1,636 → 2,047 | 71 → 71 ms |
+| Extract 2,000 small files: Bytes | 3,106 → 2,804 M | 15 K → 4.9 K | 9,495 → 14 K | 94 → 66 ms |
+| Extract 2,000 small files (1 worker) | 2,661 → 2,691 M | 15 K → 4.3 K | 9,339 → 9,375 | 212 → 179 ms |
+| Extract 2,000 small files (8 workers) | 2,953 → 2,854 M | 15 K → 4.5 K | 9,463 → 13 K | 85 → 70 ms |
+| Extract 32 MB text: Bytes / zlib / Zstd | 263 / 241 / 402 → 262 / 240 / 401 M | 263 → 129 | 145 → 134 | 14 / 15 / 21 → 14 / 15 / 20 ms |
+| Extract 32 MB random (stored) | 51 → 50 M | 264 → 129 | 140 → 131 | 3.9 → 3.8 ms |
+| Inflate + CRC, Verify (controls) | ±0.7% | — | — | — |
+
+Single small-file rows move ±10–20% in instructions between runs here (the kernel's share), so they were also
+compared **interleaved with an identical harness** (git HEAD's library against this one, three rounds each, p0):
+1 worker 2,771 / 2,918 / 2,790 M old against 2,675 / 2,707 / 2,661 M new (−3 to −7% every round); 20,000 files
+23 / 23 / 24 G against 23 / 24 / 23 G; 2,000 files on all writers 2,814 / 2,923 / 2,941 against 2,889 / 2,964 /
+2,928 M (−0.4 to +2.7%). (An earlier interleaved run, `ab-old-1…3` against `ab-new-1…3`, used this package's own
+benchmark file for the new side and read +2–8%: the harnesses differed, not the libraries.)
+
+**End to end** (`nunzip`, hyperfine, old and new binaries alternated for three rounds, minimum / median; load 5–15):
+
+| Job | Old | New | Instructions (median) |
+|---|---|---|---|
+| 20,000 files of 1–8 KB (step15: 542 ms) | 542 / 548, 555 / 592, 545 / 557 ms | **514 / 537, 515 / 528, 502 / 515 ms** | 20.5 → 20.1–20.3 G |
+| 8 archives of one 64 MB text file (step15: 73 ms) | 66 / 113, 66 / 67, 65 / 68 ms | 66 / 111, 67 / 70, 65 / 69 ms | 4,232 → 4,244 M |
+
+`nunzip --jobs 1`, `8`, `24` on the 20,000 files (`/usr/bin/time -l`, three rounds): 19.5–20.0 → 19.1–19.4 G, 20.9–21.4
+→ 20.6–21.1 G, 20.9–21.4 → 20.8–21.0 G instructions. The 8-archive job is the one that isn't faster: equal minimums,
+medians 1–3 ms higher in two rounds, the +12 M instructions of Disk's setup for 24 writers on the calling task.
+Neither a wider file system limit (8, 24) nor 8 writers changed it (68–69 ms minimums, then bimodal under load). A
+smaller queue would cost more than it saves: Disk resumes a waiting planner on every pop, a wake-up per file once full.
+
+**System calls per file.** With Disk's `SyscallCounting` trait (`swift package --traits SyscallCounting --scratch-path
+.build-syscalls --disable-sandbox benchmark`, baseline `mig-syscalls`), Disk makes **4 calls per file** (`openat`,
+`pwrite`, `fsetattrlist`, `close`) plus 2–5 per directory: 9,294 for 2,000 files and 321 directories, 81,000 for
+20,000 files and 201 directories, 48–49 for one 32 MB file (`pwrite`s of 1 MB chunks or 8 MiB pieces), 538 for the
+8 archives. The old writer made the same four (`open`, `write`, `fsetattrlist`, `close`, and `mkdir` per directory).
+The process's count (package-benchmark's `.syscalls`) rose by about 2 per file with all writers (82 K → 123 K for
+20,000 files) and not at all with one (9,339 → 9,375): thread parking and waking around Disk's file system limit
+(24 writers, 6 in calls at once, where the old pool ran 8 small-file workers with no limit), not file system work.
+
+**Progress** (`prog-1…3`, interleaved rounds, p0): `Extract 32 MB text: Bytes` 262 M with and without in every round
+(one relaxed add per 1 MB chunk); 2,000 files, 1 worker, 2,548 / 2,539 / 2,554 M without against 2,559 / 2,520 /
+2,626 M with; 20,000 files 22–23 G both. Nothing measurable: one relaxed add per file against about 1.2 M
+instructions of kernel work.
+
+**Same trees.** `InfoZIPComparisonTests` extracts an archive `/usr/bin/zip` makes (nested and read-only directories,
+setuid and private modes, links, a 5 MB compressible file, a 9 MB stored one) with `/usr/bin/unzip` and NativeZip, with
+no flags, `-K`, `-LL`, and `-X`, and compares every item's type, mode, size, contents, modification time, and link
+target. By hand, `nunzip` before and after gave the same trees and exit codes as each other on 22 cases (the rich
+archive with `-j -D -K -L -LL -X -n -f -u -C`, the format fixtures, encrypted ones with `-P`), and the same output and
+exit codes for unsupported methods (81), wrong and missing passwords (82), several archives by wildcard, and existing
+files without a terminal. Where both differ from Info-ZIP's `unzip` they did before: `-j` with a link (unzip fails),
+`-n`/`-f`/`-u` restoring directory times, Unicode names (unzip folds `café` to `cafe`), MS-DOS hosts' modes, bzip2
+(this `unzip` lacks it), and the warning exit code for prepended data.
+
 ## 2026-11-19: M1 Max against M3 Ultra (baselines `d2-zip2` → `m1max`)
 
 > Later the same day the benchmark file was reworked for runtime: the three `Open + extract …` benchmarks were removed

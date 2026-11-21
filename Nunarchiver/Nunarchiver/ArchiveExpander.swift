@@ -1,0 +1,171 @@
+import ComposableArchitecture
+import Foundation
+import IssueReporting
+
+/// Expands archives: the boundary between the features and the file system, so tests control it.
+///
+/// ``expand(_:id:credentials:)`` does the whole job (staging, extraction, naming, publishing or discarding) and never
+/// throws: cancellation of the calling task is reported as ``ExpansionOutcome/cancelled`` after the staging directory
+/// is removed, and an archive that can't be opened without a password or key as
+/// ``ExpansionOutcome/needsCredential(_:)`` (nothing staged), for the feature to ask and call again.
+/// ``progress(of:)`` is polled by the app feature a few times a second while the progress window is up; it reads the
+/// extraction's counters and nothing is ever pushed to the UI.
+protocol ArchiveExpander: Sendable {
+    /// Expands `archive` next to itself. `id` names it for ``progress(of:)`` while it runs.
+    func expand(_ archive: URL, id: UUID, credentials: ArchiveCredentials) async -> ExpansionOutcome
+    /// Where the expansion `id` has got, or `nil` if it isn't running (not started yet, or finished).
+    func progress(of id: UUID) -> ExpansionProgress?
+}
+
+/// What an archive can need from the user before it opens.
+enum CredentialKind: Hashable, Sendable {
+    /// A password: an encrypted ZIP (ZipCrypto, WinZip AES), or an `.aea` of the password profile.
+    case password
+    /// An `.aea`'s 32-byte symmetric key, as `aea -key-value` takes it (hex or `base64:…`).
+    case key
+    /// The public key of whoever signed an `.aea` that carries no certificate chain (a PEM, or the X9.63 point in hex
+    /// or `base64:…`). Not a secret, but the archive can't be verified or read without it.
+    case signingPublicKey
+}
+
+/// What the user has entered for an archive so far, by kind.
+struct ArchiveCredentials: Equatable, Sendable {
+    var values: [CredentialKind: String] = [:]
+
+    subscript(kind: CredentialKind) -> String? {
+        get { values[kind] }
+        set { values[kind] = newValue }
+    }
+}
+
+/// An archive can't be opened without `kind`. `isRetry`: one was given and didn't work.
+struct CredentialRequest: Equatable, Error, Sendable {
+    var kind: CredentialKind
+    var isRetry = false
+}
+
+/// How an expansion ended.
+enum ExpansionOutcome: Equatable, Sendable {
+    /// Published at this URL (the single top-level item, or the folder holding several).
+    case expanded(URL)
+    /// Failed with this message; nothing was left behind.
+    case failed(String)
+    /// Cancelled; nothing was left behind.
+    case cancelled
+    /// Not expanded: the archive needs this first. Nothing was left behind.
+    case needsCredential(CredentialRequest)
+}
+
+/// A progress reading: the extraction's relaxed counters, summed.
+struct ExpansionProgress: Equatable, Sendable {
+    /// Entries written so far.
+    var entries = 0
+    /// Bytes of file contents written to disk so far (the files' own sizes, before any APFS compression).
+    var bytes = 0
+    /// Done, from 0 to 1, when the totals are known (see ``fraction(entries:of:bytes:of:)``).
+    var fraction: Double?
+
+    /// Everything counted is written and the expansion hasn't ended: what's left is counted by nothing (directories'
+    /// permissions and times, moving the result into place). The row says so instead of showing a full bar.
+    var isFinishing: Bool {
+        (fraction ?? 0) >= 1
+    }
+
+    /// What an entry weighs against bytes of contents in ``fraction(entries:of:bytes:of:)``: 64 KiB. Roughly what
+    /// making one costs (Xcode's archives on an M3 Ultra: about 30,000 entries a second where contents are written
+    /// at 1.5 to 2.5 GB a second); it only has to keep the bar moving at a believable pace through both kinds of
+    /// work.
+    static let entryWeight = 65_536
+
+    /// How far along an extraction is, from 0 to 1, by its bytes and its entries together: `nil` when neither total
+    /// is known, by whichever is when only one is.
+    ///
+    /// Bytes alone leave out the work that writes none: a `.xip`'s hard links (a third of Xcode's expansion: the
+    /// bar sat full, then indeterminate, for 3.4 s of 10.2), symbolic links, and directories. Entries alone would
+    /// stall on a large file. So each entry counts as ``entryWeight`` bytes, on both sides of the ratio.
+    ///
+    /// - Parameters:
+    ///   - entries: Entries made so far, of `expectedEntries` (0: not known).
+    ///   - bytes: Bytes of contents written so far, of `expectedBytes` (0: not known).
+    static func fraction(entries: Int, of expectedEntries: Int, bytes: Int, of expectedBytes: Int) -> Double? {
+        guard expectedEntries > 0 || expectedBytes > 0 else { return nil }
+        // The counters run ahead of an estimated total (and are read a moment apart): never past it.
+        let weight = Double(entryWeight)
+        let done = (expectedBytes > 0 ? Double(min(bytes, expectedBytes)) : 0)
+            + (expectedEntries > 0 ? Double(min(entries, expectedEntries)) * weight : 0)
+        let total = Double(max(0, expectedBytes)) + Double(max(0, expectedEntries)) * weight
+        return min(1, max(0, done / total))
+    }
+
+    /// The percent a row reports (VoiceOver's value, the first-fraction log line): `nil` until the extraction has
+    /// counted anything, and again for the moment it's finishing. The bar itself is always determinate, drawn from
+    /// ``fraction`` (empty without one).
+    var barFraction: Double? {
+        guard !isFinishing else { return nil }
+        return entries > 0 || (fraction ?? 0) > 0 ? fraction : nil
+    }
+}
+
+/// Archive Utility-like conveniences around a finished expansion.
+protocol Workspace: Sendable {
+    /// Whether finished expansions are revealed (the Settings toggle).
+    var revealsExpandedItems: Bool { get }
+    /// Selects `url` in the Finder.
+    func reveal(_ url: URL) async
+}
+
+extension FeatureEnvironmentValues {
+    @FeatureEnvironmentEntry(
+        liveValue: LiveArchiveExpander.shared,
+        previewValue: PreviewArchiveExpander()
+    )
+    var archiveExpander: any ArchiveExpander = UnimplementedArchiveExpander()
+
+    @FeatureEnvironmentEntry(
+        liveValue: LiveWorkspace(),
+        previewValue: PreviewWorkspace()
+    )
+    var workspace: any Workspace = UnimplementedWorkspace()
+}
+
+// MARK: Test and preview values
+
+struct UnimplementedArchiveExpander: ArchiveExpander {
+    func expand(_ archive: URL, id: UUID, credentials: ArchiveCredentials) async -> ExpansionOutcome {
+        reportIssue("UnimplementedArchiveExpander.\(#function)")
+        return .failed("unimplemented")
+    }
+
+    func progress(of id: UUID) -> ExpansionProgress? {
+        reportIssue("UnimplementedArchiveExpander.\(#function)")
+        return nil
+    }
+}
+
+/// Never finishes, always half done: for SwiftUI previews.
+struct PreviewArchiveExpander: ArchiveExpander {
+    func expand(_ archive: URL, id: UUID, credentials: ArchiveCredentials) async -> ExpansionOutcome {
+        try? await Task.sleep(for: .seconds(1_000_000))
+        return .cancelled
+    }
+
+    func progress(of id: UUID) -> ExpansionProgress? {
+        ExpansionProgress(entries: 1_234, bytes: 1_234_000_000, fraction: 0.5)
+    }
+}
+
+struct UnimplementedWorkspace: Workspace {
+    var revealsExpandedItems: Bool {
+        reportIssue("UnimplementedWorkspace.\(#function)")
+        return false
+    }
+
+    func reveal(_ url: URL) async {
+        reportIssue("UnimplementedWorkspace.\(#function)")
+    }
+}
+
+struct PreviewWorkspace: Workspace {
+    var revealsExpandedItems: Bool { false }
+    func reveal(_ url: URL) async {}
+}

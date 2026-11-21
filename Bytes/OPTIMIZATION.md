@@ -28,20 +28,21 @@ conversions.
 
 **Headline results.** Every figure is on the machine described below, release builds, medians:
 
-- Base64 encoding reaches 21.5 GB/s at 1 MB, level with C of the same design and 93% of a C kernel that uses `ld3` and
-  `st4` (ARM's deinterleaving load and interleaving store, [Part I](#part-i-foundations)) directly.
-  <!-- src: Bytes/Benchmarks/RESULTS-base64.md "Encoding" table (M3 Ultra column, d2-final: 21.5 GB/s at 1 MB) and "The ceiling: a C kernel with ld3 and st4" (23.1 GB/s; same-design C 21.8); Bytes/OPTIMIZATION.md (old) §10 (93%) -->
-- CRC-32 uses ARM's carry-less multiply and CRC instructions: 32 MB in 532 µs (63 GB/s) against zlib's 888 µs, and
-  2.3x zlib at 64 bytes.
-  <!-- src: Bytes/IMPROVEMENTS.md headline table row "CRC-32, hardware path" -->
-- The Zstandard decoder is faster than libzstd on every Silesia input and level: 1.12–1.45x for one call, with 7–22%
+- Base64 encoding reaches 20.4 GB/s at 1 MB (21.5 in the earlier `d2-final` run, with the same instruction count), near
+  a C kernel that uses `ld3` and `st4` (ARM's deinterleaving load and interleaving store, [Part I](#part-i-foundations))
+  directly, which reached 23.1 GB/s in that earlier run.
+  <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): row "Encode 1 MB: Bytes (BytesReader → BytesWriter)", 205,695 ns for 4 MiB, 2,799,615 instructions; Bytes/Benchmarks/RESULTS-base64.md "Encoding" table (M3 Ultra column, d2-final: 21.5 GB/s at 1 MB) and "The ceiling: a C kernel with ld3 and st4" (23.1 GB/s; same-design C 21.8) -->
+- CRC-32 uses ARM's carry-less multiply and CRC instructions: 1 MB in 15.3 µs (69 GB/s; 77 GB/s on 32 MB in the probe)
+  against zlib's 25.2 µs, and 2.3x zlib at 64 bytes.
+  <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "CRC-32 1 MB: Bytes" 15,295 ns and ": zlib" 25,215 ns, "CRC-32 64 B (×16 K): Bytes" 108,479 ns and ": zlib" 248,959 ns (2.30x); Tools/probes/results/M3-Ultra-2026-11-20/checksums.tsv (32 MB: 77.0 GB/s) -->
+- The Zstandard decoder is faster than libzstd on every Silesia input and level: 1.13–1.50x for one call, with 8–22%
   fewer instructions.
-  <!-- src: Bytes/Benchmarks/RESULTS.md line 671 "Faster on every Silesia input and level: one call 1.12–1.45x" -->
-- ChaCha20-Poly1305 seals 1 MB at 2.50 GB/s (Poly1305's work interleaved into ChaCha20's rounds, −40% time), 2.95x
-  CryptoKit's `ChaChaPoly` in the `d2-final` run. AES-128-GCM seals 1 MB at 7.9 GB/s (CryptoKit, on the same run, 9.4).
-  <!-- src: Bytes/Benchmarks/RESULTS.md line 762 (1.52 → 2.50 GB/s, −40%); line 596 (2.95x CryptoKit); line 98 (AES-128-GCM seal 1 MB 7.9 GB/s) -->
-- TLS 1.3 records sealed on several cores: AES-128-GCM 5.7 / 20.3 / 32.7 GB/s on 1 / 4 / 8 lanes (parallel workers).
-  <!-- src: Bytes/Benchmarks/RESULTS.md line 609 "Parallel sealing" -->
+  <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Zstd decode L1/L3/L19 {dickens, mozilla, samba, x-ray, xml}: Bytes" against ": libzstd" (time 1.127 x-ray L1 to 1.503 x-ray L19; instructions 0.782 x-ray L1 to 0.918) -->
+- ChaCha20-Poly1305 seals 1 MB at 2.37 GB/s (Poly1305's work interleaved into ChaCha20's rounds, −40% time), 2.80x
+  CryptoKit's `ChaChaPoly` in the `m3-final` run. AES-128-GCM seals 1 MB at 9.0 GB/s (CryptoKit, on the same run, 9.6).
+  <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): rows "ChaCha20-Poly1305 seal 1 MB (x1): Bytes" 442,623 ns, ": CryptoKit" 1,241,087 ns; "AES-128-GCM seal 1 MB (x1): Bytes" 116,095 ns, ": CryptoKit" 108,991 ns; the −40% is the dated change from 1.52 → 2.50 GB/s (RESULTS.md line 762) -->
+- TLS 1.3 records sealed on several cores: AES-128-GCM 6.4 / 20.8 / 35.9 GB/s on 1 / 4 / 8 lanes (parallel workers).
+  <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): rows "TLS seal 4 MB AES-128-GCM (1 / 4 / 8 lanes): Bytes", 652,799 / 201,471 / 116,799 ns for 4 MiB -->
 - Parsing MQTT PUBLISH packets as views of the input, not copies, is 8.6x faster on one core than conventional parsing
   into `[UInt8]` and `String`, and 18.6x on all cores.
   <!-- src: MQTT/Benchmarks/RESULTS.md 2026-11-19 "The views against the conventional code" (M3, d2-final's code: 8.6x one core, 18.6x all cores; supersedes the older 5.5x) -->
@@ -61,10 +62,10 @@ crypto, and the consumer projects. [Part IV](#part-iv-concurrency-and-further-re
 compiler limitations, and further reading.
 
 **The machine and the measurements.** Unless a section says otherwise, numbers come from an Apple M3 Ultra (24
-performance and 8 efficiency cores, about 4.05 GHz maximum performance-core clock, 256 GB of LPDDR5-6400), macOS 27.2,
-Xcode 27.3, Swift 6.4.2 and, for the later measurements, 6.4.4, release builds. A second machine, an Apple M1 Max
+performance and 8 efficiency cores, about 4.05 GHz maximum performance-core clock, 256 GB of LPDDR5-6400), macOS 27.2.1,
+Xcode 27.3, Swift 6.4.2 and, for the later measurements (all of the 2026-11-20 ones), 6.4.4, release builds. A second machine, an Apple M1 Max
 (8 performance and 2 efficiency cores, about 3.23 GHz), is used where a section says so.
-<!-- src: Bytes/Benchmarks/RESULTS.md lines 14-26 (machine table; "Xcode 27.3's Swift 6.4.4"); Bytes/OPTIMIZATION.md (old) intro ("Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 and later measurements)") -->
+<!-- src: Bytes/Benchmarks/RESULTS.md lines 14-26 (machine table; "Xcode 27.3's Swift 6.4.4"); "2026-11-20, M3 Ultra" (macOS 27.2.1, Xcode 27.3, Swift 6.4.4); Tools/probes/results/M3-Ultra-2026-11-20/machine.tsv; Bytes/OPTIMIZATION.md (old) intro ("Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 and later measurements)") -->
 Timings are medians from [package-benchmark](https://github.com/ordo-one/package-benchmark). "GB/s" is bytes processed
 per second, and "x% faster" means x% less time unless it says "throughput". Where a number was taken while other jobs
 loaded the machine, the text says so, and the claim rests on instruction counts, which do not depend on load.
@@ -168,8 +169,8 @@ operation, 3 cycles for the pair. Sections [2.8](#28-dot-products-udot) and [2.9
 
 Measuring throughput takes enough independent chains to cover the latency: at 4 per cycle and 3 cycles of latency, 12
 instructions must be in flight. The first probe used 8 chains, so every 3-cycle instruction read as 8 ÷ 3 = 2.7 per
-cycle, and `fmla` (4 cycles) as 2; with 16 chains, both run 4 per cycle.
-<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" (re-measurement note: 8 chains → 2.7; 16 chains → 4) -->
+cycle, and `fmla` (4 cycles) as 2; with 16 chains, both run 4 per cycle. The same eight-chain probe on an M3 Ultra also read 2.7, and 4 per cycle with 16.
+<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" (re-measurement note: 8 chains → 2.7; 16 chains → 4); "2026-11-20, M3 Ultra" (8 and 16 chains) -->
 
 A **dependency chain** is a sequence of instructions where each needs the previous one's result. A chain runs at the
 speed of its links' latencies, however wide the core is. A loop's longest chain is its **critical path**. So two loops
@@ -224,10 +225,13 @@ The M3 Ultra's performance-core clusters have 16 MB of L2 shared by 6 cores; the
 <!-- src: Writeups/M1-Max-vs-M3-Ultra.md "The machines" table, "P-cluster L2" row -->
 
 Sequential reads are fast because the hardware **prefetches**: it detects the pattern and loads lines before the
-program asks. On the M3 Ultra one core reads about 72–77 GB/s from memory, and all cores together about 245–250 GB/s;
-the 819 GB/s on the spec sheet is shared with the GPU and Neural Engine, and the CPU clusters' links cap at about 30% of
-it.
-<!-- src: Bytes/Benchmarks/RESULTS.md "The ceiling" (72 GB/s one thread; 245–250 GB/s 16–32 threads; ~72–77 GB/s per core; 30% of spec) -->
+program asks. On the M3 Ultra one core reads about 78 GB/s from memory (133 GB/s from L1), and all cores together about
+254 GB/s, reached at 16 threads and flat to 32; the 819 GB/s on the spec sheet is shared with the GPU and Neural Engine,
+and the CPU clusters' links cap at about 31% of it. On the same chip the pointer chase reads 1.0 ns (4 cycles) in L1, 4.4–6.0
+ns (18–24 cycles) in L2, 25–64 ns for 16–64 MB, and 127 ns in DRAM.
+<!-- src: Tools/probes/results/M3-Ultra-2026-11-20/mem-threads.tsv (1 thread 78.5 GB/s, 16 threads 252.2, 24 254.8, 32 253.3 of 819 = 31%), mem-bandwidth.tsv (132.5 GB/s at 32 KB), mem-latency.tsv (L1 0.99–1.00 ns, 3.9–4.0 cycles; L2 4.41–6.03 ns, 17.9–24.4 cycles; 16–64 MB 24.6–64.1 ns; 256 MB 127.0 ns) -->
+
+The M1 Max's table above is its own; the M3 Ultra's L1 is a cycle slower (4 cycles) at a faster clock.
 On the M1 Max one core reads 60 GB/s, two already reach 112 GB/s, and all ten reach 125 GB/s, so beyond two, more cores
 add little for a pure read. Stores are the same from one core (62 GB/s) and lower from all of them (about 104 GB/s).
 <!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" bandwidth paragraph (re-measured 2026-11-21, Tools/cpu-probe bandwidth) -->
@@ -262,9 +266,9 @@ does a store and a load around every field.
 <!-- src: general background (definition); the cost claim is the register-vs-memory argument in Bytes/OPTIMIZATION.md (old) §1 and §5. No repository measurement isolates forwarding itself. -->
 
 Stores are also where the two machines differ most. On the M1 Max, copies of short-distance back-references (a
-decompressor copying bytes it wrote 1–7 positions earlier) are 1.6–1.85x slower than on the M3 at identical instruction counts, and plain stores are 1.8x slower (113
+decompressor copying bytes it wrote 1–7 positions earlier) are 1.6–1.85x slower than on the M3 at identical instruction counts, and plain stores are 1.85x slower (114
 against 62 GB/s). Partial-width loads that cannot forward from recent stores are a guess at the cause, not a measurement.
-<!-- src: Bytes/OPTIMIZATION.md (old) §15 "What did not help" (1.6–1.85x, stores 1.8x); Bytes/Benchmarks/RESULTS.md "Not done" ("Raw SIMD stores run 62 GB/s on the M1 Max against 113 on the M3"; forwarding "consistent with ... but no probe was run"); Writeups/M1-Max-vs-M3-Ultra.md "Short copies" ("A guess ... not probed") -->
+<!-- src: Bytes/OPTIMIZATION.md (old) §15 "What did not help" (1.6–1.85x for the back-references); Bytes/Benchmarks/RESULTS.md "Not done" ("Raw SIMD stores run 62 GB/s on the M1 Max"; M1 Max side) and "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks row "Write: Raw SIMD store (reference), in cache (4 MB)" 36,639 ns (114 GB/s; was 113 on the M3 in that note), 114/62 = 1.85; forwarding "consistent with ... but no probe was run"); Writeups/M1-Max-vs-M3-Ultra.md "Short copies" ("A guess ... not probed") -->
 
 #### 1.7 Performance cores, efficiency cores, and clocks
 
@@ -278,8 +282,8 @@ instead: the parallel codecs are 2.4x apart.
 E cores change how work should be split. On the M1 Max, the two E cores added 3–9% to the parallel DEFLATE encoder,
 whose workers take the next chunk from a queue. They cost the parallel decoder 20–35% while its segments were split
 evenly across lanes (parallel workers; the word also names a SIMD register's slots, [section 2.1](#21-what-simd-is)); since the decoder
-started taking segments from a queue too, they make it 7–12% faster. Part III (["Static splits and efficiency cores"](#static-splits-and-efficiency-cores)) has the measurements.
-<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help both codecs now" (re-run 2026-11-21); AGENTS.md "Efficiency cores" lesson -->
+started taking segments from a queue too, they make it 7–12% faster. On the M3 Ultra every core (32 lanes) is now faster than the 24 performance cores alone. Part III (["Static splits and efficiency cores"](#static-splits-and-efficiency-cores)) has the measurements.
+<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help both codecs now" (re-run 2026-11-21); "2026-11-20, parallel DEFLATE: no fallback at any lane count; joins overlap decoding" (32 lanes up to 23% less time than 24); AGENTS.md "Efficiency cores" lesson and "Speculation must fail locally" -->
 
 ### 2. SIMD and NEON
 
@@ -493,8 +497,9 @@ from two vectors and adds each group's sum into a 32-bit lane: `acc[i] += a[4i]*
 Adler-32 needs exactly two sums, the sum of the bytes and the position-weighted sum, and they are a dot product against
 all-ones and a dot product against `64, 63, …, 1`. Moving Adler-32 onto `udot` made it 1.9x faster on the M1 Max (29.6 to
 56.9 GB/s at 1 MB, in a probe), within 10% of libdeflate's 62 GB/s, and on the M3 Ultra it cut the instructions for 1 MB from
-555 K to 271 K (−51%).
-<!-- src: Bytes/Sources/CBytesCRC/include/CBytesCRC.h bytes_crc_udot comment; Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster" (29 → 55 GB/s in the table; probe re-run 2026-11-21: 29.6 → 56.9 GB/s at 1 MB, libdeflate 62.2); Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" (baselines speed-after → p3-spot, M3 Ultra) -->
+555 K to 271 K (−51%). A later change arranged the sums so that no `udot` waits on the previous step's, and the M3 Ultra
+now runs Adler-32 at 101 GB/s at 1 MB.
+<!-- src: Bytes/Sources/CBytesCRC/include/CBytesCRC.h bytes_crc_udot comment; Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster" (29 → 55 GB/s in the table; probe re-run 2026-11-21: 29.6 → 56.9 GB/s at 1 MB, libdeflate 62.2); Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" (baselines speed-after → p3-spot, M3 Ultra); "2026-11-20, Adler-32: past `udot`'s latency"; Tools/probes/results/M3-Ultra-2026-11-20/checksums.tsv (Adler32 1 MB 101.2 GB/s) -->
 
 ```asm
 ; probe (clang -O2): vdotq_u32(acc, a, b)
@@ -807,8 +812,8 @@ func readBE32(_ p: UnsafeRawBufferPointer, _ offset: Int) -> UInt32? {
 Read it as: seven instructions of check (`tbnz`, `sub`, `cmp`, `csel`, `sub`, `cmp`, `b.lt`) and a null test (`cbz`),
 one load, one byte swap. Everything in Parts [II](#part-ii-the-bytes-toolkit-bottom-up) and [III](#part-iii-techniques-by-problem) about cursors is about making sure this is all that is left.
 When many reads share a check (a fixed-size record), the checks fold into one, which is why a record read as its own
-cursor beats field-by-field reading: 199 K against 285 K instructions for 2,000 zip directory entries.
-<!-- src: Bytes/Benchmarks/RESULTS.md 2026-11-17 "Results, t0 → final" ("Zip directory with @BinaryRecord vs field by field / ParserSpan | 285 / 461 K | 199 K"); Bytes/OPTIMIZATION.md (old) §6 "Give the record a known size" (301 K first measurement, 285 K latest, 199 K) -->
+cursor beats field-by-field reading: 200 K against 286 K instructions for 2,000 zip directory entries.
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "Fields: Bytes, fixed-size records" 199,807 and "Fields: Bytes" 285,695 instructions; Bytes/Benchmarks/RESULTS.md 2026-11-17 "Results, t0 → final" ("Zip directory with @BinaryRecord vs field by field / ParserSpan | 285 / 461 K | 199 K"); Bytes/OPTIMIZATION.md (old) §6 "Give the record a known size" (301 K first measurement, 285 K latest, 199 K) -->
 
 #### 3.8 A worked example: the Base64 encoding kernel
 
@@ -876,9 +881,10 @@ What to take from it:
   `tbl` or `tbx` as one micro-op per table register, the kernel is 7 `tbl` instructions and 25 micro-ops, with 10 other
   instructions for the fields.
   <!-- src: Bytes/Benchmarks/RESULTS-base64.md line 186 ("Deinterleave, compute, interleave (kept) | 32 | 7 tbl (25 micro-ops), 10 for the fields, interleave folded into 2 st2") -->
-- **It runs 32 instructions in about 9 cycles**, 3.5 instructions per cycle, at 21.5 GB/s at 1 MB. The C kernel using
-  `ld3`/`st4` directly reaches 23.1 GB/s, so the Swift version is at 93% of it.
-  <!-- src: Bytes/OPTIMIZATION.md (old) §10 "Base64: 0.86 → 21.4 GB/s" ("32 instructions per 48 bytes in about 9 cycles (3.5 instructions per cycle)"; 23.1 GB/s; 93%); Bytes/Benchmarks/RESULTS-base64.md "Encoding" table (M3 Ultra, d2-final: 21.5 GB/s at 1 MB) -->
+- **It runs 32 instructions in about 9.5 cycles**, 3.4 instructions per cycle, at 20.4 GB/s at 1 MB (about 9 cycles at the
+  21.5 GB/s of the earlier `d2-final` run). The C kernel using `ld3`/`st4` directly reached 23.1 GB/s in that run, so the
+  Swift version was at 93% of it then and is at 88% of it against this run's rate.
+  <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): row "Encode 1 MB: Bytes (BytesReader → BytesWriter)" 205,695 ns and 2,799,615 instructions for 4 MiB (32.0 per 48-byte block; 48 B / 20.39 GB/s × 4.02 GHz = 9.5 cycles); Bytes/OPTIMIZATION.md (old) §10 "Base64: 0.86 → 21.4 GB/s" (23.1 GB/s; 93%); Bytes/Benchmarks/RESULTS-base64.md "Encoding" table (M3 Ultra, d2-final: 21.5 GB/s at 1 MB) -->
 - **Instruction count is not the limit.** In an earlier version of this kernel, reducing the instruction count 2.3x (by
   removing bounds checks) did not change the speed, because the checks had run in spare slots beside the `tbl`s, which
   were the bottleneck.
@@ -1202,8 +1208,8 @@ A probe of the early-exit case, `for b in s where b == 0 { return true }`:
 
 The loop leaves when it finds a zero, so it must examine bytes in order: scalar, 7 instructions per byte. The fix, in
 Bytes, is explicit SIMD that tests 16 bytes per step (Part II, ["Scanning and shuffles: `ByteLanes`, `ByteMatches`,
-`GroupShuffle`, `CBytesNEON`"](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)), and the zip signature search that uses it is 16x faster (33 µs to 2.0 µs for 64 KB).
-<!-- src: Bytes/OPTIMIZATION.md (old) §8 "Searching 16 positions at once" (33 µs to 2.0 µs, 16x) -->
+`GroupShuffle`, `CBytesNEON`"](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)), and the zip signature search that uses it is 15x faster (34 µs to 2.3 µs for 64 KB).
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "Search 64 KB backwards: RawSpan.load per offset" 33,983 ns and ": lastByteOffset(of:)" 2,293 ns (14.8x); Bytes/OPTIMIZATION.md (old) §8 "Searching 16 positions at once" -->
 
 ### 5. Measuring
 
@@ -1544,8 +1550,8 @@ single check is the first three instructions of the function.
 
 A typed `Span` over `InlineArray<N, UInt8>` elements loads each element through the span's subscript as a byte aggregate,
 and LLVM merges those byte loads only for 4-byte elements. Iterating a zero-copy span of 4-byte elements runs at memory
-speed (113 GB/s in cache, 76 GB/s from memory); for 6-byte elements it reached 17 GB/s against 33 GB/s for `forEach`,
-and for 16-byte elements 30 GB/s against 112 GB/s. <!-- src: Bytes/Benchmarks/RESULTS.md "The standard library's ConvertibleFromBytes" table (InlineArray<4,UInt8> 113/76; <6> 17/17 vs forEach 33/31; <16> 30/32 vs 112/73) --> Bytes loads its own groups as a same-size integer
+speed (104 GB/s in cache, 75 GB/s from memory); for 6-byte elements it reached 17 GB/s against 35 GB/s for `forEach`,
+and for 16-byte elements 32 GB/s against 103 GB/s. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final), 4 MiB in cache: BytesBenchmarks rows "Zero-copy: for-in Span<InlineArray<4, UInt8>>" 40,479 ns (104 GB/s), "Zero-copy: for-in Span<InlineArray<6, UInt8>> (MAC bytes)" 251,647 ns (16.7), "MAC: forEach(Byte6.self), raw bytes (reference)" 119,551 (35.1), "Zero-copy: for-in Span<InlineArray<16, UInt8>> (IPv6 bytes)" 130,175 (32.2), "IPv6: forEach(Byte16.self), raw bytes (reference)" 40,799 (103); from memory: "Bandwidth: Byte4, memory (512 MB), 1 core" 7,139,327 ns for 512 MiB (75.2 GB/s); the 6- and 16-byte memory columns are not in the new run --> Bytes loads its own groups as a same-size integer
 and `bitCast`s, which is why `forEach` ([section 3](#3-cursors-bytesreader-byteswriter-and-their-modes)) is the path that is at raw speed for every size.
 
 ### 2. Byte-sized value types: `Bits`, `Byte2`…`Byte16`, byte order, ASCII tags
@@ -1659,11 +1665,11 @@ same-size integer. <!-- src: Bytes/Benchmarks/RESULTS.md "Custom byte-backed typ
 
 | Reading IPv4 addresses | GB/s |
 |---|---|
-| `forEach(IPv4Address.self)` | 114 / 78 |
-| a loop of `read(IPv4Address.self)` | 113 / 78 |
-| naive: four `read(Byte.self)` into an `InlineArray` | 3.7 / 3.7 |
+| `forEach(IPv4Address.self)` | 111 / 78 |
+| a loop of `read(IPv4Address.self)` | 110 / 78 |
+| naive: four `read(Byte.self)` into an `InlineArray` | 3.4 / 3.7 |
 
-<!-- src: Bytes/Benchmarks/RESULTS.md "Custom byte-backed types" table -->
+<!-- src: Bytes/Benchmarks/RESULTS.md "Custom byte-backed types" table (from-memory column not in the new run); in-cache column "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "IPv4: forEach(IPv4Address.self)" 37,855 ns, "IPv4: read(IPv4Address.self) per value" 38,047, "IPv4: naive, 4 × read(Byte.self) per value" 1,234,943, each 4 MiB -->
 A custom type parses at the speed of its raw bytes, and the 4-, 8-, and 16-byte ones at memory speed. <!-- src: Bytes/Benchmarks/RESULTS.md "Custom byte-backed types" last line -->
 
 #### Byte order
@@ -1854,18 +1860,21 @@ the captured variables on every iteration. <!-- src: Bytes/Sources/Bytes/BytesRe
 decoder took 21% less time (from 9.9 ms to 7.8 ms) from making its cursors locals instead of captured variables. <!-- src: BinaryParsingComparison/RESULTS.md "A Bytes caveat this exposed" (Bytes 9.9 → 7.8 ms); Bytes/OPTIMIZATION.md (old version) §5 -->
 
 Every width's `forEach` loop vectorizes. On one core, reading from memory, the power-of-two widths run at the raw load
-rate; with all 32 cores every width but `Bits<5>`–`Bits<7>` reaches 92–96% of the CPU's ~249 GB/s memory ceiling:
+rate; with all 32 cores every width but `Bits<5>`–`Bits<7>` gets close to the CPU's ~254 GB/s memory ceiling (`Byte`:
+236 GB/s, 93%):
 
 | Width | One core, from memory | All 32 cores |
 |---|---|---|
-| raw SIMD loads (reference) | 77 GB/s | 229 GB/s |
-| `Byte`, `Byte2`, `Byte4`, `Byte8` | 75–77 GB/s | 228–235 GB/s |
+| raw SIMD loads (reference) | 77 GB/s | 237 GB/s |
+| `Byte`, `Byte2`, `Byte4`, `Byte8` | 75–77 GB/s | 228–236 GB/s |
 | `Byte3` | 19 GB/s | 237 GB/s |
 | `Byte16` | 56 GB/s | 235 GB/s |
 | `Nibble` | 50 GB/s | 236 GB/s |
 | `Bit` | 11 GB/s (88 billion values/s) | 237 GB/s |
 
-<!-- src: Bytes/Benchmarks/RESULTS.md "Read bandwidth: every width, 1 bit to 16 bytes" Results table and bullets -->
+<!-- src: Bytes/Benchmarks/RESULTS.md "Read bandwidth: every width, 1 bit to 16 bytes" Results table and bullets; cells updated from "2026-11-20, M3 Ultra" (baseline m3-final), 512 MiB: BytesBenchmarks rows "Raw SIMD read (reference), memory (512 MB), 1 core" 6,942,719 ns (77.3 GB/s) and "32 cores" 2,263,039 (237), "Byte4, memory, 1 core" 7,139,327 (75.2), "Byte, memory, 32 cores" 2,273,279 (236), "Byte16, memory, 1 core" 9,560,063 (56.2), memory ceiling from Tools/probes/results/M3-Ultra-2026-11-20/mem-threads.tsv (254 GB/s); the other cells and the 228 and 75 ends are from the earlier run -->
+
+Rows not in the newest run (`Byte3`, `Nibble`, `Bit` from memory, and the other widths' all-core cells) are the earlier figures.
 
 Getting every width to vectorize took four changes in the library. For the bit widths, widths that divide 8 iterate a
 byte at a time (16 lanes) instead of in 64-bit blocks of 8 values (2 lanes per register): `Byte` went from 12 to 77 GB/s,
@@ -1934,7 +1943,7 @@ Three write forms deserve a note.
 
 - **Generating writes.** `write(_:_:count:_:)` takes a closure from index to value, the counterpart of `forEach`. It is a
   counted loop of stores that vectorizes together with the closure. Power-of-two widths write at or near one core's ceiling
-  (`Byte4` 85–88 GB/s from memory against 116 for a raw SIMD store). <!-- src: Bytes/Benchmarks/RESULTS.md "Write bandwidth" table -->
+  (`Byte4` 89 GB/s from memory against 118 for a raw SIMD store). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final), 512 MiB: BytesBenchmarks rows "Write: Byte4, memory (512 MB), 1 core" 6,062,079 ns (88.6 GB/s) and "Write: Raw SIMD store (reference), memory (512 MB), 1 core" 4,567,039 ns (117.6) -->
 - **Writing one bit at a time cannot be fast**: each write merges into the byte the previous write left partly done, a
   dependency chain from write to write. The generating bulk write packs a whole byte (or 8 values) at a time, 110x faster
   for nibbles. <!-- src: Bytes/Benchmarks/RESULTS.md "Write bandwidth" bullets ("110x faster for nibbles") -->
@@ -2065,9 +2074,9 @@ let version = try record.read(Byte2.self, .littleEndian)    // bytes 4..<6 of 46
 
 <!-- src: Bytes/OPTIMIZATION.md (old version) §6 "Give the record a known size"; Bytes/Sources/Bytes/Sections.swift readSection doc comment -->
 
-For the 2,000-entry zip central directory, the fixed-size style takes 199 K instructions (7.8 µs) where the same reads field
-by field took 301 K (11 µs; 285 K in the latest measurement); a hand-written version over `RawSpan.load` at offsets
-took 317 K instructions and 16 µs. <!-- src: Bytes/Benchmarks/RESULTS.md "Current: Bytes against the alternatives" table (11 µs/301 K; 7.8 µs/199 K; hand-written RawSpan.load offsets 16 µs/317 K) --> The
+For the 2,000-entry zip central directory, the fixed-size style takes 200 K instructions (8.1 µs) where the same reads field
+by field take 286 K (10.8 µs); a hand-written version over `RawSpan.load` at offsets
+takes 318 K instructions and 15 µs. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "Fields: Bytes, fixed-size records" 8,087 ns / 199,807 instructions, "Fields: Bytes" 10,751 ns / 285,695, "Fields: hand-written offsets" 15,335 ns / 317,695 --> The
 compiler even loads adjacent 4-byte fields with one instruction (`ldp w7, w19, [x17, #16]`). <!-- src: Bytes/Benchmarks/RESULTS.md "Assembly findings" ("paired loads (ldp w7, w19, [x17, #16])") -->
 
 Related forms:
@@ -2157,7 +2166,7 @@ three multiplies. Take the text `2026`:
 
 9–16 digits take two loads. Near the end of the data (fewer than 8 bytes left) a slower path runs out of line. Against a
 digit-at-a-time loop, 20,000 log lines of 8 fixed-width numbers each ran 5,063 K instructions (151 µs) against 5,722 K
-(177 µs): −11.5% and −15%. <!-- src: Bytes/Benchmarks/RESULTS.md "ASCII without tricks" table -->
+(190 µs): −11.5% in instructions and −20% in time. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "ASCII: 20,000 log lines, read(_:asciiDigits:)" 151,039 ns / 5,062,655 instructions and ", a digit at a time" 189,695 ns / 5,722,111 -->
 
 The tests caught two bugs before shipping. Only an input that ends exactly where the digits end can reach one of them: the
 two-load path was taken for fewer than 9 digits and loaded past the end of the data. <!-- src: same section; AGENTS.md Lessons "Test reads that end exactly at the data's end" -->
@@ -2165,8 +2174,8 @@ two-load path was taken for fewer than 9 digits and loaded past the end of the d
 `read(_:asciiDigitsUpTo:)` stops before the first non-digit (HTTP's `Content-Length: 1024\r\n`). `read(_:asciiOctalDigits:)`
 (1 to 21 digits, one or two 8-byte loads) replaced 74 per-digit branches in NativeAEA's cpio header parse, from 625 to
 266 instructions counted statically. <!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" "Adopted in consumers"; Bytes/Sources/Bytes/ASCII.swift --> `write(_:asciiDigits:)` is the writing side.
-In vectors, `ByteLanes.asciiDigits` ([section 7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)) counts digits in 620 KB 2.7x faster than a byte loop that LLVM auto-vectorizes (29 µs
-against 78 µs). <!-- src: Bytes/Benchmarks/RESULTS.md "ASCII without tricks" table row 3 -->
+In vectors, `ByteLanes.asciiDigits` ([section 7](#7-scanning-and-shuffles-bytelanes-bytematches-groupshuffle-cbytesneon)) counts digits in 620 KB 2.6x faster than a byte loop that LLVM auto-vectorizes (31 µs
+against 80 µs). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "ASCII: digits in 620 KB, ByteLanes.asciiDigits" 30,639 ns and ", isASCIIDigit per byte" 80,255 ns -->
 
 #### Hexadecimal and dates
 
@@ -2438,9 +2447,9 @@ while offset >= 0 {
 
 <!-- src: Bytes/OPTIMIZATION.md (old version) §8 "Searching 16 positions at once" (simplified from BytesReader.lastByteOffset(of:)); Bytes/Sources/Bytes/BytesReader.swift firstByteOffset(of:) -->
 
-Finding a 4-byte signature 64 KB back (a zip file's end-of-directory record, the worst case) takes 2.0 µs and 50 K
-instructions, against 33 µs and 787 K for a `RawSpan.load` at every offset, 16x faster. The loop is about 9 instructions per 16
-offsets. <!-- src: Bytes/Benchmarks/RESULTS.md "Current: Bytes against the alternatives" table row 4; "Assembly findings" ("16 candidate offsets per ~9 instructions") -->
+Finding a 4-byte signature 64 KB back (a zip file's end-of-directory record, the worst case) takes 2.3 µs and 51 K
+instructions, against 34 µs and 788 K for a `RawSpan.load` at every offset, 15x faster. The loop is about 9 instructions per 16
+offsets. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "Search 64 KB backwards: lastByteOffset(of:)" 2,293 ns / 50,655 instructions and ": RawSpan.load per offset" 33,983 ns / 788,479; "Assembly findings" ("16 candidate offsets per ~9 instructions") -->
 
 #### `commonPrefixLength`: match extension
 
@@ -2548,8 +2557,8 @@ CRC, AES, and SHA instructions"](#29-carry-less-multiply-crc-aes-and-sha-instruc
 
 The constants are `x^(n ± 32) mod P`, bit-reflected, and a test derives them. Inputs shorter than 256 bytes use `crc32x`
 8 bytes at a time instead (a dependency chain, one instruction per 3 cycles) rather than pay to combine eight lanes. <!-- src: Bytes/Sources/Bytes/CRC32.swift foldThreshold comment; Bytes/Benchmarks/RESULTS.md "CRC32" "Below 256 bytes" -->
-The fold reaches **63 GB/s** over 32 MB (1.7x zlib's `crc32_z`, 532 µs against 888), 1.9x zlib at 1 KB, and 2.3x at 64
-bytes. <!-- src: Bytes/Benchmarks/RESULTS.md "CRC32 (measured in NativeZip's benchmarks…)" table -->
+The fold reaches **72 GB/s** over 32 MB (465 µs), is 1.65x zlib's `crc32_z` at 1 MB (15.3 µs against 25.2), and 2.3x at 64
+bytes (108 µs against 249 for 16 K inputs). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks row "CRC-32 checksum(_:), 256 KB" 465,407 ns for 32 MiB (72.1 GB/s); CompressionBenchmarks rows "CRC-32 1 MB: Bytes" 15,295 ns and ": zlib" 25,215 ns, "CRC-32 64 B (×16 K): Bytes" 108,479 ns and ": zlib" 248,959 ns -->
 
 The first version was **3.5x slower than zlib**. The nested helper that loaded each 16 bytes was not inlined, and as a call
 per load it spilled the eight accumulators to the stack every time. `@inline(always)` on it fixed that. <!-- src: Bytes/Benchmarks/RESULTS.md same section ("First version 3.5x slower than zlib") --> Eight live
@@ -2562,8 +2571,8 @@ instructions (336 M to 180 M) and ran 27% faster on 64-byte inputs, but no faste
 zlib's **braided** CRC runs five independent CRCs over interleaved 8-byte words. Each jumps 40 bytes per step through
 tables that skip over the other four braids' words as if they were zeros, and the five are combined in the last block,
 which works because a CRC is linear. The loop became load-bound (126 instructions per 40 bytes, 45 of them loads) instead
-of latency-bound, and 3.6x faster at 256 KB (14 ms to 3.9 ms for 32 MB, 8.3 GB/s). That is still 8.3x slower than
-folding. <!-- src: Bytes/Benchmarks/RESULTS.md "Group operations …" table and "2026-11-12: fast portable builds" (braided CRC); Bytes/Sources/Bytes/CRC32.swift _tableUpdate doc comment -->
+of latency-bound, and 3.6x faster at 256 KB (14 ms to 3.8 ms for 32 MB, 8.7 GB/s). That is still 8.3x slower than
+folding. <!-- src: Bytes/Benchmarks/RESULTS.md "Group operations …" table and "2026-11-12: fast portable builds" (braided CRC; the 14 ms is that dated before); "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks row "CRC-32 tables, 256 KB" 3,846,143 ns for 32 MiB (8.72 GB/s) against "CRC-32 checksum(_:), 256 KB" 465,407 ns (8.27x); Bytes/Sources/Bytes/CRC32.swift _tableUpdate doc comment -->
 
 The table code taught two more lessons. First, the byte-indexed lookups had a bounds check each. As 256-entry spans, the
 checks vanished in one loop and stayed in the other; stating the counts with a `precondition` fixed that loop but made the
@@ -2580,18 +2589,38 @@ that, the literal tables saved 3.3% at 64 bytes (150 M to 145 M instructions). <
 Adler-32 is two sums modulo 65,521: `a`, the sum of the bytes plus one, and `b`, the sum of the successive values of `a`; `b`
 weights each byte by how many bytes follow it. <!-- src: Bytes/Sources/Bytes/Adler32.swift doc comment --> `udot` (FEAT_DotProd) adds, into each 32-bit lane, the dot
 product of four bytes by four bytes, which computes both sums directly. The byte sum is a dot product against ones; the
-position-weighted sum is a dot product against `64, 63, …, 1`. Swift's SIMD types have no widening dot product, so, like
-`pmull`, the instruction is reached through a `static inline` C wrapper (`bytes_crc_udot`), and the loop is Swift: 64-byte
-blocks, four independent accumulators per sum, and 86 blocks per reduction so that no 32-bit lane overflows. <!-- src: Bytes/Sources/CBytesCRC/include/CBytesCRC.h bytes_crc_udot; Bytes/Sources/Bytes/Adler32.swift _updateDotProduct -->
+position-weighted sum is a dot product against a descending run of weights (`128, 127, …, 1` over a 128-byte step).
+Swift's SIMD types have no widening dot product, so, like `pmull`, the instruction is reached through a `static inline` C
+wrapper (`bytes_crc_udot`), and the loop is Swift. The first version took 64-byte blocks with four accumulators per sum and
+86 blocks per reduction; the current one takes 128-byte steps, described below. <!-- src: Bytes/Sources/CBytesCRC/include/CBytesCRC.h bytes_crc_udot; Bytes/Sources/Bytes/Adler32.swift _updateDotProduct; Bytes/Benchmarks/RESULTS.md "2026-11-20, Adler-32: past `udot`'s latency" -->
 
 On an M1 Max (one core), Adler-32 went from 29.6 to 56.9 GB/s at 1 MB, with instructions −51% and 64-byte inputs −12% in
-time, within 10% of libdeflate's 62 GB/s. The loop is 16 instructions per 64 bytes (8 `udot.4s`, 4 `add.4s`, 2 `ldp`,
-`subs`, `b.ne`). Its 12 vector instructions take 3 cycles on the four vector pipes, and each accumulator's `udot` waits 3
-cycles for the last, so both limits say 3 cycles per 64 bytes: 68 GB/s at 3.21 GHz, of which it reaches 83%. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-19, M1 Max experiments: Adler-32 with UDOT" (probe re-run 2026-11-21; udot 3 cycles, 4/cycle) -->
+time, within 10% of libdeflate's 62 GB/s (probe re-run 2026-11-21). That first loop was 16 instructions per 64 bytes (8 `udot.4s`, 4 `add.4s`, 2 `ldp`,
+`subs`, `b.ne`), and it was bound by `udot`'s 3-cycle latency: each of the eight accumulators took one `udot` an
+iteration, so an iteration couldn't finish in fewer than 3 cycles. The 4 `add.4s` (forming `prefix`, the byte sum before
+each block, which the weighted sum needs) and the 8 `udot`s were 12 vector operations on 4 pipes, also 3 cycles: two bounds
+at 64 bytes per 3 cycles: 68 GB/s at the M1 Max's 3.21 GHz, of which it reached 83%, and 86 GB/s at 4.02 GHz, where it
+measured 76 GB/s at 1 MB on the M3 Ultra. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-19, M1 Max experiments: Adler-32 with UDOT" (and its 2026-11-20 correction); "2026-11-20, Adler-32: past `udot`'s latency" (the two bounds; 76 GB/s before); Tools/probes/results/M3-Ultra-2026-11-20/insn.tsv (udot latency 3.01 cycles, 4 a cycle with 16 chains) -->
 
-On the M3 Ultra the same change cut Adler-32 of 1 MB from 555 K to 271 K instructions (−51%) and 16 K 64-byte inputs from
-2,345 K to 1,755 K (−25%); the 1 MB time went from 31 to 16 µs, measured under load. <!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" ("Adler-32 (its −25 to −51% against speed-after is the M1 Max work …)"); baselines CompressionBenchmarks speed-after → p3-spot (M3 Ultra), rows "Adler-32 1 MB: Bytes" and "Adler-32 64 B (×16 K): Bytes" --> `udot` was the instruction the
-M3-tuned code had left unused.
+More accumulators would not have helped. Two blocks a step into 16 accumulators (eight per sum) need eight adds a step to
+form `prefix`: 24 vector operations per 128 bytes, still 3 cycles per 64 bytes, and it measured 3% faster at 1 MB (78.2
+against 76.0 GB/s in an interleaved A/B). The fix removes the dependency instead. Each 128-byte step's byte sum is one chain
+of eight `udot`s that starts from zero, so nothing from the previous step feeds it and the chain's latency overlaps the next
+steps'. Only two adds carry over (`prefix += sum`, `sum += step`), and the eight weighted accumulators (weights `128…1`,
+in a 128-entry table `bytes_adler_weights`) take one `udot` each. A step is 19 vector operations (16 `udot`, 2 `add.4s`,
+a `movi` that zeroes the chain), 26 instructions per 128 bytes: 13 per 64 bytes, from 16, with no spills and no calls. The
+reduction runs every 512 steps (64 KiB, against 86 blocks before): `prefix`'s lanes reach at most 32,640 · m(m − 1)/2 after
+`m` steps, below 2^32 for m ≤ 513, and a limit of 514 failed the all-`0xFF` tests from 131,071 bytes. A last odd 64-byte
+block is added alone. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, Adler-32: past `udot`'s latency" (16 accumulators 24 operations, 78.2 vs 76.0 GB/s; 19 vector operations, 26 instructions per 128 B; 512 steps per reduction, 514 failed); Tools/loops --body on Adler32.checksum (26-instruction loop) -->
+
+Measured in one process, old and new kernels interleaved (GB/s): 64 B 10.1 → 13.4, 1 KB 70.4 → 82.9, 16 KB 76.5 → 105.7, 1 MB
+76.0 → 100.9. In the suite (baseline `m3-final`), Adler-32 of 1 MB takes 215 K instructions and 11.0 µs, and 16 K inputs of
+64 bytes 1,264 K instructions and 78 µs (libdeflate: 305 K and 15.0 µs for 1 MB; zlib 527 K and 49.9 µs); a single thread
+measures 101 GB/s at 1 MB and 99 GB/s from 4 MB to 32 MB. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, Adler-32: past `udot`'s latency" (A/B table); "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Adler-32 1 MB: Bytes" 11,047 ns / 215,167 instructions, ": libdeflate" 15,047 / 305,663, ": zlib" 49,887 / 527,359, "Adler-32 64 B (×16 K): Bytes" 78,463 ns / 1,263,615; Tools/probes/results/M3-Ultra-2026-11-20/checksums.tsv (Adler32 1 MB 101.2, 4 MB 99.4, 8 MB 98.7, 32 MB 99.5 GB/s) -->
+
+The earlier change, `udot` itself, cut the instructions for 1 MB from 555 K to 271 K (−51%) and 16 K 64-byte inputs from
+2,345 K to 1,755 K (−25%) on the M3 Ultra (baselines `speed-after` → `p3-spot`); the step above took those to 215 K (−21%)
+and 1,264 K (−28%). `udot` was the instruction the M3-tuned code had left unused. <!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" ("Adler-32 (its −25 to −51% against speed-after is the M1 Max work …)"); "2026-11-20, Adler-32" benchmarks paragraph (272 K → 215 K, −21.0%; 1,755 K → 1,264 K, −28.0%) -->
 
 #### CRC-64 and XXH64 (in `BytesCompression`)
 
@@ -2742,17 +2771,18 @@ transforming allocates nothing. A stage that works *in place* (`InPlaceByteTrans
 `Pipeline.transform` is `@inlinable` and generic all the way down, so a pipeline of concrete stages specializes to *one
 function*: the stages' code with the buffer handling between them, and nothing dynamic. A `Pipeline` is `~Copyable` but not
 `~Escapable`, so one can live across an `await` in a socket loop. <!-- src: Bytes/Sources/Bytes/Pipeline.swift Pipeline doc comment ("One function, after specialization"); Bytes/OPTIMIZATION.md (old version) §10 "Pipelines: composing stages for free" --> The measurement shows no difference
-from running the stages separately, which is the intended result:
+from running the stages separately, which is the intended result (the one exception in the newest run is the 119 KB send,
+where the pipeline read 13% slower with 1.4% more instructions; the morning's run had it 1.5% apart):
 
 | Work (µs) | Pipeline | The same stages, two passes |
 |---|---|---|
-| deflate 1 + TLS send, JSON 1.6 KB | 9.58 | 9.34 |
-| deflate 1 + TLS send, JSON 119 KB | 187 | 184 |
-| deflate 1 + TLS send, Main.js | 11,000 | 11,000 |
-| TLS + inflate receive, JSON 1.6 KB | 3.38 | 3.34 |
-| TLS + inflate receive, Main.js | 3,297 | 3,297 |
+| deflate 1 + TLS send, JSON 1.6 KB | 9.30 | 9.22 |
+| deflate 1 + TLS send, JSON 119 KB | 191 | 169 |
+| deflate 1 + TLS send, Main.js | 10,100 | 9,994 |
+| TLS + inflate receive, JSON 1.6 KB | 3.46 | 3.42 |
+| TLS + inflate receive, Main.js | 3,123 | 3,109 |
 
-<!-- src: Bytes/Benchmarks/RESULTS.md "Pipelines against two passes (final-1, µs)" -->
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Pipeline deflate 1 + TLS send JSON (1.6 KB) / (119.0 KB) / Main.js (3.8 MB): Bytes" 9,295 / 190,719 / 10,100,735 ns against "Two passes deflate 1, then TLS send …" 9,215 / 168,959 / 9,994,239; "Pipeline TLS + inflate receive JSON (1.6 KB) / Main.js (3.8 MB)" 3,459 / 3,123,199 against "Two passes TLS, then inflate receive …" 3,417 / 3,108,863; 119 KB instructions 3,454,975 against 3,407,871; the morning's m3-1120 row: 177,791 against 175,231 -->
 
 A pipeline is not a speed-up. It costs the same as two passes through a buffer, saves the intermediate buffer, and (with
 `ResettableByteTransform`) lets a pipeline built once serve stream after stream. The TLS sealer's `reset()` deliberately
@@ -2879,15 +2909,19 @@ Every codec has the same shapes, borrowed from zlib:
   (32 KB of history for DEFLATE, a window that wraps for Zstandard). The DEFLATE and Brotli encoders and decoders are also
   `ByteTransform`s (and `ResettableByteTransform`s), so they drop into a `Pipeline`. <!-- src: Bytes/Sources/BytesCompression/DeflateEncoder.swift, DeflateDecoder.swift, Transforms.swift; ZstdDecoder.swift -->
 - **Parallel.** `ParallelDeflateEncoder(format:level:chunkSize:lanes:independentChunks:)` compresses `chunkSize`-byte chunks
-  (256 KB by default, at most 512 KB) on `lanes` lanes at once. `lanes` is usually the number of performance cores.
+  (256 KB by default, at most 512 KB; a one-shot call over a large input cuts up to four chunks per lane, none under 64 KB)
+  on `lanes` lanes at once. `lanes` is usually every core (the streaming form, one chunk per lane a round, wants the
+  performance cores).
   `ParallelDeflateDecoder(format:lanes:)` decodes in parallel *if the stream allows it*. It guesses block boundaries (a
-  `00 00 FF FF` marker, a sync flush), decodes segments speculatively, and accepts segment *j* only if segment *j−1* ended
-  exactly at its start. It cuts up to four segments per lane (`segmentsPerLane`), taken in order by whichever lane is
-  free, so a slow lane (a busy or efficiency core) holds up one small segment rather than a whole share of the stream.
+  `00 00 FF FF` marker, a sync flush that a block header could follow), decodes segments speculatively, and accepts segment
+  *j* only if segment *j−1* ended exactly at its start. It cuts up to four segments per lane (`segmentsPerLane`), taken in
+  order by whichever lane is free, so a slow lane (a busy or efficiency core) holds up one small segment rather than a whole
+  share of the stream. A wrong guess costs only its own segment: a segment that ends inside a block decodes on to the next
+  split, and a failed one is decoded again in place.
 
   Streams from `ParallelDeflateEncoder` with `independentChunks`, from pigz `-i`, and zlib streams with full flushes decode
-  in parallel. Anything else decodes sequentially, and the time spent speculating is lost. `lastSegmentCount` says which
-  happened. <!-- src: Bytes/Sources/BytesCompression/ParallelDeflate.swift init and doc comment; ParallelInflate.swift doc comment (rules 3–4), lastSegmentCount; Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help the encoder, hurt the decoder" -->
+  in parallel. Streams whose matches cross every split decode their first segment in parallel and the rest sequentially.
+  `lastSegmentCount` says which happened. <!-- src: Bytes/Sources/BytesCompression/ParallelDeflate.swift init and doc comment (chunksPerLane, lanes: every core); ParallelInflate.swift doc comment (rules 1–4), lastSegmentCount; Bytes/Benchmarks/RESULTS.md "2026-11-20, parallel DEFLATE: no fallback at any lane count; joins overlap decoding" -->
 
 A complete one-shot encode, using a `ByteBuffer` as the output:
 
@@ -2966,8 +3000,8 @@ The rest of the surface:
 
 Zero-malloc gates cover the AEADs, TLS, the hashes with HMAC and HKDF, PBKDF2, ECDSA/ECDH P-384, HPKE, and the TLS
 pipelines. <!-- src: Bytes/Benchmarks/RESULTS.md "Crypto cleanup (2026-11-19)" ("Zero-malloc gates for …: all still 0") --> For scale, sealing 1 KB messages 1,024 at a time,
-AES-128-GCM took 212 µs against CryptoKit's 919, because CryptoKit's per-call setup and allocation dominate below 16 KB.
-For one 1 MB message, CryptoKit's hand-written assembly was faster (111 µs against 133). <!-- src: Bytes/Benchmarks/RESULTS.md "crypto in Swift, TLS 1.3, parallel sealing" table (d2-final); Bytes/OPTIMIZATION.md (old version) "AES-GCM and TLS 1.3 in Swift" (per-call setup and allocation; hand-written assembly) -->
+AES-128-GCM takes 237 µs against CryptoKit's 956, because CryptoKit's per-call setup and allocation dominate below 16 KB.
+For one 1 MB message, CryptoKit's hand-written assembly is faster (109 µs against 116). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "AES-128-GCM seal 1 KB (x1024): Bytes" 236,799 ns and ": CryptoKit" 956,415, "AES-128-GCM seal 1 MB (x1): Bytes" 116,095 and ": CryptoKit" 108,991; earlier: Bytes/Benchmarks/RESULTS.md "crypto in Swift, TLS 1.3, parallel sealing" table (d2-final); Bytes/OPTIMIZATION.md (old version) "AES-GCM and TLS 1.3 in Swift" (per-call setup and allocation; hand-written assembly) -->
 
 ### 13. `BytesBase64` and `BytesFoundation`
 
@@ -3015,29 +3049,30 @@ block), which makes each of the four values a shift or two of a whole vector, an
 
 Part I (["A worked example: the Base64 encoding kernel"](#38-a-worked-example-the-base64-encoding-kernel)) walks through the compiled loop: 32 instructions per block, one
 bounds check before the loop and none inside it ([section 1](#1-borrowed-memory-spans-and-inlinearray)'s typed-span loop), no scalar loads or branches, and the
-second round of interleaving folded by LLVM into `st2` stores. It runs at about 9 cycles per block (3.5 instructions per
-cycle). <!-- src: Bytes/Benchmarks/RESULTS-base64.md "Current" bullets ("Per block … 32 per 48-byte block, at about 9 cycles per block"); disassembly of Base64.encodeBlocks in Bytes/.build/agent-tools/BytesBase64.o -->
+second round of interleaving folded by LLVM into `st2` stores. It runs at about 9.5 cycles per block (3.4 instructions per
+cycle). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): Base64Benchmarks row "Encode 1 MB: Bytes (BytesReader → BytesWriter)", 20.39 GB/s at 4.02 GHz and 32.0 instructions per block; Bytes/Benchmarks/RESULTS-base64.md "Current" bullets ("Per block … 32 per 48-byte block, at about 9 cycles per block"); disassembly of Base64.encodeBlocks in Bytes/.build/agent-tools/BytesBase64.o -->
 
-Encoding throughput on one core, in GB/s of input (the latest M3 Ultra run, baseline `d2-final`):
+Encoding throughput on one core, in GB/s of input (the latest M3 Ultra run, baseline `m3-final`):
 
 | Input | `BytesBase64` | Foundation `base64EncodedData()` | scalar table loop |
 |---|---|---|---|
-| 64 B | 5.04 | 0.64 | 0.86 |
-| 1 KB | 19.1 | 2.54 | 0.88 |
-| 1 MB | **21.5** | 3.17 | 0.85 |
+| 64 B | 5.49 | 0.64 | 0.87 |
+| 1 KB | 17.2 | 2.45 | 0.79 |
+| 1 MB | **20.4** | 3.23 | 0.88 |
 
-<!-- src: Bytes/Benchmarks/RESULTS-base64.md "2026-11-19: the same suite on an M1 Max" "Encoding" table (M3 Ultra column, d2-final); earlier "Current (baseline final)": 4.4 / 18.1 / 21.4 -->
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): Base64Benchmarks rows "Encode {64 B, 1 KB, 1 MB}: Bytes (BytesReader → BytesWriter) / Foundation base64EncodedData / Scalar table", 4 MiB per iteration (count × max(1, 4 MiB / count), Fixture); earlier d2-final: 5.04 / 19.1 / 21.5 (instructions identical) -->
 
-The encoder allocates nothing at any size. It is level with C of the same design, and 93% of a C kernel that uses `ld3` and
-`st4` directly (23.1 GB/s), which Swift cannot emit for explicit vectors. The limit is the core's table-lookup rate; Part III
+The encoder allocates nothing at any size. It is near C of the same design (21.8 GB/s) and a C kernel that uses `ld3` and
+`st4` directly (23.1 GB/s), both measured in the earlier `d2-final` run: 93% of the latter then, 88% of it against this run's
+20.4. Swift cannot emit those instructions for explicit vectors. The limit is the core's table-lookup rate; Part III
 (["Case study: the Base64 encoder's kernel"](#case-study-the-base64-encoders-kernel)) traces each step and its effect. <!-- src: Bytes/Benchmarks/RESULTS-base64.md "The ceiling: a C kernel with ld3 and st4" (23.1; kernel table 21.8) -->
 
 The first working version was a plain loop that computes each character with arithmetic masks (no table, so no gather) and
 lets LLVM vectorize it to `ld3`…`st4`. It already ran at 9.0 GB/s, and that kernel is what other CPUs get
 (`ByteLanes.isLookupVectorized` is false there). <!-- src: Bytes/Benchmarks/RESULTS-base64.md "How it got here" row 1; Bytes/Sources/BytesBase64/Base64.swift doc comment -->
 
-**Decoding** runs at 12.8 GB/s of decoded bytes at 1 MB (17 GB/s of text; 12.9 in the latest run), at the C ceiling
-(12.9 GB/s). Its kernel does five things per 64 characters:
+**Decoding** runs at 12.8 GB/s of decoded bytes at 64 MB (17 GB/s of text), 12.2 at 16 KB, and 11.5 at 1 MB in the latest
+run (`m3-final`; 12.9 at 1 MB in the `d2-final` run, same instructions), at the C ceiling (12.9 GB/s, measured then). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): Base64Benchmarks rows "Decode {64 MB, 16 KB, 1 MB}: Bytes (BytesReader → BytesWriter)" 5,242,879 / 345,087 / 365,055 ns for 64 MiB / 4 MiB / 4 MiB of decoded bytes; C ceiling from Bytes/Benchmarks/RESULTS-base64.md --> Its kernel does five things per 64 characters:
 
 - splits them into four vectors with eight `uzp`s (what `ld4` does);
 - maps each character to its 6-bit value through two `tbx` lookups in an 80-character window of the ASCII table (the
@@ -3054,8 +3089,9 @@ The decoder met two compiler traps, both from `SIMD16` and LLVM. `SIMD16` array 
 calls to `SIMD.init` (about 1,200 instructions) until they were written as `Byte16` integer literals converted with
 `.vector`. And LLVM narrowed the loads to the lanes the first `uzp` round used until an empty `asm` kept them whole. <!-- src: Bytes/OPTIMIZATION.md (old version) §10 "Base64 decoding"; AGENTS.md Lessons ("Constant vectors", "LLVM narrows loads") -->
 
-Against Foundation's `Data(base64Encoded:)`, decoding is 3.9–5.3x from 1,000 bytes up; against a scalar table, 44–52x
-(`d2-final`). <!-- src: Bytes/Benchmarks/RESULTS-base64.md "The Bytes codec against its references" (M3 column, inputs ≥ 1000 B); earlier "Decoding" bullets: 4.2x from 16 KB, 4.9x at 1 KB, 50x -->
+Against Foundation's `Data(base64Encoded:)`, decoding is 3.8–5.2x from 1,000 bytes up; against a scalar table, 5.5–6.2x
+(`m3-final`; the scalar reference decoder no longer reads its table from a lazy global on every call, which made it 8–9x
+faster than in `d2-final`, where the ratio was 44–52x). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): Base64Benchmarks rows "Decode {1000 B, 1 KB, 16 KB, 1 MB, 64 MB}: Bytes (BytesReader → BytesWriter)" against ": Foundation Data(base64Encoded:)" and ": Scalar table" (3.8–5.2x; 5.5–6.2x); Bytes/Benchmarks/RESULTS.md "Improvements against speed-after" (Scalar table rows −56%, 9x: the benchmark's reference decoder, not Bytes) -->
 
 #### `BytesFoundation`
 
@@ -3572,8 +3608,8 @@ accepts them.<!-- src: OPTIMIZATION-old.md "7. Let LLVM vectorize your loops" fi
 
 A reader that advances a pointer field by field makes each load wait for the previous advance: a dependency chain.
 Bytes loads each field of a record from `base + constant offset`, independently. On the same zip directory, Bytes took
-two-thirds of the time of a conventional pointer-advancing reader (11 against 17 µs) despite running 16% more
-instructions (301 K against 259 K).<!-- src: OPTIMIZATION-old.md "7." "Independent loads, not a moving pointer" -->
+two-thirds of the time of a conventional pointer-advancing reader (11 against 17 µs) despite running 10% more
+instructions (286 K against 260 K).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "Fields: Bytes" 10,751 ns / 285,695 instructions and "Fields: original ByteReader" 16,847 ns / 259,711; OPTIMIZATION-old.md "7." "Independent loads, not a moving pointer" -->
 
 #### Odd widths from overlapping loads
 
@@ -3818,41 +3854,65 @@ The families worth this treatment:
   instructions `aese`/`aesmc`, `sha256h`, `sha512h` through `CBytesCrypto` ([section 9](#9-crypto)).<!-- src: OPTIMIZATION-old.md "9."; Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT"; Bytes/Sources/BytesCrypto/AES.swift bytes_aese -->
 
 **`udot` made Adler-32 twice as fast.** Adler-32's two sums are dot products (Part II, ["Adler-32: `udot`"](#adler-32-udot)), so the
-instruction is a `static inline` wrapper (`bytes_crc_udot`) and the loop is Swift. The inner loop is 16 instructions per
-64 bytes and is bound by `udot` throughput:<!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster"; Bytes/Sources/Bytes/Adler32.swift line 200 -->
+instruction is a `static inline` wrapper (`bytes_crc_udot`) and the loop is Swift. The first loop was 16 instructions per
+64 bytes and bound by `udot`'s latency (the earlier version, below); the current one is 13 instructions per 64 bytes, in
+128-byte steps:<!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster" (and its 2026-11-20 correction); "2026-11-20, Adler-32: past `udot`'s latency" (13 instructions per 64 B, from 16); Bytes/Sources/Bytes/Adler32.swift _updateDotProduct -->
 
 ```asm
-; The inner loop of Adler32._updateDotProduct: 16 instructions per 64-byte block.
-; v0 = ones; v1–v4 = the weights 64…49, 48…33, 32…17, 16…1; x16 points 32 bytes into the block.
+; The inner loop of Adler32._updateDotProduct: 26 instructions per 128-byte step (13 per 64 bytes).
+; v0 = ones; v1–v7 and v16 = the weights 128…113, 112…97, …, 16…1; x5 points 64 bytes into the step.
+; v17 = sum; v26 = prefix; v11 = the step's own byte sum; v25, v24, …, v18 = weighted0…weighted7.
 L1:
-ldp     q22, q23, [x16, #-0x20] ; bytes 0–31 of the block
-add.4s  v24, v6, v5             ; prefix += (sum0 + sum1) + (sum2 + sum3): the byte sum of the
-add.4s  v25, v7, v16            ;   blocks before this one, which the weighted sum needs
-add.4s  v24, v24, v25           ;   (three adds to total the four accumulators,
-add.4s  v21, v24, v21           ;   one into prefix)
-udot.4s v16, v22, v0            ; sum0 += bytes 0–15 · ones: 4 bytes into each 32-bit lane
-udot.4s v7, v23, v0             ; sum1 += bytes 16–31 · ones
-ldp     q24, q25, [x16], #0x40  ; bytes 32–63; then x16 += 64
-udot.4s v6, v24, v0             ; sum2
-udot.4s v5, v25, v0             ; sum3
-udot.4s v20, v22, v1            ; weighted0 += bytes 0–15 · (64…49)
-udot.4s v19, v23, v2            ; weighted1
-udot.4s v18, v24, v3            ; weighted2
-udot.4s v17, v25, v4            ; weighted3
-subs    x17, x17, #0x1          ; one block fewer
-b.ne    L1                      ; loop while blocks remain
+ldp     q27, q28, [x5, #-0x40]  ; bytes 0–31 of the step
+ldp     q29, q30, [x5, #-0x20]  ; bytes 32–63
+ldp     q31, q8, [x5]           ; bytes 64–95
+ldp     q9, q10, [x5, #0x20]    ; bytes 96–127
+add.4s  v26, v17, v26           ; prefix += sum: the byte sum of the steps before this one (carried)
+movi.2d v11, #0                 ; the step's byte sum starts from zero: nothing carries it
+udot.4s v11, v27, v0            ; step += bytes 0–15 · ones: 4 bytes into each 32-bit lane
+udot.4s v11, v28, v0            ; …one chain of eight udots, 24 cycles of latency, that no later step waits on
+udot.4s v11, v29, v0
+udot.4s v11, v30, v0
+udot.4s v11, v31, v0
+udot.4s v11, v8, v0
+udot.4s v11, v9, v0
+udot.4s v11, v10, v0
+add.4s  v17, v11, v17           ; sum += step (carried)
+udot.4s v25, v27, v1            ; weighted0 += bytes 0–15 · (128…113): each accumulator takes one udot a step
+udot.4s v24, v28, v2            ; weighted1
+udot.4s v23, v29, v3            ; weighted2
+udot.4s v22, v30, v4            ; weighted3
+udot.4s v21, v31, v5            ; weighted4
+udot.4s v20, v8, v6             ; weighted5
+udot.4s v19, v9, v7             ; weighted6
+udot.4s v18, v10, v16           ; weighted7
+add     x5, x5, #0x80           ; x5 += 128
+subs    x6, x6, #0x1            ; one step fewer
+b.ne    L1                      ; loop while steps remain
 ```
-<!-- src: Bytes/Sources/Bytes/Adler32.swift _updateDotProduct, copied with CBytesCRC.h and compiled with Xcode's swiftc -O (Tools/loops --body); the same mix as Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT" ("16 instructions per 64 bytes (8 udot.4s, 4 add.4s, 2 ldp, subs, b.ne)") -->
+<!-- src: Bytes/Sources/Bytes/Adler32.swift _updateDotProduct, the package's release build (Tools/loops --target Bytes Bytes 'Adler32.*(checksum|update)' --body: loop 2, 0x2c4–0x328, 26 instructions: 16 udot.4s, 4 ldp, 2 add.4s, add, movi.2d, subs, b.ne); Bytes/Benchmarks/RESULTS.md "2026-11-20, Adler-32: past `udot`'s latency" ("19 vector operations a step (16 udot, 2 add.4s, a movi zeroing the chain), 26 instructions per 128 B") -->
 
-(This is the function's source compiled on its own with `swiftc -O`; `Tools/loops` reports the same mix for the package
-build.) The eight accumulators are independent chains, so the `udot`s do not wait on each other.
+(This is the loop in the package's release build, from `Tools/loops --body`.) Four `ldp`s (eight vectors), sixteen `udot`s,
+two adds, a `movi`, and the loop's three bookkeeping instructions. The eight weighted accumulators are independent chains that each
+take one `udot` a step. The byte sum is the part that changed: a step's eight `udot`s form one chain started from zero, so
+no later step waits on it, and only the two adds (`prefix`, `sum`) carry from step to step. The 19 vector operations are
+4.75 cycles on four pipes, and the weighted chains' 3-cycle latency fits inside that. In L1 the loop runs 2.43 cycles per
+64 bytes against the 2.375 its 19 operations allow: the `movi` takes a pipe.
 
-On an M1 Max, the result was 29.6 to 56.9 GB/s on 1 MB in a probe (the benchmark: 36 to 19 µs, against libdeflate's 18),
-instructions −51%, and 64-byte inputs −12% in time. `udot` runs 4 per cycle with 3 cycles of latency, so the 12 vector
-instructions per 64 bytes and each accumulator's chain both come to 3 cycles: 68 GB/s at 3.21 GHz, 83% of it reached.
-86 blocks (5,504 bytes) go between reductions so no 32-bit lane overflows.<!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT" -->
-On the M3 Ultra the instructions fell from 555 K to 271 K for 1 MB (−51%) and from 2,345 K to 1,755 K for 16 K 64-byte
-inputs (−25%), baselines `speed-after` → `p3-spot`; its times were taken only under load.<!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)"; baselines CompressionBenchmarks speed-after → p3-spot (M3 Ultra), rows "Adler-32 1 MB: Bytes" and "Adler-32 64 B (×16 K): Bytes" -->
+**The earlier loop** (the first `udot` version) was 16 instructions per 64 bytes: 8 `udot.4s`, 4 `add.4s`, 2 `ldp`, `subs`,
+and `b.ne`. Its eight accumulators were independent chains, so the `udot`s did not wait on each other within an
+iteration, but each accumulator waited for its own `udot` from the iteration before: with `udot`'s 3-cycle latency, an
+iteration took at least 3 cycles however many the core could issue (the M3 Ultra issues 4 a cycle), and its four adds for
+`prefix` and eight `udot`s were 12 vector operations, also 3 cycles. On an M1 Max the result was 29.6 to 56.9 GB/s on 1 MB
+in a probe (the benchmark: 36 to 19 µs, against libdeflate's 18), instructions −51%, and 64-byte inputs −12% in time: 64
+bytes per 3 cycles is 68 GB/s at 3.21 GHz (83% of it reached, re-measured 2026-11-21), and on an M3 Ultra (4.02 GHz, 86 GB/s by the same bound) it measured 76 GB/s.
+That loop took 86 blocks (5,504 bytes) between reductions so no 32-bit lane overflowed. <!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT" and "2026-11-20, Adler-32: past `udot`'s latency" (the two bounds; 2.43 against 2.375 cycles per 64 B) -->
+
+Why not 16 accumulators? Two blocks a step with eight accumulators for the byte sums would have needed eight adds a step to
+form `prefix`: 24 vector operations per 128 bytes, still 3 cycles per 64 bytes (+3% measured). Cutting the dependency, not
+adding chains, was the fix. On the M3 Ultra (baseline `m3-final`): 101 GB/s at 1 MB against 76 before, 215 K instructions
+for 1 MB (from 271 K, −21%) and 1,264 K for 16 K 64-byte inputs (from 1,755 K, −28%); the `udot` change itself had taken
+them from 555 K and 2,345 K (−51% and −25%, baselines `speed-after` → `p3-spot`).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, Adler-32: past `udot`'s latency" (24 operations, +3%; 272 K → 215 K −21.0%; 1,755 K → 1,264 K −28.0%); Tools/probes/results/M3-Ultra-2026-11-20/checksums.tsv (101.2 GB/s at 1 MB); "Cleanup and improvements (2026-11-19)"; baselines CompressionBenchmarks speed-after → p3-spot (M3 Ultra), rows "Adler-32 1 MB: Bytes" and "Adler-32 64 B (×16 K): Bytes" -->
 
 #### The catch: LLVM merges shuffles into ones it cannot build
 
@@ -3948,9 +4008,10 @@ does), shifts and masks to cut out the 6-bit values, `tbl` to map them to charac
 The steps and their effect (1 MB, one run): scalar table loop 0.86 GB/s; characters by masks, LLVM-vectorized, 9.0; 48-byte
 blocks with `tbl`, 19.1; blocks as typed-span elements so the checks fold, 18.9; interleave with 8 `zip`s instead of 4
 four-register lookups, 21.7; short inputs as one padded block, 21.0 (64-byte inputs 3.2 to 4.4 GB/s). The latest M3 Ultra
-run (baseline `d2-final`) measured 21.5 GB/s at 1 MB, with zero allocations at every size, 32 instructions per 48 bytes in
-about 9 cycles (3.5 instructions per cycle); Foundation's `base64EncodedData()` runs 3.2 GB/s there. A C kernel using `ld3`
-and `st4` directly reaches 23.1 GB/s, so the Swift kernel is at 93% of it, and level with C of the same design (21.8).<!-- src: Bytes/Benchmarks/RESULTS-base64.md "How it got here" table, "Encoding (GB/s of input: M3 Ultra → M1 Max)" 1 MB row (21.5, Foundation 3.17), "Current (baseline final)" and "The ceiling" -->
+run (baseline `m3-final`) measured 20.4 GB/s at 1 MB (21.5 in `d2-final`), with zero allocations at every size, 32 instructions
+per 48 bytes in about 9.5 cycles (3.4 instructions per cycle); Foundation's `base64EncodedData()` runs 3.2 GB/s there. A C
+kernel using `ld3` and `st4` directly reached 23.1 GB/s in the `d2-final` run, where the Swift kernel was at 93% of it, and
+the same-design C kernel 21.8, level with it.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): Base64Benchmarks rows "Encode 1 MB: Bytes (BytesReader → BytesWriter)" 205,695 ns / 2,799,615 instructions, ": Foundation base64EncodedData" 1,300,479 ns (3.23 GB/s), 0 mallocs; Bytes/Benchmarks/RESULTS-base64.md "How it got here" table, "Encoding (GB/s of input: M3 Ultra → M1 Max)" 1 MB row (21.5, Foundation 3.17), "Current (baseline final)" and "The ceiling" -->
 
 The limit is how many `tbl` micro-ops the core can start per cycle, not instruction count: cutting instructions 2.3x did
 not change the speed, but replacing the 4 four-register lookups that interleaved with 8 cheaper `zip`s gained 15% in the
@@ -4246,8 +4307,8 @@ compare, select) went from about 11 cycles to about 6. The load is off the chain
 `UInt16`s, one 32-bit load) are loaded while the parent bit decodes; the normalization compare is one `cmp` against a
 register; and the normalization shift is chosen alongside it. Normalization stays a branch: it predicts well, and every
 branchless form measured 2–10% slower.<!-- src: Bytes/Benchmarks/RESULTS.md LZMA "How it got there" last paragraph; AGENTS.md "The normalization branch predicts well" -->
-The final decoder is faster than both references on every input: 1.09–1.28x Compression and 1.18–1.70x liblzma 5.8.4
-(about 200 MB/s on Xcode's segments, which were the use case).<!-- src: Bytes/Benchmarks/RESULTS.md LZMA "Results" -->
+The final decoder is faster than both references on every input: 1.11–1.29x Compression and 1.22–1.68x liblzma 5.8.4
+(about 200 MB/s on Xcode's segments, which were the use case).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "LZMA decode -6 {dickens, mozilla, samba, x-ray, xml}" and "LZMA decode Apple seg{0, 60, 255}", Bytes against Compression (1.112 seg60 to 1.290 x-ray) and liblzma (1.218 seg60 to 1.683 xml); the 200 MB/s is from Bytes/Benchmarks/RESULTS.md LZMA "Results" and is not in the new run -->
 
 #### Find what the load is waiting on
 
@@ -4292,8 +4353,8 @@ table entry (a dependent load from a 3.6 MB table, about 30 cycles each, one cha
 So the walk is cut into segments of about 1 KB at evenly spaced rows (each start marked in the table), and 24 are walked at
 once. Each lane writes to its own pages and takes the next segment when its current one meets a mark; afterwards the
 segments are copied out in cycle order. Instructions went *up* (lane bookkeeping) and cycles went down: dickens took 46
-cycles a byte for one walk, 37 for two (walking from both ends), and 22 for 16 segment lanes. The decoder reaches 160–487
-MB/s against libbzip2's 49–126, 2.1–5.3x faster, with 0 mallocs.<!-- src: Bytes/Benchmarks/RESULTS-bzip2.md "What worked" first bullet, design "The walk", and "Final" table -->
+cycles a byte for one walk, 37 for two (walking from both ends), and 22 for 16 segment lanes. The decoder reaches 164–526
+MB/s on the Silesia files against libbzip2's 50–94, 3.2–5.6x faster (2.1–5.6x with the small JSON inputs), with 0 mallocs.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "BZip2 decode -9 {dickens, mozilla, samba, x-ray, xml, JSON}: Bytes / libbz2" (MB/s = Silesia file bytes over wallClock; ratios 3.245 x-ray to 5.586 xml; 2.122 for JSON 1.6 KB); the cycles a byte are from Bytes/Benchmarks/RESULTS-bzip2.md "What worked" first bullet, design "The walk", and "Final" table -->
 
 Three more bzip2 changes shortened chains. Loading the refill's 8-byte word one symbol ahead took dickens −15%: the refill
 address depends on the bits consumed, so a load per symbol sat in the chain from one code's length to the next code's
@@ -4368,7 +4429,7 @@ same benchmark process.
 #### DEFLATE (RFC 1951) and gzip/zlib
 
 **Decoder.** Built on `BitBuffer`, `HuffmanTable`, and `AlignedBytesWriter`, with zero allocations; inflating Main.js
-(3.8 MB) takes 1,864 µs against libdeflate's 1,674 and zlib's 2,058 (Apple's Compression: 3,600). In order of payoff:<!-- src: OPTIMIZATION-old.md "DEFLATE: from 2x slower than zlib to faster" and Compression table (d2-final) -->
+(3.8 MB) takes 1,935 µs against libdeflate's 1,735 and zlib's 2,183 (Apple's Compression: 3,551). In order of payoff:<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Inflate Main.js (3.8 MB): Bytes / libdeflate / zlib / Apple Compression" 1,935,359 / 1,734,655 / 2,183,167 / 3,551,231 ns; OPTIMIZATION-old.md "DEFLATE: from 2x slower than zlib to faster" -->
 
 1. Inlining and small functions with local state (sections [1](#1-keep-hot-state-in-registers) and [5](#5-inlining-and-specialization)).
 2. **A register-only refill.** The slow refill, used near the end of the input, took the buffer's fields `inout`, which
@@ -4401,8 +4462,8 @@ dynamic header. When a decoder rejects a value, check `isOverrun` and ask for mo
 is to record a stream's calls and replay them cut at every point.<!-- src: AGENTS.md "Truncated input looks like data" -->
 
 **Encoder.** It follows libdeflate's levels (a 2-entry hash table at level 1, hash chains above, lazy parsing from level 5,
-block splitting from statistics). Level 1's output is the same size as libdeflate's. Level 1 on Main.js runs 9,011 µs
-against libdeflate's 8,057 and zlib's 17,000; level 9 runs 56,000 against 59,000 and 83,000.<!-- src: OPTIMIZATION-old.md "Compression: DEFLATE and Brotli, both directions" table and prose -->
+block splitting from statistics). Level 1's output is the same size as libdeflate's. Level 1 on Main.js runs 8,954 µs
+against libdeflate's 8,241 and zlib's 16,600; level 9 runs 56,200 against 58,900 and 80,900.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Deflate 1 Main.js (3.8 MB): Bytes / libdeflate / zlib" 8,953,855 / 8,241,151 / 16,637,951 ns and "Deflate 9 Main.js (3.8 MB): Bytes / libdeflate / zlib" 56,197,119 / 58,916,863 / 80,871,423; OPTIMIZATION-old.md "Compression: DEFLATE and Brotli, both directions" table and prose -->
 Level 1 also has an inner loop without the per-position checks, used where they always pass (a full-length match fits
 before the data's end and no rebase is due). It takes the same steps and so writes the same output: instructions −17.8%
 (135 to 111 M on Main.js), −12.7 to −18.8% across the corpus, and −12.5 to −17.0% per lane in parallel level 1.<!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements" table; Bytes/Sources/BytesCompression/DeflateCompressor.swift parseFastest -->
@@ -4428,9 +4489,9 @@ compiles.<!-- src: OPTIMIZATION-old.md "Compression" item 6; AGENTS.md "Reused s
 #### Brotli (RFC 7932)
 
 Brotli adds a static dictionary, context modeling, and several encoder quality levels. Results (one run): quality 1 on
-x-ray, 21,000 µs against Google's 28,000; quality 5 on Main.js, 33,000 against 32,000; quality 9 on dickens, 323,000
-against 522,000; decoding quality-11 streams of Main.js, 3,799 against Google's 4,104 and Apple's 3,568. Output is within
-3–6% of Google's size at quality 5 (7% at 9, without context modeling).<!-- src: OPTIMIZATION-old.md Compression table and prose -->
+x-ray, 22,000 µs against Google's 28,000; quality 5 on Main.js, 35,000 against 32,000; quality 9 on dickens, 330,000
+against 545,000; decoding quality-11 streams of Main.js, 3,912 against Google's 3,836 and Apple's 3,875. Output is within
+3–6% of Google's size at quality 5 (7% at 9, without context modeling).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Brotli encode q1 x-ray (8.1 MB): Bytes / Google" 22,315,007 / 28,114,943 ns, "Brotli encode q5 Main.js (3.8 MB)" 34,537,471 / 32,145,407, "Brotli encode q9 dickens (9.7 MB)" 330,301,439 / 544,735,231, "Brotli decode q11 Main.js (3.8 MB): Bytes / Google / Apple Compression" 3,911,679 / 3,835,903 / 3,874,815; the output sizes are from OPTIMIZATION-old.md Compression table and prose -->
 
 - **Decoder state in locals.** Brotli's bit buffer was passed `inout` to a function that was not inlined, so it lived in
   memory for the whole decode loop (and its bit order was tested at run time). Copied into locals, passed by value, and
@@ -4461,18 +4522,18 @@ against 522,000; decoding quality-11 streams of Main.js, 3,799 against Google's 
 streams and single- or double-symbol tables; predefined, RLE, FSE, and repeat sequence tables; skippable and concatenated
 frames; and XXH64 content checksums, verified. In one call (`decompressAll`) the output is the history, so there is no
 window and no copy.<!-- src: OPTIMIZATION-old.md "Zstandard: faster than libzstd" first paragraph -->
-Against libzstd 1.5.7 with a reused context, on one thread (instructions per byte are exact; times are ±10% under load):<!-- src: OPTIMIZATION-old.md Zstd table -->
+Against libzstd 1.5.7 with a reused context, on one thread (baseline `m3-final`, an idle machine; instructions per byte are exact):<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final) -->
 
 | Silesia file, level | Bytes MB/s | libzstd MB/s | Speed-up | Bytes / libzstd instr per byte |
 |---|---|---|---|---|
-| dickens, 3 | 1,536 | 1,092 | 1.41x | 13.44 / 14.91 |
-| mozilla, 1 | 1,707 | 1,384 | 1.23x | 8.47 / 9.39 |
-| x-ray, 1 | 1,497 | 1,328 | 1.13x | 7.79 / 10.03 |
-| xml, 19 | 3,916 | 3,101 | 1.26x | 4.12 / 4.49 |
-<!-- src: OPTIMIZATION-old.md Zstd table (rows selected) -->
+| dickens, 3 | 1,606 | 1,164 | 1.38x | 13.45 / 14.90 |
+| mozilla, 1 | 1,706 | 1,372 | 1.24x | 8.47 / 9.40 |
+| x-ray, 1 | 1,496 | 1,327 | 1.13x | 7.84 / 10.02 |
+| xml, 19 | 3,872 | 3,150 | 1.23x | 4.09 / 4.50 |
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Zstd decode L3 dickens (9.7 MB)", "L1 mozilla (48.8 MB)", "L1 x-ray (8.1 MB)", "L19 xml (5.1 MB)", Bytes against libzstd; MB/s = Silesia file bytes (10,192,446; 51,220,480; 8,474,240; 5,345,280) over wallClock; instructions over the same bytes (rows selected, as in OPTIMIZATION-old.md Zstd table) -->
 
-Every Silesia file at levels 1, 3, and 19 is faster, 1.12–1.45x in one call, with 7–22% fewer instructions per byte; of 32
-small inputs, 31 are faster.<!-- src: OPTIMIZATION-old.md Zstd "Every Silesia file" paragraph -->
+Every Silesia file at levels 1, 3, and 19 is faster, 1.13–1.50x in one call, with 8–22% fewer instructions per byte; all 20
+small inputs in the suite (1–64 KB) are faster, 1.02–1.42x.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Zstd decode L{1,3,19} {dickens, mozilla, samba, x-ray, xml}: Bytes / libzstd" (1.127 x-ray L1 to 1.503 x-ray L19; instructions 0.782 to 0.918) and the 20 rows "Zstd decode L3 … 1/4/16/64 KB", "L19 … 4 KB" (1.022 to 1.420) -->
 The first complete version followed libzstd's loops: a four-stream Huffman loop with sentinel bits, sequences executed one
 at a time with 16- and 32-byte wild copies (copies allowed to write past their end), and the careful path out of line. It
 was already 5–28% faster on large inputs but 1–24% slower on 1–4 KB ones.
@@ -4501,9 +4562,9 @@ LZ4 decoding is mostly copies. The structure follows lz4's own "shortcut": a seq
 16-byte match moves, in a 30-instruction loop with no calls. Everything else takes the general path (255-continued
 lengths, careful copies). Each buffer has two limits, the block's exact end and the buffer's end less the 16-byte overrun;
 their `min` is the fast-path bound, so one comparison picks the path.<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "Design"; "Code generation" -->
-LZ4 runs between 11% fewer and 8% more instructions than Apple's Compression, except on x-ray's long literal runs (+20%),
-at 0.72–1.03x its speed.
-Compression's LZ4 decoder is the one place it is still clearly ahead (x-ray 9.9 against 7.2 GB/s).<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "Results" summary -->
+LZ4 runs between 11% fewer and 5% more instructions than Apple's Compression, except on x-ray's long literal runs (+25%),
+at 0.74–1.05x its speed.
+Compression's LZ4 decoder is the one place it is still clearly ahead (x-ray 10.3 against 7.6 GB/s).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "LZ4 {raw, framed} decode {dickens, mozilla, samba, x-ray, xml, JSON}: Bytes / Compression" (speed 0.738 raw x-ray to 1.050 raw JSON; instructions on the Silesia files 0.886 dickens to 1.053 xml, x-ray 1.248; "LZ4 raw decode x-ray (8.1 MB)" 1,110 µs against 819 for 8,474,240 bytes); Bytes/Benchmarks/RESULTS-lz4-lzfse.md "Results" summary -->
 Tried and reverted: 32-byte steps for long wild copies (the smaller overrun was kept), and chaining shortcut sequences
 without the end-of-input check at the loop's top (+2.4–3.3%, because LLVM laid the loop out worse).<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "What worked and what didn't" -->
 
@@ -4512,10 +4573,11 @@ without the end-of-input check at the loop's top (+2.4–3.3%, because LLVM laid
 LZFSE (LZ77 blocks whose literals and literal-length, match-length, distance triples are coded with FSE, a table-based
 ANS; a stream may also hold LZVN blocks) follows the open reference's structure. The header is checked (counts, states,
 frequency sums), value tables are 8-byte entries (`bits | extra bits | next state base | value base`), and decoding costs
-12.46 instructions per byte on dickens and 4.12 on xml, at 0.90–1.16x Compression's speed and 1.2–1.4x the reference's.
+12.48 instructions per byte on dickens and 4.04 on xml, at 0.90–1.03x Compression's speed on the Silesia files and 1.2–1.4x
+the reference's.
 LZVN matches the reference's instruction counts (±5%) at 1.1–1.35x its speed on Silesia. LZVN opcodes are classified with
 a few bit tests (the undefined rows with one shift of the mask 0x2080), and a literal of 0–3 bytes is one 4-byte move that
-the match then overwrites.<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "Design" and "Results"; Bytes/Sources/BytesCompression/LZFSEDecoder.swift doc comment -->
+the match then overwrites.<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md "Design" and "Results" (the reference ratios, not in the new run); Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "LZFSE decode {dickens, xml, mozilla, samba, x-ray}: Bytes / Compression" (instructions 12.48 and 4.04 per byte for 10,192,446 and 5,345,280 bytes; speed 0.900 xml to 1.026 x-ray); Bytes/Sources/BytesCompression/LZFSEDecoder.swift doc comment -->
 
 #### LZBITMAP
 
@@ -4532,9 +4594,9 @@ and copies by a bitmap. The decoder's history, in instructions per output byte (
 <!-- src: Bytes/Benchmarks/RESULTS-lzbitmap.md same table (columns selected) -->
 
 The unchecked group loop is 15 instructions (a load of the shuffle, one `tbl.16b`, an 8-byte store); the vector pass is
-104–116 instructions per 16 groups; the nibble unpack is `st2.16b`. Decoding reaches 4.4–5.9 GB/s on whole streams,
+104–116 instructions per 16 groups; the nibble unpack is `st2.16b`. Decoding reaches 5.0–6.6 GB/s on whole streams,
 level with Apple's own decoder (Apple ahead on some inputs and Bytes on others), at 3.1–3.4 instructions per byte, where
-the open `libzbitmap` reference takes 31–35.<!-- src: Bytes/Benchmarks/RESULTS-lzbitmap.md "The decoder" and Benchmarks final table -->
+the open `libzbitmap` reference takes 31–35.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "LZBITMAP decode {dickens, mozilla, samba, x-ray, xml} (… MB): Bytes" (5.03 mozilla to 6.59 dickens GB/s; 3.11 to 3.39 instructions per byte; Bytes/Compression speed 0.95 to 1.08); Bytes/Benchmarks/RESULTS-lzbitmap.md "The decoder" and Benchmarks final table (the libzbitmap reference) -->
 
 #### bzip2
 
@@ -4548,14 +4610,14 @@ Decoding happens in five passes over one workspace:
 4. The walk ([section 7](#7-branches-and-data-dependent-work)).
 5. Run expansion, 16 bytes at a time where no 4 equal bytes end in the window.
 
-Results on Silesia files as `bzip2 -9` writes them: 2.1–5.3x libbz2, at about half the instructions per byte (dickens
-62.9 against 105.9).<!-- src: Bytes/Benchmarks/RESULTS-bzip2.md "Design, as it ended" and "Final" table -->
+Results on Silesia files as `bzip2 -9` writes them: 3.2–5.6x libbz2, at about half the instructions per byte (dickens
+62.9 against 105.9).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "BZip2 decode -9 {dickens, mozilla, samba, x-ray, xml}: Bytes / libbz2" (3.245 to 5.586; instructions 0.523 to 0.594, dickens 0.594 = 62.9 / 105.9); Bytes/Benchmarks/RESULTS-bzip2.md "Design, as it ended" and "Final" table -->
 
 #### Hashes and checksums as codec parts
 
 XXH64's one-shot form (no streaming state) took 16,384 64-byte inputs from 3.79 to 2.44 M instructions (−35.5%).<!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements" XXH64 row -->
-CRC-32 runs at 63 GB/s with `pmull` folding and 8.3 GB/s braided in software; Adler-32 at 58 GB/s with `udot` on the M1
-Max ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)).<!-- src: OPTIMIZATION-old.md CRC-32; Bytes/Benchmarks/RESULTS.md Adler-32 with UDOT -->
+CRC-32 runs at 72 GB/s with `pmull` folding and 8.7 GB/s braided in software; Adler-32 at 101 GB/s with `udot` (1 MB), 58 GB/s
+in the first version on the M1 Max ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "CRC-32 checksum(_:), 256 KB" 465,407 ns and "CRC-32 tables, 256 KB" 3,846,143 ns, each 32 MiB (72.1 and 8.72 GB/s); Tools/probes/results/M3-Ultra-2026-11-20/checksums.tsv (Adler32 1 MB 101.2 GB/s); OPTIMIZATION-old.md CRC-32; Bytes/Benchmarks/RESULTS.md Adler-32 with UDOT (58 GB/s, M1 Max) -->
 
 #### Matching Apple's bytes exactly
 
@@ -4599,10 +4661,10 @@ in constant time.<!-- src: OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" fi
 #### AES-GCM
 
 - **Counter mode in eight-block batches**: eight independent `aese`/`aesmc` chains, as ChaCha20 needed eight blocks to
-  fill the pipes. AES-CTR went from 453 to 80 to 62 µs per MB on the M3 Ultra with unrolled eight-block batches. On an M1
+  fill the pipes. AES-CTR went from 453 to 80 to 54 µs per MB on the M3 Ultra with unrolled eight-block batches. On an M1
   Max core, AES-128-CTR (12 GB/s) is at the bound for eight chains of fused `aese`+`aesmc` rounds at 3 cycles each (about 4
   bytes a cycle); the units take almost 4 rounds a cycle, so 12 blocks in flight could reach about 1.5x (not tried; 11
-  round keys and 12 states fit in the 32 registers).<!-- src: OPTIMIZATION-old.md same; Bytes/Benchmarks/RESULTS.md "crypto in Swift" (453 → 80 → 62); RESULTS.md M1 section "What the cores can do" (re-measured 2026-11-21) -->
+  round keys and 12 states fit in the 32 registers).<!-- src: OPTIMIZATION-old.md same; Bytes/Benchmarks/RESULTS.md "crypto in Swift" (453 → 80, the dated steps); "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks row "AES-128-CTR 1 MB: Bytes" 53,727 ns (was 62 µs in the earlier run); RESULTS.md M1 section "What the cores can do" (re-measured 2026-11-21) -->
 - **GHASH** multiplies by the hash key with three `pmull`s (Karatsuba), sums eight blocks' products against the key's
   first eight powers before reducing once, and reduces with two more `pmull`s by the field's constant (0xC2 shifted)
   instead of shifts and XORs.<!-- src: OPTIMIZATION-old.md same -->
@@ -4616,42 +4678,42 @@ in constant time.<!-- src: OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" fi
   says. Result: AES-128-GCM open of 1 KB × 1,024 went from 4.64 to 4.10 M instructions (−11.7%), 16 KB × 64 from 3.46 to
   3.03 M (−12.5%; CryptoKit 3.67 M), and TLS open of 4 MB from 14 to 12 M (−14%).<!-- src: Bytes/Benchmarks/RESULTS.md "Crypto cleanup" "AES-GCM open in one pass"; AGENTS.md "A stitched decrypt-and-authenticate must restore the buffer on a bad tag" -->
 
-Sealing 1 MB as messages of various sizes (`d2-final`, p50), Bytes' AES-128-GCM against CryptoKit: 1 MB × 1, 133 µs
-against 111 (7.9 GB/s; CryptoKit's hand-written assembly keeps 17% for one large message); 16 KB × 64, 124 against 154;
-1 KB × 1,024, 212 against 919; 64 B × 16,384, 3,686 against 13,000 (CryptoKit's per-call setup and allocation dominate
-below 16 KB).<!-- src: OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" table (d2-final) -->
+Sealing 1 MB as messages of various sizes (`m3-final`, p50), Bytes' AES-128-GCM against CryptoKit: 1 MB × 1, 116 µs
+against 109 (9.0 GB/s; CryptoKit's hand-written assembly keeps 6% for one large message); 16 KB × 64, 126 against 151;
+1 KB × 1,024, 237 against 956; 64 B × 16,384, 3,838 against 12,500 (CryptoKit's per-call setup and allocation dominate
+below 16 KB).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "AES-128-GCM seal 1 MB (x1) / 16 KB (x64) / 1 KB (x1024) / 64 B (x16384): Bytes / CryptoKit" 116,095 / 108,991, 126,463 / 150,655, 236,799 / 956,415, 3,837,951 / 12,517,375 ns; earlier: OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" table (d2-final) -->
 
 #### SHA-2, HMAC, PBKDF2, HKDF
 
 - **SHA-512/384 on the SHA-512 instructions** (`sha512h`/`sha512h2` for two rounds, `sha512su0`/`sha512su1` for two
-  schedule words; ARMv8.2): 1 MB went from 38 M to 4.01 M instructions (−89%; CryptoKit's 4.34 M) and from 1.60 ms to
-  0.64 ms (CryptoKit 0.64; times taken under load, indicative), at 489 instructions a block with no calls. The first
-  version's state in captured variables is [section 1](#1-keep-hot-state-in-registers)'s SHA-512 example.<!-- src: Bytes/Benchmarks/RESULTS.md "Crypto cleanup" SHA-512 bullet -->
+  schedule words; ARMv8.2): 1 MB went from 38 M to 4.01 M instructions (−89%; CryptoKit's 4.34 M) and from 1.60 ms
+  (under load, indicative) to 0.57 ms (CryptoKit 0.57), at 489 instructions a block with no calls. The first
+  version's state in captured variables is [section 1](#1-keep-hot-state-in-registers)'s SHA-512 example.<!-- src: Bytes/Benchmarks/RESULTS.md "Crypto cleanup" SHA-512 bullet (the 1.60 ms before); "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "SHA-512 1 MB: Bytes" 567,807 ns / 4,009,983 instructions and ": CryptoKit" 574,463 / 4,341,759 -->
   The portable block function was a rolled 80-round loop with a `round >= 16` test per round; written as five groups of
   sixteen rounds with the schedule in sixteen locals, it is about 2,570 instructions a block against about 4,600.<!-- src: same -->
-- **SHA-256** on `sha256h`, `sha256h2`, `sha256su0`, `sha256su1`: 400 µs per MB against CryptoKit's 337, in 6% more
+- **SHA-256** on `sha256h`, `sha256h2`, `sha256su0`, `sha256su1`: 397 µs per MB against CryptoKit's 337, in 6% more
   instructions; where the rest of the time goes was not found. Round constants as vector literals took SHA-256 from 5.5
-  to 2.07 M instructions.<!-- src: OPTIMIZATION-old.md "AES-GCM and TLS 1.3" primitives table and text; Bytes/Benchmarks/RESULTS.md "crypto in Swift" -->
+  to 2.07 M instructions.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "SHA-256 1 MB: Bytes" 396,799 ns / 2,067,455 instructions and ": CryptoKit" 336,639 / 1,955,839 (+5.7%); OPTIMIZATION-old.md "AES-GCM and TLS 1.3" primitives table and text (5.5 → 2.07 M) -->
 - **PBKDF2**: each iteration starts from a copy of the keyed HMAC, whose inner and outer hash states already hold the
   key's pads, so an iteration is two block compressions: 1.4 M instructions for 1,000 iterations against CommonCrypto's
-  2.8 M (2.91x faster).<!-- src: OPTIMIZATION-old.md same -->
+  2.8 M (2.96x faster).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "PBKDF2-HMAC-SHA1 x1000, 34 bytes: Bytes" 116,927 ns / 1,427,455 instructions and ": CommonCrypto" 346,111 / 2,791,423 -->
 - **HKDF's expander** keys the HMAC once; TLS traffic keys expand the key and IV from one expander (two compressions saved
   per direction).<!-- src: Bytes/Benchmarks/RESULTS.md "Crypto cleanup" HKDF bullet -->
 
 #### Elliptic curves: P-256 and P-384
 
-ECDSA verification and ECDH are in Swift, with no C and no assembly. Against CryptoKit (corecrypto): ECDSA verify P-256 54
-µs against 91 (812 K instructions against 1,757 K, 0 mallocs against 3), P-384 206 against 227, ECDH P-256 52 against 89,
-HPKE open 61 against 105.<!-- src: Bytes/Benchmarks/RESULTS-ecc.md "Results" -->
+ECDSA verification and ECDH are in Swift, with no C and no assembly. Against CryptoKit (corecrypto): ECDSA verify P-256 49
+µs against 81 (819 K instructions against 1,733 K, 0 mallocs against 3), P-384 177 against 226, ECDH P-256 50 against 82,
+HPKE open 53 against 97.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "ECDSA verify P-256: Bytes / CryptoKit" 48,671 ns / 819,199 instructions against 81,279 / 1,732,607, "ECDSA verify P-384" 176,511 against 226,431, "ECDH P-256" 50,399 against 81,727, "HPKE open P-256 AES-256-GCM 32 B" 53,183 against 96,895; mallocs from Bytes/Benchmarks/RESULTS-ecc.md "Results" -->
 The optimization log, in P-256 verify instructions:
 
 - Complete projective formulas: 1,422 K.
 - Jacobian coordinates with a width-7 NAF (non-adjacent form: a signed-digit representation with fewer additions) of u1
   over a static table of G's odd multiples, and a width-4 NAF of u2: 890 K (−37%).
 - Inverting s by binary extended Euclid (variable time, because s is public): 825 K (−8%).
-- Final: 812 K.
+- Final: 819 K.
 
-What the work taught:<!-- src: Bytes/Benchmarks/RESULTS-ecc.md "Optimization log" -->
+What the work taught:<!-- src: Bytes/Benchmarks/RESULTS-ecc.md "Optimization log" (the steps above); "2026-11-20, M3 Ultra" (baseline m3-final): row "ECDSA verify P-256: Bytes" 819,199 instructions (the log's last line read 812 K) -->
 
 - **Jacobian coordinates with masked special cases beat complete formulas for constant-time ladders** (−28% ECDH
   instructions). The complete formulas have no special cases, so the first ladder was branch-free by construction, but a
@@ -4674,14 +4736,14 @@ What the work taught:<!-- src: Bytes/Benchmarks/RESULTS-ecc.md "Optimization log
 
 #### RSA verification, X.509, scrypt
 
-- **RSA PKCS #1 v1.5 verification** (1024–4096-bit keys; variable time, only public values): 13 µs against Security's 19
-  at 2048 bits (294 K instructions against 338 K, 0 mallocs against 14), 42 against 65 at 4096. Parsing a key includes
+- **RSA PKCS #1 v1.5 verification** (1024–4096-bit keys; variable time, only public values): 12 µs against Security's 18
+  at 2048 bits (295 K instructions against 340 K, 0 mallocs against 14), 41 against 61 at 4096. Parsing a key includes
   computing R² mod n for Montgomery multiplication. Against the first version, verification was −24% in instructions and
-  −38% in time, and key parsing −79%.<!-- src: Bytes/Benchmarks/RESULTS-rsa.md "Results" -->
-- **X.509 parsing**: 8.1 K instructions (0.40 µs, 0 mallocs) for a 583-byte certificate against Security's 36 K (1.76 µs,
+  −38% in time, and key parsing −79%.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "RSA verify 2048 SHA-256: Bytes / Security" 12,335 ns / 295,423 instructions against 17,759 / 340,223 and "RSA verify 4096 SHA-256" 40,959 / 1,019,391 against 61,311; the mallocs and the −24%, −38%, −79% against the first version are from Bytes/Benchmarks/RESULTS-rsa.md "Results" -->
+- **X.509 parsing**: 8.1 K instructions (0.37 µs, 0 mallocs) for a 583-byte certificate against Security's 36 K (1.56 µs,
   11 mallocs). The first version took 14 K: it walked the whole structure before parsing, and checked each extension for
   duplicates by parsing every earlier extension again (quadratic). Walking only what the parse does not read, and keeping
-  the first 16 extension identifiers' ranges on the stack, gave −42%. Validation passes add up.<!-- src: Bytes/Benchmarks/RESULTS-scrypt-x509.md "Parsing, per certificate" and Lessons -->
+  the first 16 extension identifiers' ranges on the stack, gave −42%. Validation passes add up.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "X.509 parse G3 (x1000): Bytes / Security" 371,455 ns / 8,134,655 instructions against 1,561,599 / 35,586,047 (per certificate 0.37 and 1.56 µs); the mallocs and the 14 K first version are from Bytes/Benchmarks/RESULTS-scrypt-x509.md "Parsing, per certificate" and Lessons -->
 - **scrypt** (RFC 7914): 1.50–1.53x OpenSSL's speed (17.0 ms against 25.6 for N = 2¹⁴, r = 8). Salsa20/8 is scalar
   ([section 7](#7-branches-and-data-dependent-work)). The time per Salsa20/8 grows from 29 ns (N ≤ 2¹⁴) to 35–36 ns at 2¹⁶ and above, because ROMix's second
   loop reads V[j] at a data-dependent j. One DRAM and TLB miss per BlockMix is exposed and cannot be prefetched, since j
@@ -4721,6 +4783,11 @@ Rounds against the scheduler, interleaved in one process (gzip, 24 lanes, same o
 
 The gain is the rounds saved: none with one round, 8–22% with two, 22–41% with four. Speed-up over one core at 24 lanes:
 DEFLATE 14–19x (level 6 samba, 135 to 7.2 ms), Brotli quality 1 15x, quality 5 15–17x (1.10% bigger than one stream).<!-- src: Bytes/Benchmarks/RESULTS.md same -->
+Later the one-shot encoder also began cutting up to four chunks per lane, none under 64 KB (interleaved, four beat one,
+two, three, and six): dickens at level 6 on 28 and 32 lanes went from 7.3 and 6.5 ms to 6.2 and 5.5, samba from 7.1 and 6.6 to
+6.6 and 6.25, for 0.03–0.1% more output. A 32 KB floor cost Main.js (3.8 MB, 96 chunks of 40 KB) 28% more instructions at level 1
+and was reverted; the streaming path keeps one chunk per lane. On the M3 Ultra now (`Tools/probe bytes lanes`): dickens
+level 6 takes 119.9 ms on one lane, 17.0 on 8, 6.3 on 24, and 5.9 on 32; mozilla level 1, 175.4, 25.2, 9.2, and 8.5.<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, parallel DEFLATE: no fallback at any lane count; joins overlap decoding" (encoder paragraph); Tools/probes/results/M3-Ultra-2026-11-20/lanes.tsv (dickens 6 encode 1, 8, 24, 32: 119.9, 17.0, 6.3, 5.9; mozilla 1 encode 175.4, 25.2, 9.2, 8.5 ms) -->
 Details that cost real bugs or time:
 
 - **Whole chunks per lane.** Equal chunks, 39 on 24 lanes, take as long as 48.<!-- src: AGENTS.md "Parallel compression: avoid rounds" -->
@@ -4741,19 +4808,38 @@ its own.
 
 `ParallelDeflateDecoder` speculates, as rapidgzip and pugz do, but accepts a speculation only when it is proven right:
 
-- It picks split points just after a `00 00 FF FF`, spread evenly (a vectorized scan from each target), up to four
-  segments per lane, so a lane that runs slow holds up one small segment instead of a whole share.
-- The lanes take segments in order and decode each from nothing.
-- Segment *j* is accepted only if segment *j* − 1 ended exactly at its start, between blocks, and nothing threw; otherwise
-  the whole stream is decoded sequentially.
+- It cuts the input into windows, up to four segments per lane, so a lane that runs slow holds up one small segment instead
+  of a whole share. Each window's split point is just after a `00 00 FF FF` in it that a block header could follow
+  (a vectorized scan): a candidate is skipped when the bytes after it can't start a block under DEFLATE's own header
+  rules (the reserved block type, a stored block whose length doesn't match its complement, more than 286 literal or 30
+  distance codes). The check never rejects a real block.
+- The lanes take segments in order, each the next not yet taken, find that window's split point themselves (each depends
+  only on its window, so there is no serial scan first), and decode the segment from nothing.
+- A segment that reaches its end inside a block, because its next split was a false `00 00 FF FF` (Huffman-coded bits, or
+  the data of a stored block), **decodes on past it** to the following split, until it is between blocks.
+- The segments are joined in order. Segment *j* is accepted only if segment *j* − 1 ended exactly at its start, between
+  blocks, and nothing threw. A segment that fails (a match across its start, corrupt data) is **decoded again in place**:
+  the join decodes its region sequentially into the output after the bytes joined so far, so its matches see the real
+  history, until it is between blocks at a later split, and the join goes on from there. A bad split costs its own region.
+  Only a failed segment 0 (or no split points at all) decodes the whole stream sequentially.
+- The lanes copy each accepted segment to the output as soon as every segment before it is, while the others are still
+  decoding. (Before, the calling thread copied all 51 MB of mozilla at the end: about 1 ms of a 3.8 ms decode.)
 - gzip's CRC-32 and zlib's Adler-32 are computed per segment and combined.
 
 Streams from the parallel encoder (with independent chunks), pigz `-i`, and zlib streams with full flushes decode in
-parallel; others decode sequentially.<!-- src: Bytes/Sources/BytesCompression/ParallelInflate.swift doc comment -->
-Measured with one segment per lane, parallel inflate of such a stream was 5–10x one core at 24 lanes, and 8 lanes were
-5.6x faster than sequential decoding on both an M3 Ultra and an M1 Max. Up to four segments per lane cost 1.4–1.6% more
-instructions (more fixed costs, but the lanes finish together); its time gain, 50–80% under load, has not yet been
-re-measured on an idle machine.<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel compression" Speed-up bullet and "Cleanup and improvements (2026-11-19)" Parallel inflate row; Writeups/M1-Max-vs-M3-Ultra.md "Parallel scaling"; Bytes/Sources/BytesCompression/ParallelInflate.swift segmentsPerLane -->
+parallel; for streams whose matches cross every split, the first segment still decodes in parallel and the rest
+sequentially.<!-- src: Bytes/Sources/BytesCompression/ParallelInflate.swift doc comment; Bytes/Benchmarks/RESULTS.md "2026-11-20, parallel DEFLATE: no fallback at any lane count; joins overlap decoding" (decodes on past a false split; decoded again in place; header rules; workers copy; each worker finds its split points) -->
+
+The fix came from a cliff. The earlier version discarded the whole speculation when any one split proved false, and on
+mozilla compressed at level 1 (stored blocks of binary data, then Huffman-coded data) one split was: a `00 00 FF FF`
+22,493 output bytes into a chunk, in the middle of a block. At 11, 22, 25, and 28–32 lanes the decode took about 56 ms
+instead of 4, 14 times slower, because at those lane counts it was the first marker after a split target. The sweep now (`Tools/probe
+bytes segments`, mozilla level 1, 1–32 lanes) finds every lane count parallel: 8.0 ms at 8 lanes, 6.1 at 11, 4.2 at 16, 3.4 at
+22, 2.9 at 24, 2.9 at 25, 2.7 at 28, and 2.7 at 32, with about 4 segments per lane. One core takes 52.7 ms, so 32 lanes are
+about 19x one core. In the suite (`m3-final`) parallel inflate is 6.6–7.0x the sequential decoder on 8 lanes, 10–17x on 24, and
+9–18x on 32 (dickens 11.2 ms sequential, 1.59 ms on 8 lanes, 0.66 on 24, 0.63 on 32). Four segments per lane cost 1.4–1.6%
+more instructions than one (more fixed costs, but the lanes finish together). Earlier, with one segment per lane, 8 lanes
+were 5.6x faster than sequential decoding on both an M3 Ultra and an M1 Max.<!-- src: Tools/probes/results/M3-Ultra-2026-11-20/segments.tsv (mozilla level 1 lanes 1, 8, 11, 16, 22, 24, 25, 28, 32: 52.8, 8.0, 6.1, 4.2, 3.4, 2.9, 2.9, 2.8, 2.7 ms; 4 segments per lane at 1–24, 98–124 at 25–32) and lanes.tsv (mozilla level 1 decode 1 lane 52.7 ms, 32 lanes 2.6); Bytes/Benchmarks/RESULTS.md "2026-11-20, parallel DEFLATE" (the cliff: 22,493 bytes into chunk 10, 55–60 ms at 11, 22, 25, 28–32 lanes) and "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Parallel inflate {dickens, samba, Main.js}: Bytes, {sequential, 8, 24, 32 lanes}, sync" (dickens 11,165,695 / 1,590,271 / 660,479 / 629,759 ns); the 1.4–1.6% and 5.6x are from RESULTS.md "Cleanup and improvements (2026-11-19)" and Writeups/M1-Max-vs-M3-Ultra.md "Parallel scaling" -->
 
 #### Static splits and efficiency cores
 
@@ -4776,6 +4862,13 @@ its speculation at 4, 8, 12, 13, 15, and 16 lanes and decodes the whole stream s
 10.3 ms at 10 and 11.2 ms for the old decoder at 8. Every other corpus file and level decodes in parallel at every lane
 count, including the benchmarks' inputs, which is why no benchmark showed it. Falling back for the whole stream, not just
 from the bad segment, is what makes one bad split cost 7x.<!-- src: Bytes/Benchmarks/RESULTS.md same; Writeups/M1-Max-vs-M3-Ultra.md "M1 Max-specific optimizations explored"; Bytes/Sources/BytesCompression/ParallelInflate.swift doc comment -->
+
+Both have since changed (2026-11-20). The decoder no longer falls back for the whole stream: the segment before a bad
+split decodes on past it, and a failed region is decoded again in place, so no lane count decodes sequentially (not
+re-measured on the M1 Max). And the rule was measured on the M3 Ultra, where
+both parallel codecs now recommend every core: 32 lanes took up to 23% less time than 24, 8% at the median, over five
+Silesia files at levels 1 and 6 (decode of mozilla level 1: 2.9 ms on 24 lanes, 2.7 on 32; encode of dickens at level 6:
+6.3 and 5.9 ms). `ParallelDeflateEncoder` and `ParallelDeflateDecoder` document `lanes` that way.<!-- src: Bytes/Benchmarks/RESULTS.md same; "2026-11-20, parallel DEFLATE: no fallback at any lane count; joins overlap decoding" (lanes = every core; 32 lanes up to 23% less than 24, 8% at the median); Tools/probes/results/M3-Ultra-2026-11-20/segments.tsv (mozilla 1: 24 lanes 2.9 ms, 32 lanes 2.7) and lanes.tsv (dickens 6 encode 24: 6.3, 32: 5.9); Writeups/M1-Max-vs-M3-Ultra.md "M1 Max-specific optimizations explored"; Bytes/Sources/BytesCompression/ParallelInflate.swift doc comment -->
 
 #### TLS records sealed in parallel
 
@@ -4804,9 +4897,9 @@ DispatchQueue.concurrentPerform(iterations: min(lanes, count)) { lane in
 
 | Sealing 4 MB per call (p50) | 1 lane | 4 lanes | 8 lanes |
 |---|---|---|---|
-| AES-128-GCM | 5.7 GB/s | 20.3 GB/s (3.6x) | 32.7 GB/s (5.8x) |
-| ChaCha20-Poly1305 | 2.0 GB/s | 7.6 GB/s (3.8x) | 13.9 GB/s (6.9x) |
-<!-- src: OPTIMIZATION-old.md same table; Bytes/Benchmarks/RESULTS.md "crypto in Swift" -->
+| AES-128-GCM | 6.4 GB/s | 20.8 GB/s (3.2x) | 35.9 GB/s (5.6x) |
+| ChaCha20-Poly1305 | 2.3 GB/s | 7.8 GB/s (3.4x) | 14.6 GB/s (6.4x) |
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "TLS seal 4 MB AES-128-GCM (1 / 4 / 8 lanes): Bytes" 652,799 / 201,471 / 116,799 ns and "TLS seal 4 MB ChaCha20-Poly1305 (1 / 4 / 8 lanes): Bytes" 1,831,935 / 536,575 / 287,743 ns, each for 4 MiB; earlier: OPTIMIZATION-old.md same table; Bytes/Benchmarks/RESULTS.md "crypto in Swift" -->
 
 Over loopback (SocketStream, one connection, 16 KB payloads), four sealing lanes took ChaCha20-Poly1305 from 1.35–1.54 to
 1.77–1.87 GB/s and AES-128-GCM from 2.79–3.16 to 3.63–3.80, against 4.6–5.8 unencrypted. Eight lanes added nothing: the
@@ -4816,14 +4909,15 @@ In general, parallelism helps only the stage that is the bottleneck, and the nex
 
 #### Other parallelism
 
-scrypt's `p` ROMix calls run on `concurrentPerform` lanes with a table per lane (p = 4, N = 2¹⁴: 70 ms on one lane, 17 ms
-on four, 4.1x, with the same 775 M instructions).<!-- src: Bytes/Benchmarks/RESULTS-scrypt-x509.md "scrypt" and "Against OpenSSL" -->
+scrypt's `p` ROMix calls run on `concurrentPerform` lanes with a table per lane (p = 4, N = 2¹⁴: 58 ms on one lane, 17 ms
+on four, 3.4x, with the same 775 M instructions).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "scrypt N=2^14 r=8 p=4: Bytes, 1 lanes / 4 lanes" 58,359,807 / 17,055,743 ns, 774,574,128 / 774,606,459 instructions; Bytes/Benchmarks/RESULTS-scrypt-x509.md "scrypt" and "Against OpenSSL" -->
 Many-core memory-bound reads and many-archive extraction are in sections [11](#11-techniques-in-the-projects-built-on-bytes) and [12](#12-measuring-honestly).
 
 #### When not to
 
 Parallelism has a floor per call (pool bookkeeping allocations, waking threads whose cores are at low clocks), so small
-inputs stay sequential. Parallel inflate falls back to sequential decoding when its speculation fails. And file-system work
+inputs stay sequential. Parallel inflate decodes a failed segment's region again in place, and decodes the whole stream
+sequentially only when the first segment fails or no split point exists. And file-system work
 ([section 11](#11-techniques-in-the-projects-built-on-bytes)) stops scaling at a handful of threads, because the kernel, not the CPU, is the limit.<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel compression"; NativeZipArchive/Benchmarks/RESULTS.md step15 -->
 
 ### 11. Techniques in the projects built on Bytes
@@ -5227,10 +5321,10 @@ Bytes' standings against the references hold. Zstandard's lead over libzstd shri
 and one flip (LZ4 swift-help, Bytes 0.93x to 1.05x of `ParserSpan`'s, same instructions) was not investigated.<!-- src: OPTIMIZATION-old.md "15." paragraph 1; Writeups/M1-Max-vs-M3-Ultra.md "The short version" and "Per package" -->
 The ratio is not one number: about 1.06 at 1 KB, about 1.5 for 100–400 KB inputs (an L2-sized working set; cause not
 found), and 1.3 for multi-MB inputs.<!-- src: OPTIMIZATION-old.md "15." -->
-Where the chips differ beyond the clock: raw SIMD stores run at 113 GB/s against 62 on one core (1.81x; reads 78 against
+Where the chips differ beyond the clock: raw SIMD stores run at 114 GB/s against 62 on one core (1.85x; reads 78 against
 61); back-references at distances 1–7 are 1.6–1.85x slower at identical instructions (a guess: partial-width loads that
 cannot forward from recent stores; not probed); and latency-bound code keeps up (hashes 1.14–1.21, hardware CRC-32
-1.08–1.15, small-input Zstandard 0.97–1.04).<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "Where the two chips differ beyond the clock" -->
+1.08–1.15, small-input Zstandard 0.97–1.04).<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "Where the two chips differ beyond the clock"; the M3 store rate from Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks row "Write: Raw SIMD store (reference), in cache (4 MB)" 36,639 ns, and the 78 GB/s read from Tools/probes/results/M3-Ultra-2026-11-20/mem-threads.tsv (1 thread 78.5) -->
 
 **Many cores: the core count is the difference.** With the lane count following the chip (24 lanes against 8), the
 parallel codecs are 2.4x apart (geometric mean over 60 pairs), and memory-bound reads on all cores 1.9x (bandwidth ratio
@@ -5253,6 +5347,29 @@ other: derive worker counts from the machine.<!-- src: OPTIMIZATION-old.md "15."
 
 Memory: L1 3 cycles, L2 17.6 cycles, 16–32 MB 40–70 ns (system-level cache with page walks), DRAM about 123 ns; one core
 reads 60 GB/s, two 112 GB/s, and all ten only 125 GB/s.<!-- src: Writeups/M1-Max-vs-M3-Ultra.md same section; Bytes/Benchmarks/RESULTS.md "What the cores can do" read bandwidth -->
+
+The same rows beside the M3 Ultra; the M1 Max columns here are the first probe's, which the table above supersedes.
+**What one core of each measured** (probes; the M1 Max's cycles scaled from a calibration that read 2.82 GHz, ±15%; the
+M3 Ultra's read 4.05 GHz, its clock. "Per cycle" from eight independent chains, the M3's also from 16). The M3 Ultra's
+numbers come from `Tools/probe`, which runs the same measurements on any Apple silicon Mac so two machines compare row by
+row; its method point is that a throughput probe needs latency × width independent chains (12 for a 3-cycle instruction on
+four pipes), so it measures 8, 16, and 24:<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "What each core can do"; Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra"; Tools/probes/README.md, Tools/probes/results/M3-Ultra-2026-11-20/insn.tsv and insn-clock.tsv (clock median 4.050 GHz before, 4.056 after) -->
+
+| Instruction | M1 Max latency (cycles) | M1 Max per cycle | M3 Ultra latency | M3 Ultra per cycle (8 / 16 chains) |
+|---|---|---|---|---|
+| `add`, `eor`, `eor3`, `zip`, `uzp`, `ext`, `tbl` with 1–2 registers | 2 | 4 | 2 | 4 / 4 |
+| `udot`, `pmull`, `aese`, `mul`, `usra` | 3 | 2.7 | 3 | 2.7 / 4 |
+| `tbl` with 3 registers | 4 | 1.9 | 4.0 | 1.6 / 2.0 |
+| `tbl` with 4 registers | 4 | 1.3 | 4.9 | 1.1–1.4 (varies between runs) |
+| `tbx` with 4 registers (chained through the index) | 8 | 1.0 | 6 | 0.8–1.0 (varies between runs) |
+| `sha256h`, `sha512h` | 5, 3 | 0.5 | 4, 2 | 0.5 / 0.5 |
+<!-- src: Writeups/M1-Max-vs-M3-Ultra.md same table (rows selected, M1 Max columns); Tools/probes/results/M3-Ultra-2026-11-20/insn.tsv (add, zip1, uzp1, ext, tbl 1 and 2 regs: 2 cycles, 4 a cycle; udot.4s, pmull, aese, mul.4s, usra: 3.01, 2.65–2.69 at 8 chains, 4.00 at 16; tbl 3 regs 3.99 cycles, 1.59 / 2.05; tbl 4 regs 4.90, 0.91 / 1.08; "tbx 4 regs via index" 6.05, 0.86 / 0.76; sha256h 4.01, sha512h 2.00, 0.50); the earlier probe in RESULTS.md "2026-11-20, M3 Ultra" read tbl 4 regs 1.35 a cycle and tbx 4 regs 0.85 / 0.95 -->
+
+The 2.7 per cycle is the eight-chain method's limit for a 3-cycle instruction, not the M1 Max's: with 16 chains the M3
+Ultra issues these at 4. Memory on the M1 Max: L1 3 cycles, L2 17–18 cycles, system-level cache 35–52 ns, DRAM about
+122 ns; one core reads 61 GB/s, two 115 GB/s, and all ten only 126 GB/s. On the M3 Ultra: L1 4 cycles (1.0 ns), L2 18–24
+cycles, system-level cache 25–64 ns (16–64 MB), DRAM about 127 ns; one core reads 78 GB/s from DRAM and stores 118–125, and
+reads level off at about 254 GB/s from 16 threads.<!-- src: Writeups/M1-Max-vs-M3-Ultra.md same section (M1 Max); Tools/probes/results/M3-Ultra-2026-11-20/mem-latency.tsv (L1 0.99–1.00 ns, 3.9–4.0 cycles; L2 4.41–6.03 ns, 17.9–24.4 cycles; 16, 24, 32, 48, 64 MB: 24.6, 30.7, 40.8, 54.2, 64.1 ns; 256 MB 127.0 ns), mem-bandwidth.tsv (reads 78.3 GB/s and stores 118.0 at 256 MB, stores 124.4–125.5 at 32–128 MB), mem-threads.tsv (1 thread 78.5, 16 threads 252.2, 24 254.8, 32 253.3) -->
 Read as cost per lookup, this core's `tbl` with one or two table registers takes one vector slot, with four about three,
 and a four-register `tbx` four, with 8 cycles of latency ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)).<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" paragraph after the table; AGENTS.md "Measure a core's instructions rather than assuming" -->
 
@@ -6293,7 +6410,8 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **Hop**: a `swift_task_switch` that finds the task on the wrong executor: the runtime enqueues a job on the right one, the
   thread goes back to the pool, and the task continues later, usually on another thread with cold caches.
 - **Independent chains**: separate dependency chains interleaved in one loop so their latencies overlap: eight ChaCha20
-  blocks at once in place of four, eight CRC fold accumulators, four `udot` accumulators per sum.
+  blocks at once in place of four, eight CRC fold accumulators, eight `udot` accumulators for Adler-32's weighted sum, and a
+  byte sum started from zero in each step so that no step waits on the one before.
 - **`InferIsolatedConformances`**: an upcoming-feature flag (from SE-0470, global-actor isolated conformances) under which
   a generic `@concurrent` function called on a type parameter warns that its conformance "may be isolated".
 - **`@inlinable`**: makes a function's body visible to other modules so it can be inlined and specialized; does not by
@@ -6434,8 +6552,8 @@ Each term is bold where the text first defines it; this list collects the terms 
   stays valid while the view is used (`Span`, `RawSpan`, `MutableSpan`, `MutableRawSpan`).
 - **Specialization**: a copy of a generic function for concrete types, removing the metadata calls.
 - **Speculative parallel decoding**: `ParallelDeflateDecoder` splits a DEFLATE stream after sync-flush markers, decodes
-  the segments at once, and accepts segment *j* only if segment *j* − 1 ended exactly at its start; otherwise the stream
-  is decoded sequentially.
+  the segments at once, and accepts segment *j* only if segment *j* − 1 ended exactly at its start; a segment that fails
+  is decoded again in place, and the whole stream is decoded sequentially only if the first segment fails.
 - **Spill**: storing a register's value to the stack because the compiler ran out of registers or needed its address.
 - **Split continuation**: the unmerged Swift pull request (swiftlang/swift#91981) whose toolchain swift-platform-executors'
   I/O needs; with it, a suspended read or write resumes on the thread running the event loop.

@@ -104,58 +104,6 @@ import Testing
         }
     }
 
-    // MARK: Directories
-
-    @Test func emptyDirectoryTableResolvesToTheDestination() {
-        let table = DirectoryTable(root: 7)
-        for path in ["a", "a/b", "a/b/c.txt", ""] {
-            let bytes = Array(path.utf8) + [0]
-            let resolved = bytes.withUnsafeBytes { unsafe table.resolve($0.baseAddress!, count: bytes.count - 1) } // The array's bytes: safe.
-            #expect(resolved.directory == 7 && resolved.leaf == 0)
-            #expect(bytes.withUnsafeBytes { unsafe table.lookup($0.baseAddress!, count: bytes.count - 1) } == (path.isEmpty ? 7 : nil)) // Same.
-        }
-    }
-
-    @Test func directoryTableFindsOpenedParents() {
-        var table = DirectoryTable(root: 7)
-        let directories = (0..<40_000).map { "d\($0 % 100)/e\($0)" }
-        for (index, path) in directories.enumerated() {
-            let bytes = Array(path.utf8)
-            bytes.withUnsafeBytes { _ = unsafe table.insert($0.baseAddress!, count: bytes.count, descriptor: Int32(100 + index)) } // Same.
-        }
-        for index in [0, 1, 99, 12_345, 39_999] {
-            let file = Array("\(directories[index])/file.txt".utf8)
-            let resolved = file.withUnsafeBytes { unsafe table.resolve($0.baseAddress!, count: file.count) } // Same.
-            #expect(resolved.directory == Int32(100 + index))
-            #expect(resolved.leaf == directories[index].utf8.count + 1)
-        }
-        // A parent that wasn't opened: the whole path from the destination.
-        let other = Array("d1/elsewhere/file".utf8)
-        let resolved = other.withUnsafeBytes { unsafe table.resolve($0.baseAddress!, count: other.count) } // Same.
-        #expect(resolved.directory == 7 && resolved.leaf == 0)
-    }
-
-    // MARK: Disk compression
-
-    /// Each codec's encoder is made on first use; switching codecs in one writer keeps each one's output.
-    @Test func chunkEncodersMadeOnFirstUse() {
-        let input = testBytes(65_536, seed: 3, compressible: true)
-        var output = [UInt8](repeating: 0, count: 65_537)
-        let encoders = ChunkEncoders()
-        var first: [DiskCodec: [UInt8]] = [:]
-        for codec in [DiskCodec.lzvn, .lzbitmap, .lzfse, .lzvn, .lzbitmap, .lzfse] {
-            let count = input.withUnsafeBytes { source in
-                output.withUnsafeMutableBytes { target in
-                    // Both arrays, alive for the call; the output has room for a chunk and one byte: safe.
-                    unsafe encoders.compress(source.baseAddress!, count: source.count, into: target.baseAddress!, codec: codec)
-                }
-            }
-            #expect(count > 0 && count < input.count)
-            let bytes = Array(output[0..<count])
-            if let earlier = first[codec] { #expect(earlier == bytes) } else { first[codec] = bytes }
-        }
-    }
-
     // MARK: Memory
 
     /// A pool that starts with some buffers inactive (an AEA payload, until it knows whether writers will hold segment
@@ -192,9 +140,8 @@ import Testing
         #expect(dictionary == [0: 2, 8: 3, 14: 1, 15: 1, 16: 1, 300: 2])
     }
 
-    /// A job is copied into the write queue's 16,384-slot ring, made when an extraction starts.
-    @Test func writeJobsAreSmall() {
-        #expect(MemoryLayout<Bridge>.size <= 132)
-        #expect(MemoryLayout<WriteJob>.stride <= 320)
+    /// A file's contents are copied into each of Disk's write jobs (a 16,384-slot ring, made when an extraction starts).
+    @Test func contentsAreSmall() {
+        #expect(MemoryLayout<SegmentContents.Contents>.stride <= 48)
     }
 }

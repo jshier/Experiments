@@ -142,8 +142,11 @@ struct NUnzip: AsyncParsableCommand {
     @Flag(name: [.customShort("q"), .customLong("quiet")], help: "Quiet mode; -qq is quieter.")
     var quiet: Int
 
-    @Option(name: .customLong("jobs"), help: "The most files to process at once (default: the number of active cores).")
-    var jobs = ProcessInfo.processInfo.activeProcessorCount
+    @Option(
+        name: .customLong("jobs"),
+        help: "The most files to process at once (default: extracting, one per performance core; testing, the number of active cores)."
+    )
+    var jobs: Int?
 
     @Flag(name: .customLong("zlib"), help: "Decompress DEFLATE with zlib instead of the built-in decoder (for comparison).")
     var useZlib = false
@@ -151,7 +154,7 @@ struct NUnzip: AsyncParsableCommand {
     private var backend: ZipDecoder.Backend { useZlib ? .zlib : .bytes }
 
     func validate() throws {
-        guard jobs >= 1 else { throw ValidationError("--jobs must be at least 1.") }
+        if let jobs, jobs < 1 { throw ValidationError("--jobs must be at least 1.") }
         if update != nil, mode != nil { throw ValidationError("-f and -u only apply to extraction.") }
     }
 
@@ -313,7 +316,7 @@ struct NUnzip: AsyncParsableCommand {
         // Archives are planned in order (opened, listed, asked about) while their files are being written.
         let failures: [ExtractionFailure]
         do {
-            failures = try await ZipExtractor.extract(maxConcurrency: jobs) { extractor in
+            failures = try await ZipExtractor.extract(into: destination, maxConcurrency: jobs) { extractor in
                 for (index, path) in paths.enumerated() {
                     if index > 0, quiet < 2 { Console.out("") }
                     guard let zip = open(path, status: &status) else { continue }
@@ -378,7 +381,7 @@ struct NUnzip: AsyncParsableCommand {
                         Console.out("\(label.leftPadded(to: 11)): \(base.pushing(path))\(suffix)")
                     }
                     do {
-                        try extractor.add(zip, entries: selected, to: destination, options: options)
+                        try await extractor.add(zip, entries: selected, options: options)
                     } catch {
                         Console.error("nunzip: \(error)")
                         status.archive(failed: 2)
@@ -415,6 +418,8 @@ struct NUnzip: AsyncParsableCommand {
         switch error {
         case let error as ZipError: error.description
         case let error as Errno: error.description
+        // Disk's errors (`DiskError`) describe the path and the call.
+        case let error as any CustomStringConvertible: error.description
         default: error.localizedDescription
         }
     }
@@ -526,7 +531,7 @@ struct NUnzip: AsyncParsableCommand {
     private func test(_ entries: [ZipEntry], in zip: ZipArchive, at path: String) async throws {
         if quiet < 2 { Console.out("Archive:  \(path)") }
         // Entries are verified in parallel; results are reported afterwards, in archive order.
-        let failed = await zip.verify(entries, maxConcurrency: jobs, backend: backend, password: password(for: zip, entries: entries, at: path))
+        let failed = await zip.verify(entries, maxConcurrency: jobs ?? ProcessInfo.processInfo.activeProcessorCount, backend: backend, password: password(for: zip, entries: entries, at: path))
         let errors = Dictionary(failed.map { ($0.entry.localHeaderOffset, $0.error) }, uniquingKeysWith: { first, _ in first })
         let width = min(entries.map(\.path.count).max() ?? 0, 60)
         for entry in entries where entry.kind != .directory {

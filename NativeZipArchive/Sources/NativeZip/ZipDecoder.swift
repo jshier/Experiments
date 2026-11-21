@@ -1,4 +1,5 @@
 internal import Bytes
+internal import BytesAsync
 internal import BytesCompression
 internal import CBZip2
 import Compression
@@ -63,9 +64,10 @@ public struct ZipDecoder: ~Copyable {
     /// The current encrypted entry's decryption, and its payload (in the mapped file), which it reads.
     private var decryptor: PayloadDecryptor?
     private var payload = unsafe UnsafeRawBufferPointer(start: nil, count: 0)
-    /// Two output buffers, each history plus a chunk. The second is used only by the pipelined path; its
-    /// pages are untouched otherwise. Raw allocations rather than arrays because the pipelined path sends
-    /// chunks of them to child tasks (see ``Chunk``); freed in `deinit`, never reallocated.
+    /// Two output buffers, each history plus a chunk. The second is used only when chunks alternate (a large entry
+    /// decoded on one task and written on another, ``nextChunk(into:)``); its pages are untouched otherwise. Raw
+    /// allocations rather than arrays because chunks of them cross tasks and suspensions (see ``Chunk``); freed in
+    /// `deinit`, never reallocated.
     private let buffers: (UnsafeMutableRawBufferPointer, UnsafeMutableRawBufferPointer)
     /// Whole decrypted payloads, for the decoders that read their whole input at once (Deflate64, LZMA): grown
     /// as needed, and released after a large one.
@@ -76,6 +78,9 @@ public struct ZipDecoder: ~Copyable {
     private var codec = Codec.inflate(window: 32 << 10)
     /// Whether a bzip2 or xz stream is initialized and must be ended.
     private var streamOpen = false
+    /// The entry ``nextChunk(into:)`` hands out: its name (for errors), and whether it's a stored entry being decrypted.
+    private var entryPath = ""
+    private var decryptsStored = false
     /// Where the last step's output ended, and in which buffer: the next step's history.
     private var lastBuffer = 0
     private var lastEnd = 0
@@ -195,70 +200,53 @@ public struct ZipDecoder: ~Copyable {
         let bytes: UnsafeRawBufferPointer
     }
 
-    /// Decodes an entry, overlapping `consume` of chunk N (in a child task) with decoding chunk N+1.
-    ///
-    /// Two buffers alternate: a buffer is decoded into only after the consumer of its previous contents
-    /// has finished, and consumers run one at a time, in order. Decoding into a buffer reads the other's
-    /// last 32 or 64 KB as history while its consumer may be reading it too: both only read.
+    // MARK: Pulling chunks
+
+    /// Starts decoding an entry for ``nextChunk(into:)``, which hands out its output a chunk at a time: for callers that
+    /// write each chunk before asking for the next (an extraction's writers, which suspend in their writes), or that
+    /// decode on one task and write on another (two buffers alternate: see ``nextChunk(into:)``). End with
+    /// ``endEntry()``.
     ///
     /// - Parameters:
-    ///   - payload: The entry's payload, as stored.
-    ///   - entry: The entry: not stored (unless encrypted, then it's one chunk).
+    ///   - payload: The entry's payload, as stored. It must stay valid until ``endEntry()`` (it points into a
+    ///     ``MappedFile``).
+    ///   - entry: The entry: compressed, or stored and encrypted (unencrypted stored entries are their payload).
     ///   - password: The password for an encrypted entry.
-    ///   - consume: Called with each chunk in a child task, one at a time, in order.
-    /// - Throws: The errors of ``decode(_:entry:password:_:)``; whatever `consume` throws.
-    /// - Precondition: `payload` stays valid for the whole call (it points into a ``MappedFile``).
-    nonisolated(nonsending) mutating func decodePipelined(
-        _ payload: UnsafeRawBufferPointer,
-        entry: ZipEntry,
-        password: String?,
-        consume: @escaping @Sendable (Chunk) throws -> Void
-    ) async throws {
-        defer { endDecryption() }
+    /// - Throws: The errors of ``decode(_:entry:password:_:)`` that come before any output.
+    mutating func beginEntry(_ payload: UnsafeRawBufferPointer, entry: ZipEntry, password: String?) throws {
+        endEntry()
         let input = try unsafe prepareInput(payload, entry: entry, password: password)
+        entryPath = entry.path
         if entry.method == ZipArchive.Method.stored {
-            if decryptor != nil {
-                // Decrypted a chunk at a time; consumed in order, one at a time (the buffer is reused).
-                while decryptor?.isFinished == false {
-                    try unsafe consume(decryptStored(into: 0))
-                }
-            } else {
-                try unsafe consume(Chunk(bytes: input))
-            }
+            precondition(decryptor != nil, "an unencrypted stored entry is its payload")
+            decryptsStored = true
             return
         }
+        decryptsStored = false
         try unsafe begin(input, method: entry.method, size: entry.uncompressedSize, endMarker: entry.flags & 0x2 != 0, path: entry.path)
-        defer { closeStream() }
-        // One consumer task for the whole entry, handed each chunk in turn: no allocation per chunk (a child task
-        // per chunk was one each).
-        let handoff = ChunkHandoff()
-        try await withThrowingTaskGroup(of: Void.self) { group in
-            group.addTask {
-                do {
-                    while let chunk = await unsafe handoff.receive() { try unsafe consume(chunk) }
-                } catch {
-                    handoff.fail()
-                    throw error
-                }
-            }
-            // A decoding error ends the consumer's loop before the group waits for it.
-            defer { handoff.close() }
-            var target = 0
-            while true {
-                // Large entries only (several chunks): stop promptly when the task is cancelled.
-                try Task.checkCancellation()
-                let (output, finished) = try unsafe step(into: target, path: entry.path)
-                if unsafe !output.isEmpty {
-                    // `send` returns once the consumer has finished the previous chunk and taken this one: so the
-                    // buffer decoded into next (the other one) is free. `false`: the consumer failed; stop.
-                    guard await unsafe handoff.send(Chunk(bytes: output)) else { break }
-                    target ^= 1
-                }
-                if finished { break }
-            }
-            handoff.close()
-            try await group.waitForAll()
+    }
+
+    /// The entry's next chunk of output, decoded (or decrypted) into buffer `index` (0 or 1), and whether it's the last.
+    ///
+    /// A chunk stays valid until the next call into the same buffer. Decoding into one buffer reads the other's last 32
+    /// or 64 KB as history, so a consumer may read one buffer's chunk while the next is decoded into the other (both
+    /// only read the first).
+    ///
+    /// - Throws: ``ZipError/corruptData(_:)`` for invalid or truncated data.
+    mutating func nextChunk(into index: Int) throws -> (chunk: Chunk, finished: Bool) {
+        if decryptsStored {
+            let chunk = unsafe decryptStored(into: index)
+            return unsafe (chunk, decryptor?.isFinished ?? true)
         }
+        let (output, finished) = try unsafe step(into: index, path: entryPath)
+        return unsafe (Chunk(bytes: output), finished)
+    }
+
+    /// Ends the entry ``beginEntry(_:entry:password:)`` started (a library stream, its decryption): after its last
+    /// chunk, or a failure.
+    mutating func endEntry() {
+        closeStream()
+        endDecryption()
     }
 
     // MARK: Decryption
@@ -463,8 +451,8 @@ public struct ZipDecoder: ~Copyable {
             do {
                 // Unsafe: spans over memory this type owns. Safe: `buffers` are allocated for the decoder's
                 // lifetime, and `input` points into a mapped file or ``decrypted``, which outlive the entry's
-                // decoding (see `decodePipelined`); both spans end with this call. Owned buffers can't be safe
-                // types here: the pipelined path hands chunks to child tasks across suspension points, which a
+                // decoding (see `beginEntry`); both spans end with this call. Owned buffers can't be safe
+                // types here: chunks cross tasks and suspension points (`nextChunk`), which a
                 // span or an `Array`'s storage can't outlive.
                 var span = unsafe MutableRawSpan(_unsafeBytes: output)
                 (end, finished) = try unsafe inflater.decode(RawSpan(_unsafeBytes: input), into: &span, start: history)
@@ -680,145 +668,10 @@ public struct ZipDecoder: ~Copyable {
     }
 }
 
-/// A rendezvous between a decoder making chunks and the one task consuming them, in order: the decoder's `send`
-/// returns once the consumer has finished the previous chunk and taken the new one. Nothing is allocated per
-/// chunk: waits are unchecked continuations, which live in the waiting task.
-///
-/// The NativeAEA discipline: what doesn't have to wait is decided synchronously under the lock, without
-/// suspending; a wait checks again under the lock inside the continuation's body (so no wakeup is lost); and
-/// continuations are taken out of the state under the lock and resumed after it's released.
-@safe
-final class ChunkHandoff: Sendable {
-    // Unsafe: chunks and unchecked continuations in the state. Safe: each continuation is resumed exactly once
-    // (taken out of the state, under the lock, by whoever resumes it), and a chunk is used by one consumer at a
-    // time (see `send`).
-    @safe private struct State: @unchecked Sendable {
-        /// The consumer, waiting for a chunk.
-        var consumer: UnsafeContinuation<ZipDecoder.Chunk?, Never>?
-        /// The decoder, waiting for the consumer to take its chunk.
-        var producer: (continuation: UnsafeContinuation<Bool, Never>, chunk: ZipDecoder.Chunk)?
-        /// No more chunks are coming.
-        var closed = false
-        /// The consumer threw: chunks are refused.
-        var failed = false
-
-        /// What `send` does now; a waiting consumer is taken out.
-        mutating func send() -> Send {
-            if failed { return .refused }
-            guard let waiting = unsafe consumer else { return .wait }
-            unsafe consumer = nil
-            return unsafe .handed(waiting)
-        }
-
-        /// What `receive` does now; a waiting decoder is taken out.
-        mutating func receive() -> Receive {
-            guard let (waiting, chunk) = unsafe producer else { return closed ? .closed : .wait }
-            unsafe producer = nil
-            return unsafe .taken(chunk, producer: waiting)
-        }
-    }
-
-    /// What `send` does, decided under the lock.
-    @safe private enum Send {
-        /// Refused (the consumer failed).
-        case refused
-        /// Taken by the waiting consumer, which is to be resumed with it.
-        case handed(UnsafeContinuation<ZipDecoder.Chunk?, Never>)
-        /// The consumer is busy: wait for it.
-        case wait
-    }
-
-    /// What `receive` does, decided under the lock.
-    @safe private enum Receive {
-        /// A waiting decoder's chunk; the decoder is to be resumed with `true`.
-        case taken(ZipDecoder.Chunk, producer: UnsafeContinuation<Bool, Never>)
-        /// No more chunks.
-        case closed
-        /// Nothing yet: wait for the decoder.
-        case wait
-    }
-
-    private let state = Mutex(State())
-
-    /// Hands `chunk` to the consumer, waiting until it's free.
-    ///
-    /// - Returns: `false` if the consumer failed (the chunk wasn't taken).
-    @unsafe
-    nonisolated(nonsending) func send(_ chunk: ZipDecoder.Chunk) async -> Bool {
-        // Fast path: the consumer is already waiting (or has failed): no suspension.
-        switch state.withLock({ $0.send() }) {
-        case .refused: return false
-        case let .handed(consumer):
-            unsafe consumer.resume(returning: chunk)
-            return true
-        case .wait: break
-        }
-        return await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<Bool, Never>) in
-            // Again under the lock: the consumer may have come (or failed) since.
-            let ready = state.withLock { state in
-                let now = state.send()
-                if case .wait = now { unsafe state.producer = (continuation, chunk) }
-                return now
-            }
-            switch ready {
-            case .refused: unsafe continuation.resume(returning: false)
-            case let .handed(consumer):
-                unsafe consumer.resume(returning: chunk)
-                unsafe continuation.resume(returning: true)
-            case .wait: break // Stored: `receive` or `fail` resumes it.
-            }
-        }
-    }
-
-    /// The next chunk, waiting for one; `nil` once the decoder is done. Calling it again means the previous
-    /// chunk is finished with.
-    @unsafe
-    nonisolated(nonsending) func receive() async -> ZipDecoder.Chunk? {
-        // Fast path: the decoder is already waiting with a chunk (or done): no suspension.
-        switch state.withLock({ $0.receive() }) {
-        case let .taken(chunk, producer):
-            unsafe producer.resume(returning: true)
-            return unsafe chunk
-        case .closed: return nil
-        case .wait: break
-        }
-        return await unsafe withUnsafeContinuation { (continuation: UnsafeContinuation<ZipDecoder.Chunk?, Never>) in
-            // Again under the lock: the decoder may have sent (or closed) since.
-            let ready = state.withLock { state in
-                let now = state.receive()
-                if case .wait = now { unsafe state.consumer = continuation }
-                return now
-            }
-            switch ready {
-            case let .taken(chunk, producer):
-                unsafe producer.resume(returning: true)
-                unsafe continuation.resume(returning: chunk)
-            case .closed: unsafe continuation.resume(returning: nil)
-            case .wait: break // Stored: `send` or `close` resumes it.
-            }
-        }
-    }
-
-    /// No more chunks: a waiting consumer gets `nil`.
-    func close() {
-        let consumer = unsafe state.withLock { state in
-            state.closed = true
-            defer { unsafe state.consumer = nil }
-            return unsafe state.consumer
-        }
-        unsafe consumer?.resume(returning: nil)
-    }
-
-    /// The consumer failed: a waiting decoder gets `false`, and so does every later `send`.
-    func fail() {
-        let producer = unsafe state.withLock { state in
-            state.failed = true
-            defer { unsafe state.producer = nil }
-            return unsafe state.producer?.continuation
-        }
-        unsafe producer?.resume(returning: false)
-    }
-}
+/// A rendezvous between a decoder making chunks and the one task consuming them, in order (BytesAsync's
+/// `AsyncHandoff`): the decoder's `send` returns once the consumer has finished the previous chunk and taken the new
+/// one, so two decoder buffers can alternate. Nothing is allocated per chunk.
+typealias ChunkHandoff = AsyncHandoff<ZipDecoder.Chunk>
 
 // MARK: - Benchmarking hooks
 

@@ -93,8 +93,8 @@ public struct Adler32: Hashable, Sendable {
         let halfMask = SIMD4<UInt32>(repeating: 0xFFFF)
         let halfShift = SIMD4<UInt32>(repeating: 16)
         #if HardwareCRC && arch(arm64) && !Portable
-        // Whole 64-byte blocks with UDOT; the vector loop below takes the (at most one) 32-byte block left, and the
-        // bytes loop the rest.
+        // Whole 64-byte blocks with UDOT (two at a time, then an odd one); the vector loop below takes the (at most one)
+        // 32-byte block left, and the bytes loop the rest.
         if count >= 64 { _updateDotProduct(bytes, offset: &offset, a: &a, b: &b) }
         #endif
         while count &- offset >= 32 {
@@ -161,16 +161,26 @@ public struct Adler32: Hashable, Sendable {
 
 #if HardwareCRC && arch(arm64) && !Portable
 extension Adler32 {
-    /// 64-byte blocks per reduction: 86 keeps every 32-bit lane (and the sum of a vector's four) below 2^32.
-    static var dotProductBlocksPerChunk: Int { 86 }
+    /// 128-byte steps per reduction (64 KiB). A step adds at most 128 × 255 = 32,640 to the four lanes of `sum`
+    /// together, and `prefix` adds `sum` before each step, so after `m` steps `prefix`'s lanes total at most
+    /// 32,640 · m(m − 1)/2: below 2^32 for m ≤ 513. The weighted sums grow by at most 255 × (128 + 127 + … + 1) =
+    /// 2,105,280 a step (below 2^32 for m ≤ 2,040), and `sum` by 32,640. So no 32-bit lane, and no horizontal sum of a
+    /// vector's (or the eight weighted vectors') lanes, overflows.
+    static var dotProductStepsPerChunk: Int { 512 }
 
     /// Adds whole 64-byte blocks of `bytes` from `offset` with UDOT, which sums four bytes into a 32-bit lane in
-    /// one instruction: the byte sums against a vector of ones, the position-weighted sums against 64, 63, …, 1.
+    /// one instruction: the byte sums against a vector of ones, the position-weighted sums against 128, 127, …, 1.
     ///
-    /// For a chunk of `m` blocks, byte `j` of block `k` is followed by `64(m − k) − j − 1` bytes within the chunk, so
-    /// `b` grows by `64m·a + Σ (64(m − k) − j)·byte`. Split as `64·Σ (m − k)·byte` (each block adds the sum of all
-    /// the bytes before it, `prefix`, once more for every block after it, and once for its own) plus the weighted
-    /// sum `Σ (64 − j)·byte` of each block. Four independent accumulators for each of the sums.
+    /// For a chunk of `m` 128-byte steps, byte `j` of step `k` is followed by `128(m − k) − j − 1` bytes within the
+    /// chunk, so `b` grows by `128m·a + Σ (128(m − k) − j)·byte`. Split as `128·Σ (m − 1 − k)·byte` (`prefix`, which
+    /// adds before each step the byte sum of the steps before it) plus the weighted sum `Σ (128 − j)·byte` of each
+    /// step. A last odd 64-byte block is added alone, with the weights 64, …, 1.
+    ///
+    /// The loop is bound by the vector pipes, not by UDOT's latency (3 cycles on the M3 and M1): a step is 16 UDOTs, two
+    /// adds, and the zeroing of a register, 19 vector operations for four pipes, about 4.75 cycles. Each of the eight
+    /// weighted accumulators takes one UDOT a step. The byte sum of a step is one chain of eight UDOTs started from
+    /// zero, which no later step waits on: only the two adds (`prefix`, `sum`) carry over. (Eight accumulators for the
+    /// byte sums, as the weighted sums have, would cost eight adds a step to form `prefix`: 24 operations.)
     ///
     /// - Parameters:
     ///   - bytes: The bytes to checksum.
@@ -181,39 +191,80 @@ extension Adler32 {
     static func _updateDotProduct(_ bytes: RawSpan, offset: inout Int, a: inout UInt32, b: inout UInt32) {
         let count = bytes.byteCount
         let ones = SIMD16<UInt8>(repeating: 1)
+        let zero = SIMD4<UInt32>()
         let weights0 = bytes_adler_weights(0)
         let weights1 = bytes_adler_weights(1)
         let weights2 = bytes_adler_weights(2)
         let weights3 = bytes_adler_weights(3)
-        while count &- offset >= 64 {
-            let blocks = min((count &- offset) &>> 6, dotProductBlocksPerChunk)
-            var sum0 = SIMD4<UInt32>(), sum1 = SIMD4<UInt32>(), sum2 = SIMD4<UInt32>(), sum3 = SIMD4<UInt32>()
-            var weighted0 = SIMD4<UInt32>(), weighted1 = SIMD4<UInt32>(), weighted2 = SIMD4<UInt32>(), weighted3 = SIMD4<UInt32>()
-            var prefix = SIMD4<UInt32>()
-            for _ in 0..<blocks {
-                // Unsafe: unchecked loads. Safe: `blocks` 64-byte blocks remain from `offset`, checked above.
+        let weights4 = bytes_adler_weights(4)
+        let weights5 = bytes_adler_weights(5)
+        let weights6 = bytes_adler_weights(6)
+        let weights7 = bytes_adler_weights(7)
+        while count &- offset >= 128 {
+            let steps = min((count &- offset) &>> 7, dotProductStepsPerChunk)
+            var sum = zero, prefix = zero
+            var weighted0 = zero, weighted1 = zero, weighted2 = zero, weighted3 = zero
+            var weighted4 = zero, weighted5 = zero, weighted6 = zero, weighted7 = zero
+            for _ in 0..<steps {
+                // Unsafe: unchecked loads. Safe: `steps` 128-byte steps remain from `offset`, checked above.
                 let data0 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)
                 let data1 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 16, as: SIMD16<UInt8>.self)
                 let data2 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 32, as: SIMD16<UInt8>.self)
                 let data3 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 48, as: SIMD16<UInt8>.self)
-                prefix &+= (sum0 &+ sum1) &+ (sum2 &+ sum3) // The byte sum of the blocks before this one.
-                sum0 = bytes_crc_udot(sum0, data0, ones)
-                sum1 = bytes_crc_udot(sum1, data1, ones)
-                sum2 = bytes_crc_udot(sum2, data2, ones)
-                sum3 = bytes_crc_udot(sum3, data3, ones)
+                let data4 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 64, as: SIMD16<UInt8>.self)
+                let data5 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 80, as: SIMD16<UInt8>.self)
+                let data6 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 96, as: SIMD16<UInt8>.self)
+                let data7 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 112, as: SIMD16<UInt8>.self)
+                prefix &+= sum // The byte sum of the steps before this one.
+                // This step's byte sum, from zero: the chain's latency overlaps the next steps'.
+                var step = bytes_crc_udot(zero, data0, ones)
+                step = bytes_crc_udot(step, data1, ones)
+                step = bytes_crc_udot(step, data2, ones)
+                step = bytes_crc_udot(step, data3, ones)
+                step = bytes_crc_udot(step, data4, ones)
+                step = bytes_crc_udot(step, data5, ones)
+                step = bytes_crc_udot(step, data6, ones)
+                step = bytes_crc_udot(step, data7, ones)
+                sum &+= step
                 weighted0 = bytes_crc_udot(weighted0, data0, weights0)
                 weighted1 = bytes_crc_udot(weighted1, data1, weights1)
                 weighted2 = bytes_crc_udot(weighted2, data2, weights2)
                 weighted3 = bytes_crc_udot(weighted3, data3, weights3)
-                offset &+= 64
+                weighted4 = bytes_crc_udot(weighted4, data4, weights4)
+                weighted5 = bytes_crc_udot(weighted5, data5, weights5)
+                weighted6 = bytes_crc_udot(weighted6, data6, weights6)
+                weighted7 = bytes_crc_udot(weighted7, data7, weights7)
+                offset &+= 128
             }
-            // Each total is below 2^32 (see `dotProductBlocksPerChunk`); `prefix` is shifted in 64 bits.
-            let sum = UInt64(((sum0 &+ sum1) &+ (sum2 &+ sum3)).wrappedSum())
-            let weighted = UInt64(((weighted0 &+ weighted1) &+ (weighted2 &+ weighted3)).wrappedSum())
+            // Each total is below 2^32 (see `dotProductStepsPerChunk`); `prefix` is shifted in 64 bits.
+            let total = UInt64(sum.wrappedSum())
+            let weighted = UInt64(
+                (((weighted0 &+ weighted1) &+ (weighted2 &+ weighted3)) &+ ((weighted4 &+ weighted5) &+ (weighted6 &+ weighted7)))
+                    .wrappedSum()
+            )
             let before = UInt64(prefix.wrappedSum())
-            let n = UInt64(blocks &<< 6)
-            b = UInt32((UInt64(b) &+ n &* UInt64(a) &+ before &<< 6 &+ weighted) % UInt64(modulus))
-            a = UInt32((UInt64(a) &+ sum) % UInt64(modulus))
+            let n = UInt64(steps &<< 7)
+            b = UInt32((UInt64(b) &+ n &* UInt64(a) &+ before &<< 7 &+ weighted) % UInt64(modulus))
+            a = UInt32((UInt64(a) &+ total) % UInt64(modulus))
+        }
+        if count &- offset >= 64 {
+            // One block left: `b` grows by `64·a` plus the bytes weighted 64, …, 1 (the last four weight vectors).
+            // Unsafe: unchecked loads. Safe: 64 bytes remain from `offset`, checked above.
+            let data0 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)
+            let data1 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 16, as: SIMD16<UInt8>.self)
+            let data2 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 32, as: SIMD16<UInt8>.self)
+            let data3 = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 48, as: SIMD16<UInt8>.self)
+            var sum = bytes_crc_udot(zero, data0, ones)
+            sum = bytes_crc_udot(sum, data1, ones)
+            sum = bytes_crc_udot(sum, data2, ones)
+            sum = bytes_crc_udot(sum, data3, ones)
+            var weighted = bytes_crc_udot(zero, data0, weights4)
+            weighted = bytes_crc_udot(weighted, data1, weights5)
+            weighted = bytes_crc_udot(weighted, data2, weights6)
+            weighted = bytes_crc_udot(weighted, data3, weights7)
+            b = UInt32((UInt64(b) &+ 64 &* UInt64(a) &+ UInt64(weighted.wrappedSum())) % UInt64(modulus))
+            a = UInt32((UInt64(a) &+ UInt64(sum.wrappedSum())) % UInt64(modulus))
+            offset &+= 64
         }
     }
 }

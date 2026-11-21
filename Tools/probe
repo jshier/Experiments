@@ -1,0 +1,316 @@
+#!/bin/bash
+# probe — what this Mac's cores and memory can do, and how Bytes' kernels run on it, measured the same way on
+# any Apple silicon Mac (M1 through M5; base, Pro, Max, Ultra) so results from two machines compare row by row.
+# Sources and the method, with its pitfalls: Tools/probes/README.md. Reference results: Tools/probes/results/.
+#
+# usage: Tools/probe COMMAND [options]
+#
+#   machine            what the results depend on, as key<TAB>value: chip, model, cores and caches per level,
+#                      memory, line and page size, ARM features (hw.optional.arm.FEAT_*), macOS, Xcode, clang,
+#                      Swift, power source, low power mode, load average.
+#   insn [--quick] [--runs N] [--clock FILE] [--only NAME]
+#                      latency (one dependent chain) and throughput (8, 16, 24 independent chains; the best is
+#                      `per_cycle`) of NEON, crypto, and scalar instructions on one P core, in cycles of a
+#                      dependent-`add` calibration timed next to each instruction; medians of 3 runs, with
+#                      their spread. Instructions the chip lacks are skipped (FEAT_* sysctl). --clock FILE writes
+#                      the per-run clock table there (else a summary goes to stderr). --only NAME: just the
+#                      instructions whose name contains NAME (e.g. "tbl"). About 12 s.
+#   mem [latency|bandwidth|threads] [--quick]
+#                      pointer-chase latency (16 KB to 512 MB, 1 GB with 16 GB of memory or more), one thread's
+#                      read and write bandwidth by working set, and read bandwidth by thread count (`steps`), each
+#                      thread on its own 256 MB (less on small-memory Macs). No part: all three tables, separated
+#                      by a blank line. About 20 s.
+#   bytes [checksums|lanes|segments] [--quick]
+#                      Bytes' kernels (Tools/probes/BytesProbe, built release on first use: a minute or two):
+#                      CRC-32 and Adler-32 GB/s by size; ParallelDeflateEncoder/Decoder ms by lane count (`steps`);
+#                      the decoder's segments at every lane count from 1 to hw.ncpu (where it falls back to one).
+#                      lanes and segments need the corpus (Tools/corpus fetch). About 40 s.
+#   all [--save DIR] [--quick] [--no-bytes]
+#                      everything: machine.tsv, insn.tsv, insn-clock.tsv, mem-latency.tsv, mem-bandwidth.tsv,
+#                      mem-threads.tsv, checksums.tsv, lanes.tsv, segments.tsv in DIR (default
+#                      ~/Scratch/probes/CHIP-YYYY-MM-DD, e.g. M3-Ultra-2026-11-20, with -2, -3… if it exists).
+#                      Prints DIR. About 1.5 minutes on an M3 Ultra, plus the first BytesProbe build.
+#   compare [--probe RE] [--metric RE] [--spread] [--min-change PCT] DIR_A DIR_B...
+#                      the same rows from each directory side by side, with each later directory's ratio to
+#                      DIR_A. --min-change shows only rows that differ by at least PCT percent.
+#   steps              the thread and lane counts used on this Mac: 1, 2, 3, 4, 6, 8, 10, 12, 16, … up to hw.ncpu,
+#                      plus half the P cores, the P cores, one more than the P cores, and each level's total.
+#
+#   --quick            shorter measurements (fewer repetitions, less data): about a third of the time, noisier.
+#
+# Output: TSV on stdout (pipe to `column -t -s $'\t'`), progress and notes on stderr. Measure on an idle Mac on
+# AC power; `machine` records the load average and power source so a busy run can be recognized afterwards.
+# The C probes are compiled with `xcrun clang -O2 -mcpu=apple-m1` into ~/Library/Caches/experiments-tools/probe
+# (again when a source or the compiler changes); BytesProbe builds in Tools/probes/BytesProbe/.build.
+#
+# examples:
+#   Tools/probe all
+#   Tools/probe compare Tools/probes/results/M3-Ultra-2026-11-20 ~/Scratch/probes/M1-Max-2026-11-21 | column -t -s $'\t'
+#   Tools/probe compare --probe insn --metric 'latency|^per_cycle$' A B
+#   Tools/probe insn --quick | column -t -s $'\t'
+source "$(dirname "$0")/lib/common.sh"
+
+PROBES_DIR="$TOOLS_DIR/probes"
+CACHE="$HOME/Library/Caches/experiments-tools/probe"
+QUICK=
+
+sysctl_value() { sysctl -n "$1" 2>/dev/null || echo "-"; }
+
+# Runs a probe with a time limit, so a stuck run fails with a message instead of hanging.
+limited() {
+    local seconds="$1" rc=0; shift
+    with_timeout "$seconds" "$@" || rc=$?
+    [[ $rc -ne 141 ]] || exit 141  # SIGPIPE: the reader (head, a closed pipe) went away; nothing to report
+    [[ $rc -ne 124 ]] || die "$(basename "$1") ${2:-} ran past $seconds s and was stopped"
+    [[ $rc -eq 0 ]] || die "$(basename "$1") ${2:-} failed (exit $rc)"
+}
+
+# Thread and lane counts: the usual steps up to hw.ncpu, plus the core-count boundaries of this chip.
+steps() {
+    local ncpu levels counts=() level total=0 p
+    ncpu="$(sysctl -n hw.ncpu)"
+    levels="$(sysctl -n hw.nperflevels 2>/dev/null || echo 1)"
+    p="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo "$ncpu")"
+    counts+=("$((p / 2))" "$p" "$((p + 1))")
+    for ((level = 0; level < levels; level++)); do
+        total=$((total + $(sysctl -n "hw.perflevel$level.physicalcpu" 2>/dev/null || echo 0)))
+        counts+=("$total")
+    done
+    NCPU="$ncpu" perl -e 'my %s; $s{$_} = 1 for grep { $_ >= 1 && $_ <= $ENV{NCPU} } (1, 2, 3, 4, 6, 8, 10, 12, 16, 20, 24, 28, 32, 40, 48, 56, 64, 80, 96, 112, 128, @ARGV);
+        print join(",", sort { $a <=> $b } keys %s), "\n"' "${counts[@]}"
+}
+all_counts() { seq -s, 1 "$(sysctl -n hw.ncpu)"; }
+
+# --- Building -------------------------------------------------------------------------------------------------
+
+# Compiles a C probe when its source, or the compiler, changed. $1: name; $2: source file.
+build_c() {
+    local name="$1" source="$2" binary="$CACHE/$1" stamp="$CACHE/$1.compiler" compiler
+    compiler="$(xcrun clang --version | head -1)"
+    mkdir -p "$CACHE"
+    if [[ ! -x "$binary" || "$source" -nt "$binary" || ! -f "$stamp" || "$(cat "$stamp")" != "$compiler" ]]; then
+        note "compiling $name ($compiler)…"
+        xcrun clang -O2 -mcpu=apple-m1 -Wall -o "$binary" "$source" || die "couldn't compile $source"
+        echo "$compiler" > "$stamp"
+    fi
+    echo "$binary"
+}
+insn_binary() {
+    local generated="$CACHE/insn.c"
+    mkdir -p "$CACHE"
+    if [[ ! -f "$generated" || "$PROBES_DIR/gen-insn.pl" -nt "$generated" ]]; then
+        perl "$PROBES_DIR/gen-insn.pl" > "$generated.tmp" && mv "$generated.tmp" "$generated" ||
+            die "gen-insn.pl failed"
+    fi
+    build_c insn "$generated"
+}
+bytes_binary() {
+    local package="$PROBES_DIR/BytesProbe" log bin
+    [[ -f "$EXPERIMENTS_DIR/Bytes/Package.swift" ]] || die "no Bytes package at $EXPERIMENTS_DIR/Bytes"
+    log="$(mktemp "${TMPDIR:-/tmp}/probe-build.XXXXXX")"
+    note "building BytesProbe (release; the first build takes a minute or two)…"
+    (cd "$package" && swift build -c release --product bytes-probe) > "$log" 2>&1 ||
+        { grep -E 'error:' "$log" | head -20 >&2; rm -f "$log"; die "swift build of BytesProbe failed"; }
+    grep -E 'warning:' "$log" | sort -u | head -5 >&2 || true
+    rm -f "$log"
+    bin="$(cd "$package" && swift build -c release --show-bin-path)/bytes-probe"
+    [[ -x "$bin" ]] || die "no $bin after building"
+    echo "$bin"
+}
+corpus_dir() {
+    local dir
+    dir="$("$TOOLS_DIR/corpus" path)"
+    [[ -f "$dir/silesia/dickens" && -f "$dir/silesia/mozilla" ]] || return 1
+    echo "$dir"
+}
+
+# --- Probes ---------------------------------------------------------------------------------------------------
+
+machine() {
+    local level levels feature
+    printf 'key\tvalue\n'
+    printf 'date\t%s\n' "$(date +%Y-%m-%dT%H:%M:%S%z)"
+    printf 'chip\t%s\n' "$(sysctl_value machdep.cpu.brand_string)"
+    for key in hw.model hw.ncpu hw.nperflevels; do printf '%s\t%s\n' "$key" "$(sysctl_value $key)"; done
+    levels="$(sysctl -n hw.nperflevels 2>/dev/null || echo 0)"
+    for ((level = 0; level < levels; level++)); do
+        for key in name physicalcpu l1dcachesize l1icachesize l2cachesize cpusperl2; do
+            printf '%s\t%s\n' "hw.perflevel$level.$key" "$(sysctl_value "hw.perflevel$level.$key")"
+        done
+    done
+    for key in hw.memsize hw.cachelinesize hw.pagesize; do printf '%s\t%s\n' "$key" "$(sysctl_value $key)"; done
+    for feature in AES PMULL SHA256 SHA512 SHA3 CRC32 DotProd FHM FP16 I8MM BF16 SME SME2; do
+        printf 'FEAT_%s\t%s\n' "$feature" "$(sysctl -n "hw.optional.arm.FEAT_$feature" 2>/dev/null || echo 0)"
+    done
+    printf 'macos\t%s (%s)\n' "$(sw_vers -productVersion)" "$(sw_vers -buildVersion)"
+    printf 'xcode\t%s\n' "$(xcodebuild -version 2>/dev/null | perl -0ne 's/Xcode //; s/\nBuild version (\S+)\n?/ ($1)/; print' || echo -)"
+    printf 'clang\t%s\n' "$(xcrun clang --version | head -1)"
+    printf 'swift\t%s\n' "$(xcrun swift --version 2>&1 | perl -ne 'print "$1\n" if /(Apple Swift version [^)]*\))/' | head -1)"
+    printf 'power\t%s\n' "$(pmset -g ps 2>/dev/null | perl -ne "print \$1 if /drawing from '([^']+)'/" || echo -)"
+    printf 'lowpowermode\t%s\n' "$(pmset -g 2>/dev/null | perl -ne 'print $1 if /lowpowermode\s+(\d+)/' || echo -)"
+    printf 'loadavg_1m\t%s\n' "$(sysctl -n vm.loadavg | perl -ne 'print $1 if /\{\s*([\d.]+)/')"
+    printf 'probe_revision\t%s\n' "$(probe_revision)"
+}
+probe_revision() {
+    local rev dirty
+    rev="$(git -C "$EXPERIMENTS_DIR" log -1 --format=%h -- Tools/probe Tools/probes 2>/dev/null || true)"
+    dirty="$(git -C "$EXPERIMENTS_DIR" status --porcelain -- Tools/probe Tools/probes 2>/dev/null | head -1 || true)"
+    echo "${rev:-uncommitted}${dirty:+ (modified)}"
+}
+
+insn() {
+    local runs=3 clock= only= binary args
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --quick) QUICK=1 ;;
+            --runs) runs="$2"; shift ;;
+            --clock) clock="$2"; shift ;;
+            --only) only="$2"; shift ;;
+            -h|--help) usage ;;
+            *) die "unknown insn option $1" ;;
+        esac
+        shift
+    done
+    binary="$(insn_binary)"
+    args=(-r "$runs")
+    [[ -n "$QUICK" ]] && args+=(-n 2 -i 83333 -w 200)
+    [[ -n "$clock" ]] && args+=(-c "$clock")
+    [[ -n "$only" ]] && args+=(-o "$only")
+    note "insn: $runs runs…"
+    limited 600 "$binary" "${args[@]}"
+}
+
+mem() {
+    local part= binary flags=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            latency|bandwidth|threads) part="$1" ;;
+            --quick) QUICK=1 ;;
+            -h|--help) usage ;;
+            *) die "unknown mem option $1" ;;
+        esac
+        shift
+    done
+    binary="$(build_c mem "$PROBES_DIR/mem.c")"
+    [[ -n "$QUICK" ]] && flags+=(-q)
+    if [[ -z "$part" ]]; then
+        mem_part "$binary" latency ${flags[@]+"${flags[@]}"}; echo
+        mem_part "$binary" bandwidth ${flags[@]+"${flags[@]}"}; echo
+        mem_part "$binary" threads ${flags[@]+"${flags[@]}"}
+    else
+        mem_part "$binary" "$part" ${flags[@]+"${flags[@]}"}
+    fi
+}
+mem_part() {
+    local binary="$1" part="$2"; shift 2
+    note "mem ${part}…"
+    if [[ "$part" == threads ]]; then
+        limited 600 "$binary" threads -t "$(steps)" "$@"
+    else
+        limited 600 "$binary" "$part" "$@"
+    fi
+}
+
+bytes() {
+    local part= binary
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            checksums|lanes|segments) part="$1" ;;
+            --quick) QUICK=1 ;;
+            -h|--help) usage ;;
+            *) die "unknown bytes option $1" ;;
+        esac
+        shift
+    done
+    binary="$(bytes_binary)"
+    if [[ -z "$part" ]]; then
+        bytes_part "$binary" checksums; echo
+        bytes_part "$binary" lanes; echo
+        bytes_part "$binary" segments
+    else
+        bytes_part "$binary" "$part"
+    fi
+}
+bytes_part() {
+    local binary="$1" part="$2" corpus
+    note "bytes ${part}…"
+    case "$part" in
+        checksums)
+            if [[ -n "$QUICK" ]]; then limited 600 "$binary" checksums --reps 3 --megabytes 128
+            else limited 600 "$binary" checksums; fi ;;
+        lanes)
+            corpus="$(corpus_dir)" || { note "skipping lanes: no Silesia corpus (Tools/corpus fetch)"; return 0; }
+            if [[ -n "$QUICK" ]]; then limited 900 "$binary" lanes --corpus "$corpus" --lanes "$(steps)" --encodes 3 --decodes 3
+            else limited 900 "$binary" lanes --corpus "$corpus" --lanes "$(steps)"; fi ;;
+        segments)
+            corpus="$(corpus_dir)" || { note "skipping segments: no Silesia corpus (Tools/corpus fetch)"; return 0; }
+            if [[ -n "$QUICK" ]]; then limited 900 "$binary" segments --corpus "$corpus" --lanes "$(steps)" --decodes 1
+            else limited 900 "$binary" segments --corpus "$corpus" --lanes "$(all_counts)"; fi ;;
+    esac
+}
+
+all() {
+    local dir= no_bytes= chip base n start bytes_bin
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --save) dir="$2"; shift ;;
+            --quick) QUICK=1 ;;
+            --no-bytes) no_bytes=1 ;;
+            -h|--help) usage ;;
+            *) die "unknown all option $1" ;;
+        esac
+        shift
+    done
+    if [[ -z "$dir" ]]; then
+        chip="$(sysctl -n machdep.cpu.brand_string | perl -pe 's/^Apple //; s/\s+/-/g')"
+        base="$HOME/Scratch/probes/$chip-$(date +%Y-%m-%d)"
+        dir="$base"; n=2
+        while [[ -e "$dir" ]]; do dir="$base-$n"; n=$((n + 1)); done
+    fi
+    mkdir -p "$dir" || die "couldn't create $dir"
+    dir="$(cd "$dir" && pwd)"
+    # Build everything first, so the measurements run back to back.
+    insn_binary > /dev/null
+    build_c mem "$PROBES_DIR/mem.c" > /dev/null
+    [[ -n "$no_bytes" ]] || bytes_bin="$(bytes_binary)"
+    start="$(date +%s)"
+    note "results in $dir"
+    machine > "$dir/machine.tsv"
+    insn --clock "$dir/insn-clock.tsv" > "$dir/insn.tsv"
+    local mem_bin flags=()
+    mem_bin="$(build_c mem "$PROBES_DIR/mem.c")"
+    [[ -n "$QUICK" ]] && flags+=(-q)
+    mem_part "$mem_bin" latency ${flags[@]+"${flags[@]}"} > "$dir/mem-latency.tsv"
+    mem_part "$mem_bin" bandwidth ${flags[@]+"${flags[@]}"} > "$dir/mem-bandwidth.tsv"
+    mem_part "$mem_bin" threads ${flags[@]+"${flags[@]}"} > "$dir/mem-threads.tsv"
+    if [[ -z "$no_bytes" ]]; then
+        bytes_part "$bytes_bin" checksums > "$dir/checksums.tsv"
+        bytes_part "$bytes_bin" lanes > "$dir/lanes.tsv"
+        bytes_part "$bytes_bin" segments > "$dir/segments.tsv"
+        # A skipped probe leaves an empty file: remove it.
+        for f in lanes segments; do [[ -s "$dir/$f.tsv" ]] || rm -f "$dir/$f.tsv"; done
+    fi
+    printf 'loadavg_1m_end\t%s\n' "$(sysctl -n vm.loadavg | perl -ne 'print $1 if /\{\s*([\d.]+)/')" >> "$dir/machine.tsv"
+    printf 'duration_s\t%s\n' "$(($(date +%s) - start))" >> "$dir/machine.tsv"
+    [[ -n "$QUICK" ]] && printf 'quick\t1\n' >> "$dir/machine.tsv"
+    note "done in $(($(date +%s) - start)) s"
+    echo "$dir"
+}
+
+compare() {
+    perl "$PROBES_DIR/compare.pl" "$@"
+}
+
+[[ $# -ge 1 ]] || usage 2
+command="$1"; shift
+case "$command" in
+    machine) machine ;;
+    insn) insn "$@" ;;
+    mem) mem "$@" ;;
+    bytes) bytes "$@" ;;
+    all) all "$@" ;;
+    compare) [[ "${1:-}" == -h || "${1:-}" == --help ]] && usage; compare "$@" ;;
+    steps) steps ;;
+    -h|--help|help) usage ;;
+    *) die "unknown command $command (Tools/probe --help)" ;;
+esac

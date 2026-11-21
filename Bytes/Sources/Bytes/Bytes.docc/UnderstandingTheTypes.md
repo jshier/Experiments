@@ -18,12 +18,14 @@ as it works; the few that own memory (``ByteBuffer``, ``Pipeline``) allocate onc
 | Hold bytes between a producer and a consumer | ``ByteBuffer`` |
 | Stream bytes through stages (compress, encrypt) | ``ByteTransform``, ``Pipeline``, ``FusedPipeline`` (and `AsyncByteTransform` in `BytesAsync`) |
 | Share spans with other threads for one call | ``LentBytes``, ``LentMutableBytes`` |
+| Memory made once and shared by reference (worker scratch, pools, read buffers) | ``RawStorage`` |
+| Make tasks wait without blocking threads | `Continuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, `AsyncHandoff` in `BytesAsync` |
 | Test 16 bytes at once | ``ByteLanes``, ``ByteMatches`` |
 | Checksums | ``CRC32``, ``Adler32``, ``RunningChecksum`` |
 | Field types | ``Byte2`` through ``Byte16``, ``Bits`` (``Bit``, ``Crumb``, ``Nibble``, ``Byte``) |
 
 The package's products: `Bytes` (everything above except the rows marked otherwise), `BytesMacros` (the
-`@BitFields` and `@BinaryRecord` macros, with their swift-syntax plugin: depend on it only if you use them), `BytesAsync` (asynchronous pipelines and sockets), `BytesCompression` (DEFLATE, zlib, gzip, and
+`@BitFields` and `@BinaryRecord` macros, with their swift-syntax plugin: depend on it only if you use them), `BytesAsync` (asynchronous pipelines and sockets, and the waiting primitives of the packages built on Bytes), `BytesCompression` (DEFLATE, zlib, gzip, and
 Brotli, both directions; Zstandard, and LZMA, LZMA2, and `.xz`, decoding), `BytesCrypto` (ChaCha20-Poly1305 and TLS 1.3 records; P-256 and P-384 ECDSA verification and ECDH; HPKE), and `BytesFoundation` (`Data` with spans).
 
 The rest is extensions to the standard library's spans: copying between them, finding patterns in them, and

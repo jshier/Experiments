@@ -17,6 +17,16 @@ let performanceCores: Int = {
     return Int(count)
 }()
 
+/// Every core, efficiency cores included: with several chunks or segments per lane the parallel DEFLATE codecs
+/// gain from them, and lane counts past the performance cores cut streams at other places (the parallel decoder
+/// once fell back to one segment at 32 lanes on Silesia's mozilla).
+let allCores: Int = {
+    var count: Int32 = 0
+    var size = MemoryLayout<Int32>.size
+    guard sysctlbyname("hw.physicalcpu", &count, &size, nil, 0) == 0, count > 0 else { return performanceCores }
+    return Int(count)
+}()
+
 /// The large samples (but xml, which added nothing to dickens and samba), plus a 256 KB slice of dickens, where a
 /// round's fixed costs show.
 private func parallelSamples() -> [Fixtures.Sample] {
@@ -85,12 +95,13 @@ final class ParallelDecodeFixture {
 }
 
 /// Compresses each large sample with the parallel DEFLATE encoder on `performanceCores` and 8 lanes, at levels
-/// 1 and 6, synchronously (`concurrentPerform` rounds); and in its async forms (on a Dispatch queue, and as task
-/// groups) at level 1 on samba and the 256 KB input, on the performance cores. Raw format, 256 KB chunks (64 KB for
-/// the 256 KB input, so it fills 4 lanes). Compare with the sequential "Deflate N sample: Bytes" rows.
+/// 1 and 6, and on `allCores` at level 6, synchronously (`concurrentPerform` rounds); and in its async forms (on a
+/// Dispatch queue, and as task groups) at level 1 on samba and the 256 KB input, on the performance cores. Raw
+/// format, 256 KB chunks (64 KB for the 256 KB input, so it fills 4 lanes). Compare with the sequential "Deflate N
+/// sample: Bytes" rows.
 ///
-/// Then decodes an independent-chunk encoding of each (level 6) with the parallel decoder and, for
-/// reference, the sequential one. Setups check that zlib (or Google's brotli) decodes each encoding back.
+/// Then decodes an independent-chunk encoding of each (level 6) with the parallel decoder on the same lane counts
+/// and, for reference, the sequential one. Setups check that zlib (or Google's brotli) decodes each encoding back.
 func registerParallelBenchmarks() {
     let queue = DispatchQueue(label: "compression")
     let configuration = parallelConfiguration
@@ -99,9 +110,12 @@ func registerParallelBenchmarks() {
         // The async forms' own costs (hops, task groups) show on the small input and one large one: on the
         // performance cores only.
         let asyncInput = sample.name == "samba" || sample.byteCount <= 256 << 10
-        for lanes in Set([performanceCores, 8]).sorted(by: >) {
+        // Every core for the large inputs only: the 256 KB one is 4 chunks.
+        let laneCounts = sample.byteCount <= 256 << 10 ? [performanceCores, 8] : [allCores, performanceCores, 8]
+        for lanes in Set(laneCounts).sorted(by: >) {
             let async = asyncInput && lanes == performanceCores
-            for level in [1, 6] {
+            // On every core (when there are more than the performance cores): level 6 and the decoder only.
+            for level in [1, 6] where level == 6 || lanes <= performanceCores {
                 let fixture = Lazy {
                     let encoder = ParallelDeflateEncoder(format: .raw, level: level, chunkSize: chunkSize, lanes: lanes)
                     let outputCount = encoder.maximumCompressedSize(forByteCount: sample.byteCount)

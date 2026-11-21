@@ -1,0 +1,49 @@
+import Disk
+import Foundation
+import NativeZip
+import System
+
+/// The one place Nunarchiver calls NativeZip.
+///
+/// Options are NativeZip's defaults (the same as `nunzip`'s), so the app expands as fast as the CLI, plus what Archive
+/// Utility does that Info-ZIP doesn't: AppleDouble entries merged into their items (NativeZip's default), symbolic
+/// links given their archived times, and names written in the file system's decomposed form. The extraction counts
+/// into `progress` and sets its totals from the central directory.
+///
+/// The archive's quarantine goes in the options: Disk's writers set it on each file while it's open, and its passes
+/// after them on directories (the ones the archive doesn't list too) and links, as for Apple archives. (Until
+/// NativeZip took it, a single-threaded walk here set it afterwards: +0.7 s on an archive of 8,060 entries that
+/// expanded in 0.65 s.)
+enum ZipAdapter {
+    /// Opens the archive; an encrypted one without a password asks for it (before anything is staged).
+    ///
+    /// - Returns: The archive, and the password to extract it with (`nil` for one that isn't encrypted).
+    static func open(_ archive: FilePath, credentials: ArchiveCredentials) throws -> (ZipArchive, password: String?) {
+        let zip = try ZipArchive(url: URL(filePath: archive.string))
+        let password = credentials[.password]
+        if password == nil, zip.entries.contains(where: \.isEncrypted) { throw CredentialRequest(kind: .password) }
+        return (zip, password)
+    }
+
+    static func extract(_ zip: ZipArchive, password: String?, into staging: Destination, quarantine: Quarantine?, progress: ExtractionProgress) async throws {
+        var options = ExtractionOptions()
+        options.password = password
+        options.progress = progress
+        options.quarantine = quarantine
+        options.restoreLinkTimestamps = true
+        options.decomposesNames = true
+        do {
+            try await zip.extract(to: staging.path, options: options)
+        } catch ZipError.incorrectPassword {
+            // Found at the first encrypted entry (its check bytes, or AES's verification value): ask again. What was
+            // staged before it is discarded with the rest.
+            throw CredentialRequest(kind: .password, isRetry: true)
+        }
+    }
+
+    static func message(_ error: any Error) -> String? {
+        if let error = error as? ZipError { return error.description }
+        if let failure = error as? ExtractionFailure { return failure.description }
+        return nil
+    }
+}

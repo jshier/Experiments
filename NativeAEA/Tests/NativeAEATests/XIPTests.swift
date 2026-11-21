@@ -4,6 +4,7 @@
 import BytesTestSupport
 import Compression
 import CryptoKit
+import Disk
 import Foundation
 @testable import NativeAEA
 import System
@@ -262,16 +263,24 @@ func makeXIP(
         let archive = try XIPArchive(path: FilePath(url.path), signature: .none)
         #expect(archive.blockSize == blockSize)
         #expect(archive.contentChecksum?.count == 20)
-        // Hard links after the writers, and made by link threads while they write.
-        for (writers, width, linkers) in [(1, 1, 0), (8, 4, 2)] {
+        // Hard links after the writers, by one writer and by several.
+        for (writers, width) in [(1, 1), (8, 4)] {
             let output = directory.path("out-\(writers)")
             var options = AEAExtractionOptions()
             options.writerThreads = writers
             options.fileSystemWidth = width
-            options.hardLinkThreads = linkers
+            let progress = ExtractionProgress()
+            options.progress = progress
             let statistics = try await archive.extract(to: FilePath(output.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
             #expect(statistics.hardLinks == 2)
+            // Exact once walked: each hard-linked file's bytes once, every entry but the root. (Less the compressed
+            // pieces in which no chunk ends, which Disk doesn't count: with blocks under 64 KiB, most of a large file's.)
+            #expect(progress.bytes == progress.expectedBytes)
+            #expect(progress.entries == progress.expectedEntries)
+            let bytes = statistics.fileBytes - expected["Xcode.app/second"]!.contents!.count
+            if blockSize >= 1 << 20 { #expect(progress.expectedBytes == bytes) } else { #expect(progress.expectedBytes <= bytes) }
+            #expect(progress.expectedEntries == statistics.entries - 1)
             let tree = try readTree(output)
             #expect(tree == expected)
             for path in compressed { #expect(decmpfsType(output.appending(path: path)) == 8, "\(path)") }

@@ -35,10 +35,8 @@ public struct AEAStatistics: Sendable {
     public var fileBytes = 0
     /// Files by on-disk compression (`AFT`): 0 when there's none.
     public var filesByDiskCompression: [UInt32: Int] = [:]
+    /// Entries in hard-link clusters (every name of each file).
     public var hardLinks = 0
-    /// Of the later names of hard-linked files, those made after the writers (see
-    /// ``AEAExtractionOptions/hardLinkThreads``).
-    public var hardLinksAfterWriters = 0
     public var withExtendedAttributes = 0
     public var withAccessControlLists = 0
     /// FIFOs, devices, and sockets made (``otherEntries`` counts them too), and entries skipped: sockets, whiteouts,
@@ -55,15 +53,17 @@ public struct AEAStatistics: Sendable {
     /// Of ``walkSeconds``, the time it waited for decoded segments and for room in the writers' queue.
     public var walkWaitForSegments = 0.0
     public var walkWaitForWriters = 0.0
+    /// The writers' busy time, summed (with ``AEAExtractionOptions/collectsTimings``).
     public var writeSeconds = 0.0
     public var peakSegmentBuffers = 0
     /// Buffers still referenced after the pass, in every pool the decoding used: 0 unless something leaked (the tests
     /// check).
     public var unreleasedBuffers = 0
-    /// Seconds per kind of writer work, summed across writers.
+    /// Seconds per kind of writer work, summed across writers (Disk's `ExtractionReport.writerSeconds`, with
+    /// ``AEAExtractionOptions/collectsTimings``).
     public var writerWork: [String: Double] = [:]
-    /// Seconds of each phase after the walk: the writers finishing, then hard links, special files, symbolic links,
-    /// deferred metadata, and directories.
+    /// Seconds of each phase (Disk's `ExtractionReport.phaseSeconds`): `planning` (the walk), then after the writers
+    /// `hardLinks`, `specialFiles`, `symbolicLinks`, `deferred` metadata, and `directories`.
     public var phaseSeconds: [String: Double] = [:]
 }
 

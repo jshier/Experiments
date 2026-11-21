@@ -1,5 +1,6 @@
 import Benchmark
 import BytesTestSupport
+import Disk
 import Foundation
 @_spi(Benchmarking) import NativeAEA
 import System
@@ -87,8 +88,6 @@ final class ArchiveFixture: @unchecked Sendable {
         var decoded: [UInt8]
         /// The headers that end in the segment (their blobs may not).
         var headerCount = 0
-        /// The paths of those headers' entries, as ranges of `decoded`.
-        var paths: [Range<Int>] = []
     }
 
     lazy var firstSegment: FirstSegment = {
@@ -102,9 +101,6 @@ final class ArchiveFixture: @unchecked Sendable {
                       position + size <= bytes.count,
                       let header = try? AppleArchive.parseHeader(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position..<(position + size)])))
                 else { break }
-                if let path = header.path {
-                    segment.paths.append((position + path.offset)..<(position + path.offset + path.count))
-                }
                 position += size + header.blobByteCount
                 segment.headerCount += 1
             }
@@ -146,7 +142,9 @@ let benchmarks: @Sendable () -> Void = {
     // own. On the cooperative pool, with malloc-interposer 977dc06 (2026-10-29), it doesn't (2026-11-19: about 1,700
     // per synthetic extraction). The interposer adds its header to every allocation whether or not it counts, so
     // counting adds only the per-thread increments.
-    let threadedMetrics: [BenchmarkMetric] = [.wallClock, .cpuTotal, .peakMemoryResident, .mallocCountTotal]
+    // Instructions are the process's (every thread, and the kernel's work for its system calls): the measure that
+    // doesn't move with the machine's load (2026-11-20, moving extraction onto Disk).
+    let threadedMetrics: [BenchmarkMetric] = [.wallClock, .cpuTotal, .instructions, .peakMemoryResident, .mallocCountTotal]
 
     for fixture in Fixtures.archives {
         let name = fixture.name
@@ -229,26 +227,8 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
 
-        // Each entry's parent lookup on the walker's thread (no directories opened, the default): the paths of the
-        // first segment's entries, 100 rounds. "Directory table" alone is making the table, once per extraction
-        // (no paths: it reads none).
-        Benchmark(
-            "Resolve parents x100: \(name) segment 0",
-            configuration: .init(setup: { _ = fixture.firstSegment })
-        ) { benchmark in
-            let segment = fixture.firstSegment
-            let decoded = segment.decoded
-            let paths = segment.paths
-            benchmark.startMeasurement()
-            for _ in benchmark.scaledIterations {
-                blackHole(DirectoryResolution.resolve(decoded, paths: paths, rounds: 100))
-            }
-        }
-        Benchmark("Directory table: \(name)") { benchmark in
-            for _ in benchmark.scaledIterations {
-                blackHole(DirectoryResolution.resolve([], paths: [], rounds: 0))
-            }
-        }
+        // (The walker's parent lookups, "Resolve parents" and "Directory table", went with its directory table: Disk's
+        // planner resolves parents now, 2026-11-20.)
 
         // MARK: Whole archives
 
@@ -277,9 +257,11 @@ let benchmarks: @Sendable () -> Void = {
         // Extraction is bound by the file system: its iterations spread 2–14% within a run whatever their number, so
         // 2 iterations' p50 (their minimum). Each iteration extracts into its own directory, and the teardown removes
         // them all (2.2 s per synthetic tree, 13 s per Xcode tree), outside the measurement.
-        for mode in DiskCompressionMode.allCases {
+        // "progress": the same extraction counting into an `ExtractionProgress` (one relaxed add per entry and per
+        // piece), against "archived" without it.
+        for (mode, counted) in DiskCompressionMode.allCases.map({ ($0, false) }) + [(.archived, true)] {
             Benchmark(
-                "Extract: \(name): \(mode)",
+                "Extract: \(name): \(mode)\(counted ? ": progress" : "")",
                 configuration: .init(
                     metrics: threadedMetrics,
                     warmupIterations: 0,
@@ -294,6 +276,7 @@ let benchmarks: @Sendable () -> Void = {
             ) { (benchmark: Benchmark) async throws in
                 var options = AEAExtractionOptions()
                 options.diskCompression = mode
+                if counted { options.progress = ExtractionProgress() }
                 let destination = FilePath(Fixtures.output.appending(path: "\(benchmark.currentIteration)-\(UUID().uuidString)").path)
                 let archive = fixture.archive
                 benchmark.startMeasurement()

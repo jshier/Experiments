@@ -1,5 +1,6 @@
 import BytesTestSupport
 import BytesTesting
+import Disk
 import Foundation
 @testable import NativeAEA
 import System
@@ -79,7 +80,8 @@ import Testing
             options.read.decodeThreads = threads
             options.writerThreads = threads
             options.fileSystemWidth = min(threads, 2)
-            options.spreadDirectories = threads > 1
+            // Entries made relative to opened parents (Disk's `.descriptors`) as well as by path.
+            options.relativeToParents = threads > 1
             let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey)
                 .extract(to: FilePath(destination.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
@@ -323,6 +325,32 @@ import Testing
         // Nothing was made or removed outside.
         #expect(try String(contentsOf: victim, encoding: .utf8) == "keep me")
         #expect(try FileManager.default.contentsOfDirectory(atPath: outside.path) == ["victim"])
+    }
+
+    /// Progress, as an app polls it: the totals start as the payload's size, become exact once the walk has read the
+    /// stream (every file's bytes, every entry made), and the counters reach them.
+    @Test func reportsProgress() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        // 16 KiB segments (`aea`'s smallest): most files are written in pieces.
+        let (url, keys, files) = try Self.xcodeStyleArchive(blockSize: "1k")
+        let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        let bytes = files.values.reduce(0) { $0 + $1.count }
+        for mode in [DiskCompressionMode.none, .archived] {
+            let progress = ExtractionProgress()
+            var options = AEAExtractionOptions()
+            options.writerThreads = 4
+            options.diskCompression = mode
+            options.progress = progress
+            let statistics = try await archive.extract(to: FilePath(directory.path("out-\(mode)").path), options: options)
+            #expect(progress.bytes == progress.expectedBytes, "\(mode)")
+            #expect(progress.entries == progress.expectedEntries, "\(mode)")
+            #expect(progress.expectedEntries >= files.count && progress.expectedEntries <= statistics.entries, "\(mode)")
+            #expect(progress.fractionCompleted == 1, "\(mode)")
+            #expect(statistics.unreleasedBuffers == 0)
+            // Every file's bytes, compressed large files' pieces in which no chunk ends included.
+            #expect(progress.expectedBytes == bytes, "\(mode)")
+        }
     }
 
     @Test func refusesToOverwriteUnlessAsked() async throws {

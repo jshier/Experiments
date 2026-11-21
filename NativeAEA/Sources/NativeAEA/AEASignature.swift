@@ -24,6 +24,26 @@ public enum AEASigningKey: Sendable {
         }
         return .publicKey(key.x963Representation)
     }
+
+    /// A public key from text, for an app's key field: a PEM (`-----BEGIN PUBLIC KEY-----`, with or without its line
+    /// breaks, as a one-line text field leaves a pasted one), or the X9.63 point (65 bytes) as `aea -sign-pub-value`
+    /// takes it (`hex:…`, `base64:…`, or bare hex).
+    public static func publicKey(text: String) throws(AEAError) -> AEASigningKey {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let begin = "-----BEGIN PUBLIC KEY-----", end = "-----END PUBLIC KEY-----"
+        if trimmed.hasPrefix(begin), let tail = trimmed.range(of: end) {
+            let body = trimmed[trimmed.index(trimmed.startIndex, offsetBy: begin.count)..<tail.lowerBound].filter { !$0.isWhitespace }
+            guard let key = try? P256.PublicKey(pemRepresentation: "\(begin)\n\(body)\n\(end)\n") else {
+                throw .untrustedSigningKey("not a P-256 public key")
+            }
+            return .publicKey(key.x963Representation)
+        }
+        // The same encodings as a symmetric key's.
+        guard case .symmetric(let bytes)? = try? AEADecryptionKey.symmetric(text: trimmed), bytes.count == 65,
+              (try? P256.PublicKey(x963Representation: bytes.span.bytes)) != nil
+        else { throw .untrustedSigningKey("not a P-256 public key") }
+        return .publicKey(bytes)
+    }
 }
 
 /// The signer of an archive, as verified.

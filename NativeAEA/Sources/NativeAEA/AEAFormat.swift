@@ -228,6 +228,23 @@ public struct AEAPrologue: Sendable {
             + AEARootHeader.byteCount + 32
     }
 
+    /// The profile in the prologue's first bytes.
+    ///
+    /// - Parameter bytes: At least the first 12 bytes of the file.
+    static func profile(parsing bytes: RawSpan) throws(AEAError) -> AEAProfile {
+        let head: PrologueHead
+        do {
+            var reader = AlignedBytesReader(bytes)
+            head = try reader.read(PrologueHead.self)
+        } catch {
+            throw .notAnAEAFile
+        }
+        guard let profile = AEAProfile(rawValue: Int(head.profileWord & 0xFF_FFFF)) else {
+            throw .unsupportedProfile(Int(head.profileWord & 0xFF_FFFF))
+        }
+        return profile
+    }
+
     private static func bytes(_ reader: inout AlignedBytesReader, _ count: Int) throws(BytesError) -> [UInt8] {
         let span = try reader.read(byteCount: count)
         return span.withUnsafeBytes { unsafe Array($0) } // Copies the bytes out of a borrowed span: safe.

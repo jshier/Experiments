@@ -256,6 +256,20 @@ struct InflateStream: ~Copyable {
         length = 0
     }
 
+    /// Starts a new stream and reads just its container's header (nothing for raw DEFLATE), for a parallel
+    /// decoder that decodes the blocks with raw streams.
+    ///
+    /// - Returns: The byte offset where the first block starts, or `nil` if the header isn't all there.
+    /// - Throws: As ``run(_:from:into:at:)`` for a header it doesn't accept.
+    mutating func readHeader(_ input: RawSpan) throws(BytesError) -> Int? {
+        reset()
+        var position = 0
+        while true {
+            if case .blockHeader = stage { return position &>> 3 }
+            guard try readContainerHeader(input, at: &position) else { return nil }
+        }
+    }
+
     /// Whether the stream has ended.
     var isDone: Bool {
         if case .done = stage { return true }

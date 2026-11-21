@@ -1,5 +1,6 @@
 internal import Bytes
 internal import BytesFoundation
+import Disk
 import Foundation
 import Synchronization
 import System
@@ -165,8 +166,8 @@ public struct ZipArchive: Sendable {
     ///   ``ZipError/badSignature(_:)``, or ``ZipError/corruptData(_:)`` if the central directory is damaged.
     public init(url: URL) throws {
         self.url = url
-        // Memory-map the archive so large files aren't read into RAM up front. Everything below
-        // parses `file.bytes` (a RawSpan) in place.
+        // Memory-map the archive (Disk's `MappedFile`) so large files aren't read into RAM up front. Everything
+        // below parses `file.bytes` (a RawSpan) in place.
         let file = try MappedFile(path: FilePath(url.path(percentEncoded: false)))
         self.file = file
         (entries, comment, leadingByteCount) = try Self.readDirectory(file.bytes)
@@ -624,43 +625,6 @@ public extension ZipArchive {
         guard crc == UInt(entry.crc32) || !entry.checksCRC else {
             throw ZipError.crcMismatch(entry.path, expected: entry.crc32, actual: UInt32(truncatingIfNeeded: crc))
         }
-    }
-
-    /// Like ``contents(of:using:password:_:)``, but `consume` runs in a child task, concurrently with
-    /// decoding the next chunk. The CRC-32 is computed there too, off the decoding task.
-    ///
-    /// Chunks are consumed one at a time, in order. Only worth it for large compressed entries.
-    ///
-    /// - Parameters:
-    ///   - entry: The entry to read.
-    ///   - decoder: The decoder to use.
-    ///   - password: The password, for encrypted entries.
-    ///   - consume: Called with each chunk, in order, in a child task. The chunk is valid until it returns.
-    /// - Throws: The errors of ``contents(of:using:password:_:)``.
-    nonisolated(nonsending) internal func contentsPipelined(
-        of entry: ZipEntry,
-        using decoder: inout ZipDecoder,
-        password: String?,
-        consume: @escaping @Sendable (ZipDecoder.Chunk) throws -> Void
-    ) async throws {
-        let archive = file.bytes
-        guard let range = try archive.byteOffsets(of: Self.payload(of: entry, in: archive)) else {
-            throw ZipError.truncated("payload for '\(entry.path)'")
-        }
-        // Consumers run one at a time, in order, so the running CRC needs no more than a lock to cross tasks.
-        let progress = Mutex<(crc: UInt, written: UInt64)>((0, 0))
-        let backend = decoder.backend
-        // The mapping outlives this call (`self` holds it), so its address is stable across suspensions.
-        try await unsafe decoder.decodePipelined(file.stableBuffer(range), entry: entry, password: password) { chunk in
-            progress.withLock { progress in
-                let bytes = unsafe RawSpan(_unsafeBytes: chunk.bytes)
-                progress.crc = ZipDecoder.crc32(progress.crc, bytes, backend: backend)
-                progress.written += UInt64(bytes.byteCount)
-            }
-            try unsafe consume(chunk)
-        }
-        let (crc, written) = progress.withLock { $0 }
-        try Self.check(entry, written: written, crc: crc)
     }
 
     /// The entry's full decompressed contents, verified.

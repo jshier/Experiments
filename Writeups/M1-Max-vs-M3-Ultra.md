@@ -88,7 +88,7 @@ with the decoder.
 - **Allocation counts** that depend on the machine's worker count differ (NativeZip's 32 MB extracts 271–275 → 131–135
   mallocs, Verify 449/545 → 125/155; Dispatch rows 13 → 7): per-worker allocations, consistent with 32 against 10 workers.
 
-## What the M1 Max can do (measured on one P core)
+## What each core can do (measured on one P core)
 
 Re-measured 2026-11-21 with `Tools/cpu-probe` (now in the repository). The first probe had two errors. Its clock
 calibration read 2.82 GHz, and cycles were scaled from it ±15%; a scalar `add` chain now reads 3.21 GHz, and a vector
@@ -108,11 +108,32 @@ calibration read 2.82 GHz, and cycles were scaled from it ±15%; a scalar `add` 
 Memory: L1 3 cycles, L2 17.6 cycles, 16–32 MB 40–70 ns (system-level cache, with page walks: the chase is random across
 16 KB pages), DRAM about 123 ns; one core reads 60 GB/s, ten cores 125.
 
+Beside the M3 Ultra, from the first M1 Max probe (the table above supersedes its M1 Max columns).
+The M1 Max probes ran on 2026-11-19; the same probes, rebuilt, ran on the M3 Ultra on 2026-11-20 (`Bytes/Benchmarks/RESULTS.md`,
+"2026-11-20, M3 Ultra"). "Per cycle" is from eight independent chains, as the M1 Max was measured, which caps a 3-cycle
+instruction at 2.7; the M3 was also measured with 16 chains, its real rate.
+
+| Instruction | M1 Max latency (cycles) | M1 Max per cycle (8 chains) | M3 Ultra latency | M3 per cycle (8 / 16 chains) |
+|---|---|---|---|---|
+| `add`, `eor`, `eor3`, `bcax`, `zip`, `uzp`, `ext`, `rev32`, `tbl` with 1–2 registers | 2 | 4 | 2 | 4 / 4 |
+| `udot`, `pmull`, `mul`, `usra` | 3 | 2.7 | 3 | 2.7 / **4** |
+| `aese`; `aese`+`aesmc` pair | 3; 6 a pair | 2.7; 2.6 | 2.7; **2.6 a pair** | 2.7 / **4** |
+| `tbl` with 3 / 4 registers | 4 | 1.9 / 1.3 | 4 / 4.8 | 2.0 / 1.35 |
+| `tbx` with 4 registers | 8 | 1.0 | 6 (through the index) | 0.85 / 0.95 |
+| `fmla.4s` | 4 | 2.0 | 3.6 | 2.1 / **4** |
+| `sha256h`, `sha512h` | 5, 3 | 0.5 | 4, 2 | 0.5 / 0.5 |
+
+M1 Max cycles are scaled from a calibration that read 2.82 GHz (±15%); the M3's read 4.02 GHz, its clock, unscaled. So
+the M1 Max's real throughput for the 3-cycle instructions is unmeasured (at least 2.7). Memory, M1 Max against M3 Ultra:
+L1 3 against 4 cycles (0.9–1.2 against 1.0 ns), L2 17–18 against 18–24 cycles, 16 / 32 MB 35 / 52 against 15 / 41 ns, DRAM
+about 122 against 127 ns. One core reads 61 against 80 GB/s from DRAM and stores 62 against 125; all cores read 126
+(10 threads) against 254 GB/s (16 threads and more).
+
 ## M1 Max-specific optimizations explored
 
 | Idea | Result |
 |---|---|
-| **Adler-32 with `udot`** (FEAT_DotProd) | **Kept.** 29.6 → 56.9 GB/s (1 MB, probe re-run 2026-11-21), −47% time, −51% instructions; 64 B inputs −12% time; zero mallocs; tests for the chunk boundaries. Within 10% of libdeflate (62 GB/s). Bound at 3 cycles per 64 bytes by both its 12 vector instructions and its accumulators' `udot` latency (68 GB/s; 83% reached). Gain on the M3 likely, unmeasured. |
+| **Adler-32 with `udot`** (FEAT_DotProd) | **Kept.** 29.6 → 56.9 GB/s (1 MB, probe re-run 2026-11-21), −47% time, −51% instructions; 64 B inputs −12% time; zero mallocs; tests for the chunk boundaries. Within 10% of libdeflate (62 GB/s). Bound at 3 cycles per 64 bytes by both its 12 vector instructions and its accumulators' `udot` latency (68 GB/s; 83% reached). On the M3 Ultra (2026-11-20): 76 GB/s at 1 MB, 1.31x. |
 | Lanes = all cores for the encoder (the E cores) | **Measured, not applied.** +3% (dickens) to +7–9% (mozilla) for the parallel DEFLATE encoder with 10 lanes against 8 (first run: 10–13% on mozilla). |
 | Lanes = all cores for the decoder | **Measured, not applied.** With segments from a queue (the current decoder), 10 lanes are 7–12% faster than 8 and 9 no slower. The first run, with one segment per lane split evenly, had 9–10 lanes 20–35% slower. |
 | (Found by the lane probe) | The current decoder rejects its speculation on Silesia's mozilla at level 1 for 4, 8, 12, 13, 15, and 16 lanes and decodes it sequentially: 75.7 ms at 8 lanes against 10.3 at 10 (the old decoder: 11.2 at 8). No other corpus file or level does. Cause not investigated. |

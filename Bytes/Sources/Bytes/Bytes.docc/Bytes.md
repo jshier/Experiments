@@ -189,6 +189,7 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 ### Buffers and copies
 
 - ``ByteBuffer``
+- ``RawStorage``
 - ``LentBytes``
 - ``LentMutableBytes``
 

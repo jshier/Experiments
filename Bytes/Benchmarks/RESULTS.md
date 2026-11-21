@@ -12,6 +12,280 @@ Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module h
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
 
+## 2026-11-21, the waiting primitives and `RawStorage`, from Disk, NativeAEA, and NativeZip (additive; measured in the clients)
+
+Disk and NativeAEA each had the same `Continuation`/`suspend`, `WaiterQueue`, and `RawStorage` (160 lines, word for
+word); Disk had a limiter, an index pool, and a latch built on them, NativeAEA a bounded queue, NativeZip a
+producer-consumer handoff written against raw `UnsafeContinuation`s. One implementation of each is here now, and all
+three packages use them. Nothing existing in Bytes changed, so no Bytes benchmark row can move; the measurements are the
+clients' (their RESULTS.md, 2026-11-21: mallocs and file-system calls identical in every row, instructions within the
+rows' spread, the parse and decode rows identical to the digit).
+
+| New API | Module | Was |
+|---|---|---|
+| `Continuation<T>`, `withContinuation(_:)`: a continuation resumed exactly once, `CheckedContinuation` in debug builds, `UnsafeContinuation` (no allocation per wait) in release | BytesAsync (`Waiting.swift`) | Disk's and NativeAEA's `Continuation` and `suspend` |
+| `WaiterQueue<Element>`: a FIFO ring for waiters, reserved up front | BytesAsync | Disk's and NativeAEA's |
+| `AsyncLimiter` (permits), `AsyncIndexPool` (indexes), `AsyncLatch` (a countdown) | BytesAsync (`AsyncLimits.swift`) | Disk's |
+| `AsyncQueue<Element>`: a bounded FIFO between tasks, elements handed straight to waiting consumers | BytesAsync (`AsyncQueue.swift`) | NativeAEA's `JobQueue` (its unused wait-time counter dropped) |
+| `AsyncHandoff<Element>`: a rendezvous of one producer and one consumer | BytesAsync | NativeZip's `ChunkHandoff`, made generic |
+| `RawStorage`: memory allocated once, shared by reference; `reuse`/`giveBack` keep 2 MiB of a large buffer resident between uses (`madvise`) | Bytes (`RawStorage.swift`) | Disk's and NativeAEA's |
+
+- **How they stay free across modules:** every type is `@frozen` or keeps `@usableFromInline` state, and every method
+  is `@inlinable`, so each client compiles its own specialized copies: `Tools/calls --target Disk Disk '.*' --callee
+  'BytesAsync|swift_getGenericMetadata' --sum` finds `specialized WaiterQueue.append`, `AsyncLimiter.acquire()` and the
+  like emitted in Disk, and no call into BytesAsync's unspecialized code. The only calls that are new are `RawStorage`'s
+  metadata accessor (where a buffer is allocated: once per writer or decoder) and its out-of-line `advise` (the
+  `madvise` itself; the "over the floor?" test is inlined).
+- **Not moved:** Disk's write queue (jobs plus a ring of path bytes, producers woken at a low-water mark), NativeAEA's
+  `SegmentBufferPool` (carry regions, reference counts, activation), NativeZip's `WorkQueue` (one user). Disk doesn't
+  use `RawSpan.withLentBytes` from BytesAsync: called with a closure that names its error type it's ambiguous with
+  Bytes' synchronous method of the same name (the known sync/async overload trap), so its writers keep a two-line
+  `withUnsafeBytesAsync`.
+- **A PR-toolchain-only warning:** SocketStream's compiler (pr-91981) warned that the queue's and the handoff's
+  decision enums "cannot be returned" from `Mutex.withLock` (region isolation); Xcode's didn't. They're `Sendable` now.
+- **Tests:** `BytesAsyncTests/WaitingTests` (9 tests: ordering through wrap, growth, and removal; a limiter never over
+  its permits under 64 tasks; each pool index held once; the latch; the queue delivering 8,000 elements once and in
+  producer order through capacities 1, 2, and 64; closing; the handoff's alternation and refusal; `RawStorage` keeping
+  its floor across `giveBack`/`reuse`). `swift test`: every target passes (605 tests); MQTT, BinaryParsingComparison,
+  SocketStream (PR toolchain), and BytesProbe build without warnings.
+
+## 2026-11-20, after the day's changes (baseline `m3-final`; probes `Tools/probes/results/M3-Ultra-2026-11-20/`)
+
+The whole suite again after the two changes below, on the idle machine (load 3–5 during the run): 5 min 4 s, 1,082
+benchmarks (six new 32-lane parallel rows). Against `m3-1120` (exact medians), instructions on the 886 rows of 200 K or
+more: geomean **0.9999**. Changed by more than 1%: Adler-32 1 MB −20.8% and 64 B −28.0%; the parallel DEFLATE rows +1 to
++9% (more chunks a lane, and the decoder's test inputs re-encoded into more chunks; the `… sequential` rows on those
+inputs rose with them, +2.7 to +4.5%); Base64 `encodedString` 1 KB −2.3%; CryptoKit's SHA-256 and HMAC 64 B rows
+(controls). Times of the parallel rows: inflate dickens 24 lanes 969 → 660 µs (−32%), samba 24 lanes async Dispatch 1,356 →
+964 (−29%), Main.js 24 lanes 298 → 228 (−23%), the 8-lane inflate rows −9 to −13%, deflate 1 Main.js 24 lanes −14%,
+deflate 6 dickens 24 lanes −7%; the rest within ±5% but the `Parallel inflate … sequential` rows (+5 to +13%, their
+new inputs). The standalone `Inflate …: Bytes` rows (`DeflateDecoder`, which
+gained `InflateStream.readHeader`) have identical instruction counts. `Tools/probe all` afterwards (62 s): no decoder
+segment sweep row falls back (0 of 320: five Silesia files × levels 1 and 6 × lanes 1–32); Adler-32 101.2 GB/s at 1 MB
+(CRC-32 73.4); instruction rows as in the probe section below, except `tbl` with 4 registers at 1.08 a cycle (1.34–1.39 in
+two other idle runs today: bimodal).
+
+## 2026-11-20, parallel DEFLATE: no fallback at any lane count; joins overlap decoding (baselines `parallel-cliff-before` → `parallel-cliff-after`)
+
+The parallel decoder fell back to a sequential decode, 14x slower, at 11, 22, 25, and 28–32 lanes on mozilla compressed
+at level 1 (section below). The cause: one `00 00 FF FF` inside **Huffman-coded** data (compressed offset 1,861,129,
+22,493 output bytes into chunk 10, mid-block), the first marker after a target at those counts; one unproven split
+discarded the whole speculation. Changes (`ParallelInflate.swift`, `DeflateDecoder.swift`):
+
+- **A segment decodes on past a false split**: reaching its end split mid-block, it continues to the next split until
+  it is between blocks (its outcome records which split, `.boundary(k)`), and the join skips the segments it covered.
+- **A failed segment is decoded again in place**: the join decodes its region sequentially into the output after the
+  joined bytes (so matches see the real history) until it is between blocks at a later split, and resumes joining there.
+  Only a failed segment 0 falls back to a full sequential decode (for `DeflateDecoder`'s error). Streams whose matches
+  cross every split (zlib sync flushes) keep segment 0's parallel work.
+- **Candidates are checked against DEFLATE's header rules**: skipped when the next bytes can't start a block (the
+  reserved type, a stored length that doesn't match its complement, more than 286/30 codes). Never rejects a real block;
+  rejected mozilla's false marker. The container header is parsed up front (`InflateStream.readHeader`), so every segment
+  is raw DEFLATE (segment 0's duplicate checksum is gone).
+- **Copies overlap decoding** (`InflateDelivery`): a profile showed the calling thread copying all 51 MB at the end, about
+  1 ms of a 3.8 ms decode; now whichever worker makes a segment ready copies it while others decode (mozilla 24/32 lanes
+  4.0/3.8 → 3.1/2.85 ms). **Each worker finds its own split points** (`SplitPoints`: each depends only on its window), not
+  a serial 0.23 ms scan first (32 lanes 2.85 → 2.6 ms).
+- One behaviour change: a bad trailer throws `.mismatch`, as `DeflateDecoder` does (was `.invalidValue`). Allocations:
+  none in Bytes per call (`Tools/runtime-count`: only Dispatch's closure box and `_Block_copy`).
+
+The encoder (`ParallelDeflate.swift`) now cuts up to four chunks per lane, none under 64 KB (interleaved, 4 beat 1, 2, 3,
+and 6): dickens level 6 on 28/32 lanes 7.3/6.5 → 6.2/5.5 ms, samba 7.1/6.6 → 6.6/6.25, for 0.03–0.1% more output. A
+32 KB floor cost Main.js (3.8 MB, 96 chunks of 40 KB) 28% more instructions at level 1 and was slower: reverted. The
+streaming path keeps one chunk per lane. Both types' `lanes` documentation now recommends every core (32 lanes took up
+to 23% less time than 24, 8% at the median, over five Silesia files at levels 1 and 6).
+
+Decoder sweep, mozilla level 1 (`BytesProbe segments`, median of 5, under load; segments / ms):
+
+| Lanes | 8 | 11 | 16 | 22 | 24 | 25 | 28 | 29 | 30 | 31 | 32 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| before | 32/8.4 | **1/59.1** | 64/5.2 | **1/55.6** | 96/4.0 | **1/55.1** | **1/57.2** | **1/60.0** | **1/54.9** | **1/56.2** | **1/57.1** |
+| after | 32/7.6 | 44/6.1 | 64/4.3 | 88/3.4 | 96/2.9 | 98/2.9 | 110/2.7 | 113/2.7 | 116/2.8 | 120/3.0 | 124/2.8 |
+
+Level 6 decode at 24 / 32 lanes: mozilla 4.1 → 3.2 / 3.9 → 2.7 ms, dickens 1.0 → 0.7 / 0.8 → 0.7, samba 1.4 → 0.9 / 1.3 →
+1.0, x-ray 1.0 → 0.9 / 1.0 → 0.8, ooffice 0.8 → 0.6 / 0.7 → 0.6.
+
+Benchmarks (p50 µs; six new 32-lane rows, `allCores`, for deflate 6 and inflate on dickens, samba, Main.js, their
+"before" from the new benchmark file on the old code; under load): inflate dickens 24 lanes 944 → 668 (−29%), 32 lanes
+863 → 626 (−28%), 8 lanes 1,825 → 1,603 (−12%); samba 24 lanes 1,336 → 908 (−32%), 32 lanes 1,256 → 916 (−27%); Main.js
+−24% at 24 and 32 lanes, −12% at 8. Deflate 1 dickens 24 lanes 2,396 → 1,926 (−20%), deflate 6 dickens 32 lanes 6,582 →
+5,595 (−15%), deflate 6 Main.js 24 lanes 1,751 → 1,375 (−21%). Instructions rose 1–5% on inflate (mostly new test inputs:
+dickens, x-ray, and ooffice encode into more chunks now, and the sequential rows rose with them; the rest is each worker
+scanning its windows) and on deflate where chunks were added (dickens level 1 at 24 lanes 459 M → 483 M). Rows whose
+chunking didn't change: instructions within ±0.7%. Tests: `falseSplitCostsOnlyItsSegment` (stored chunks with a marker
+every 256 bytes, three formats), `failedSegmentsAreDecodedAgainInPlace` (zlib streams alternating full and sync flushes),
+`splitsAfterTheStreamAreIgnored`, `everyLaneCount` (1–32, generated streams), and bulk `corpusAtEveryLaneCount` (five
+Silesia files × levels 1 and 6 × lanes 1–32: output, parallelism, no repairs), backed by package-visible
+`lastSplitCount` and `lastRepairCount`.
+
+## 2026-11-20, Adler-32: past `udot`'s latency (baselines `adler-before` → `adler-after`)
+
+The `udot` kernel took 64-byte blocks with four accumulators per sum: each accumulator one `udot` a block (3 cycles'
+latency), and 8 `udot` + 4 `add.4s` (forming `prefix`, the byte sum before each block) = 12 vector operations on 4 pipes,
+also 3 cycles: two bounds at 64 B / 3 cycles (86 GB/s at 4.02 GHz; measured 76 at 1 MB). More accumulators don't help:
+two blocks a step with 16 (8 per sum) need 8 adds a step for `prefix`, 24 operations per 128 B, still 3 cycles per 64 B
+(+3% measured). Instead each 128-byte step's byte sum is one chain of eight `udot`s from zero, which no later step waits
+on; only `prefix += sum` and `sum += step` carry over, and the eight weighted accumulators (weights 128…1, a 128-entry
+`bytes_adler_weights`) take one `udot` each. 19 vector operations a step (16 `udot`, 2 `add.4s`, a `movi` zeroing the
+chain), 26 instructions per 128 B (13 per 64 B, from 16), no spills, no calls. A last odd 64-byte block is added alone.
+The reduction runs every 512 steps (64 KiB; `prefix`'s lanes reach 32,640 · m(m − 1)/2, below 2^32 for m ≤ 513;
+setting the limit to 514 made the all-`0xFF` tests fail from 131,071 bytes), against 86 blocks before.
+
+A/B in one process (old and new kernels as separate `@inline(never)` functions, interleaved, best of 9, under load; GB/s):
+
+| Size | 64 B | 1 KB | 16 KB | 256 KB | 1 MB | 8 MB | 128 MB |
+|---|---|---|---|---|---|---|---|
+| before | 10.1 | 70.4 | 76.5 | 76.1 | 76.0 | 73.5 | 72.3 |
+| **after** | **13.4** | **82.9** | **105.7** | **98.6** | **100.9** | **97.5** | **84.1** |
+| 16 accumulators | 11.9 | 65.9 | 83.0 | 79.1 | 78.2 | 78.1 | 75.0 |
+
+Benchmarks (one run each, under load): `Adler-32 1 MB: Bytes` 272 K → 215 K instructions (−21.0%), 17 → 12 µs;
+`Adler-32 64 B (×16 K): Bytes` 1,755 K → 1,264 K (−28.0%), 110 → 78 µs; libdeflate and zlib unchanged in instructions
+(their times moved 11–12% between the runs: judge by instructions). Other variants: 192-byte steps (12 weight
+registers: 16 `mov.16b` and 2 `ldr` in the loop) 93 GB/s at 1 MB, 256-byte steps (one 16-long chain) 99, two 4-long
+chains 98, 43 steps per reduction 97. In L1 the loop runs 2.43 cycles per 64 B against the 2.375 its 19 operations
+allow: the `movi` takes a pipe. Tests: `adlerAroundDotProductChunks` moved to the new 65,536-byte limit (18 sizes, 5
+unaligned starts, random and all-`0xFF` continuing from `0xFFF0FFF0`), and new `adlerOddAndEvenBlockCounts` (1–9 blocks,
+remainders 0–63, 5 starts). The `Portable` and `portable-no-c` builds still build (the kernel is `HardwareCRC` only).
+
+CRC-32's `pmull` fold, looked at and not changed: 8 accumulators, each `pmull` + `pmull2` + `eor3` per 128-byte step,
+24 vector operations: 6 cycles on 4 pipes, so pipe-bound (86 GB/s at 4.02 GHz; measured 77, 90%). More accumulators
+can't help (3 operations per 16 bytes is a fold's minimum); the way past is the integer pipes, scalar `crc32x` streams
+alongside the `pmull` lanes, combined at the end (corsix's fast-crc32), up to about 32 GB/s more in theory. Not tried.
+
+## 2026-11-20, M3 Ultra: the whole suite after the cleanup, and the M1 Max probes repeated (baseline `m3-1120`)
+
+M3 Ultra (24 P + 8 E), macOS 27.2.1, Xcode 27.3 (Swift 6.4.4), working tree at `6f20e6c`. One run of all three targets,
+`baseline update m3-1120`: **5 min 8 s** for 1,076 benchmarks (Bytes 245, Compression 744, Base64 87). Fewer rows than
+`speed-after` (483 + 830 + 99) because the coverage work merged the per-row allocation benchmarks into "all workloads"
+gates and trimmed repeated Bandwidth and Write rows; 877 rows pair by name. Medians below are computed from the saved
+histograms (exact; `bench-table`'s markdown rounds large counts to 2–3 digits, so "12 M → 13 M" can be +0.5%).
+
+### Regressions: one, in parallel inflate above 24 lanes; none in the suite's rows
+
+- **Instructions** (781 rows of 200 K or more, the ones that don't vary by process): geomean **0.982** against
+  `speed-after`. Eight rows rose more than 0.5%: six `Parallel inflate` rows (+0.7 to +1.3%, the up-to-four-segments-a-lane
+  change's fixed costs, recorded in the cleanup table below as +1.4–1.6%), `ECDSA verify P-256 DER` +0.75% (the plain
+  `ECDSA verify P-256` row moved −0.9%), and libzstd's 16 KB row.
+- **Small rows** (under 200 K instructions): the 76 that counted mallocs in the same run in `speed-after` (the malloc
+  interposer active) are higher by a median **+704** instructions, Bytes and the system libraries alike (LZ4 1.6 KB:
+  Bytes +673, Compression +1,591); the 20 whose metrics didn't change moved by a median **0**. A measurement change,
+  not code: compare instruction counts only between rows with the same metric set.
+- **Times**: geomean 0.888 against `speed-after` (recorded while other agents were building; unchanged libzstd rows
+  0.73–0.77 too), so no row is a regression by time alone. The Bytes rows that didn't get faster are memory-bound or
+  all-core rows, and `Deflate 6 dickens` (+5.1% time, identical instructions 1,309.7 M, 7 samples; `Deflate 6 samba`
+  −5.1%): run-to-run drift.
+- **Allocations**: every gate at its threshold (`Read: for-in Bytes (UInt8)`'s threshold is 1).
+- **Parallel inflate falls back to one lane at some lane counts above 24** (`BytesProbe segments`, below; the suite runs
+  8 and 24 lanes, so it never showed). `ParallelDeflateDecoder` picks `4 × lanes` split points just after `00 00 FF FF`
+  markers, evenly spaced, and if any one is false (the bytes inside a stored block), the whole stream decodes
+  sequentially. Silesia's mozilla at level 1 (stored blocks of binary data) hits one at 25, 28, and 32 lanes (and, by the
+  full 1–32 sweep of `Tools/probe bytes segments`, at 11, 22, 29, 30, and 31 too):
+
+  | mozilla, level 1 (51.2 MB) | 8 | 16 | 24 | 25 | 26 | 27 | 28 | 32 |
+  |---|---|---|---|---|---|---|---|---|
+  | segments | 32 | 64 | 96 | **1** | 104 | 108 | **1** | **1** |
+  | ms (median of 5) | 8.4 | 5.2 | 4.0 | **56.1** | 4.2 | 3.9 | **56.2** | **57.5** |
+
+  Level 6 on the same file, and dickens, samba, x-ray, and ooffice at both levels, split at every count. The splits
+  depend only on their number, so one segment per lane (before the cleanup) made at 25–32 lanes the splits four
+  segments a lane makes at 6–8, which decode in parallel: the change made the miss likely at all-core lane counts
+  (`activeProcessorCount` is 32 here). Fixed the same day (section above): parallel at every lane count.
+
+### Improvements against `speed-after` (instructions)
+
+Each matches the cleanup table below: DEFLATE level 1's inner loop (`Deflate 1` corpus rows −12.7 to −18.7%, streaming
+and the TLS pipelines with it, parallel deflate 1 −12.4 to −17.0%), Adler-32 with `udot` (1 MB −51.1%, 64 B −25.1%),
+per-value `Nibble` writes (−29.6%), the array builder (−5.2%), CRC-32's literal tables at 64 B (−3.2%). Not attributed:
+`Bulk BE24`/`BE32: read(_:_:into:)` −16.1%/−15.9%. Base64's `Decode … : Scalar table` rows (−56%, 9x faster) are the
+benchmark's reference decoder no longer reading its table from a lazy global per call (the rule in AGENTS.md), not Bytes.
+
+### Probes: what the M3 Ultra's cores can do, measured the M1 Max way
+
+The 2026-11-19 M1 Max probes (below) were throwaway; these were rebuilt from their description in the session's
+scratchpad: a C program of inline-asm chains (`insn`), a C memory probe (`mem`), and a package depending on `Bytes`
+(`BytesProbe`: checksums, parallel lanes, segments). P-core QoS, idle machine, after the suite.
+
+**Instructions.** The dependent-`add` calibration read **4.02 GHz** (3.90–4.05 in three runs), the P core's clock, so
+no rescaling (the M1 Max probe read 2.82 GHz and was scaled). Cycles from three runs (±4%):
+
+| Instruction | M3 latency | M3 per cycle, 8 chains | M3 per cycle, 16 chains | M1 Max latency / per cycle (8 chains) |
+|---|---|---|---|---|
+| `add`, `eor`, `eor3`, `bcax`, `shl`, `zip1`, `uzp1`, `ext`, `rev32` | 2 | 4 | 4 | 2 / 4 |
+| `tbl` 1 or 2 registers; `tbx` 1 register | 2 | 4 | 4 | 2 / 4 |
+| `tbl` 3 / 4 registers | 4 / 4.8 | 2.0 / 1.35 | 2.0 / 1.35 | 4 / 1.9, 1.3 |
+| `tbx` 2 registers | 4 | 1.9 | 1.9 | — |
+| `tbx` 4 registers (chained through the index) | 5.9 | 0.85 | 0.95 | 8 / 1.0 |
+| `usra`, `mul.4s`, `umull`, `udot`, `pmull`, `pmull2` | 3 | 2.7 | **4** | 3 / 2.7 |
+| `aese` / `aesmc` | 2.7 / 2 | 2.7 / 4 | **4** / 4 | 3, 2 / 2.7, 4 |
+| `aese`+`aesmc` pair | **2.6 per pair** | 2.7 | **4** | 6 per pair / 2.6 |
+| `fmla.4s` | 3.6 | 2.1 | **4** | 4 / 2.0 |
+| `sha256h`, `sha512h` | 4, 2 | 0.5 | 0.5 | 5, 3 / 0.5 |
+| `crc32x`, scalar `mul` | 3, 3 | 1, 2 | — | not measured |
+
+**Eight chains cap a 3-cycle instruction at 8/3 = 2.7 a cycle**: that is the M1 Max table's "2.7" for `udot`, `pmull`,
+`aese`, and the multiplies, and the M3 reads the same with eight. With 16 chains the M3 issues all of them at **4 a
+cycle** (and `fmla` at 4, not 2): the M1 Max's real rate for them is unmeasured. The M3 fuses `aese`+`aesmc` into a
+2.6-cycle step (the M1 Max: 6 a pair), and `tbx` with 4 registers chained through its index is 6 cycles (8).
+
+**Memory** (pointer chase, one pointer per 128-byte line, random order):
+
+| Working set | M3 Ultra | M1 Max |
+|---|---|---|
+| 16–128 KB (L1D) | 1.0 ns (4 cycles) | 0.93–1.2 ns (3) |
+| 256 KB–2 MB (L2) | 4.5–6.0 ns (18–24 cycles) | 5.3–5.6 ns (17–18) |
+| 4 / 8 MB | 7.3 / 8.2 ns | 6.3 / 8.5 ns |
+| 16 / 24 / 32 MB | 15 / 30 / 41 ns | 35 / — / 52 ns |
+| 48 / 64 MB | 49 / 53 ns | — / 100 ns |
+| 128 / 256 / 512 MB (DRAM) | 106 / 127 / 128 ns | 121–124 ns |
+
+One-core bandwidth (128-bit loads into four `eor` accumulators; `stp q` stores): reads 133 GB/s in L1, 108–115 from
+256 KB to 64 MB, 89 at 128 MB, **80 at 256 MB** (M1 Max: 61); stores **122–126 GB/s from 4 MB to 256 MB** (91–110 at
+256 KB–1 MB; M1 Max 62). Read bandwidth by threads (256 MB each, GB/s total):
+
+| Threads | 1 | 2 | 3 | 4 | 6 | 8 | 10 | 12 | 16 | 24 | 32 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| M3 Ultra | 80 | 122 | 156 | 191 | 188 | 224 | 241 | 243 | **254** | 254 | 253 |
+| M1 Max | 61 | 115 | 114 | 113 | 102 | 115 | 126 | | | | |
+
+The M3 Ultra levels off at 16 threads (254 GB/s, about 31% of the 819 GB/s the whole chip, GPU included, is rated
+for); the M1 Max at two.
+
+**Checksums** (one thread, best of 9; GB/s):
+
+| Size | 64 B | 1 KB | 16 KB | 256 KB | 1 MB | 4 MB | 8 MB | 32 MB | 128 MB |
+|---|---|---|---|---|---|---|---|---|---|
+| CRC-32, M3 Ultra | 16.1 | 70.9 | 79.1 | 77.6 | 77.3 | 77.6 | 77.4 | 77.2 | 73.9 |
+| CRC-32, M1 Max | | | | 61.6 | | 61.6 | | 58.4 | 58.8 |
+| Adler-32 (`udot`), M3 Ultra | 19.8 | 72.6 | 76.7 | 76.0 | 76.4 | 75.3 | 74.9 | 74.3 | 72.6 |
+| Adler-32 (`udot`), M1 Max | 8.2 | 56.0 | 57.2 | | 58.0 | | 55.7 | | |
+
+The first M3 measurement of the `udot` Adler-32: 1.31x the M1 Max at 1 MB, about the clock ratio. Its loop (`Tools/loops`
+on `Adler32.checksum`) is 16 instructions per 64 bytes, eight `udot`s into eight accumulators, each written once an
+iteration: it is **bound by `udot`'s 3-cycle latency**, not its throughput (64 bytes per 3 cycles: 86 GB/s at 4.02 GHz,
+measured 76; on the M1 Max 69 at 3.23 GHz, measured 58). (Fixed the same day, section above: 101 GB/s at 1 MB.)
+
+**Parallel DEFLATE by lane count** (`ParallelDeflateEncoder`/`Decoder`, 256 KB chunks, raw, independent chunks for
+decoding; medians of 7 encodes and 9 decodes, ms):
+
+| File, level | Direction | 1 | 2 | 4 | 8 | 12 | 16 | 20 | 24 | 28 | 32 |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| dickens 10.2 MB, 1 | encode | 37.2 | 19.7 | 10.6 | 5.3 | 3.6 | 2.8 | 2.8 | 2.4 | 2.3 | 2.1 |
+| dickens, 6 | encode | 120.7 | 62.3 | 33.9 | 17.3 | 11.6 | 8.8 | 7.1 | 8.3 | 7.3 | 6.5 |
+| mozilla 51.2 MB, 1 | encode | 181.7 | 96.2 | 49.3 | 25.6 | 17.1 | 13.1 | 10.6 | 9.0 | 8.2 | 8.5 |
+| mozilla, 6 | encode | 406.9 | 208.9 | 114.3 | 57.5 | 39.7 | 29.7 | 24.1 | 20.5 | 18.9 | 17.7 |
+| dickens, 1 | decode | 11.6 | 6.1 | 3.2 | 1.9 | 1.3 | 1.1 | 1.1 | 0.9 | 0.9 | 0.8 |
+| dickens, 6 | decode | 10.0 | 5.3 | 3.1 | 1.8 | 1.2 | 1.0 | 1.0 | 1.0 | 0.8 | 0.8 |
+| mozilla, 1 | decode | 52.7 | 29.3 | 16.1 | 8.6 | 6.4 | 5.2 | 4.6 | 4.0 | **54.9** | **55.0** |
+| mozilla, 6 | decode | 53.2 | 29.5 | 15.9 | 8.3 | 6.2 | 5.2 | 4.6 | 4.2 | 3.8 | 3.7 |
+
+(dickens is the M1 Max table's "9.7 MB": 10.2 million bytes.) Encoding on 24 P cores: 19.8x one lane (mozilla level 6);
+all 32 cores another 14% (20.5 → 17.7 ms), as the M1 Max's two E cores gave 10–13%. Decoding with four segments a lane
+now gains from the E cores too (mozilla level 6: 24 → 32 lanes, 4.2 → 3.7 ms; on the M1 Max, before the change, 9–10
+lanes were slower than 8), except where it falls back (above). Against the M1 Max at 8 lanes: encoding 1.21–1.28x
+faster (mozilla level 6 70.1 → 57.5 ms), decoding 1.30x, roughly the clock; at the full chips (32 lanes against 10),
+encoding 3.1–3.6x.
+
 ## 2026-11-19, M1 Max against M3 Ultra (baselines `d2-final` → `m1max`, `trk-final-portable*` → `m1max-portable*`; Swift 6.4.4)
 
 The repository moved to a new machine, and every package's suite was run again there. Same code, same compiler (Xcode
@@ -291,6 +565,9 @@ accumulators takes one `udot` a block (3 cycles of latency, below), so both limi
 cycles, from the probe's chain limit.) Getting past it needs fewer vector instructions per block (the 4 `add.4s` for the
 running total) and more accumulators (two blocks an iteration), both; not tried. Not measured on the M3 Ultra
 (no access): the instruction exists there, so a gain is likely, but its size depends on that core's `udot` rate.
+**Corrected 2026-11-20:** the 2.7 a cycle was the probe's own limit (eight chains of a 3-cycle instruction), and the
+loop is bound by `udot`'s 3-cycle *latency*: each of its eight accumulators takes one `udot` an iteration. More
+accumulators, not fewer `udot`s, is the way past it. The M3 Ultra runs it at 76 GB/s (2026-11-20 section, above).
 
 ### Parallel lanes: the efficiency cores help both codecs now; one stream falls back to sequential
 

@@ -15,6 +15,11 @@ enum Fixtures {
     static var zstdText: URL { root.appending(path: "text-zstd.zip") } // the 32 MB text as Zstandard (method 93), level 3
     static var zstdRaster: URL { root.appending(path: "raster-zstd.zip") } // the 32 MB raster as Zstandard, level 3
 
+    /// 20,000 text files of 1–8 KB in 200 directories: RESULTS.md's step15 small-file job.
+    static var smallFiles20k: URL { root.appending(path: "small-20k.zip") }
+    /// Eight archives of one 64 MB text file each (`text0.txt` … `text7.txt`): step15's several-archives job.
+    static var textArchives: [URL] { (0..<8).map { root.appending(path: "text64-\($0).zip") } }
+
     /// Where extraction benchmarks write: `.noindex`, so Spotlight doesn't index what they extract.
     static var output: URL { root.appending(path: "output.noindex") }
 
@@ -76,6 +81,39 @@ enum Fixtures {
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: output, withIntermediateDirectories: true)
         if fileManager.fileExists(atPath: largeRandom.path) { return }
+        try prepareOriginal()
+    }
+
+    /// The step15 jobs' archives (made on first use, about 30 s, then cached): a separate seed, so the fixtures above
+    /// stay as they were.
+    static func prepareLarge() throws {
+        let fileManager = FileManager.default
+        try prepare()
+        if fileManager.fileExists(atPath: textArchives.last!.path) { return }
+        let source = root.appending(path: "source-large")
+        try? fileManager.removeItem(at: source)
+        var rng = SplitMix64(seed: 0x20_000)
+        let small = source.appending(path: "small20k")
+        for index in 0..<20_000 {
+            let directory = small.appending(path: "dir\(index % 200)")
+            if index < 200 { try fileManager.createDirectory(at: directory, withIntermediateDirectories: true) }
+            let size = 1024 + Int(rng.next() % 7168)
+            try text(byteCount: size, using: &rng).write(to: directory.appending(path: "file\(index).txt"))
+        }
+        try zip("small20k", into: smallFiles20k, from: source)
+        let text64 = text(byteCount: 64 << 20, using: &rng)
+        for (index, archive) in textArchives.enumerated() {
+            let directory = source.appending(path: "text64-\(index)")
+            try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
+            try text64.write(to: directory.appending(path: "text\(index).txt"))
+            try ExternalTool.run("/usr/bin/zip", ["-qj", archive.path, "text\(index).txt"], in: directory)
+            try fileManager.removeItem(at: directory)
+        }
+        try fileManager.removeItem(at: source)
+    }
+
+    private static func prepareOriginal() throws {
+        let fileManager = FileManager.default
 
         let source = root.appending(path: "source")
         try fileManager.createDirectory(at: source, withIntermediateDirectories: true)

@@ -192,15 +192,16 @@ enum CpioWalker {
         entry.mode = UInt16(truncatingIfNeeded: cpio.mode & 0o7777)
         entry.uid = UInt32(truncatingIfNeeded: cpio.uid)
         entry.gid = UInt32(truncatingIfNeeded: cpio.gid)
-        // Files keep their time; directories and links get the extraction's, as `xip --expand` leaves them.
-        if type == .regularFile { entry.modificationTime = (Int64(cpio.mtime), 0) }
+        // Files keep their time; links get the extraction's, as `xip --expand` leaves them, and so do directories
+        // unless the extraction asks for theirs (``AEAExtractionOptions/restoresXIPDirectoryTimes``; the sink drops them).
+        if type == .regularFile || type == .directory { entry.modificationTime = (Int64(cpio.mtime), 0) }
         switch type {
         case .symbolicLink:
             entry.linkTarget = AAHeaderRange(offset: Cpio.headerSize + cpio.nameSize, count: cpio.fileSize)
         case .regularFile:
             entry.data = (0, cpio.fileSize)
-            // `xip --expand`'s compression: LZVN forks for files over 16 KiB (whether one pays, and PNGs, are decided
-            // with the data: `Decmpfs.pays`, `Decmpfs.skips`).
+            // `xip --expand`'s compression: LZVN forks for files over 16 KiB, stored by Disk's `StoragePolicy.lzvnForks`
+            // (whether one pays, and PNGs, are decided with the data: the rest of `.xipExpand`'s rules).
             if cpio.fileSize > xipCompressionThreshold { entry.diskCompression = 8 }
             entry.blobByteCount = cpio.fileSize
             // A file with other names: the first one written, the others linked to it.

@@ -1,4 +1,5 @@
 import BytesTestSupport
+import Disk
 import Foundation
 import NativeZip
 import System
@@ -137,9 +138,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
         let directory = temporary.url
-        let failures = try await ZipExtractor.extract { extractor in
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
             for name in ["bzip2.zip", "xz.zip", "deflate64.zip", "symlink.zip"] {
-                try extractor.add(fixture(name), to: FilePath(directory.path))
+                try await extractor.add(fixture(name))
             }
         }
         #expect(failures.isEmpty, "\(failures)")
@@ -157,10 +158,9 @@ private func zip(_ arguments: [String], in directory: URL) throws {
         var options = ExtractionOptions()
         options.password = "secret"
         let names = ["large-zipcrypto-stored.zip", "large-zipcrypto-deflated.zip", "large-aes256-store.zip", "large-aes256-deflate.zip"]
-        let failures = try await ZipExtractor.extract { extractor in
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
             for name in names {
-                let destination = FilePath(directory.appending(path: name).path)
-                _ = try extractor.add(fixture(name), to: destination, options: options)
+                _ = try await extractor.add(fixture(name), into: FilePath(name), options: options)
             }
         }
         #expect(failures.isEmpty, "\(failures)")
@@ -175,14 +175,48 @@ private func zip(_ arguments: [String], in directory: URL) throws {
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
         let directory = temporary.url
-        let failures = try await ZipExtractor.extract { extractor in
-            try extractor.add(fixture("ppmd.zip"), to: FilePath(directory.appending(path: "ppmd").path))
-            try extractor.add(fixture("zipcrypto.zip"), to: FilePath(directory.appending(path: "crypto").path))
-            try extractor.add(fixture("bzip2.zip"), to: FilePath(directory.appending(path: "bzip2").path))
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
+            try await extractor.add(fixture("ppmd.zip"), into: "ppmd")
+            try await extractor.add(fixture("zipcrypto.zip"), into: "crypto")
+            try await extractor.add(fixture("bzip2.zip"), into: "bzip2")
         }
         #expect(failures.count == 2)
         #expect(FileManager.default.fileExists(atPath: directory.appending(path: "bzip2/sample.txt").path))
         #expect(!FileManager.default.fileExists(atPath: directory.appending(path: "ppmd/sample.txt").path))
+    }
+
+    /// Small entries (written whole, in one write) whose recorded CRC-32 is wrong: the check after the last write fails
+    /// the file, which is removed, and the error is the decoder's own (thrown, and in the failures).
+    @Test(arguments: [["-0"], ["-9"]])
+    func failsSmallEntriesAfterTheirLastWrite(_ method: [String]) async throws {
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
+        try Data(SampleBytes.text(20_000, seed: 3)).write(to: directory.appending(path: "small.txt"))
+        try zip(method + ["small.zip", "small.txt"], in: directory)
+        var bytes = try [UInt8](Data(contentsOf: directory.appending(path: "small.zip")))
+        // The central directory's CRC-32 (what the extractor checks): 16 bytes into its header.
+        let central = try #require(bytes.indices.dropLast(4).last { bytes[$0] == 0x50 && bytes[$0 + 1] == 0x4B && bytes[$0 + 2] == 1 && bytes[$0 + 3] == 2 })
+        bytes[central + 16] ^= 0xFF
+        let damaged = directory.appending(path: "damaged.zip")
+        try Data(bytes).write(to: damaged)
+
+        let out = directory.appending(path: "out")
+        do {
+            try await ZipArchive(url: damaged).extract(to: FilePath(out.path))
+            Issue.record("no error")
+        } catch {
+            if case ZipError.crcMismatch? = error as? ZipError {} else { Issue.record("\(error)") }
+        }
+        #expect(!FileManager.default.fileExists(atPath: out.appending(path: "small.txt").path))
+
+        let collected = directory.appending(path: "collected")
+        let failures = try await ZipExtractor.extract(into: FilePath(collected.path)) { extractor in
+            try await extractor.add(ZipArchive(url: damaged))
+        }
+        #expect(failures.count == 1)
+        if case ZipError.crcMismatch? = failures.first?.error as? ZipError {} else { Issue.record("\(failures)") }
+        #expect(!FileManager.default.fileExists(atPath: collected.appending(path: "small.txt").path))
     }
 
     /// A stored entry big enough to be copied in pieces, intact and then with one byte changed.
@@ -232,5 +266,65 @@ private func zip(_ arguments: [String], in directory: URL) throws {
 
         try await fixture("bzip2-large.zip").extract(to: FilePath(out.path))
         #expect(try Data(contentsOf: out.appending(path: "large.txt")).count == 6_000_000)
+    }
+
+    /// With a quarantine, everything extracted gets the attribute (files, read-only ones too; listed directories;
+    /// parents the archive doesn't list; symbolic links themselves), the destination doesn't, and contents and modes
+    /// are as without one. Through `ZipArchive.extract`'s option and `ZipExtractor`'s parameter.
+    @Test(arguments: [false, true]) func quarantinesWhatItExtracts(listsDirectories: Bool) async throws {
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let directory = temporary.url
+        let tree = directory.appending(path: "tree")
+        try FileManager.default.createDirectory(at: tree.appending(path: "a/b"), withIntermediateDirectories: true)
+        try Data("one\n".utf8).write(to: tree.appending(path: "a/b/one.txt"))
+        try Data("read only\n".utf8).write(to: tree.appending(path: "a/locked.txt"))
+        try FileManager.default.setAttributes([.posixPermissions: 0o444], ofItemAtPath: tree.appending(path: "a/locked.txt").path)
+        try Data("top\n".utf8).write(to: tree.appending(path: "top.txt"))
+        try FileManager.default.createSymbolicLink(atPath: tree.appending(path: "a/link").path, withDestinationPath: "b/one.txt")
+        // `-y`: links as links; `-D`: no directory entries, so `a` and `a/b` are made only as their files' parents.
+        try zip(["-r", "-y"] + (listsDirectories ? [] : ["-D"]) + ["../q.zip", "."], in: tree)
+        let archive = try ZipArchive(url: directory.appending(path: "q.zip"))
+        #expect(archive.entries.contains { $0.kind == .directory } == listsDirectories)
+
+        let quarantine = Quarantine(value: Array("0083;673e3000;Safari;".utf8))
+        func attribute(_ url: URL) -> [UInt8]? {
+            let size = getxattr(url.path, "com.apple.quarantine", nil, 0, 0, XATTR_NOFOLLOW)
+            guard size >= 0 else { return nil }
+            var value = [UInt8](repeating: 0, count: size)
+            _ = getxattr(url.path, "com.apple.quarantine", &value, size, 0, XATTR_NOFOLLOW)
+            return value
+        }
+        func mode(_ url: URL) -> mode_t {
+            var info = stat()
+            return lstat(url.path, &info) == 0 ? info.st_mode & 0o7777 : 0
+        }
+        let items = ["a", "a/b", "a/b/one.txt", "a/locked.txt", "a/link", "top.txt"]
+
+        let plain = directory.appending(path: "plain")
+        try await archive.extract(to: FilePath(plain.path))
+        for item in items { #expect(attribute(plain.appending(path: item)) == nil, "\(item)") }
+
+        var options = ExtractionOptions()
+        options.quarantine = quarantine
+        let single = directory.appending(path: "single")
+        try await archive.extract(to: FilePath(single.path), options: options)
+        let pooled = directory.appending(path: "pooled")
+        let failures = try await ZipExtractor.extract(into: FilePath(pooled.path), quarantine: quarantine) { extractor in
+            try await extractor.add(archive, into: "x/y")
+        }
+        #expect(failures.isEmpty)
+        for (root, prefix) in [(single, ""), (pooled, "x/y/")] {
+            for item in items {
+                let url = root.appending(path: prefix + item)
+                #expect(attribute(url) == quarantine.value, "\(prefix)\(item)")
+                #expect(mode(url) == mode(plain.appending(path: item)), "\(prefix)\(item)")
+            }
+            #expect(attribute(root) == nil)
+            #expect(try contents(root.appending(path: prefix + "a/locked.txt")) == "read only\n")
+            #expect(try FileManager.default.destinationOfSymbolicLink(atPath: root.appending(path: prefix + "a/link").path) == "b/one.txt")
+        }
+        // The subdirectory the archive went into was made on the way too.
+        #expect(attribute(pooled.appending(path: "x")) == quarantine.value && attribute(pooled.appending(path: "x/y")) == quarantine.value)
     }
 }

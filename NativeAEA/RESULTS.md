@@ -7,6 +7,308 @@ and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIV
 synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
 M1 Max's (baseline `m1max`).
 
+## 2026-11-21 (later): Archive Utility's folder and a `.xip`'s directory times, as options; keys for an app (baselines `cleanup-after` → `v1-after`)
+
+Nunarchiver's output was compared with Archive Utility's, item by item (corpus, method, and the table by archive:
+Disk/RESULTS.md, same date). Xcode's `.aea` already matched in all 167,541 items, extended attributes' stored bytes
+included, as did plain `.aar` archives of one item. Two things differed, and each is an `AEAExtractionOptions` field,
+off by default so the command line still extracts as `aa extract` and `xip --expand` do:
+
+- **`restoresDestinationMetadata`**: an archive `aa archive -d DIR` makes has an entry for its root. Archive Utility
+  gives the folder it makes that entry's mode and time (0755 and the directory's own time, where its folders are
+  otherwise 0700 and new); `aa extract` leaves the destination alone, and so did the sink. With the option, the entry
+  is planned like any directory (Disk sets the destination's mode in its directory pass: Disk/RESULTS.md).
+- **`restoresXIPDirectoryTimes`**: a `.xip`'s cpio stream records every directory's time. `xip --expand` applies none.
+  Archive Utility applies them before it writes the files, so they survive only where nothing is written afterwards:
+  in Xcode 27.3's xip, 1,877 of 30,068 directories (1,876 of the 1,886 that hold only directories, and 1 of the 28,182
+  holding a file or a link; found by classifying every directory of its expansion by what it holds). With the
+  option, all 30,068 get their time, in Disk's directory pass, after the hard links. The app sets it: against Archive
+  Utility's expansion, the 28,191 directories it left with the extraction's time are the only differences in 167,521
+  items (files' contents, modes, times, hard-link groups, `decmpfs` attributes and forks, and links all equal;
+  neither quarantines anything from a `.xip`; links keep the extraction's time in both).
+
+For an app that asks for keys:
+
+- `AEAArchive.profile(at:)`: the profile from the file's first 12 bytes, with no key, so the app knows whether to ask
+  for a password (5), a symmetric key (1, 2), or nothing (0) before opening.
+- `AEASigningKey.publicKey(text:)`: a signer's public key as a text field holds it (a PEM with or without its line
+  breaks, or the X9.63 point in hex or `base64:`).
+
+An archive `aea encrypt -profile 0 -sign-priv KEY` makes has no certificate chain: opening it throws
+`untrustedSigningKey("no certificate chain in the auth data")`, and the app asks for the signer's public key. Archive
+Utility fails on it ("Error 22 - Invalid argument"; its log: `AEAAuthInfo.init found 0 entries in auth data`, `Main
+key derivation failed`): it takes the signer only from the auth data, as Xcode's archive supplies it.
+
+**Xcode's archives, in the app and on the command line** (M3 Ultra, one run after another, a machine also running
+other sessions; times from the app's log line and `nunarchiver`'s wall clock):
+
+| | Archive Utility | Nunarchiver (Release) | `nunarchiver` |
+|---|---|---|---|
+| `Xcode_27.3_beta.xip` (167,521 items, 9.57 GB written) | 59 s | 10.3 s, 10.3 s (10.5 s in the comparison run) | 10.6 s, 9.8 s |
+| `Xcode_27.3_beta_2.aea` (167,541 items, 10.43 GB written) | 103 s | 10.0 s | |
+
+The app's xip runs set 30,068 directory times that the command line's don't, at no cost that shows (earlier: app
+10.4–13.1 s, CLI 10.6–13.9 s). Archive Utility's times are `open -W` around the whole run, including its launch.
+
+**Benchmarks** (`cleanup-after` → `v1-after`, one run): nothing measured changed (the options are off).
+
+| Benchmark | Instructions | Mallocs |
+|---|---|---|
+| Extract: synthetic: archived | 400 G → 401 G | 1,398 → 1,395 |
+| Extract: synthetic: lzfse | 533 G → 533 G | 1,416 → 1,422 |
+| Extract: synthetic: none | 291 G → 292 G | 965 → 961 |
+| List (decode, verify, parse): synthetic: bytes | 260 G → 260 G | 31 K → 31 K |
+| Open and verify: synthetic | 1,886 K → 1,886 K | 30 → 30 |
+
+**Tests**: 59 tests in 12 suites (was 55 in 11). New, `ArchiveUtilityOptionsTests`: the root entry setting a 0700
+destination's mode and time, with the option and without; a xip's directories (holding files, a link, hard links)
+getting their times, with and without; the profile read without a key for profiles 0, 1, and 5, and a file that
+isn't an archive; public keys from text in five forms, and four that aren't keys.
+
+## 2026-11-21: shared primitives, mapping, and output file (baselines `fu-after` → `cleanup-after`; `nunarchiver` before and after)
+
+The last pass before the app: what this package had in common with Disk and NativeZip now has one implementation,
+in Bytes, BytesAsync, or Disk. `Buffers.swift` 468 → 170 lines (only `SegmentBufferPool` left).
+
+| Was here | Now | |
+|---|---|---|
+| `RawStorage` (and its `reuse`/`giveBack`) | Bytes' `RawStorage` | word for word Disk's copy too |
+| `Continuation`, `suspend`, `WaiterQueue` | BytesAsync's `Continuation`, `withContinuation`, `WaiterQueue` | the same again |
+| `JobQueue<Job>` (the block stream's) | BytesAsync's `AsyncQueue<Element>` | its `pushWaitNanoseconds`, read by nobody, dropped |
+| `RawMapping` (`--input mapped`) | Disk's `MappedFile` (`access: .sequential`) | NativeZip's `MappedFile` was the same thing |
+| `open` + a `pwrite` loop in `decrypt(to:)` | Disk's `OutputFile` | the loop was a copy of Disk's `writeFully`; errors map as before (`AEAError(DiskError)`) |
+
+**Left here, and why:** `SegmentBufferPool` (its carry regions, reference counts, and `activateAll` are this
+pipeline's; BytesAsync's `AsyncIndexPool` is its free list without them); `AtomicCounter` (three lines); the slot rings
+and consumer waits of `SegmentStream` and `BlockStream`; `AEAArchive.readFully` (one `pread` loop on swift-system's
+`FileDescriptor`, shared by every reader here, with this format's `truncated` at end of file: a Disk type would only
+wrap it); timing with `DispatchTime` (a one-liner; Disk's clock is another).
+
+**Measured.** The baseline for "before" is `fu-after` (yesterday's final code, which is today's before; the
+`cleanup-before` run for this package was lost to an edit made while its benchmark targets were still building: see
+AGENTS.md). Counts are firm; times were taken under load.
+
+| Synthetic archive (`fu-after` → `cleanup-after`) | Instructions | Mallocs |
+|---|---|---|
+| Extract: archived | 402 → 400 G | 1,394 → 1,398 | |
+| Extract: archived: progress | 403 → 401 G | 1,402 → 1,403 | |
+| Extract: lzfse | 535 → 533 G | 1,422 → 1,416 | |
+| Extract: none | 292 → 291 G | 963 → 965 | |
+| Decode segment 0: bytes / system (against `aea-2`) | 1,132 M / 929 M, both unchanged | 0 |
+
+On Xcode's archives, the binary built before the pass against the one after, back to back (`/usr/bin/time -l`; an
+interposer counting file-system calls on the extractions):
+
+| | Before | After |
+|---|---|---|
+| `.xip` 27.2 RC, extract | 1,328.06 G instructions, 522,413 calls, 10.7 s | 1,328.76 G (+0.05%), 522,413 calls, 10.8 s |
+| `.aea` 27.3 beta 2, extract (quarantined) | 991.6 G, 780,239 calls, 11.7 s | 987.3 G (−0.4%), 780,239 calls, 10.5 s |
+| `.xip`, list (`-l`: block stream, `AsyncQueue`), two rounds | 429.26, 428.52 G | 428.52, 428.52 G |
+| `.aea`, verify | 485.71 G | 484.90 G |
+| `.aea`, decrypt to a file (`OutputFile`) | 490.09 G, 2.80 s | 490.11 G, 2.78 s; the 10,464,202,071-byte files identical |
+
+**Same trees.** Every item of both extractions compared as on 2026-11-20 (type, mode, flags, owner, size, hard-link
+group, link target, SHA-256 of the contents, and of every extended attribute read raw, `com.apple.decmpfs` and
+`com.apple.ResourceFork` included): the `.aea`'s 167,541 items identical (modification times aside: the archive has
+none); the `.xip`'s 167,192 identical, files' modification times included (its directories' and links' times are each
+run's own, before and after alike).
+
+**Disk changes that reach this package** (Disk/RESULTS.md, 2026-11-21): a parent directory an archive doesn't list now
+gets the quarantine too (Xcode's archives list every directory: no call changed above), and a directory listed after
+something made it, or already there, gets its entry's mode.
+
+`swift test`: 55 pass; `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`: 55 pass. A build
+from scratch with tests has no warnings.
+
+## 2026-11-20 (follow-ups): Disk's fixes for this package's proposals (baselines `fu-before` → `fu-after`)
+
+Disk took the three proposals below (Disk/RESULTS.md, "follow-ups"), and the workarounds went: `Extraction.swift` 621 →
+589 lines (39 removed, 7 added).
+
+- **Bridged pieces' bytes are counted** by Disk now, so the sink's `uncountedBytes` (left out of the exact total) is
+  gone, and `reportsProgress` checks the exact total is every file's bytes in both modes (it was below them with
+  `archived` and 16 KiB segments).
+- **`LargeFileToken.entry`** replaces the `Mirror` read (`ExtractionSink.reflect`, and the `largeFileCompressed` flag
+  only the workaround needed).
+- **`fchflags` for flags alone.** Xcode's `.aea` (27.3 beta 2, `--no-quarantine`), the binary before these changes
+  against after, interleaved (7 rounds; an interposer counting the file-system calls):
+
+  | | Before | After |
+  |---|---|---|
+  | Instructions | 956.5, 959.1, 958.1, 955.1, 961.2, 959.4, 958.9 G | 953.2, 946.7, 947.4, 946.9, 947.3, 944.4, 944.2 G |
+  | Wall (s), loaded | 8.33, 9.63, 9.57, 9.14, 9.33, 9.32, 8.82 | 9.98, 10.98, 10.92, 10.08, 8.47, 9.26, 9.15 |
+  | Calls | 620,272: 125,890 `fsetattrlist` | 620,272: 112,922 `fchflags`, 12,968 `fsetattrlist` |
+
+  Instructions are back to before the migration (949–951 G; medians now 946.9 against 958.9 G). The wall times'
+  difference is the order: in rounds 2–4 (old first) I was building in parallel; rounds 5–7 ran new first with nothing
+  of mine running, and read 8.47–9.26 against 8.82–9.33 s. The `.xip` (every file has times) makes the same 522,413
+  calls either way, 1,326.0 against 1,327.0 G.
+- **Disk's setup is lazy** (writers' scratch and each of its buffers, the job ring, large-file slots): the synthetic
+  archive's extractions lost 1,400–1,600 mallocs each (archived 2,799 → 1,394, lzfse 2,823 → 1,422, none 2,537 → 963),
+  instructions 404 → 402 G, 537 → 535 G, 291 → 292 G. The final binary on Xcode's `.aea`: 945.5 G, the same 620,272
+  calls, the same tree.
+- `DiskError.source` carries the source's error, and `AEAError(DiskError)` passes an `AEAError` through as it is.
+- Disk's `ExtractionOptions` is `ExtractionSettings` now (`AEAExtractionOptions.scheduling`).
+
+**Same trees.** Both Xcode archives through `nunarchiver`, before and after, every item compared (type, mode, flags,
+owner, size, hard-link group, link target, SHA-256 of the contents, and SHA-256 of every extended attribute read raw,
+`com.apple.decmpfs` and `com.apple.ResourceFork` included): the `.xip`'s 167,192 items identical, file modification
+times included; the `.aea`'s 167,541 identical but for modification times (the archive has none: each run's own).
+125,887 of the `.aea`'s files are `UF_COMPRESSED`, in both.
+
+`swift test`: 55 pass; `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`: 55 pass.
+
+## 2026-11-20: writing through Disk (baselines `mig-before` → `mig-after`)
+
+NativeAEA's disk writing moved onto **Disk** (`../Disk`, extracted from NativeAEA and NativeZipArchive): the planner,
+write queue, writers, file-system limit, APFS compression, metadata, large files in pieces, and the passes after the
+writers are Disk's now. NativeAEA keeps decoding and walking, and plans: `ExtractionSink` turns walked entries into
+`Planner` calls, and `SegmentContents` (a `PieceSource`) hands Disk's writers ranges of the decoded segment buffers by
+reference. ARCHITECTURE.md §7–§8 describe it.
+
+**Every time below was taken under load** (other agents building and benchmarking: load average 15–28 during the
+timed rounds, 7–10 for the first "before" runs), so instruction and call counts are the firm numbers; times are
+interleaved rounds.
+
+### What moved, what went
+
+- Deleted (Disk owns them): `Writer.swift` (524 lines), `DiskCompression.swift` (266: `Decmpfs`, `ChunkEncoders`,
+  `ForkUnpacker`, `EntryTimes`), `Directories.swift` (140: `DirectoryTable`, the descriptor limit), `Metadata.swift` (175:
+  xattrs, ACLs, quarantine), and from `Extraction.swift` the context, write jobs, bridges, large files, early links,
+  cancellation target, path checks, and the passes after the walk (1,426 → 620 lines, with the new sink and source);
+  from `Buffers.swift` the limiter, index pool, latch, first-failure box, timings, and the job queue's watchers (681 →
+  468); the ACL and `decmpfs` records. The library went from 7,392 to 5,253 lines.
+- Options: `AEAExtractionOptions` keeps `read`, `writerThreads`, `fileSystemWidth` (defaults now Disk's:
+  `DiskDefaults`, 24 and 6 here, as before), `diskCompression`, `overwrite`, `restoreOwnership`, `relativeToParents`,
+  `copyQuarantine`; adds `progress` (Disk's `ExtractionProgress`) and `collectsTimings` (writer timings, off by
+  default: they cost a clock read per step); drops `spreadDirectories` and `hardLinkThreads` (both measured slower).
+  `AEAStatistics.hardLinksAfterWriters` went with the link tasks. `nunarchiver` lost `--hard-link-threads` and
+  `--spread-directories` and gained `--progress`.
+- `DiskCompressionMode` maps to Disk's `StoragePolicy`: `.archived` → `forArchivedType` (`AFT` 13/14 → `.appleArchive`,
+  7/8 → `.lzvnForks`: the xip walker asks for LZVN only over 16 KiB, so that's `.xipExpand`), `.lzfse` →
+  `.appleArchiveLZFSE`, `.none` → plain. One change of behavior: an archive asking for zlib (`AFT` 3/4, none seen) now
+  gets Disk's `.zlibInline` instead of plain.
+- Destination: `permissions: .exact` and `keepsSpecialBits` (the archived mode, as `aa` and `xip` restore it),
+  devices allowed (made as root, skipped and counted otherwise, as before), quarantine copied with
+  `quarantinesDestination` for `.aar` only, `O_RESOLVE_BENEATH` on (Disk's default).
+
+### Correctness
+
+- **Xcode, every item compared** (a manifest of every item: type, mode, flags, owner, size, times, hard-link group, link
+  target, SHA-256 of the contents read through the kernel, and SHA-256 of each extended attribute read raw, so the
+  stored `com.apple.decmpfs` and `com.apple.ResourceFork` bytes too): the `.xip` (Xcode 27.2 RC), all **167,193** items
+  identical to the pre-migration output (directories' and links' times are the extraction's, as `xip --expand` leaves
+  them, and weren't compared); the `.aea` (Xcode 27.3 beta 2, `--no-quarantine`), all **167,542** identical but for
+  modification times, which Xcode's `.aea` doesn't archive (both outputs have their extraction's time).
+- `swift test`: 55 tests pass (57 before: the two `DirectoryTable` tests, `chunkEncodersMadeOnFirstUse` and
+  `writeJobsAreSmall` went with their code; `contentsAreSmall` and `reportsProgress` are new, and the xip test checks
+  progress too): about 14 s in debug. `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`: all 55 pass, the
+  bulk suite's two cases (LZBITMAP forks in 1 KiB and 1 MiB segments) included, in 2 s. Among them, the comparisons
+  with Apple's tools: `compressesFilesAsAppleDoes` and `restoresMetadataAsAppleDoes` against `aa extract`,
+  `extractsAsXipExpandDoes` against `xip --expand`'s rules, and `CancellationTests` (every buffer back after a cancelled
+  or failed extraction, in every layout).
+- `MetadataTests.restoresMetadataAsAppleDoes` (against `aa extract`: xattrs across segments, ACLs, hard links, the
+  quarantine) passes after the move, and also passed on the pre-migration tree today (5 of 5 runs each, filtered and in
+  the full suite, macOS 27.2.1 26B131): the failure reported earlier didn't reproduce here, before or after.
+
+### System calls (an interposer counting every file-system call, both builds alike)
+
+| Xcode | Before | After | Change |
+|---|---|---|---|
+| `.xip`: all calls | 567,486 | 540,947 | **−26,539** |
+| … `fchflags` / `fchmod` / `fsetattrlist` | 18,058 / 8,706 / 99,965 | 0 / 0 / 100,186 | |
+| `.aea`: all calls | 650,897 | 637,936 | **−12,961** |
+| … `fchflags` / `fchmod` / `fsetattrlist` | 125,887 / 12,968 / 0 | 0 / 0 / 125,890 | |
+
+Disk sets a file's flags, mode, and times in one `fsetattrlist`. On the xip, whose files carry times, every compressed
+file lost its `fchflags` (**one call fewer per compressed file**: 18,058), and every file whose mode needed an `fchmod`
+lost that too. Xcode's `.aea` has no times, so the old writer made one call for the flags (`fchflags`) and Disk makes
+one (`fsetattrlist`): there the saving is the 12,968 `fchmod`s only.
+
+### Xcode, timed (interleaved, `/usr/bin/time -l`, loaded machine)
+
+| Run | Before | After |
+|---|---|---|
+| `.xip` wall (3 rounds) | 11.83, 12.64, 10.77 s | 11.37, 11.82, 11.20 s |
+| `.xip` instructions | 1,326.7, 1,334.1, 1,333.3 G | 1,333.1, 1,333.1, 1,324.7 G |
+| `.aea` wall (6 rounds) | 9.13, 8.91, 9.71, 9.45, 9.20, 9.83 s | 9.62, 9.41, (56.9), 10.09, 8.68, 9.41 s |
+| `.aea` instructions | 949.0, 948.7, 951.5, 951.1, 949.2, 949.3 G | 961.2, 960.8, 955.9, 960.4, 958.9, 960.6 G |
+| `.aea` user / system (median) | 84.0 / 38.1 s | 84.0 / 38.2 s |
+
+- **xip:** no change (the medians: 11.83 before, 11.37 after; instructions within their run-to-run spread). The first
+  runs, under lighter load: 10.69 s before (the "about 9.9 s" of an idle machine).
+- **.aea:** the same time (medians 9.33 and 9.41 s; the first runs, under lighter load, 8.11 s before), and **+1.1%
+  instructions** in every round, **found: `fsetattrlist` with only `ATTR_CMN_FLAGS` costs the kernel 62,000
+  instructions more than `fchflags`** (a C probe below: 809 K against 747 K per inline-compressed file, 2–5 µs more),
+  and Xcode's `.aea` makes that call for 125,887 compressed files with no times: ~7.8 G of the +10 G. With times (the
+  xip), the one call is cheaper than the two it replaces (809 K against 833 K), which is why the xip shows nothing.
+  `O_RESOLVE_BENEATH` was ruled out (a build without it: 958–962 G, the same). The 56.9 s run coincided with a release
+  build of mine on every core; it didn't recur in the next three rounds.
+
+The probe (`flagsprobe.c` in the session's scratch; 5,000 files of a 100-byte inline `decmpfs` type 13 each, one
+thread, 4 interleaved rounds, the process's instructions from `proc_pid_rusage`, kernel included):
+
+| Per file after `open` + `fsetxattr(decmpfs)` | Instructions | ns |
+|---|---|---|
+| `fchflags(UF_COMPRESSED)` (before, no times) | 747,000 | 50,000–52,000 |
+| `fsetattrlist(FLAGS)` (Disk, no times) | 809,000 (+62,000) | 54,000–56,000 |
+| `fchflags` + `fsetattrlist(MODTIME)` (before, xip) | 833,000 | 58,000 |
+| `fsetattrlist(MODTIME \| FLAGS)` (Disk, xip) | 809,000 (−24,000) | 54,000–58,000 |
+
+### Package benchmarks (`mig-before` → `mig-after`, synthetic archive)
+
+The extraction benchmarks now record instructions too (the process's, every thread and the kernel's work for its
+calls). `mig-before` ran at a load of about 6 and `mig-after` at about 20, so their times aren't comparable; two
+interleaved rounds against the pre-migration tree (a copy of HEAD's NativeAEA, built separately: `ab-old-N` /
+`ab-new-N`) are:
+
+| Benchmark | Instructions (old → new, both rounds) | CPU | Wall, round 2 (round 1 overlapped another run) | Mallocs |
+|---|---|---|---|---|
+| Extract: archived | 401 → 407 G, 400 → 406 G (+1.5%) | 43 → 44 s | 2,129 → 2,179 ms | 1,705 → 2,799 |
+| Extract: archived: progress (new) | 406 G, 406 G | 44–46 s | 2,164 ms | 2,799 |
+| Extract: lzfse | 534 → 539 G (+0.9%) | 52 → 52 s | 2,481 → 2,439 ms | 1,728 → 2,823 |
+| Extract: none | 291 → 293 G (+0.7%) | 32 → 32 s | 1,461 → 1,563 ms | 1,660 → 2,537 |
+
+(`mig-before` → `mig-after`: 399 → 409 G, 532 → 537 G, 290 → 291 G; the "Resolve parents" and "Directory table"
+benchmarks went with the directory table.)
+
+- **The same extractions through `nunarchiver`, 4 interleaved rounds each** (no benchmark harness): plain, 282.9–283.0 G
+  before and 282.6–283.3 G after, 1.41–1.51 s and 1.44–1.47 s; compressed (`archived`), 390.1–390.8 G and
+  392.7–392.9 G (+0.6%: the 28,379 compressed files' `fsetattrlist(FLAGS)`, 1.8 G, above), 2.00–2.25 s and 1.99–2.18 s.
+  The calls are identical but for `fchflags` → `fsetattrlist` (an interposer: 90,598 and 132,510 before, 90,602 and
+  132,514 after; the 4 more are `mkdirat`s of the destination's own parents). So the extraction itself costs the same,
+  and the plain row's +2 G in the benchmark is the harness's (the malloc interposer runs there), not reproduced
+  outside it.
+- **Mallocs: +1,100 per extraction, fixed**: Disk's setup (writer scratch, the job and path rings, the large-file
+  slots: Disk/RESULTS.md measures ~1,040 with 24 writers), not per entry.
+- **Progress costs nothing measurable**: 406 G and 406 G with an `ExtractionProgress`, 407 G and 406 G without, in the
+  same runs (one relaxed add per file, in a slot per writer).
+
+### Progress
+
+`AEAExtractionOptions.progress` takes Disk's `ExtractionProgress` (relaxed per-writer counters, polled; no Foundation
+`Progress`). The extraction sets the bytes it expects from a cheap estimate when it starts (the `.aea` payload's raw
+size, the `.aar` file's size, the xip's cpio size from its `Metadata`) and the exact entries and bytes once the walk
+has read the stream. `nunarchiver --progress` draws it.
+
+### Disk proposals (Disk was read-only for this work)
+
+1. **`LargeFileToken`'s entry and compression, public** (`public var entry: EntryToken { token }`, `public var
+   isCompressed: Bool { compressed }`). A large file needs its `EntryToken` for its blobs (`addExtendedAttributes`) and
+   to be a hard-link target, and the planner returns it only inside the token. The workaround reads both with `Mirror`
+   once per large file (`ExtractionSink.reflect`): at most one per segment (624 for Xcode's `.aea`), about a
+   microsecond and a few allocations each, invisible in the totals above; it traps if the fields are renamed.
+2. **Count bridged pieces' bytes in the progress.** A compressed large file's piece in which no 64 KiB chunk ends gets
+   no job (`Planner.piece` bridges it into the next one), and the writer counts only `job.count`, so those bytes are
+   never counted: with 16 KiB segments (`aea`'s smallest), three quarters of every compressed large file. Fix: count
+   them when bridged (`progress?.add(entries: 0, bytes: count)` in that branch of `Planner.piece`), or carry them in
+   the completing job. Workaround: `ExtractionProgress` has no public add, so the sink leaves those bytes out of the
+   exact total too (`uncountedBytes`): the fraction still reaches 1, and with segments of 64 KiB or more (Xcode's:
+   16 MiB) at most a piece per file is left out.
+3. **`fchflags` when flags are all there is to set.** `AttributeList.apply` with only `ATTR_CMN_FLAGS` (a compressed
+   file with no times, mode change, or owner) costs 62,000 kernel instructions more than `fchflags`: 0.8% of an Xcode
+   `.aea` extraction's instructions (7.8 G), no measurable time. With anything else in the list, keep the one call.
+
 ## 2026-11-19: M1 Max against M3 Ultra (baselines `aea-2` → `m1max`, synthetic archive only)
 
 > Read against the later sections: both baselines measured the pipeline on its own threads (commit 918278e), before the

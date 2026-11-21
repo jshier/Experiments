@@ -1,0 +1,164 @@
+import BytesTestSupport
+// Only what's needed: Disk has an `ExtractionOptions` of its own.
+import class Disk.ExtractionProgress
+import enum Disk.DiskError
+import Foundation
+import NativeZip
+import System
+import Testing
+
+/// Extraction against Info-ZIP's `unzip` (`/usr/bin/unzip`): the same tree, item for item (type, mode, size, contents,
+/// modification time of files and directories, link target), from an archive `/usr/bin/zip` makes of a tree with
+/// nested and read-only directories, setuid and private modes, symbolic links, a large compressible file (decoded in a
+/// child task while it's written), and a stored file over 8 MiB (checksummed and written in pieces).
+@Suite struct InfoZIPComparisonTests {
+    /// The archive, made once per test in `directory`.
+    private static func makeArchive(in directory: URL) throws -> URL {
+        let source = directory.appending(path: "source")
+        let fileManager = FileManager.default
+        for path in ["a/b/c", "empty", "ro", "x"] {
+            try fileManager.createDirectory(at: source.appending(path: path), withIntermediateDirectories: true)
+        }
+        func write(_ path: String, _ bytes: [UInt8], mode: Int = 0o644) throws {
+            let url = source.appending(path: path)
+            try Data(bytes).write(to: url)
+            try fileManager.setAttributes([.posixPermissions: mode], ofItemAtPath: url.path)
+        }
+        try write("a/one.txt", Array("hello\n".utf8))
+        try write("a/UPPER.TXT", Array("UPPER\n".utf8))
+        try write("a/b/two.txt", Array("two\n".utf8))
+        try write("a/text.txt", SampleBytes.text(5 << 20, seed: 7))
+        var generator = SplitMix64(seed: 9)
+        try write("a/b/c/big.bin", generator.bytes(9 << 20 | 4321))
+        try write("x/suid.sh", Array("#!/bin/sh\n".utf8), mode: 0o4755)
+        try write("x/private.txt", Array("private\n".utf8), mode: 0o600)
+        try write("ro/file.txt", Array("ro\n".utf8), mode: 0o444)
+        try fileManager.createSymbolicLink(atPath: source.appending(path: "link").path, withDestinationPath: "a/one.txt")
+        try fileManager.createSymbolicLink(atPath: source.appending(path: "a/b/c/rel").path, withDestinationPath: "../two.txt")
+        let old = Date(timeIntervalSince1970: 1_577_934_245)
+        for path in ["a/one.txt", "a/text.txt", "a/b", "empty", "x"] {
+            try fileManager.setAttributes([.modificationDate: old], ofItemAtPath: source.appending(path: path).path)
+        }
+        try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: source.appending(path: "a/b").path)
+        try fileManager.setAttributes([.posixPermissions: 0o555], ofItemAtPath: source.appending(path: "ro").path)
+        let archive = directory.appending(path: "tree.zip")
+        // `-y`: links as links; `-n .bin`: the random file stored.
+        try ExternalTool.run("/usr/bin/zip", ["-qry", "-n", ".bin", archive.path, "."], in: source)
+        return archive
+    }
+
+    struct Item: Equatable, CustomStringConvertible {
+        var kind: String
+        var mode: UInt16
+        var size: Int64
+        var modification: Int
+        var contents: Data?
+        var target: String?
+
+        var description: String {
+            "\(kind) \(String(mode, radix: 8)) \(size) bytes mtime \(modification)\(target.map { " -> \($0)" } ?? "")"
+        }
+    }
+
+    /// Every item under `root` by relative path, not following links. Links' times aren't compared (neither tool sets
+    /// them).
+    private static func tree(_ root: URL) throws -> [String: Item] {
+        var result: [String: Item] = [:]
+        let enumerator = FileManager.default.enumerator(atPath: root.path)!
+        while let relative = enumerator.nextObject() as? String {
+            let path = root.appending(path: relative).path
+            var info = stat()
+            guard lstat(path, &info) == 0 else { throw Errno(rawValue: errno) }
+            let mode = UInt16(info.st_mode & 0o7777)
+            let time = info.st_mtimespec.tv_sec
+            switch info.st_mode & S_IFMT {
+            case S_IFDIR: result[relative] = Item(kind: "directory", mode: mode, size: 0, modification: time)
+            case S_IFLNK:
+                let target = try FileManager.default.destinationOfSymbolicLink(atPath: path)
+                result[relative] = Item(kind: "link", mode: mode, size: 0, modification: 0, target: target)
+            default:
+                result[relative] = Item(kind: "file", mode: mode, size: info.st_size, modification: time, contents: try Data(contentsOf: URL(filePath: path)))
+            }
+        }
+        return result
+    }
+
+    @Test(arguments: [[String](), ["-K"], ["-LL"], ["-X"]])
+    func matchesUnzip(_ flags: [String]) async throws {
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let archive = try Self.makeArchive(in: temporary.url)
+        let reference = temporary.url.appending(path: "unzip")
+        try ExternalTool.run("/usr/bin/unzip", ["-q"] + flags + [archive.path, "-d", reference.path], in: temporary.url)
+
+        var options = ExtractionOptions()
+        options.keepSetIDBits = flags.contains("-K")
+        options.lowercaseNames = flags.contains("-LL") ? .all : .none
+        options.restoreOwnership = flags.contains("-X")
+        let output = temporary.url.appending(path: "native")
+        try await ZipArchive(url: archive).extract(to: FilePath(output.path), options: options)
+
+        let expected = try Self.tree(reference)
+        let actual = try Self.tree(output)
+        #expect(expected.count == 16)
+        #expect(Set(actual.keys) == Set(expected.keys))
+        for (path, item) in expected {
+            #expect(actual[path] == item, "\(path): unzip \(item), NativeZip \(actual[path].map(\.description) ?? "missing")")
+        }
+    }
+}
+
+@Suite struct ExtractionProgressTests {
+    private static func fixture(_ name: String) throws -> ZipArchive {
+        try ZipArchive(url: TestData.file(set: "nativezip-formats", name: name))
+    }
+
+    /// The totals come from the central directories as archives are added; every entry and byte is counted once.
+    @Test func countsEveryEntryAndByte() async throws {
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let progress = ExtractionProgress()
+        let archives = try ["symlink.zip", "zstd-large.zip", "bzip2-large.zip"].map(Self.fixture)
+        let failures = try await ZipExtractor.extract(into: FilePath(temporary.url.path), progress: progress) { extractor in
+            for (index, archive) in archives.enumerated() {
+                try await extractor.add(archive, into: FilePath("\(index)"))
+            }
+        }
+        #expect(failures.isEmpty)
+        let entries = archives.reduce(0) { $0 + $1.entries.count }
+        let bytes = archives.reduce(0) { $0 + $1.entries.filter { $0.kind == .file }.reduce(0) { $0 + Int($1.uncompressedSize) } }
+        #expect(progress.expectedEntries == entries)
+        #expect(progress.expectedBytes == bytes)
+        #expect(progress.entries == entries)
+        #expect(progress.bytes == bytes)
+        #expect(progress.fractionCompleted == 1)
+    }
+
+    /// Entries planning skips come off the totals, so a finished extraction reads complete.
+    @Test func skippedEntriesLeaveTheTotals() async throws {
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let progress = ExtractionProgress()
+        var options = ExtractionOptions()
+        options.overwrite = .never
+        options.progress = progress
+        try await Self.fixture("duplicates.zip").extract(to: FilePath(temporary.url.path), options: options)
+        #expect(progress.entries == progress.expectedEntries)
+        #expect(progress.bytes == progress.expectedBytes)
+        #expect(progress.fractionCompleted == 1)
+    }
+
+    /// An archive's subdirectory is a path inside the destination, checked like an entry's.
+    @Test func refusesSubdirectoriesOutside() async throws {
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        let archive = try Self.fixture("symlink.zip")
+        for subdirectory in ["../out", "/tmp/out", "a/../../out"] {
+            await #expect(throws: DiskError.self) {
+                _ = try await ZipExtractor.extract(into: FilePath(temporary.url.path)) { extractor in
+                    try await extractor.add(archive, into: FilePath(subdirectory))
+                }
+            }
+        }
+    }
+}

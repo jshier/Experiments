@@ -288,6 +288,8 @@ public final class XIPArchive: Sendable {
 
     /// Extracts the archive beneath `destination`, as `xip --expand` does; see ``AEAArchive/extract(to:options:)``.
     /// Apple's expansion copies no quarantine attribute, so ``AEAExtractionOptions/copyQuarantine`` is ignored.
+    /// ``AEAExtractionOptions/progress`` starts from the cpio stream's size in the xip's `Metadata` as its estimate of the
+    /// bytes (`Content`'s stored size without it).
     ///
     /// With ``AEAReadOptions/verifyChecksums``, the content's SHA-1 (from the TOC) is checked by a child task while
     /// it's decoded; a mismatch throws after extraction (`xip --expand` checks nothing).
@@ -300,7 +302,7 @@ public final class XIPArchive: Sendable {
         async let mismatch = check?.run()
         let statistics = try await Extractor.extract(
             source(options.read, heldBeyondDecoding: options.writerThreads), format: .cpio, to: destination, options: options,
-            archivePath: path, quarantineDestination: false
+            archivePath: path, quarantineDestination: false, expectedBytes: metadata?.uncompressedSize ?? contentSize
         )
         if let failure = await mismatch { throw failure }
         return statistics

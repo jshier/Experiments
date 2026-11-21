@@ -22,12 +22,15 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
         .package(path: "../Bytes"),
+        .package(path: "../Disk"),
     ],
     targets: [
         .target(
             name: "NativeAEA",
             dependencies: [
                 .product(name: "Bytes", package: "Bytes"),
+                // The pipeline's waits: `Continuation`, `WaiterQueue`, `AsyncQueue` (Buffers.swift, BlockStream.swift).
+                .product(name: "BytesAsync", package: "Bytes"),
                 // LZMA2 (xz) segments.
                 .product(name: "BytesCompression", package: "Bytes"),
                 // HKDF, HMAC-SHA256, and SHA-256 for the archive's MACs and checksums.
@@ -37,6 +40,8 @@ let package = Package(
                 // The certificates in a xip's table of contents (XAR.swift), and Base64 keys (AEADecryption.swift,
                 // WKMS.swift).
                 .product(name: "BytesBase64", package: "Bytes"),
+                // Writing the tree: the planner, the writers, APFS compression, and metadata (Extraction.swift).
+                .product(name: "Disk", package: "Disk"),
             ],
             swiftSettings: strictSettings
         ),
@@ -44,6 +49,8 @@ let package = Package(
             name: "nunarchiver",
             dependencies: [
                 "NativeAEA",
+                // `ExtractionProgress`, for `--progress`.
+                .product(name: "Disk", package: "Disk"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: strictSettings
@@ -52,6 +59,8 @@ let package = Package(
             name: "NativeAEATests",
             dependencies: [
                 "NativeAEA",
+                // `ExtractionProgress`, for the progress test.
+                .product(name: "Disk", package: "Disk"),
                 .product(name: "BytesCrypto", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
@@ -62,6 +71,8 @@ let package = Package(
             name: "NativeAEABenchmarks",
             dependencies: [
                 "NativeAEA",
+                // `ExtractionProgress`, for the progress benchmark.
+                .product(name: "Disk", package: "Disk"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],

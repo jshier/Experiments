@@ -1,7 +1,18 @@
 import Benchmark
+@_spi(Benchmarking) import Disk
 import Foundation
 @_spi(Benchmarking) import NativeZip
 import System
+
+/// Disk's file system calls per iteration (the `SyscallCounting` trait: `swift package --traits SyscallCounting
+/// --scratch-path .build-syscalls --disable-sandbox benchmark`); not recorded without it.
+let diskSyscalls = BenchmarkMetric.custom("Disk syscalls", polarity: .prefersSmaller, useScalingFactor: false)
+
+/// Records Disk's calls since `before`, per iteration.
+func recordDiskSyscalls(_ benchmark: Benchmark, since before: Int) {
+    guard SyscallCounter.isEnabled else { return }
+    benchmark.measurement(diskSyscalls, (SyscallCounter.total - before) / max(1, benchmark.scaledIterations.count))
+}
 
 // The benchmark tool launches this executable once to list the benchmarks and again for every benchmark it runs,
 // so registration does no work: the fixtures are made or found in `Benchmark.setup` (before a benchmark runs, never
@@ -23,6 +34,9 @@ let benchmarks: @Sendable () -> Void = {
     // code two runs' p50s differed by up to 16% (instructions up to 9%, 30% for the floors: kernel work). Compare these
     // only within one interleaved run, or by several runs.
     let files = Benchmark.Configuration(maxDuration: .seconds(2), maxIterations: 12)
+    // Extraction rows also count the process's system calls (package-benchmark's `.syscalls`: every thread's Unix and
+    // Mach calls, waits and the allocator included), comparable across the old writer and Disk's.
+    let extractionMetrics = Benchmark.defaultConfiguration.metrics + [.syscalls, diskSyscalls]
 
     Benchmark.setup = { try Fixtures.prepare() }
 
@@ -174,13 +188,18 @@ let benchmarks: @Sendable () -> Void = {
     // skips). Many small files are removed after each sample, outside the measurement; one large file is kept until
     // teardown (see `Fixtures.remove(_:)` for the measurements behind each).
     func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil, backend: ZipDecoder.Backend = .bytes,
-                             configuration: Benchmark.Configuration) {
+                             progress: Bool = false, configuration: Benchmark.Configuration) {
         let removeEachSample = url == Fixtures.smallFiles
+        var configuration = configuration
+        configuration.metrics = extractionMetrics
         Benchmark(name, configuration: configuration) { benchmark in
             let archive = try ZipArchive(url: url)
-            var options = ExtractionOptions()
+            var options = NativeZip.ExtractionOptions()
             options.backend = backend
             if let maxConcurrency { options.maxConcurrency = maxConcurrency }
+            // Polled by nobody: the cost of counting (one relaxed add per file, or per chunk of a streamed one).
+            if progress { options.progress = ExtractionProgress() }
+            let before = SyscallCounter.total
             for _ in benchmark.scaledIterations {
                 let destination = Fixtures.outputDirectory()
                 benchmark.startMeasurement()
@@ -188,6 +207,7 @@ let benchmarks: @Sendable () -> Void = {
                 benchmark.stopMeasurement()
                 if removeEachSample { Fixtures.remove(destination) }
             }
+            recordDiskSyscalls(benchmark, since: before)
         } teardown: {
             Fixtures.removeOutput()
         }
@@ -211,6 +231,12 @@ let benchmarks: @Sendable () -> Void = {
         extractionBenchmark("Extract 2,000 small files (\(workers) worker\(workers == 1 ? "" : "s"))",
                             archive: Fixtures.smallFiles, maxConcurrency: workers, configuration: files)
     }
+
+    // `ExtractionProgress` counting, polled by nobody: against the rows without it (instructions; RESULTS.md, 2026-11-20).
+    extractionBenchmark("Extract 2,000 small files (1 worker), progress", archive: Fixtures.smallFiles, maxConcurrency: 1,
+                        progress: true, configuration: files)
+    extractionBenchmark("Extract 2,000 small files: Bytes, progress", archive: Fixtures.smallFiles, progress: true, configuration: files)
+    extractionBenchmark("Extract 32 MB text: Bytes, progress", archive: Fixtures.largeText, progress: true, configuration: large)
 
     // The kernel cost of creating the same files with no decoding at all: a floor for extraction.
     Benchmark("Floor: create + write 2,000 files (no decoding)", configuration: files) { benchmark in
@@ -265,6 +291,51 @@ let benchmarks: @Sendable () -> Void = {
     }
 
     extractionBenchmark("Extract 32 MB random", archive: Fixtures.largeRandom, configuration: large)
+
+    // RESULTS.md's step15 jobs (measured there with hyperfine through `nunzip`): 20,000 files of 1–8 KB, and eight
+    // archives of one 64 MB text file each, extracted together by one pool. Each sample extracts into its own directory;
+    // the trees are removed in the teardown (deleting 20,000 files costs about as much as extracting them).
+    let whole = Benchmark.Configuration(metrics: extractionMetrics, warmupIterations: 0, maxDuration: .seconds(10), maxIterations: 3)
+    // "quarantined": the archive's quarantine on everything extracted (what an app does; one `fsetxattr` more a file).
+    for (suffix, progress, quarantined) in [("", false, false), (", progress", true, false), (", quarantined", false, true)] {
+        Benchmark("Extract 20,000 small files\(suffix)", configuration: whole) { benchmark in
+            let archive = try ZipArchive(url: Fixtures.smallFiles20k)
+            var options = NativeZip.ExtractionOptions()
+            if progress { options.progress = ExtractionProgress() }
+            if quarantined { options.quarantine = Quarantine(value: Array("0083;673e3000;Safari;".utf8)) }
+            let before = SyscallCounter.total
+            let destinations = benchmark.scaledIterations.map { _ in FilePath(Fixtures.outputDirectory().path) }
+            benchmark.startMeasurement()
+            for index in benchmark.scaledIterations {
+                try await archive.extract(to: destinations[index], options: options)
+            }
+            benchmark.stopMeasurement()
+            recordDiskSyscalls(benchmark, since: before)
+        } setup: {
+            try Fixtures.prepareLarge()
+        } teardown: {
+            Fixtures.removeOutput()
+        }
+    }
+
+    Benchmark("Extract 8 archives of 64 MB text (one pool)", configuration: whole) { benchmark in
+        let archives = try Fixtures.textArchives.map { try ZipArchive(url: $0) }
+        let before = SyscallCounter.total
+        let destinations = benchmark.scaledIterations.map { _ in FilePath(Fixtures.outputDirectory().path) }
+        benchmark.startMeasurement()
+        for index in benchmark.scaledIterations {
+            let failures = try await ZipExtractor.extract(into: destinations[index], stopOnFirstError: true) { extractor in
+                for archive in archives { try await extractor.add(archive) }
+            }
+            precondition(failures.isEmpty)
+        }
+        benchmark.stopMeasurement()
+        recordDiskSyscalls(benchmark, since: before)
+    } setup: {
+        try Fixtures.prepareLarge()
+    } teardown: {
+        Fixtures.removeOutput()
+    }
 }
 
 /// Finds an entry's payload byte range by parsing its local header (benchmark-only helper).

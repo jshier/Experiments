@@ -1,3 +1,4 @@
+import BytesAsync
 import Foundation
 import Synchronization
 import System
@@ -77,7 +78,7 @@ final class AEAPayload: ChunkSource {
 
     /// Suspends until ``prepare()`` decides (or the source is stopped first: `nil`).
     nonisolated(nonsending) private func decision() async -> BlockStream? {
-        await suspend { (continuation: Continuation<BlockStream?>) in
+        await withContinuation { (continuation: Continuation<BlockStream?>) in
             let decided: BlockStream?? = state.withLock { state in
                 if state.decided { return .some(state.blocks) }
                 state.runner = continuation
@@ -202,12 +203,13 @@ public final class AppleArchiveFile: Sendable {
         )
     }
 
-    /// Extracts the archive beneath `destination`; see ``AEAArchive/extract(to:options:)``.
+    /// Extracts the archive beneath `destination`; see ``AEAArchive/extract(to:options:)``. ``AEAExtractionOptions/progress``
+    /// starts from the file's size as its estimate of the bytes (the stream's, for a plain archive; low for `pbz`).
     @concurrent @discardableResult
     public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
         try await Extractor.extract(
             source(options.read, heldBeyondDecoding: options.writerThreads), to: destination, options: options, archivePath: path,
-            quarantineDestination: true
+            quarantineDestination: true, expectedBytes: size
         )
     }
 

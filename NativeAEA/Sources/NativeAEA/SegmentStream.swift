@@ -1,4 +1,6 @@
 import Bytes
+import BytesAsync
+import Disk
 import Foundation
 import Synchronization
 import System
@@ -98,7 +100,8 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
     private let verifyMACs: Bool
     private let verifyChecksums: Bool
     private let input: SegmentInput
-    private let mapping: RawMapping?
+    /// The archive mapped read-only (Disk's `MappedFile`, read front to back), for ``SegmentInput/mapped``.
+    private let mapping: MappedFile?
 
     private let nextSegment = Atomic<Int>(0)
     private let cancelled = Atomic<Bool>(false)
@@ -138,7 +141,15 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
         self.verifyMACs = verifyMACs
         self.verifyChecksums = verifyChecksums
         self.input = input
-        mapping = input == .mapped ? try RawMapping(archive.descriptor, count: archive.rootHeader.containerSize) : nil
+        if input == .mapped {
+            do throws(Errno) {
+                mapping = try MappedFile(archive.descriptor, count: archive.rootHeader.containerSize, access: .sequential)
+            } catch {
+                throw .fileSystem("mmap", error)
+            }
+        } else {
+            mapping = nil
+        }
         state = Mutex(State(slots: Array(repeating: -1, count: archive.segments.count)))
     }
 
@@ -179,7 +190,7 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
             case .some(.success(let buffer)): return buffer
             case .some(.failure(let error)): throw error
             case nil:
-                await suspend { (continuation: Continuation<Void>) in
+                await withContinuation { (continuation: Continuation<Void>) in
                     // Checked again under the lock decoders publish under: no wakeup is lost.
                     let ready = state.withLock { state in
                         if state.failure != nil || state.slots[index] >= 0 { return true }
@@ -294,7 +305,9 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
         defer { if let readBuffer { readBuffer.giveBack(segment.compressedSize) } }
         var stored: UnsafeRawBufferPointer
         if let mapping {
-            unsafe stored = mapping.buffer(segment.fileOffset, segment.compressedSize)
+            // Unsafe: a buffer into the mapping. Safe: within it (segment offsets are checked against the file's size
+            // when the archive opens, and `buffer` checks again); the stream keeps the mapping while decoders run.
+            unsafe stored = mapping.buffer(segment.fileOffset..<segment.fileOffset + segment.compressedSize)
         } else {
             let readBuffer = readBuffer!
             let readStart = DispatchTime.now().uptimeNanoseconds
@@ -326,34 +339,5 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
         if verifyChecksums {
             try unsafe SegmentChecks.verifyChecksum(archive, segment: index, raw: RawSpan(_unsafeBytes: UnsafeRawBufferPointer(output))) // Same.
         }
-    }
-}
-
-/// The archive mapped read-only, for ``SegmentInput/mapped``.
-@safe
-final class RawMapping: @unchecked Sendable {
-    private let base: UnsafeRawPointer
-    let count: Int
-
-    init(_ descriptor: FileDescriptor, count: Int) throws(AEAError) {
-        let mapping = unsafe mmap(nil, count, PROT_READ, MAP_PRIVATE, descriptor.rawValue, 0)
-        guard unsafe mapping != MAP_FAILED, let mapping = unsafe mapping else {
-            throw .fileSystem("mmap", Errno(rawValue: errno))
-        }
-        unsafe madvise(mapping, count, MADV_SEQUENTIAL)
-        unsafe base = UnsafeRawPointer(mapping)
-        self.count = count
-    }
-
-    deinit {
-        unsafe munmap(UnsafeMutableRawPointer(mutating: base), count)
-    }
-
-    /// The mapped bytes at `offset`: valid while `self` lives.
-    ///
-    /// - Precondition: The range is within the file (segment offsets are checked against its size when the archive opens).
-    func buffer(_ offset: Int, _ count: Int) -> UnsafeRawBufferPointer {
-        precondition(offset >= 0 && offset + count <= self.count)
-        return unsafe UnsafeRawBufferPointer(start: base + offset, count: count)
     }
 }

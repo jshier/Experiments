@@ -3,8 +3,8 @@
 `nunarchiver` verifies, lists, decrypts, and extracts Apple Encrypted Archives (`.aea`), Apple Archives (`.aar`), and
 Xcode's `.xip` files. One pipeline serves every format: a **chunk source** decodes the archive into a pool of large
 buffers with many decoder tasks; one **walker**, on the calling task, parses the decoded stream in place; and a
-**sink** turns entries into work. For extraction, that work is jobs for **writer** tasks, which compress outside a
-small file-system limit. Every part is a child task of the call (structured concurrency, no threads of its own):
+**sink** turns entries into work. For extraction, that work is a plan for **Disk** (`../Disk`), whose **writer** tasks
+compress outside a small file-system limit. Every part is a child task of the call (structured concurrency, no threads of its own):
 cancelling the caller stops all of it. This document follows the code from the command line down to the system calls.
 The byte formats are described in [FORMAT.md](FORMAT.md), and the measurements in [RESULTS.md](RESULTS.md) and
 [XIP-REPORT.md](XIP-REPORT.md).
@@ -52,9 +52,11 @@ closure, called on the calling task one entry at a time. Opening (`AEAArchive(pa
 `AppleArchiveFile`) stays synchronous: it reads only headers.
 
 The options map one to one onto `AEAReadOptions`, which control decoding (decoders, decoder, input, checks), and
-`AEAExtractionOptions`, which control writing (writers, file-system width, disk compression, hard-link tasks, and so
-on). Both are defined in `NativeAEA/Listing.swift` and `NativeAEA/Extraction.swift`. The option names (`decodeThreads`,
-`writerThreads`, `hardLinkThreads`) and flags are unchanged; each now counts child tasks.
+`AEAExtractionOptions`, which control writing (writers, file-system width, disk compression, overwriting, quarantine,
+progress), mapped onto Disk's options (§7). Both are defined in `NativeAEA/Listing.swift` and
+`NativeAEA/Extraction.swift`. `decodeThreads` and `writerThreads` count child tasks; `--hard-link-threads` and
+`--spread-directories` went with the move to Disk (2026-11-20: both measured slower), and `--progress` draws the
+extraction's progress.
 
 `--fetch-key` (an IPSW's WKMS key) uses `URLSession.data(from:)`.
 
@@ -76,7 +78,7 @@ flowchart LR
         CW["CpioWalker<br/>cpio odc"]
     end
     subgraph Sinks["ArchiveSink"]
-        ES["ExtractionSink<br/>→ writer jobs"]
+        ES["ExtractionSink<br/>→ Disk's Planner"]
         LS["ListingSink<br/>→ callback"]
     end
     AEA --> SS
@@ -88,7 +90,7 @@ flowchart LR
     BS --> CW
     AW --> ES & LS
     CW --> ES & LS
-    ES --> W["24 writer tasks<br/>6 at a time in the kernel"]
+    ES --> W["Disk: 24 writer tasks<br/>6 at a time in the kernel"]
 ```
 
 There are three abstractions, and each format plugs into them:
@@ -102,21 +104,22 @@ There are three abstractions, and each format plugs into them:
   - `pool`, `pools` (every pool it decodes into, for leak checks), and `counters` (busy, read, and wait time).
 
   `withDecoding(onCancel:_:)` puts them together: one `DiscardingTaskGroup` holding `run()`, the consumer running in
-  the group's body on the calling task (it may add tasks of its own: the writers), then `stop(nil)`, the group waiting
+  the group's body on the calling task (extraction runs Disk's writers there, as children of its own), then `stop(nil)`, the group waiting
   for every child, and `releaseUnconsumed()`. One `withTaskCancellationHandler` around it is the operation's only
   cancellation handler (§11).
 - **A walker** (`ArchiveWalker`, `CpioWalker`): `walk(source, into: &sink) async` takes chunks in order and calls the
   sink for each entry's header, its data, and its metadata blobs, with pointers into the buffers.
 - **`ArchiveSink`** (`ArchiveWalker.swift`): `entry(_:header:buffer:)`, `data(_:count:fileOffset:buffer:segment:)`,
-  and `endEntry()` are `async` (extraction may wait there: room in the write queue, a large-file slot, room in the link
-  queue); `metadata(_:_:count:offset:)` stays synchronous. `StreamFormat.walk` picks the walker, and
+  and `endEntry()` are `async` (extraction may wait there: room in Disk's write queue, a large-file slot);
+  `metadata(_:_:count:offset:)` stays synchronous. `StreamFormat.walk` picks the walker, and
   `Extractor.extract` and `Lister.list` pick the sink. Each walker is specialized for each sink, and every sink method
   returns without suspending unless it must wait.
 
 The cpio walker translates each cpio header into the Apple Archive model (`AAEntryHeader`). The extractor never
 learns that an entry came from a xip, so xip support needed no changes to the writers. The xip-specific rules live
 in `CpioWalker.entryHeader` (which files get `diskCompression = 8`, times, and hard-link clusters from `dev`/`ino`)
-and in `Decmpfs` (`skips` for PNGs, `pays` in 4 KiB blocks, and the LZVN room in `ChunkEncoders.compress`).
+and in Disk's `StoragePolicy.lzvnForks` (PNGs skipped, `pays` in 4 KiB blocks, each LZVN chunk given its own size as
+room), which `AFT` 8 maps to.
 
 ## 3. Opening an archive
 
@@ -207,7 +210,7 @@ AEA segments are all described up front, in `archive.segments`, so the decoders 
     are waiting for buffers.
 - **`decode(_:into:codec:readBuffer:)`** does one segment, synchronously:
   1. A positioned read into the task's read buffer (`AEAArchive.readFully`, `pread`), or a pointer into the
-     mapping with `--input mapped` (`RawMapping`, `mmap` with `MADV_SEQUENTIAL`).
+     mapping with `--input mapped` (Disk's `MappedFile`, read `.sequential`: `mmap` with `MADV_SEQUENTIAL`).
   2. `SegmentChecks.verifyMAC`: HMAC-SHA256 under the segment's key.
   3. For encrypted profiles, AES-CTR decryption, in place in the read buffer.
   4. `SegmentCodec.decode` into the pool buffer: Bytes' LZMA2/xz, LZFSE, LZBITMAP, LZ4, LZRAVEN, or zlib decoder,
@@ -219,7 +222,7 @@ AEA segments are all described up front, in `archive.segments`, so the decoders 
   straight into the pool buffer instead, and MACed, decrypted in place, and checked there: the read buffer isn't
   touched (with `--input mapped` it's decrypted from the mapping into the pool buffer, or copied).
 - **The read buffer** holds the largest stored segment (16 MiB for Xcode's). Its pages past the first 2 MiB are given
-  back after every segment that used them (`RawStorage.giveBack`, `madvise(MADV_FREE_REUSABLE)`) and taken back
+  back after every segment that used them (Bytes' `RawStorage.giveBack`, `madvise(MADV_FREE_REUSABLE)`) and taken back
   before the next (`reuse`, `MADV_FREE_REUSE`), so between segments a decoder keeps 2 MiB resident, not the largest
   segment it has seen. The kernel takes the pages only under memory pressure, so reusing them costs no faults
   otherwise. Segments of a large incompressible file come together, so 32 decoders can still hold 32 large segments
@@ -270,7 +273,7 @@ either a file offset or a staging buffer):
 - **From an upstream source** (`produce(from: upstream…)`, a `pbz` stream inside AEA segments): blocks cross
   segment boundaries freely, so the producer copies each block's stored bytes into a **staging pool** buffer
   through `UpstreamReader`, which takes upstream chunks with `nextChunk()` and releases them as it passes them.
-- **The job queue** is a `JobQueue<Job>` with capacity `2 × decoders + 2`. Each decoder does `await pool.acquire()`,
+- **The job queue** is BytesAsync's `AsyncQueue<Job>` with capacity `2 × decoders + 2`. Each decoder does `await pool.acquire()`,
   then `await jobs.pop()`: buffer first, then job, for the same reason as above. It decodes, releases the staging
   buffer, and publishes.
 - **Slots** are a ring of `pool.count` entries, each carrying (index, buffer, raw offset, raw size), allocated once:
@@ -285,8 +288,8 @@ For a xip, this means 32 decoders working through 617 blocks of 16 MiB, each blo
 
 ## 5. The buffer pool and its references
 
-`SegmentBufferPool` (`Buffers.swift`) is the one large allocation. It's a single `RawStorage` (page-aligned,
-allocated once) divided into `count` buffers. Each buffer is laid out as:
+`SegmentBufferPool` (`Buffers.swift`, all that file holds now) is the one large allocation. It's a single `RawStorage`
+(Bytes': page-aligned, allocated once) divided into `count` buffers. Each buffer is laid out as:
 
 ```
 [ carry region: 64 KiB ][ chunk: up to segment/block size ][ 64 bytes slack ]   (rounded to 16 KiB)
@@ -336,168 +339,122 @@ Both walkers (`ArchiveWalker.walk`, `CpioWalker.walk`) are the same loop over ch
 A file's contents reach the sink as one or more pieces: one per chunk the contents overlap. A 16 MiB block holds
 thousands of small files, and a large file spans many blocks.
 
-## 7. Extraction: the sink, the jobs, and the writers
+## 7. Extraction: the sink, and Disk
 
-`Extractor.extract` (`Extraction.swift`) creates the destination, then runs everything in the source's task group
-(`withDecoding`): the decoders, then (once `prepare()` has told it the pool) the writers and link tasks as further
-children, the walk on the calling task, and, once the writers are done, the passes after the walk:
+Since 2026-11-20 the tree is written by **Disk** (`Disk/`, the disk-writing half of NativeAEA and NativeZipArchive,
+extracted: [Disk/ARCHITECTURE.md](../Disk/ARCHITECTURE.md)). NativeAEA keeps what's about archives: decoding, walking,
+and turning entries into a plan. Disk owns everything from the plan down: the planner, the write queue, the writers and
+their file-system limit, APFS compression (`StoragePolicy`, the encoders, `decmpfs`), metadata (`EntryMetadata`,
+extended attributes, ACLs, `Quarantine`), large files in pieces, and the passes after the writers.
+
+`Extractor.extract` (`Extraction.swift`) makes the `Destination` (Disk: the directory made and opened once, every
+entry made relative to it with `O_NOFOLLOW_ANY | O_RESOLVE_BENEATH`; the quarantine set on it first for an `.aar`),
+then runs everything inside the source's task group (`withDecoding`): the decoders, and, once `prepare()` has told it
+the pool, Disk's `Extraction.run`, whose plan closure is the walk:
 
 ```mermaid
 sequenceDiagram
     autonumber
     participant D as Decoder tasks (32)
     participant P as SegmentBufferPool
-    participant W as Walker (calling task)
-    participant Q as Write job queue (16,384)
-    participant R as Writer tasks (24)
-    participant S as File-system limit (6)
+    participant W as Walker + ExtractionSink (calling task)
+    participant PL as Disk Planner
+    participant R as Disk writers (24)
     participant K as Kernel (APFS)
     D->>P: await acquire() (suspends if none free)
     D->>D: claim next index, read, MAC, decrypt, decode, checksum
     D->>W: publish slots[index], resume the walker if it waits for it
-    W->>W: await nextChunk(), parse header in place
-    W->>P: retain(header buffer), retain(data buffer)
-    W->>Q: await push(WriteJob: pointers, not bytes), handed to a waiting writer
-    R->>Q: await pop()
-    R->>R: copy path, compress chunks (outside the limit)
-    R->>S: await acquire()
-    R->>K: openat, pwrite or fsetxattr fork, decmpfs, fchflags, setattrlist, close
-    R->>S: release() (to the longest-waiting writer)
-    R->>P: release(header), release(data), last one frees the buffer
+    W->>W: await nextChunk(), parse header in place, copy the path
+    W->>PL: directory (mkdirat now), symbolicLink / hardLink / specialFile (recorded)
+    W->>P: retain(data buffer) for each file or piece
+    W->>PL: await file(path, contents: buffer ranges) or beginLargeFile + piece
+    PL->>R: job (path copied into the queue's ring, contents by reference)
+    R->>W: SegmentContents.write(contents, to: &output): the buffer's bytes, in place
+    R->>R: compress chunks (outside the limit)
+    R->>K: openat, pwrite or fsetxattr fork + decmpfs, fsetattrlist, close (at most 6 at once)
+    R->>P: SegmentContents.release(contents): the last reference frees the buffer
 ```
 
 ### Setup
 
-- Create and open the destination (`O_DIRECTORY`), and raise the descriptor limit
-  (`DirectoryTable.raiseDescriptorLimit`).
-- In the group, after `await source.prepare()`, `ExtractionContext` holds what the walker and writers share:
-  - `queue` (`JobQueue<WriteJob>`, capacity 16,384; a `WriteJob` is 312 bytes, so its ring is 5.1 MB, written when
-    it's made);
-  - `links` (`JobQueue<EarlyLink>`, capacity 4,096, for the link tasks; an `EarlyLink` holds two 1 KiB names, so the
-    ring is 8.7 MB: capacity 1 when there are no link tasks, the default);
-  - `fileSystem` (`AsyncLimiter`, 6 permits), or one limiter of one permit per lane with `--spread-directories`;
-  - 128 `LargeFile` states and an `AsyncIndexPool` of their slots;
-  - `failure` (`Mutex`), with a `failed` `Atomic` flag;
-  - `timings` (`WorkTimings`, atomic nanosecond counters per kind of work).
-- Add `writerThreads` (24) child tasks, each running `Writer(context).run()`, and `hardLinkThreads` (0 by default)
-  link tasks running `EarlyLink.run`. Each counts down an `AsyncLatch` when it ends.
+- `AEAExtractionOptions` maps onto Disk's options (`scheduling` and `destination(quarantine:quarantinesDestination:)`):
+  `writerThreads` → `ExtractionSettings.writers`, `fileSystemWidth`, `progress`, `collectsTimings`; and on the
+  destination, Apple's extractors' rules: `permissions: .exact` and `keepsSpecialBits` (the archived mode exactly),
+  `overwrite` → `existingItems: .replace`, `restoreOwnership` → `restoresOwnership`, `relativeToParents` →
+  `directoryResolution: .descriptors`, devices allowed (made as root, skipped and counted otherwise), and the archive's
+  quarantine (`Quarantine(copyingFrom:)`) with `quarantinesDestination` for an `.aar` only.
+- `DiskCompressionMode.storage(_:)` turns a file's `AFT` into Disk's `Storage`: `.archived` uses
+  `StoragePolicy.forArchivedType` (LZBITMAP → `.appleArchive`, `aa extract`'s rules; LZVN → `.lzvnForks`,
+  `xip --expand`'s, since the cpio walker asks for LZVN only over 16 KiB), `.lzfse` uses `.appleArchiveLZFSE`, `.none`
+  is plain.
+- After `await source.prepare()`, `Extraction.run(into:source:options:_:)` starts the writers (24 child tasks) and runs
+  the plan closure on the calling task. The closure moves Disk's `Planner` into an `ExtractionSink`, walks, stops the
+  source (`stop(nil)`: no more chunks are taken), and hands the planner back, so Disk can run its passes after the
+  writers.
+
+### The contents: `SegmentContents`
+
+Disk's writers ask a `ContentSource` for each file's bytes. `SegmentContents` (a `PieceSource`) names them by buffer
+index and offset, at most two ranges (`Contents`, 48 bytes, copied into each queued job):
+- `write(_:to:)` hands the writer the range in place (`FileOutput.write`, no copy), or two ranges for a small file
+  across a chunk boundary (Disk gathers them in the writer's staging buffer);
+- `release(_:)` drops the job's buffer references; `retain(_:)` adds one for a piece Disk keeps for a later piece's
+  chunk (a bridge);
+- `withPiece(_:_:)` gives a large file's piece as a `MutableRawSpan`, which Disk's writer compresses in place, over its
+  own consumed input (no one else reads it: the walker reads only past it).
 
 ### The walker's side: `ExtractionSink`
 
-`ExtractionSink` is a `~Copyable` struct that lives on the walker's task. It owns everything only the walker
-touches, so none of it needs a lock:
+`ExtractionSink` is a `~Copyable` struct on the walker's task holding Disk's `Planner` (also `~Copyable`), so neither
+needs a lock. Per entry:
 
-- `directories`: a `DirectoryTable`, an open-addressing hash from path to descriptor, used with
-  `--relative-to-parents`.
-- `metadataBytes` and `linkBytes`: append-only arenas for paths and blobs, so entries cause no per-entry
-  allocations.
-- `deferred`: the entries finished after the writers.
-- `hardLinkTargets` and `hardLinks`.
-- `directoryFixes`: each directory whose mode, flags, times, or metadata need setting after the walk, its path in
-  `metadataBytes` (no allocation per directory).
-- `diskCompression`: files counted by `AFT` type in a 16-entry table, made into the statistics' dictionary at the end
-  (no hashing per file).
+- **`entry(_:header:buffer:)`** copies the path into the sink's own storage (a file's data can arrive after the walker
+  has released the header's buffer, when a header ends a chunk) and checks it as a Disk `EntryPath` (a vector screen,
+  then the kernel's own checks on every call). Then, by type:
+  - **Regular file:** the metadata (`EntryMetadata`: mode, owner, times, flags) and storage are noted; the file is
+    planned when its data arrives. A file in a hard-link cluster is planned `hardLinked`, its `EntryToken` kept by
+    cluster; a later name becomes `planner.hardLink(_:to:)`, its contents skipped.
+  - **Directory:** `planner.directory`, which makes it at once (and any missing parents), so a file's parent always
+    exists before the file is queued. Its final mode, times, and flags are applied after everything else. The root
+    entry is left alone.
+  - **Symbolic link, FIFO, device:** recorded by the planner and made after the writers (links last, so nothing is
+    written through one).
+- **`data(…)`** plans files, taking one buffer reference per job:
+  - **Whole file in one chunk** (most files): `planner.file(…, contents: one range)`, which queues a job (suspending
+    only while the queue's 16,384 jobs are full: `walkWaitForWriters`).
+  - **Small file across a chunk boundary** (up to 1 MiB): the first range is `pending` until the second arrives, then
+    one job with both.
+  - **Large file:** `planner.beginLargeFile` on the first piece (Disk opens it there, so pieces can be written in any
+    order; `minimumPieceSize` is the segment size, so a 64 KiB chunk spans at most 8 pieces), then `planner.piece` per
+    chunk. Disk decides the fork from the first bytes and bridges pieces in which no chunk ends.
+- **`metadata(…)`** gathers an entry's `XAT` and `ACL` blobs (they can come before its data); **`endEntry()`** plans an
+  empty file, then adds the blobs to the entry (`addExtendedAttributes`, `addAccessControlList`): Disk applies them
+  after the writers, then the mode, times, and flags.
+- **`finish(walked:)`** releases a `pending` first range after a failure and, after a full walk, sets the progress's
+  exact totals.
 
-Per entry:
+A large file's entry token (for its blobs and hard links to it) is Disk's `LargeFileToken.entry`.
 
-- **`entry(_:header:buffer:)`** checks the path, then switches on the type. `Paths.check` rejects `..`
-  components, empty components (so absolute paths too), NUL bytes, and paths of `PATH_MAX` or longer.
-  - **Regular file:** record the parent (`directories.resolve`; by default, the destination plus the whole path)
-    and the lane. A file in a hard-link cluster records its first name; a later name becomes a `HardLink` (pushed to
-    the link tasks with `--hard-link-threads`), and its contents are skipped (`skipContents`). A file with extended
-    attributes or an ACL is also recorded in `deferred`.
-  - **Directory:** `makeDirectory` calls `mkdirat` with the mode `| 0700`, so its contents can be created in it.
-    If the mode, flags, times, or metadata differ from what `mkdir` gave, it's queued in `directoryFixes`.
-    Directories are created **by the walker, in order**, so a file's parent always exists before the file's
-    job is queued.
-  - **Symbolic link:** the path and target are appended to `linkBytes`. Links are made last (§8), so no file is
-    ever written through one.
-  - **FIFOs and devices:** deferred.
-- **`data(…)`** decides the jobs. A job is a `WriteJob` value, which points into buffers and never copies bytes:
-  - **Whole file in one chunk** (most files): retain the header and data buffers, and push one `.file` job.
-  - **Small file across a chunk boundary** (up to `smallSpanLimit`, 1 MiB): keep the first range `pending`, then
-    push one job with both ranges when the second arrives. The writer copies the two ranges into its `staging`
-    buffer.
-  - **Large file:** on its first piece, `openLargeFile` takes a `LargeFile` slot (`await`, suspending only when all
-    128 are held), copies the path, decides the fork type, and **opens the file on the walker's task**, so pieces can
-    then be written in any order. Each piece becomes a `.piece` job. When compressing, a piece in which no 64 KiB chunk
-    ends gets no job: its buffer is retained in a `Bridge` (up to 8 pieces) and travels with the job of the piece that
-    completes the chunk.
-- **`endEntry()`** pushes a job for an empty file.
-- **`enqueue(_:)`** awaits `queue.push`, which suspends only when the queue is full (`walkWaitForWriters`), and
-  counts `pushed`, which lets early hard links know when their file's job has been taken.
+### Progress
 
-### The writers' side: `Writer` (`Writer.swift`)
+`AEAExtractionOptions.progress` is Disk's `ExtractionProgress`: one slot of relaxed atomics per writer, a relaxed add
+per file (and per piece of a large file), polled by the app; nothing is published. The extraction sets the totals: at
+the start, an estimate of the bytes (the `.aea` payload's raw size, an `.aar` file's size, a xip's cpio size from its
+`Metadata`); when the walk has read the whole stream, which is long before the writers finish, the exact entries and
+bytes. The `nunarchiver --progress` flag draws it twice a second.
 
-`Writer` is a `~Copyable` struct, one per writer task. All of its scratch memory is allocated once:
-- a path buffer;
-- compressed output for a batch of 16 chunks;
-- a chunk table;
-- a bridge chunk;
-- a staging buffer;
-- its own `ChunkEncoders` (Bytes' LZBITMAP, LZFSE, and LZVN encoders, whose tables are made once).
+### The writers (Disk)
 
-A writer suspends only where a thread used to block: for a job, for a file-system permit, and for a fork's turn.
-Compression and the file-system calls run synchronously.
-
-**`run()`** loops on `await queue.pop()` until the queue is closed and empty. For each job it calls `writeFile` or
-`writePiece`, then releases the job's references: path buffer, data buffer, bridge, and second range.
-
-**`writeFile`**, for a whole file:
-
-1. Copy the path into the path buffer and add a NUL.
-2. **Compress before entering the file system.** `Decmpfs.codec(job.diskCompression)` gives the codec; type 8 is
-   LZVN for xips, and 13 or 14 is LZBITMAP for `aa`. `Decmpfs.skips` rules out PNGs for LZVN. `prepare` returns a
-   `Form`:
-   - **`.inline`:** one chunk that fits the 3,584-byte `com.apple.decmpfs` attribute (LZBITMAP and LZFSE only;
-     `xip` never stores files inline).
-   - **`.fork`:** up to 16 chunks. The chunk table and the chunks are laid out contiguously for one write, if
-     `Decmpfs.pays` approves.
-   - **`.streamed`:** more than 16 chunks, compressed and written a batch at a time.
-   - **`.plain`:** compression didn't pay.
-
-   `ChunkEncoders.compress` gives each LZVN chunk its own size as room, and LZBITMAP 64 KiB, which is what makes the
-   stored bytes identical to Apple's. A chunk that doesn't shrink is stored raw behind a marker byte.
-3. **Inside `await fileSystem { }`**, which takes a permit of the lane's `AsyncLimiter` (suspending when all are taken)
-   and returns it after the synchronous body:
-   1. `openat(directory, name, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW_ANY, mode | 0600)` (`Writer.create`).
-   2. `pwrite` the data, or `fsetxattr` the resource fork and the 16-byte `com.apple.decmpfs` header.
-   3. `complete`:
-      - the quarantine attribute, if the archive has one;
-      - then `finishAttributes`, in order: `fchown`, `fchmod`, `fchflags` (which sets `UF_COMPRESSED`, and resets
-        the modification time), then the times through `fsetattrlist`, then any locking flags.
-   4. `close`.
-
-**`writePiece`**, for one piece of a large file:
-
-- **Uncompressed:** one `pwrite` at the piece's offset, in any order.
-- **Compressed:** pieces must go into the resource fork in order, but they're compressed in parallel first. Each
-  chunk is compressed into a scratch slot and moved back **over the piece's own consumed input** in the pool buffer,
-  while the output stays behind the unread input. No other job reads those bytes, so a piece needs no memory of its
-  own. The writer then waits for its turn (`await LargeFile.waitForTurn(piece)`, which returns the fork offset to
-  write at), writes its chunks and its table entries at the fork offset with `fsetxattr(…, position:)`, and passes the
-  turn on (`passTurn(forkOffset:)`, which resumes the next piece only if it's already waiting).
-- **The last reference** to a large file's `outstanding` atomic (pieces plus the walker's hold) runs
-  `Writer.finishLargeFile`. It decides `pays` on the whole fork, rewrites the file plain through a `ForkUnpacker` if
-  compression didn't pay, sets the decmpfs header and the attributes, closes the file, and frees the slot.
-
-```mermaid
-flowchart LR
-    subgraph Walker
-        O["openLargeFile<br/>(open on walker)"] --> P0["piece 0 job"] --> P1["piece 1 job<br/>+ bridge"] --> P2["piece 2 job (last)"]
-    end
-    subgraph Writers["any writer tasks, in parallel"]
-        C0["compress piece 0<br/>in place"] --> T0["turn 0: fsetxattr fork"]
-        C1["compress piece 1<br/>in place"] --> T1["await turn 1: fsetxattr fork"]
-        C2["compress piece 2<br/>in place"] --> T2["await turn 2: fork + table end"]
-    end
-    P0 --> C0
-    P1 --> C1
-    P2 --> C2
-    T0 -->|"passTurn: next = 1"| T1
-    T1 -->|"passTurn: next = 2"| T2
-    T2 --> F["finishLargeFile:<br/>pays? decmpfs header,<br/>flags, times, close"]
-```
+Disk's `Writer`s (`Disk/Sources/Disk/Writer.swift`, `FileWriter.swift`) do what NativeAEA's did, with the same scratch
+made once per writer and the same suspension points (a job, a file-system permit, a fork's turn). Per file: compress
+first, outside the limit (inline in `com.apple.decmpfs` when it fits 3,584 bytes and the policy allows it, else a
+resource fork of 64 KiB chunks if the policy says it pays, else plain), then inside it `openat` (`O_EXCL |
+O_NOFOLLOW_ANY | O_RESOLVE_BENEATH`, owner-writable), `pwrite` or the fork and the `decmpfs` header, the quarantine,
+**one `fsetattrlist`** with the times, mode, owner, and flags (`UF_COMPRESSED` included: in one call the times given
+stick, where `fchflags` reset them), and `close`. That one call replaced `fchflags`, `fchmod`, and the times'
+`fsetattrlist`: one call fewer per compressed file with times (the xip), and per file whose mode the umask changed.
+Large files are written in pieces exactly as before (compressed in place, the fork written in order by turns, the
+whole-fork decision at the end, a fork that doesn't pay rewritten plain): Disk/ARCHITECTURE.md §5.
 
 ### Why compression is outside the file-system limit
 
@@ -517,38 +474,43 @@ Apple's `aa extract`, which allows 32 threads in the kernel, spent 340 s of syst
 
 ## 8. After the walk: links, metadata, directories
 
-When the walk ends, the walker (still in the group's body, still under the cancellation handler):
-
-1. Stops the source (`stop(nil)`: decoders end at once after a failure), closes `queue` and `links`, and awaits the
-   link tasks' latch, then the writers' (`linkersAfterWalk`, `writersAfterWalk`).
-2. Throws the first failure, if any, and collects links that early link tasks couldn't make yet (`lateLinks`).
-3. Runs the remaining phases, each a `DiscardingTaskGroup` of `fileSystemWidth` lane tasks (`inLanes`), where each
-   lane takes every `lanes`-th item and checks `Task.isCancelled` per item. The lanes' work is synchronous
-   file-system calls; each lane borrows the arenas (`withUnsafeBytes` inside its own task: the arrays are complete,
-   and captured without copying).
+When the walk ends, the plan closure stops the source (`stop(nil)`: decoders end at once after a failure) and returns
+the planner; Disk closes its queue, waits for the writers, and runs its passes, each in `fileSystemWidth` lanes
+(Disk/ARCHITECTURE.md §5, `PostPasses.swift`):
 
 ```mermaid
 flowchart TB
-    W["walk ends:<br/>stop(nil), queue.close(), links.close()"] --> J["await linkersDone, writersDone (latches)"]
-    J --> H["createHardLinks<br/>linkat(…, AT_SYMLINK_NOFOLLOW_ANY)<br/>Xcode xip: 26,062 links, 2.6 s"]
-    H --> SF["createSpecialFiles<br/>mkfifo, mknod (root only)"]
-    SF --> SL["createSymbolicLinks<br/>symlinkat, link times"]
-    SL --> DM["applyDeferredMetadata<br/>xattrs, ACLs, then mode, flags, times"]
-    DM --> DF["fixDirectories<br/>by depth, deepest first:<br/>mode, flags, times"]
+    W["walk ends: stop(nil), planner handed back"] --> J["Disk: queue closed, writers awaited"]
+    J --> H["hard links<br/>linkat(…, AT_SYMLINK_NOFOLLOW_ANY | AT_RESOLVE_BENEATH)<br/>Xcode xip: 26,062"]
+    H --> SF["special files<br/>mkfifoat, mknodat (root only)"]
+    SF --> SL["symbolic links<br/>symlinkat, then mode, attributes, times on the link"]
+    SL --> DM["deferred files<br/>xattrs, ACLs, then mode, flags, times in one call"]
+    DM --> DF["directories<br/>by depth, deepest first"]
 ```
 
-- **Hard links after the files:** a link can only be made once its target exists. Links made during the writes
-  (`--hard-link-threads N`, `EarlyLink`) measured 11% slower on the xip, so they're off by default. A link task
-  suspends in `queue.waitUntilPopped(after)` until the writers have taken its file's job (resumed by the pop that
-  reaches it), then retries `ENOENT` for up to 50 ms with `Task.sleep(200 µs)` between tries (no event says when a
-  writer has created a file).
-- **Symbolic links after everything else**, so no file or hard link is ever created through one. All creation calls
-  also refuse to follow links: `O_NOFOLLOW_ANY` and `AT_SYMLINK_NOFOLLOW_ANY`.
-- **Deferred metadata** covers files that need more than the writers did: extended attributes, ACLs, or flags that
-  would block hard links. Their writers left them owner-writable, with only `UF_COMPRESSED` set; this pass applies
-  the blobs from the arena, then the final mode, flags, and times.
-- **Directories last, deepest first, one depth at a time.** Each directory's times are set after everything inside
-  it has been created, and a directory's read-only mode never blocks a child.
+- **Hard links after the files**, only to files the plan wrote (`hardLink(_:to:)` takes the first name's
+  `EntryToken`). Making them during the writes (NativeAEA's `--hard-link-threads`) measured 11% slower on the xip and
+  went with the move.
+- **Symbolic links after everything else**, so no file or hard link is ever created through one; every call refuses
+  links in its path (`O_NOFOLLOW_ANY`, `AT_SYMLINK_NOFOLLOW_ANY`) and stays beneath the destination
+  (`O_RESOLVE_BENEATH`).
+- **Deferred files** (extended attributes, ACLs, or locking flags on a hard-linked file): left owner-writable with only
+  `UF_COMPRESSED` by their writer; this pass applies the blobs, then the rest in one `fsetattrlist`.
+- **Directories last, deepest first, one depth at a time**: their times are set after everything inside them, and a
+  read-only mode never blocks a child. With only the quarantine to set, by path in one `setxattr`.
+
+Two options, off by default (the command line's extractions stay `aa extract`'s and `xip --expand`'s, item for item),
+are what the Nunarchiver app adds to match Archive Utility (RESULTS.md, 2026-11-21):
+
+- `restoresDestinationMetadata`: the entry for the archive's root (the empty path; `aa archive -d DIR` writes one) is
+  planned like any directory, so the directory pass gives the destination its mode, times, flags, and attributes. The
+  sink otherwise skips it.
+- `restoresXIPDirectoryTimes`: `CpioWalker` records a directory's time in its entry, and the sink drops it
+  (`keepsDirectoryTimes`) unless this is set. Set, each of the xip's directories gets one more `fsetattrlist` in the
+  directory pass, after the hard links that would otherwise change its time.
+
+For an app that must ask for keys before it opens an archive, `AEAArchive.profile(at:)` reads the profile from the first
+12 bytes with no key, and `AEASigningKey.publicKey(text:)` takes a signer's key as a field holds it.
 
 ## 9. Concurrency: every task, queue, and lock
 
@@ -559,7 +521,7 @@ walker), 32 decoders, 1 block producer, 24 writers, and 1 content checker (an `a
 ```mermaid
 flowchart LR
     subgraph T0["calling task (@concurrent entry)"]
-        WK["walker + ExtractionSink<br/>mkdirat, open large files"]
+        WK["walker + ExtractionSink + Disk Planner<br/>mkdirat, open large files"]
     end
     subgraph TP["1 producer task<br/>(BlockStream)"]
         PR["read block headers"]
@@ -567,16 +529,16 @@ flowchart LR
     subgraph TD["32 decoder tasks"]
         DE["await acquire buffer, await pop job,<br/>decode, publish"]
     end
-    subgraph TW["24 writer tasks"]
+    subgraph TW["24 Disk writer tasks"]
         WR["await pop job, compress,<br/>then file system"]
     end
     subgraph TC["content check (async let, xip)"]
         CK["SHA-1 of Content,<br/>4 MiB preads"]
     end
-    PR -->|"JobQueue (66): push/pop suspend"| DE
+    PR -->|"AsyncQueue (66): push/pop suspend"| DE
     DE -->|"slots under Mutex, consumer continuation"| WK
-    WK -->|"JobQueue (16,384): push/pop suspend"| WR
-    WR -->|"AsyncLimiter (6)"| FS[("APFS")]
+    WK -->|"Disk JobQueue (16,384 + path ring): push/pop suspend"| WR
+    WR -->|"Disk AsyncLimiter (6)"| FS[("APFS")]
     WK -.->|"mkdirat, openat"| FS
     POOL[["SegmentBufferPool<br/>Mutex: free list + waiters<br/>AtomicCounter refs"]]
     DE -.->|"await acquire"| POOL
@@ -586,17 +548,21 @@ flowchart LR
 
 | Primitive | Where | What it protects or signals |
 |---|---|---|
-| `DiscardingTaskGroup` | `ChunkSource.withDecoding`, `SegmentStream.run`, `BlockStream.run`, `AEAPayload.run`, `ExtractionSink.inLanes` | The operation's child tasks: decoders, the producer, writers, link tasks; the lanes of each pass after the walk |
+| `DiscardingTaskGroup` | `ChunkSource.withDecoding`, `SegmentStream.run`, `BlockStream.run`, `AEAPayload.run`; Disk's `Extraction.run` and its passes' lanes | The operation's child tasks: decoders, the producer; Disk's writers and the lanes of each pass after the walk |
 | `async let` | `XIPArchive.extract`, `forEachEntry` | The content check, cancelled if the extraction throws |
-| `withTaskCancellationHandler` | `ChunkSource.withDecoding` (one per operation) | Cancellation: stops the source and fails the extraction (§11) |
-| `Mutex` + continuations, waiters in a `WaiterQueue` reserved up front | `SegmentBufferPool`, `JobQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `LargeFile` turns, `SegmentStream`/`BlockStream` slots, `AEAPayload` decision | Free buffers; queue rings; file-system permits; large-file slots and fork unpackers; writers and link tasks ending; whose turn it is to write a fork; published chunks and the first failure |
-| `Mutex` | `failure`, `lateLinks`, `FirstFailure` per pass, `CancellationTarget` | Small shared lists and the first error |
-| `Atomic<Int>` / `Atomic<Bool>` | `nextSegment`, `cancelled`, `failed`, `outstanding`, timing counters, `peakInUse` | Claiming the next segment without a lock; stopping; counts read across tasks |
+| `withTaskCancellationHandler` | `ChunkSource.withDecoding`; Disk's `Extraction.run` | Cancellation: stops the source; stops Disk's planner and writers (§11) |
+| `Mutex` + continuations, waiters in a `WaiterQueue` reserved up front (BytesAsync) | `SegmentBufferPool`, `AsyncQueue` (the block stream's), `SegmentStream`/`BlockStream` slots, `AEAPayload` decision; Disk's queue, limiter, large-file slots and turns, latch | Free buffers; the block queue's ring; published chunks and the first failure; Disk: the write queue, file-system permits, whose turn it is to write a fork, writers ending |
+| `Atomic<Int>` / `Atomic<Bool>` | `nextSegment`, `cancelled`, `peakInUse`, source counters; Disk's stop flag, `outstanding`, counters, `ExtractionProgress` slots | Claiming the next segment without a lock; stopping; counts read across tasks |
 | `AtomicCounter` (a class around `Atomic`, so arrays can hold them) | Pool `references` | One reference count per buffer |
 
 ### The primitives
 
-All of them follow one pattern (`Buffers.swift`):
+All of them follow one pattern, and since 2026-11-21 share one implementation of its parts: BytesAsync's
+`Continuation` and `withContinuation`, `WaiterQueue`, `AsyncQueue` (this package's block queue, moved there),
+`AsyncLimiter`, `AsyncIndexPool`, and `AsyncLatch` (Disk's, moved there), and Bytes' `RawStorage`. What stays here is
+what's this pipeline's own: `SegmentBufferPool` (its carry regions, reference counts, and activation), and the slot
+rings of `SegmentStream` and `BlockStream`; Disk keeps its write queue (jobs plus a ring of path bytes, and a low-water
+wake). The moves changed no count (RESULTS.md, 2026-11-21). The pattern:
 
 - **A synchronous fast path under the lock.** `acquire`, `push`, `pop`, `waitForTurn`, and `next` take what they need
   under a `Mutex` and return without suspending when they can; a task suspends only where a thread used to block.
@@ -609,8 +575,8 @@ All of them follow one pattern (`Buffers.swift`):
 - **Waiter storage reserved up front** (`WaiterQueue`, a ring that grows only past its capacity): the steady state
   allocates nothing. Release builds use `UnsafeContinuation` (in a `@safe` wrapper, `Continuation`); debug builds use
   `CheckedContinuation`, which checks every continuation is resumed once (it allocates a canary per wait, so release
-  builds don't use it: writers wait for the file system about once per file).
-- **Closing.** `SegmentBufferPool.close()` and `JobQueue.close()` resume every waiter (with `nil`, or `false` for a
+  builds don't use it: Disk's writers wait for the file system about once per file).
+- **Closing.** `SegmentBufferPool.close()` and `AsyncQueue.close()` resume every waiter (with `nil`, or `false` for a
   producer whose job wasn't added); the source's `stop` closes its pools and queue, so every decoder and producer
   ends without polling.
 
@@ -630,37 +596,35 @@ All of them follow one pattern (`Buffers.swift`):
   priority and don't yield, and no custom executor is needed.
 - A writer blocks its thread in file-system calls; at most `fileSystemWidth` (6) do at once.
 - Stacks: cooperative threads have 512 KiB (the old threads had 1 MiB). The decoders' and writers' large state is in
-  allocated storage (codecs, read buffers, `RawStorage` scratch); the largest stack values are `EarlyLink`'s two
-  1 KiB names. The xz paths (xip, Xcode's `.aea`) run in full.
+  allocated storage (codecs, read buffers, `RawStorage` scratch); the largest stack values are path buffers of
+  `PATH_MAX`. The xz paths (xip, Xcode's `.aea`) run in full.
 
 ### `Sendable`
 
-The primitives hold only `Mutex` and `Atomic` state, so they're checked `Sendable` (`SegmentBufferPool`, `JobQueue`,
-`AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `FirstFailure`, `CancellationTarget`, `AEAPayload`). Classes with
-fields only one task touches are `final class …: @unchecked Sendable` (`SegmentStream` and `BlockStream`: the
-consumer's position; `ExtractionContext`, `LargeFile`: fields the walker sets before queuing a job; `RawStorage`). Their mutable
-state is in a `Mutex`, or is touched by one task only (the consumer's position), as stated beside it. Values crossing tasks (`WriteJob`, `Bridge`, `Job`, `DecodedChunk`, `EarlyLink`) are `Sendable`
-structs of integers. The passes after the walk capture the arenas (`[UInt8]`) by value, and each lane task borrows
-their bytes with `withUnsafeBytes` around its synchronous loop.
+The primitives hold only `Mutex` and `Atomic` state, so they're checked `Sendable` (`SegmentBufferPool`, `AEAPayload`,
+BytesAsync's `AsyncQueue` and limits, and Disk's). Classes with fields only one task touches are `final class …: @unchecked Sendable`
+(`SegmentStream` and `BlockStream`: the consumer's position; `RawStorage`). Their mutable state is in a `Mutex`, or is
+touched by one task only (the consumer's position), as stated beside it. Values crossing tasks (`SegmentContents` and
+its `Contents`, `Job`, `DecodedChunk`) are `Sendable` structs of integers and the pool's reference.
 
 ### Ordering guarantees, and how they're kept
 
-- **Directories before their contents:** the walker makes them, in stream order, before queuing anything inside.
-- **A large file exists before its pieces:** the walker opens it.
-- **Fork pieces in order:** `LargeFile`'s turn (`next`, `forkOffset`). Compression runs before waiting for the turn.
-- **A buffer outlives every pointer into it:** reference counts. The walker retains a buffer for each job before
-  pushing it, and the writer releases after writing.
-- **Hard links after their target:** made after the writers' latch, or by early link tasks that wait for
-  `popped >= job + 2` and retry on `ENOENT`.
-- **Flags before times:** `finishAttributes` sets times after `fchflags`, because `UF_COMPRESSED` resets the
-  modification time.
+- **Directories before their contents:** the planner makes them, in stream order, before queuing anything inside.
+- **A large file exists before its pieces:** the planner opens it (`beginLargeFile`).
+- **Fork pieces in order:** Disk's large-file turns. Compression runs before waiting for the turn.
+- **A buffer outlives every pointer into it:** reference counts. The walker retains a buffer for each job (and Disk
+  for each bridged piece) before queuing it, and the writer releases it once written (`SegmentContents.release`).
+- **Hard links after their target:** made after the writers.
+- **Times that stick:** one `fsetattrlist` sets `UF_COMPRESSED` and the times together (separately, `fchflags` set the
+  modification time to now; NativeAEA used to order the calls).
 
 ### No allocations in the steady state
 
 Every buffer is allocated once: the pool, each decoder's read buffer and codec state, each writer's scratch and
-encoders, the walker's arenas (which grow only by amortized doubling), the job rings, the slots, and the waiter
-queues. A file costs one `WriteJob` copied into a ring slot (or handed to a waiting writer through its continuation),
-and no heap allocation; a suspension allocates nothing in release builds. Child tasks are made once per operation.
+encoders (Disk's), the sink's path and blob buffers, the planner's arena (which grows only by amortized doubling), the
+job and path rings, the slots, and the waiter queues. A file costs one job copied into Disk's ring slot and its path
+into the path ring, and no heap allocation; a suspension allocates nothing in release builds. Child tasks are made once
+per operation.
 The Bytes codecs used here (xz, LZVN, LZBITMAP, LZFSE, bzip2) and RSA verification have zero-malloc benchmark
 thresholds.
 
@@ -673,30 +637,33 @@ thresholds.
 - **Verifying** (`verify(options:)`, what `nunarchiver` does without `-l`, `-d`, or `-o`): the same, with no callback,
   so `ListingSink` makes no `AAEntry` and none of its strings (a path, and a link's target).
 - **Decryption** (`AEAArchive.decrypt`, `Decrypt.swift`): a `SegmentStream` restricted to the segments that overlap
-  the requested range, decoded by child tasks. The calling task `pwrite`s each segment's overlap in order with
-  `await next(index)`, then releases it.
+  the requested range, decoded by child tasks. The calling task writes each segment's overlap at its offset in order
+  with `await next(index)` (Disk's `OutputFile.write(_:at:)`: positioned writes to the end), then releases it. The
+  package makes no file-system call of its own for output now: trees through Disk's `Extraction`, this file through
+  `OutputFile`. Input stays on swift-system's `FileDescriptor` (`AEAArchive.readFully`, one `pread` loop for every
+  reader), or Disk's `MappedFile`.
 
 ## 11. Failure and cancellation
 
 - **The first error wins.** A decoder that fails calls the stream's `stop(error)`: the failure is stored under the
   stream's lock, the waiting consumer is resumed and throws it, and the pool and queue are closed, so the other
-  decoders end. Writers store theirs in `context.failure` and set `failed`; the walker checks that at each entry
-  (`checkFailure`), and writers skip remaining jobs. A skipped large-file piece marks the file failed
-  (`failTurns`), resuming any piece waiting for its turn, so no writer waits forever.
-- **Cancellation** has one handler per operation, around its task group (`withDecoding`'s
-  `withTaskCancellationHandler`). It runs synchronously in whoever cancels, and:
-  - fails the extraction context with `.cancelled` (through `CancellationTarget`, which fails the context as soon as
-    it exists if the cancellation came first), so writers skip what's left, releasing its references, and link tasks
-    stop waiting;
-  - stops the source with `.cancelled`: the consumer's wait ends with that error, and the pools and job queue close,
-    so decoders and the producer end (they also check `Task.isCancelled` once per segment or block).
+  decoders end. A writer's failure stops Disk's extraction: writers skip remaining jobs (releasing their contents), a
+  skipped large-file piece marks the file failed so no piece waits for its turn forever, and the planner's next call
+  throws it, which the sink rethrows as an `AEAError` (`AEAError.init(_: DiskError)`: paths, file-system errors, and
+  cancellation as before). A walk failure (a decoder's, a malformed stream) ends the plan with its own error, which
+  `Extraction.run` reports as `.plan(error)` after stopping its writers.
+- **Cancellation** has two handlers, one per layer: `withDecoding`'s stops the source with `.cancelled` (the consumer's
+  wait ends with that error, the pools and job queue close, so decoders and the producer end; they also check
+  `Task.isCancelled` once per segment or block), and Disk's `Extraction.run` stops its planner and writers (writers
+  skip what's left, releasing its references; the planner's next call throws `.cancelled`).
 
-  The walker then throws `.cancelled` from its next `nextChunk()` or entry. The write queue isn't closed early: the
-  writers drain it (skipping the work), so the walker's pushes land and every reference is released. The passes after
-  the walk check `Task.isCancelled` per item, and the xip's content check per 4 MiB read.
+  The walker then throws `.cancelled` from its next `nextChunk()` or entry. Disk's write queue isn't closed early: the
+  writers drain it (skipping the work), so the walker's pushes land and every reference is released. Disk's passes
+  after the walk check for cancellation per item, and the xip's content check per 4 MiB read.
 - **After the tasks end, everything is released.** `withDecoding` releases published but unconsumed buffers (and a
   block stream's queued jobs' staging buffers) once its group has ended: no polling is needed, because closing the
   pool and the queues resumes every waiter, so the group simply ends. The tests check that `buffersInUse` (and
   `unreleasedBuffers`, summed over every pool) is 0 after successful, failed, and cancelled operations, and that a
   cancelled extraction or listing throws `.cancelled` promptly.
-- **A pending file and an open large file** are released by `abandonOpenFile`.
+- **A pending file and an open large file** are released by the sink's `finish(walked:)` and Disk's planner (which
+  closes and removes a large file left half-planned).

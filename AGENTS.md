@@ -10,11 +10,13 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 
 | Project | What | Record |
 |---|---|---|
-| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work; `BytesBase64` (vectorized Base64 encoding and decoding: NEON `tbl`/`tbx` block kernels, auto-vectorized `ld3`/`st4` group kernels; whitespace-skipping decoding for PEM; was the `Base64` package, record `RESULTS-base64.md`); `BytesAsync` (async buffers, pipelines, parallel codecs); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions; Zstandard decoding, XXH64; LZMA, LZMA2, and `.xz` decoding, CRC-64; bzip2 decoding; Apple's LZFSE, LZVN, LZ4, LZBITMAP, and LZRAVEN decoding, and LZFSE, LZVN, and LZBITMAP encoding (all three byte for byte as Compression's; the open references' parse as an option)); `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR on ARM's AES/PMULL instructions via the `CBytesCrypto` C target, SHA-1/256/384/512, HMAC, PBKDF2, HKDF, scrypt, TLS 1.3's key schedule and record layer, sealing in parallel; P-256 and P-384 ECDSA verification and ECDH (keys and signatures in DER and PEM, both ways), HPKE; RSA PKCS #1 v1.5 verification (1024–4096-bit keys, SHA-1/256/384/512); DER, PEM, and X.509 parsing, and certificate signatures (`isSigned(by:)`, RSA and ECDSA)) | `Benchmarks/RESULTS.md` (and its `RESULTS-*.md`) |
+| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work, `RawStorage` (memory made once, pages given back between uses); `BytesBase64` (vectorized Base64 encoding and decoding: NEON `tbl`/`tbx` block kernels, auto-vectorized `ld3`/`st4` group kernels; whitespace-skipping decoding for PEM; was the `Base64` package, record `RESULTS-base64.md`); `BytesAsync` (async buffers, pipelines, parallel codecs; the waiting primitives Disk, NativeAEA, and NativeZip share: `Continuation`/`withContinuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, `AsyncHandoff`); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions; Zstandard decoding, XXH64; LZMA, LZMA2, and `.xz` decoding, CRC-64; bzip2 decoding; Apple's LZFSE, LZVN, LZ4, LZBITMAP, and LZRAVEN decoding, and LZFSE, LZVN, and LZBITMAP encoding (all three byte for byte as Compression's; the open references' parse as an option)); `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR on ARM's AES/PMULL instructions via the `CBytesCrypto` C target, SHA-1/256/384/512, HMAC, PBKDF2, HKDF, scrypt, TLS 1.3's key schedule and record layer, sealing in parallel; P-256 and P-384 ECDSA verification and ECDH (keys and signatures in DER and PEM, both ways), HPKE; RSA PKCS #1 v1.5 verification (1024–4096-bit keys, SHA-1/256/384/512); DER, PEM, and X.509 parsing, and certificate signatures (`isSigned(by:)`, RSA and ECDSA)) | `Benchmarks/RESULTS.md` (and its `RESULTS-*.md`) |
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
 | `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
-| `NativeZipArchive` | ZIP: stored, DEFLATE, Deflate64, bzip2, LZMA, xz, Zstandard; ZipCrypto and WinZip AES (on BytesCrypto, decrypted as streamed); `ZipExtractor` (many archives, one worker pool); `nunzip` (Info-ZIP unzip's options) | `Benchmarks/RESULTS.md` |
+| `NativeZipArchive` | ZIP: stored, DEFLATE, Deflate64, bzip2, LZMA, xz, Zstandard; ZipCrypto and WinZip AES (on BytesCrypto, decrypted as streamed); `ZipExtractor` (many archives, one worker pool, an optional quarantine for everything extracted); `nunzip` (Info-ZIP unzip's options) | `Benchmarks/RESULTS.md` |
 | `NativeAEA` | Apple Encrypted Archives (`.aea`: Xcode's, iOS IPSWs' disk images) and Apple Archives (`.aar`, plain or `pbz`): all six AEA profiles (signatures and certificate chains, symmetric, ECDH, and scrypt keys, IPSWs' WKMS keys by HPKE), all on BytesCrypto; segments and blocks decoded in parallel with BytesCompression; the Apple Archive stream walked with no copies; files written as `aa extract` writes them, byte for byte (APFS `decmpfs` compression with BytesCompression's encoders, extended attributes, ACLs, hard links, FIFOs, quarantine) by writers outside a file system semaphore; decryption to a file, with ranges; Xcode's `.xip` too (XAR TOC, RSA signature and chain to Apple Root CA on BytesCrypto, pbzx blocks of xz, the cpio stream walked into the same extractor, files stored as `xip --expand` stores them); `nunarchiver` (was `unaea`); FORMAT.md documents the formats, ARCHITECTURE.md the pipeline and its threads | `RESULTS.md`, `XIP-REPORT.md` |
+| `Disk` | Writing extracted trees, shared by NativeAEA and NativeZip: `EntryPath` (validated relative paths), `Destination` (contained creation with `O_NOFOLLOW_ANY`/`O_RESOLVE_BENEATH`, staging then `publish`/`publishUnwrapped` (Archive Utility's naming)/`discard`), `FileWriter` (one thread, no allocations), `Extraction.run` with a `Planner` and `ContentSource`/`PieceSource` (writers outside a file-system limiter, large files in pieces), APFS `decmpfs` storage as `aa extract` and `xip --expand` store it, metadata in one `fsetattrlist`, quarantine, hard and symbolic links; `ExtractionProgress` (relaxed per-writer counters, polled); `MappedFile` (the archive being read) and `OutputFile` (one file at the caller's path); a `SyscallCounting` trait for the benchmarks | `RESULTS.md`, `ARCHITECTURE.md` |
+| `Nunarchiver` | macOS app (TCA26, Xcode project) replacing Archive Utility for `.zip`, `.aea`, `.aar`, `.xip`: expands next to the archive through Disk's staging as Archive Utility does (compared item by item), progress window polling `ExtractionProgress` (throughput in GB/s from the polled bytes), passwords and keys asked for in the row. Build with its `build.sh` (shared scheme, coverage off) | — |
 | `BinaryParsingComparison` | Bytes vs swift-binary-parsing | `RESULTS.md` |
 | `NativeISO8601`, `*Benchmark` | Smaller benchmarks | READMEs |
 
@@ -216,6 +218,16 @@ latency and throughput in cycles (one dependent chain; 16 independent ones), loa
 pointer chase over 128-byte lines), and read/store bandwidth by thread count. The cost model behind "a 4-register `tbl`
 is 3 vector slots" or "two cores saturate memory"; run it on a new machine before reasoning about its micro-op costs.
 The M1 Max's numbers: `Bytes/Benchmarks/RESULTS.md`, "What the cores can do".
+
+**`Tools/probe machine|insn|mem|bytes|all|compare|steps`** — what a Mac's cores and memory can do, measured the same
+way on any Apple silicon Mac (M1–M5) so machines compare row by row: `insn` (latency from one dependent chain,
+throughput from 8/16/24 chains, cycles from a dependent-`add` calibration next to each instruction, medians of 3 runs;
+instructions the chip lacks skipped by `FEAT_*` sysctl), `mem` (pointer-chase latency per 128-byte line, one-thread
+bandwidth, read bandwidth by thread count), `bytes` (BytesProbe: CRC-32/Adler-32 by size, parallel DEFLATE by lane
+count, decoder segments at every lane count; needs `Tools/corpus fetch`). `Tools/probe all` writes one TSV per table to
+`~/Scratch/probes/CHIP-DATE/` (about 1.5 minutes); `Tools/probe compare A B` puts directories side by side with ratios.
+Reference sets in `Tools/probes/results/`; method and pitfalls in `Tools/probes/README.md`. Run on an idle Mac on AC
+power (`machine.tsv` records load and power).
 
 **`Tools/toolchain …`** — non-Xcode toolchains: `list`, `install`, `register`, and running commands,
 programs (`--runtime`), and tests (`test`) with one. See Toolchains below.
@@ -789,6 +801,155 @@ A second machine (M1 Max, 2026-11-19; `Writeups/M1-Max-vs-M3-Ultra.md`, `Bytes/O
 - **Change a parallel splitter, sweep the corpus:** the decoder's four segments per lane rejected its speculation on one
   stream (mozilla level 1) at 6 of 16 lane counts, sequentially 7x slower; the benchmarks' inputs never hit it. Check
   `lastSegmentCount` over every corpus file and lane count.
+- **A throughput probe needs latency × width independent chains** (12 for a 3-cycle instruction on four pipes). The M1 Max
+  probe used eight and read 8/3 = 2.7 a cycle for `udot`, `pmull`, `aese`: its own limit (the M3 Ultra reads 2.7 with 8
+  chains, 4 with 16; 2026-11-20). Measure with `Tools/probe` (below), which takes the best of 8, 16, and 24.
+- **Break a latency bound with chains that nothing carries, not more accumulators.** Adler-32's `udot` loop was bound at
+  3 cycles per 64 B by `udot`'s latency *and* by its `prefix` adds (one per byte-sum accumulator a block); 16
+  accumulators doubled the adds (+3%). Computing each 128-byte step's byte sum as one `udot` chain from zero, folded in
+  with two carried adds, took 19 vector operations per 128 B and 1 MB from 76 to 101 GB/s. Count every vector operation
+  (adds, `movi`) against the pipes, not just the expensive instruction, and check both bounds before adding accumulators.
+- **Compare machines with `Tools/probe`, not one-off probes** (`Tools/probes/README.md`): `Tools/probe all` on each, then
+  `Tools/probe compare`. It takes the best of 8, 16, and 24 chains (on the M3 Ultra, three-source instructions like
+  `eor3` fall to 2.8 a cycle at 24) and calibrates the clock next to each instruction (a P cluster's clock moved
+  3.6–4.06 GHz under load; a cold first calibration made the first M3 probe's latencies 3% low).
+- **Compare instruction counts only between rows measured with the same metrics.** Rows that also counted mallocs (the
+  interposer active) read about 700 fewer instructions per sample on 1–100 K-instruction rows than the same rows without
+  it (`m3-1120` against `speed-after`, system libraries included).
+- **Speculation must fail locally.** `ParallelDeflateDecoder` decoded the whole stream sequentially if any of its
+  `4 × lanes` split points was a false `00 00 FF FF` (one inside Huffman-coded data, not just stored data): mozilla level
+  1 was 14x slower at 11, 22, 25, and 28–32 lanes, and the benchmarks ran only 8 and 24. Now the segment before a bad
+  split decodes on past it, and a failed region is decoded again in place after the real history. Sweep every lane count
+  from 1 to the machine's cores in tests (`Tools/probe bytes segments`), not just the counts the benchmarks use.
+- **Profile the calling thread of a parallel call, not just the workers.** The parallel decoder's serial copy of the
+  joined output was a quarter of its time, and a serial split scan another 8%. Hand each finished piece to the output
+  from whichever worker makes it ready, and make each worker's setup depend only on its own piece so workers do it.
+
+The Disk package and the Nunarchiver app (2026-11-20; `Disk/RESULTS.md`, `NativeAEA/RESULTS.md`):
+
+- **A GUI app working with no frontmost window runs at background QoS** (App Nap): every thread at priority 4 in `ps -M -p PID`,
+  efficiency cores only. Xcode's xip in Nunarchiver was past 83 s against the CLI's 11. Start the work at `.userInitiated`
+  and hold `ProcessInfo.beginActivity([.userInitiated, .idleSystemSleepDisabled], …)` while it runs.
+- **Xcode 27's autogenerated scheme can instrument Release builds for coverage, packages included**: the LZVN encoder's
+  loop went from 188 to 585 instructions (an `adrp`/`ldr`/`add`/`str` per counter), and 24 threads sharing the counters
+  made Xcode's expansion over 3 minutes. `-enableCodeCoverage NO` applies only to `test`: commit a shared scheme with
+  coverage off, and check built apps with `otool -l APP | grep __llvm_prf_cnts`. Compare an app's hot loop with the CLI's
+  (`Tools/loops` on both binaries) when the app is slower.
+- **`fsetattrlist` sets times, mode, and flags in one call and keeps the times** even with `UF_COMPRESSED`, where `fchflags`
+  resets them; with flags alone it costs 62 K more kernel instructions than `fchflags`.
+- **TCA26's `onMount(id:)` remounts the whole feature it modifies, children included**: put it on an empty `Update` of its
+  own, or every child's effect restarts when the id changes.
+- **`NSApp.terminate` called on the main queue** (from a task or a dispatch source) hangs if it can return
+  `.terminateLater`: its nested run loop doesn't drain the main queue. Request it with `RunLoop.main.perform(inModes:)`.
+- zsh has a `log` builtin: use `/usr/bin/log`.
+
+One implementation each (2026-11-21; `Disk/RESULTS.md`, `NativeAEA/RESULTS.md`, `NativeZipArchive/Benchmarks/RESULTS.md`):
+
+- **Shared concurrency primitives go in BytesAsync, and moving them there cost nothing** when every type is `@frozen`
+  or has `@usableFromInline` state and every method is `@inlinable`: Disk's, NativeAEA's, and NativeZip's waits
+  (`Continuation`, `WaiterQueue`, limiter, index pool, latch, queue, handoff) and `RawStorage` moved with identical
+  mallocs, calls, and (within the rows' spread) instructions. Check a move with `Tools/calls --target PKG TARGET '.*'
+  --callee 'MODULE|swift_getGenericMetadata' --sum`: specialized copies in the client are fine, calls into the other
+  module's unspecialized generics aren't. `#if DEBUG` in inlinable code is decided when the *defining* module is built.
+- **Before writing a helper, look for it one module down**: two packages had the same 160 lines of waiting code, and
+  three had a class around `Atomic<Int>`. But one user and a format's own layout (NativeAEA's segment pool, Disk's
+  job-and-path queue) stay where they are.
+- **A sync method and an `async` one of the same name are ambiguous across modules too** when the closure names its
+  error type: Disk can't call BytesAsync's `RawSpan.withLentBytes` (Bytes has the sync one) and keeps a two-line helper.
+- **package-benchmark prints "Build complete!" for its tool, then builds the benchmark targets.** An edit made after
+  that line broke a queued baseline's build. Don't touch a package (or what it depends on) until its first result
+  table prints; queue every "before" baseline before the first edit.
+- **Build new Bytes API with SocketStream's PR toolchain as well**: it warned ("result of 'offer' cannot be returned":
+  region isolation) about enums returned from `Mutex.withLock` that Xcode's compiler accepted. Make such types `Sendable`.
+- **A directory isn't always made by its own entry.** Disk's planner assumed a listed directory had the mode its
+  `mkdir` gave it; one made earlier as a file's parent (an archive listing it after its contents), or already there,
+  kept 0755. And parents an archive never lists (ZIP) got no quarantine. Test archives that list directories last, and
+  not at all.
+- **A quarantine belongs in the writers, not in a walk afterwards**: one `fsetxattr` on the open file (and one
+  `setxattr` per directory in the passes) against a second traversal on one thread, which doubled an 8,060-entry
+  archive's time in the app.
+
+Matching Archive Utility (2026-11-21, later; `Disk/RESULTS.md`, `NativeZipArchive/Benchmarks/RESULTS.md`,
+`NativeAEA/RESULTS.md`):
+
+- **Compare with the real tool, item by item, before believing what it "reportedly" does.** Archive Utility
+  (`open -W -a "Archive Utility" FILE`, each archive copied into a directory of its own under `~/Scratch`, the
+  copy given a `com.apple.quarantine`) against Nunarchiver, both trees through one manifest (type, mode, flags,
+  owner, size, mtime, link target, SHA-256, every extended attribute, the ACL's text), then `diff`. Times the
+  expansion itself set are normalized (anything later than the corpus is NOW). What it showed that nobody had
+  written down: the folder for several items is 0700 unless the archive has an entry for its root (`aa archive -d`:
+  then that entry's mode and time); AppleDouble entries are merged (beside the item or under `__MACOSX`), ACLs
+  included (`com.apple.acl.text`); symbolic links get their archived times; ZIP names are written decomposed
+  (`fileSystemRepresentation`), Apple Archive names as stored; everything is quarantined, the folder too, except a
+  `.xip`'s contents.
+- **A tool's output can be an accident of its pass order: decide whether to copy it.** Archive Utility restores a
+  `.xip`'s directory times before it writes the files, so only directories holding nothing but directories keep
+  them (1,877 of Xcode's 30,068, found by classifying every directory by what it holds). Nunarchiver restores all
+  of them and says so.
+- **A GUI tool's failures are dialogs on the user's screen.** Archive Utility's alerts block `open -W` until someone
+  clicks OK, and nothing in a session without Screen Recording or Accessibility can see or dismiss them. Run it
+  only on archives it should accept (ordinary `ditto`/`zip`/`aa` output, Xcode's archives), with a timeout, add one
+  feature at a time to a known-good archive, and never bisect a failing one by running it again. Its reason is in
+  the log: `log show --last 2m --predicate 'process == "ArchiveService"'` ("Main key derivation failed", "Couldn't
+  read the header of the entry: … Code=79"). Don't run two `open -W` of one app at once: the second waits on the
+  first's dialog.
+- **Foundation's directory enumerators leave `._` files out** (`FileManager.enumerator(atPath:)`): a test that lists
+  an extracted tree to show no AppleDouble file is left passes whatever is there. List with `readdir`.
+- **macOS's `unzip` and `ditto -x -k` merge AppleDouble entries too**, so a raw copy of one for a test comes from an
+  extraction with merging off (NativeZip's `mergesAppleDouble = false`) or `python3 -m zipfile -e`.
+- **A directory can't have a resource fork**: `fsetxattr("com.apple.ResourceFork")` on one fails with `EPERM`
+  (`ditto` warns and goes on; Archive Utility refuses the archive). Leave it out rather than fail the entry.
+- **Throughput in a polled UI is the counter's gain over the last n ticks of the poll timer**: no clock reads, no
+  Foundation `Progress`; a sample every tick even when nothing changed, so a stalled rate falls to zero. State
+  what the bytes are (here: file contents written to disk, before APFS compression).
+- **A progress bar by bytes is full before the work is** (a `.xip`'s hard links and directory passes: 3.4 s of
+  Xcode's 10.2, measured from the app's polls). A finishing state from `fraction >= 1` left the bar indeterminate for
+  that third; now each entry counts as 64 KiB beside the bytes (`ExpansionProgress.fraction(entries:of:bytes:of:)`),
+  so the bar moves through the links too, and the app keeps the largest fraction read (totals go from an estimate
+  to exact mid-run).
+- **`aea encrypt -profile 5` refuses short passwords** ("Password is too short"): tests use a long one.
+- **`open` as an instance method hides Darwin's `open`** inside the type: write `Darwin.open`.
+
+Reviewing the Nunarchiver app (2026-11-21, review pass; the app's sources and tests):
+
+- **The pfw-tca26 skill's interface is older than the TCA26 the app builds with** (module `ComposableArchitecture`,
+  `forEach(\.x)` and `scope(\.x)` without `action:`, `.transformEnvironment` test traits, `store.run`, `store.trigger`).
+  Read the checkout: `Nunarchiver/.build/DerivedData-Debug/SourcePackages/checkouts/TCA26` (DocC articles under
+  `Sources/ComposableArchitecture/Documentation.docc/Articles`, behaviour in `Tests/` and `Examples/`).
+- **A parent commands a child with a `@Trigger` in the child's state, not by sending the child's actions**
+  (TCA26's Triggers article): `for expansion in store.expansions { try expansion.cancel() }` in a store task. In a
+  `TestStoreActor` the trigger's state changes are asserted in the `send` that caused it; no extra `receive`.
+- **A `TestStoreActor` applies an effect's actions as they arrive, before `receive` asserts them**: after anything
+  that can end a child (a cancel), `store.send(to: \.children[0], …)` or reading `$0.state.children[0]` races the
+  removal and traps (index out of range, taking the whole test process with it). Test a row's own guards on a store
+  of the child feature alone.
+- **Is the bar really determinate? Ask AppKit**: SwiftUI's linear `ProgressView` is an `NSProgressIndicator` on
+  macOS, so a temporary timer walking the window's views can log `isIndeterminate` and `doubleValue` (and count
+  `body` evaluations) to the system log, read with `/usr/bin/log stream --level debug --predicate 'subsystem == …'`
+  started before the app. `cacheDisplay(in:to:)` does not capture SwiftUI's text. `open --env NAME=VALUE` passes
+  the switch; remove the code afterwards.
+- **`open -a APP symlink` hands the app the link's target**: an expansion "next to the archive" went to `~/Scratch`.
+  Give the app a hard link (same volume) or a copy in the scratch directory.
+- **Automatic grammar agreement (`^[\(n) item](inflect: true)`) isn't applied by `String(localized:)`** for an app
+  with no String Catalog: the markup came out as written (in tests, and it's what VoiceOver's value would read).
+  Use two keys ("1 item", "%lld items") until a catalog carries plural variations.
+- **Rates: `Int64.formatted(.byteCount(style: .file).locale(…))` plus a localized "\(amount)/s"**. Foundation has no
+  data-rate format style (macOS 27 SDK: `Measurement` has no information-per-time dimension). Other locales put a
+  no-break space (U+00A0, or U+202F in French) before the unit: tests spell it out.
+- **`#expect(try localFunction(…) == x)` inside a closure failed to compile** ("errors thrown from here are not
+  handled", Swift Testing in Xcode 27.2) where `#expect(try Data(contentsOf:) == x)` beside it compiled: bind the
+  result with `let` first.
+- **A user-facing string held in a `String` property is never localized** (`Text(string)` is verbatim): computed
+  titles and captions are `LocalizedStringResource`s (on the feature's state, so tests read them with
+  `String(localized:)`), AppKit's take `String(localized:)`.
+- **Split a row by what the poll timer changes**: with the icon lookup in the same `body` as the polled progress,
+  `NSWorkspace.icon(forFile:)` ran 4 times a second per row; as views of their own (icon by URL; progress by store),
+  the counts over a 10 s expansion were icon 1, row 1, list 1, progress 39.
+- **An xcodebuild failure can hide behind `| tail`**: `./build.sh … | tail -3` exits 0 with a stale app in place
+  (the measurement then ran the old binary). Read build.sh's first line (`exit N`) before using the product.
+- **`SWIFT_STRICT_MEMORY_SAFETY = YES` in an app target with TCA26's macros** produced no warnings of the macros'
+  own: only the app's two C calls needed `unsafe`. It's on for Nunarchiver, so the "every `unsafe` has its reason"
+  rule is checked there too.
 
 ## Tests
 
@@ -903,6 +1064,9 @@ can't be trusted then, even serialized: other agents' builds load the machine (u
   command line contains PATTERN, so `pgrep -f` always finds it and the loop never ends (ten such loops
   outlived their agents). Wait on the job's PID (`while kill -0 $pid …`), on its output file, or let the
   harness notify you when a background job exits.
+- Nor with `grep -c PATTERN LOG` in the loop's test when the log can hold NUL bytes (an xcodebuild log does):
+  grep prints "Binary file LOG matches" instead of a count, the comparison never succeeds, and the loop never
+  ends. `grep -a -c`, or wait on the PID.
 
 ## macOS tools: what's useful for this
 

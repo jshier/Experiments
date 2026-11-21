@@ -31,9 +31,14 @@ import zlib
         }
     }
 
-    /// The UDOT kernel reduces every 86 blocks of 64 bytes (5,504 bytes): sizes around one, two, and three chunks, from
-    /// starts that aren't aligned, with the worst-case bytes and a value that continues from a large checksum.
-    @Test(arguments: [5_439, 5_440, 5_503, 5_504, 5_505, 5_567, 11_007, 11_008, 11_009, 16_511, 16_512, 16_513])
+    /// The UDOT kernel reduces every 512 steps of 128 bytes (65,536 bytes), then adds an odd 64-byte block alone: sizes
+    /// around one, two, and three chunks (one step short, an odd block over, a step over, a few bytes either side), from
+    /// starts that aren't aligned, with the worst-case bytes and a value that continues from a large checksum. 0xFF in
+    /// every byte of a full chunk is the largest the kernel's 32-bit sums get (`prefix`: 4,269,834,240).
+    @Test(arguments: [
+        65_407, 65_408, 65_471, 65_472, 65_535, 65_536, 65_537, 65_599, 65_600, 65_663, 65_664, 65_665,
+        131_071, 131_072, 131_136, 131_199, 131_200, 196_672,
+    ])
     func adlerAroundDotProductChunks(count: Int) {
         for start in [0, 1, 7, 16, 33] {
             let data = Self.bytes(count + start, seed: UInt64(count))
@@ -46,6 +51,32 @@ import zlib
                     == Self.zlibAdler(onesSlice, continuing: 0xFFF0_FFF0 & 0xFFFE_FFFE),
                 "ones \(count) from \(start)"
             )
+        }
+    }
+
+    /// The UDOT kernel takes 64-byte blocks two at a time and an odd one alone: even and odd block counts, each with the
+    /// remainders the 32-byte and bytes loops take, from unaligned starts, continuing from 1 and from a checksum whose
+    /// sums are one below the modulus.
+    @Test(arguments: 1...9)
+    func adlerOddAndEvenBlockCounts(blocks: Int) {
+        for remainder in [0, 1, 31, 32, 33, 63] {
+            let count = blocks * 64 + remainder
+            for start in [0, 1, 7, 16, 33] {
+                let data = Self.bytes(count + start, seed: UInt64(count))
+                for value: UInt32 in [1, 0xFFF0_FFF0] {
+                    #expect(
+                        Adler32.checksum(data.span.bytes.extracting(start...), continuing: value)
+                            == Self.zlibAdler(Array(data[start...]), continuing: value),
+                        "\(count) from \(start), \(value)"
+                    )
+                }
+                let ones = [UInt8](repeating: 0xFF, count: count + start)
+                #expect(
+                    Adler32.checksum(ones.span.bytes.extracting(start...), continuing: 0xFFF0_FFF0)
+                        == Self.zlibAdler(Array(ones[start...]), continuing: 0xFFF0_FFF0),
+                    "ones \(count) from \(start)"
+                )
+            }
         }
     }
 

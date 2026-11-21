@@ -31,6 +31,22 @@ public final class AEAArchive: Sendable {
     /// The largest compressed segment, for sizing read buffers.
     public let largestCompressedSegment: Int
 
+    /// The profile of the archive at `path`, read from its first bytes without any key: what it will need to open
+    /// (a symmetric key, a password, a recipient's key, a signer), for an app to ask before it opens the archive.
+    public static func profile(at path: FilePath) throws(AEAError) -> AEAProfile {
+        let descriptor: FileDescriptor
+        do {
+            descriptor = try FileDescriptor.open(path, .readOnly, options: [.closeOnExec])
+        } catch {
+            throw .fileSystem("open \(path)", error as? Errno ?? .ioError)
+        }
+        defer { try? descriptor.close() }
+        guard try fileSize(descriptor) >= AEAPrologue.fixedByteCount else { throw .notAnAEAFile }
+        var fixed = [UInt8](repeating: 0, count: AEAPrologue.fixedByteCount)
+        try read(descriptor, at: 0, into: &fixed)
+        return try AEAPrologue.profile(parsing: fixed.span.bytes)
+    }
+
     /// Opens and verifies an archive.
     ///
     /// - Parameters:

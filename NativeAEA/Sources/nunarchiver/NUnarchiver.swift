@@ -1,4 +1,5 @@
 import ArgumentParser
+import Disk
 import Foundation
 import NativeAEA
 import System
@@ -58,14 +59,14 @@ struct NUnarchiver: AsyncParsableCommand {
     @Option(name: .long, help: "Segments decoded at once (one task each).")
     var decodeThreads = ProcessInfo.processInfo.activeProcessorCount
 
-    @Option(name: .long, help: "Writers in file system calls at once.")
-    var fileSystemWidth = 6
+    @Option(name: .long, help: "Writers in file system calls at once (default: a quarter of the performance cores, 2 to 6).")
+    var fileSystemWidth = AEAExtractionOptions().fileSystemWidth
 
-    @Option(name: .long, help: "Writers (tasks) compressing and writing files.")
-    var writerThreads = 24
+    @Option(name: .long, help: "Writers (tasks) compressing and writing files (default: one per performance core).")
+    var writerThreads = AEAExtractionOptions().writerThreads
 
-    @Option(name: .long, help: "Tasks making hard links while files are written (0: all after).")
-    var hardLinkThreads = 0
+    @Flag(name: .long, help: "Show the extraction's progress on standard error.")
+    var progress = false
 
     @Option(name: .long, help: "Decoded segments held beyond one per decoder and writer.")
     var extraBuffers = 8
@@ -87,9 +88,6 @@ struct NUnarchiver: AsyncParsableCommand {
 
     @Flag(name: .long, help: "Don't copy the archive's quarantine attribute onto what's extracted (aa extract copies it).")
     var noQuarantine = false
-
-    @Flag(name: .long, help: "Admit file system calls by directory, one writer per lane (an experiment).")
-    var spreadDirectories = false
 
     @Flag(name: .long, help: "Skip checking segment MACs and checksums (the prologue and cluster headers are still checked).")
     var noVerify = false
@@ -166,17 +164,7 @@ struct NUnarchiver: AsyncParsableCommand {
             }
             statistics = try await archive.decrypt(to: FilePath(output), range: range, overwrite: overwrite, options: read)
         } else if let directory {
-            var options = AEAExtractionOptions()
-            options.read = read
-            options.writerThreads = writerThreads
-            options.fileSystemWidth = fileSystemWidth
-            options.hardLinkThreads = hardLinkThreads
-            options.diskCompression = diskCompression
-            options.overwrite = overwrite
-            options.relativeToParents = relativeToParents
-            options.copyQuarantine = !noQuarantine
-            options.spreadDirectories = spreadDirectories
-            statistics = try await archive.extract(to: FilePath(directory), options: options)
+            statistics = try await extracting(read) { try await archive.extract(to: FilePath(directory), options: $0) }
         } else {
             // Listing makes an entry (and its strings) for each; verifying alone makes none.
             statistics = list
@@ -204,17 +192,7 @@ struct NUnarchiver: AsyncParsableCommand {
         if info { return }
         let statistics: AEAStatistics
         if let directory {
-            var options = AEAExtractionOptions()
-            options.read = readOptions
-            options.writerThreads = writerThreads
-            options.fileSystemWidth = fileSystemWidth
-            options.hardLinkThreads = hardLinkThreads
-            options.diskCompression = diskCompression
-            options.overwrite = overwrite
-            options.relativeToParents = relativeToParents
-            options.copyQuarantine = !noQuarantine
-            options.spreadDirectories = spreadDirectories
-            statistics = try await file.extract(to: FilePath(directory), options: options)
+            statistics = try await extracting(readOptions) { try await file.extract(to: FilePath(directory), options: $0) }
         } else {
             // Listing makes an entry (and its strings) for each; verifying alone makes none.
             statistics = list
@@ -240,16 +218,8 @@ struct NUnarchiver: AsyncParsableCommand {
         if info { return }
         let statistics: AEAStatistics
         if let directory {
-            var options = AEAExtractionOptions()
-            options.read = readOptions
-            options.writerThreads = writerThreads
-            options.fileSystemWidth = fileSystemWidth
-            options.hardLinkThreads = hardLinkThreads
-            options.diskCompression = diskCompression
-            options.overwrite = overwrite
-            options.relativeToParents = relativeToParents
-            options.spreadDirectories = spreadDirectories
-            statistics = try await file.extract(to: FilePath(directory), options: options)
+            // `xip --expand` copies no quarantine: the option is ignored.
+            statistics = try await extracting(readOptions) { try await file.extract(to: FilePath(directory), options: $0) }
         } else {
             // Listing makes an entry (and its strings) for each; verifying alone makes none.
             statistics = list
@@ -257,6 +227,43 @@ struct NUnarchiver: AsyncParsableCommand {
                 : try await file.verify(options: readOptions)
         }
         if verbose { print(statistics) }
+    }
+
+    /// Runs `extract` with the extraction options given, showing its progress with `--progress`: a line on standard
+    /// error, redrawn twice a second from the extraction's counters (polled, as an app's timer would).
+    private func extracting(_ read: AEAReadOptions, _ extract: (AEAExtractionOptions) async throws -> AEAStatistics) async throws -> AEAStatistics {
+        var options = AEAExtractionOptions()
+        options.read = read
+        options.writerThreads = writerThreads
+        options.fileSystemWidth = fileSystemWidth
+        options.diskCompression = diskCompression
+        options.overwrite = overwrite
+        options.relativeToParents = relativeToParents
+        options.copyQuarantine = !noQuarantine
+        options.collectsTimings = verbose
+        guard progress else { return try await extract(options) }
+        let counters = ExtractionProgress()
+        options.progress = counters
+        let reporter = Task {
+            func show(_ end: String) {
+                let percent = counters.fractionCompleted.map { fraction in
+                    let tenths = Int(fraction * 1_000)
+                    return "\(tenths / 10).\(tenths % 10)%"
+                } ?? "?"
+                let line = "\r\(percent)  \(counters.entries) of \(counters.expectedEntries) entries, \(counters.bytes >> 20) of \(counters.expectedBytes >> 20) MiB\(end)"
+                FileHandle.standardError.write(Data(line.utf8))
+            }
+            while !Task.isCancelled {
+                show("")
+                try? await Task.sleep(for: .milliseconds(500))
+            }
+            show("\n")
+        }
+        defer { reporter.cancel() }
+        let statistics = try await extract(options)
+        reporter.cancel()
+        await reporter.value
+        return statistics
     }
 
     /// The key an encrypted archive needs, from the options given.

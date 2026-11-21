@@ -44,13 +44,16 @@ BYTES_CRC_INLINE bytes_crc_u32x4 bytes_crc_udot(bytes_crc_u32x4 acc, bytes_crc_u
     return (bytes_crc_u32x4)vdotq_u32((uint32x4_t)acc, (uint8x16_t)a, (uint8x16_t)b);
 }
 
-/// The weights 64, 63, …, 1 for a 64-byte Adler-32 block, as four vectors (`k` 0 through 3, constant after inlining):
-/// the weight of the byte at position `j` in the block is `64 - j`.
+/// The weights 128, 127, …, 1 for a 128-byte Adler-32 step, as eight vectors (`k` 0 through 7, constant after
+/// inlining): the weight of the byte at position `j` in the step is `128 - j`. The last four (`k` 4 through 7) are
+/// 64, …, 1, the weights of a single 64-byte block.
 BYTES_CRC_INLINE bytes_crc_u8x16 bytes_adler_weights(int k) {
-    static const uint8_t weights[64] = {
-        64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53, 52, 51, 50, 49, 48, 47, 46, 45, 44, 43,
-        42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25, 24, 23, 22, 21,
-        20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
+    static const uint8_t weights[128] = {
+        128, 127, 126, 125, 124, 123, 122, 121, 120, 119, 118, 117, 116, 115, 114, 113, 112, 111, 110, 109, 108, 107,
+        106, 105, 104, 103, 102, 101, 100, 99, 98, 97, 96, 95, 94, 93, 92, 91, 90, 89, 88, 87, 86, 85, 84, 83, 82, 81,
+        80, 79, 78, 77, 76, 75, 74, 73, 72, 71, 70, 69, 68, 67, 66, 65, 64, 63, 62, 61, 60, 59, 58, 57, 56, 55, 54, 53,
+        52, 51, 50, 49, 48, 47, 46, 45, 44, 43, 42, 41, 40, 39, 38, 37, 36, 35, 34, 33, 32, 31, 30, 29, 28, 27, 26, 25,
+        24, 23, 22, 21, 20, 19, 18, 17, 16, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1,
     };
     return (bytes_crc_u8x16)vld1q_u8(weights + 16 * k);
 }

@@ -1,3 +1,4 @@
+import Disk
 import Foundation
 
 // The original central directory parser, built on `ByteReader`, kept only so the benchmarks can compare

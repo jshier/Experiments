@@ -1,4 +1,4 @@
-import Darwin
+import Disk
 import Foundation
 import System
 
@@ -26,10 +26,13 @@ extension AEAArchive {
         let end = segments[first...].firstIndex { $0.rawOffset >= wanted.upperBound } ?? segments.count
         let needed = wanted.isEmpty ? first..<first : first..<end
 
-        let flags = O_WRONLY | O_CREAT | O_CLOEXEC | (overwrite ? O_TRUNC : O_EXCL)
-        let output = unsafe open(destination.string, flags, 0o644)
-        guard output >= 0 else { throw .fileSystem("open \(destination)", Errno(rawValue: errno)) }
-        defer { close(output) }
+        // Disk's plain output file: created (or, with `overwrite`, truncated), closed when it goes.
+        let output: OutputFile
+        do throws(DiskError) {
+            output = try OutputFile(destination, replacing: overwrite)
+        } catch {
+            throw AEAError(error)
+        }
 
         // At least one decoder, and a buffer beyond the one being written (fewer would wait forever).
         let decoders = max(1, options.decodeThreads)
@@ -49,18 +52,15 @@ extension AEAArchive {
                     // The part of this segment inside the range.
                     let low = max(wanted.lowerBound, segment.rawOffset), high = min(wanted.upperBound, segment.rawOffset + segment.rawSize)
                     let start = DispatchTime.now().uptimeNanoseconds
-                    let base = unsafe UnsafeRawPointer(pool.segmentBase(buffer)) + (low - segment.rawOffset)
-                    var done = 0
-                    while done < high - low {
-                        // Within the segment's decoded bytes: safe.
-                        let count = unsafe pwrite(output, base + done, high - low - done, off_t(low - wanted.lowerBound + done))
-                        if count < 0 {
-                            if errno == EINTR { continue }
-                            throw .fileSystem("write \(destination)", Errno(rawValue: errno))
-                        }
-                        done += count
+                    // Unsafe: a span over the decoded segment. Safe: within its `rawSize` bytes, in a buffer this task
+                    // holds until the `defer` above releases it, after the write.
+                    let bytes = unsafe RawSpan(_unsafeStart: pool.segmentBase(buffer) + (low - segment.rawOffset), byteCount: high - low)
+                    do throws(DiskError) {
+                        try output.write(bytes, at: low - wanted.lowerBound)
+                    } catch {
+                        throw AEAError(error)
                     }
-                    written += done
+                    written += high - low
                     writeNanoseconds += Int(DispatchTime.now().uptimeNanoseconds - start)
                 }
                 return nil

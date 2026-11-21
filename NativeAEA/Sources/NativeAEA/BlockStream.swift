@@ -1,4 +1,5 @@
 import Bytes
+import BytesAsync
 import Foundation
 import Synchronization
 import System
@@ -95,7 +96,8 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
     private let backend: SegmentDecoderBackend
     /// Copies of blocks' stored bytes from upstream buffers (their blocks cross them freely).
     private let staging: SegmentBufferPool?
-    private let jobs: JobQueue<Job>
+    /// Blocks to decode, from the producer to the decoders (BytesAsync's bounded queue).
+    private let jobs: AsyncQueue<Job>
 
     private let cancelled = Atomic<Bool>(false)
 
@@ -137,7 +139,7 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
         } else {
             staging = nil
         }
-        jobs = JobQueue(capacity: decoderCount * 2 + 2, waiters: decoderCount)
+        jobs = AsyncQueue(capacity: decoderCount * 2 + 2, waiters: decoderCount)
         state = Mutex(State(slots: Array(repeating: Slot(), count: pool.count)))
     }
 
@@ -170,7 +172,7 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
             case .some(.failure(let error)):
                 throw error
             case nil:
-                await suspend { (continuation: Continuation<Void>) in
+                await withContinuation { (continuation: Continuation<Void>) in
                     // Checked again under the lock publishing takes: no wakeup is lost.
                     let ready = state.withLock { state in
                         if state.failure != nil || (state.blockCount.map { index >= $0 } ?? false) || state.slots[index % state.slots.count].index == index {

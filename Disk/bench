@@ -1,0 +1,25 @@
+#!/bin/bash
+# Runs Disk's benchmarks in one of two builds, each with its own build directory so switching doesn't rebuild:
+#
+#   plain      the default build (times, instructions, mallocs)
+#   syscalls   with the SyscallCounting trait: adds the "Disk syscalls" metric (every file system call Disk makes)
+#
+# Usage: ./bench [plain|syscalls] [benchmark arguments...]
+#   ./bench syscalls --filter 'Small files.*'
+#   ./bench syscalls baseline update syscalls --no-progress
+set -euo pipefail
+cd "$(dirname "$0")"
+
+build=plain
+case "${1:-}" in
+plain | syscalls) build=$1; shift ;;
+-h | --help) sed -n '2,10p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+esac
+
+case $build in
+plain) options=() ;;
+syscalls) options=(--traits SyscallCounting --scratch-path .build-syscalls) ;;
+esac
+
+# (Bash 3.2 calls an empty array unbound under `set -u`.)
+exec swift package ${options[@]+"${options[@]}"} --disable-sandbox benchmark "$@"
