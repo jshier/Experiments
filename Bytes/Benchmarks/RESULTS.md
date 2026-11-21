@@ -239,6 +239,17 @@ Bits 1.00 against 0.91. The M1 Max penalty over the M3 barely depends on the bui
 
 Everything above ran one version of the code, tuned on the M3 Ultra. This section asks what the M1 Max could do better,
 with throwaway C probes (scratch, not checked in) and a probe package depending on `Bytes`, all on the idle machine.
+
+**Re-measured 2026-11-21** on the same machine (macOS 27.2.1, Xcode 27.3, Swift 6.4.4). The instruction, latency, and
+bandwidth probes are now a Tool, `Tools/cpu-probe` (C and inline assembly in `Tools/lib/cpu-probe.c`); the checksum
+and lane probes are a scratch package again, and the CRC variants a scratch C file. Two errors in the first probe changed
+the instruction table: its clock calibration read 2.82 GHz (the scalar `add` chain now reads 3.21 GHz, and a vector `add`
+then comes out at exactly 2.00 cycles, so cycles are no longer ±15%), and its throughput loops had 8 independent chains,
+which capped every 3-cycle instruction at 8 ÷ 3 = 2.7 a cycle (with 16 chains, `udot`, `pmull`, `aese`, `mul`, `usra` run
+4 a cycle). The parallel decoder has also changed since (up to 4 segments per lane, taken from a queue). Each subsection
+below has the new numbers and says what changed. Spotlight indexed for a few minutes during the work: the single-core
+probes ran before it started; the lane and multi-thread bandwidth tables are from runs after it stopped (an earlier lane
+run during it agreed within 5% except at 9–12 lanes).
 The M1 Max has the same ISA features as the M3 for these kernels (NEON, AES, PMULL, SHA-1/2/3/512, CRC32, DotProd, FHM; no
 I8MM, BF16, SVE, SME), so "M1-specific" here means microarchitecture and core layout, not instructions the M3 lacks.
 
@@ -269,91 +280,143 @@ rows are the control):
 | Adler-32 1 MB: libdeflate (control) | 18 → 18 µs | 305 K → 305 K | 0 |
 | Adler-32 1 MB: zlib (control) | 64 → 63 µs | 527 K → 527 K | 0 |
 
-A probe (`CRC32`/`Adler32.checksum` in a loop, best of 9): 64 B 7.2 → 8.2 GB/s, 1 KB 29.4 → 56.0, 16 KB 29.9 → 57.2, 1 MB
-29.8 → 58.0, 8 MB 29.7 → 55.7. A C version of the same algorithm ran 58.9 GB/s at 1 MB against libdeflate's 63.6 and zlib's
-17.0. `Tools/loops` on the release object: the inner loop is 16 instructions per 64 bytes (8 `udot.4s`, 4 `add.4s`, 2 `ldp`,
-`subs`, `b.ne`), `vector128`; it is bound by `udot` throughput (below: about 2.7 a cycle, so 8 of them take 3 cycles, 64 bytes
-in about 1.1 ns = 58 GB/s: the measured rate). Fewer `udot`s per byte is the only way past it. Not measured on the M3 Ultra
+A probe (`Adler32.checksum` in a loop, about 256 MB per timing, best of 9; before is the same probe built with Bytes'
+`Portable` trait, which keeps the old kernel; re-run 2026-11-21): 64 B 9.8 → 14.7 GB/s, 1 KB 29.2 → 56.0, 16 KB 29.8 →
+57.1, 1 MB 29.6 → 56.9, 8 MB 28.8 → 56.0. (The first run's probe read 7.2 → 8.2 at 64 B and 29.8 → 58.0 at 1 MB; its loop
+isn't recorded.) In a C probe on the same day, libdeflate's `libdeflate_adler32` ran 62.2 GB/s at 1 MB and zlib's
+`adler32` 16.9. `Tools/loops` on the release object: the inner loop is 16 instructions per 64 bytes (8 `udot.4s`, 4 `add.4s`, 2 `ldp`,
+`subs`, `b.ne`), `vector128`. Its 12 vector instructions take 3 cycles on the four vector pipes, and each of the eight
+accumulators takes one `udot` a block (3 cycles of latency, below), so both limits say 3 cycles per 64 bytes: 68 GB/s at
+3.21 GHz, of which it reaches 83%. (The first write-up said "bound by `udot` throughput, about 2.7 a cycle": the same 3
+cycles, from the probe's chain limit.) Getting past it needs fewer vector instructions per block (the 4 `add.4s` for the
+running total) and more accumulators (two blocks an iteration), both; not tried. Not measured on the M3 Ultra
 (no access): the instruction exists there, so a gain is likely, but its size depends on that core's `udot` rate.
 
-### Parallel lanes: the efficiency cores help the encoder, hurt the decoder
+### Parallel lanes: the efficiency cores help both codecs now; one stream falls back to sequential
 
 The parallel codecs' benchmarks use `hw.perflevel0.physicalcpu` (8 on the M1 Max) as the lane count, on the belief that
 the efficiency cores finish last. Probe: `ParallelDeflateEncoder`/`ParallelDeflateDecoder`, 256 KB chunks, raw, medians
-of 7 (encode) and 9 (decode) runs, 1–16 lanes (ms; the machine has 8 P and 2 E cores):
+of 7 (encode) and 9 (decode) runs after one warmup, 1–16 lanes (ms; the machine has 8 P and 2 E cores). The decoder's
+input is the same file encoded with independent chunks (as the benchmarks make it). Re-run 2026-11-21 on the idle
+machine, with the current decoder (up to 4 segments per lane, lanes taking the next segment from a counter):
 
 | Silesia file, level | Direction | 1 | 2 | 4 | 6 | 7 | **8** | 9 | **10** | 12 | 16 |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| dickens 9.7 MB, 1 | encode | 48.9 | 25.3 | 13.2 | 8.8 | 7.6 | **6.7** | 7.0 | **6.6** | 6.6 | 6.6 |
-| dickens, 6 | encode | 154.9 | 77.4 | 41.5 | 27.9 | 23.8 | **21.0** | 21.8 | **20.9** | 20.7 | 20.6 |
-| mozilla 48.8 MB, 1 | encode | 229.8 | 119.1 | 61.6 | 41.1 | 35.8 | **32.8** | 30.4 | **28.5** | 28.4 | 28.5 |
-| mozilla, 6 | encode | 512.3 | 264.9 | 137.4 | 91.4 | 79.8 | **70.1** | 66.3 | **63.3** | 63.5 | 63.7 |
-| dickens, 1 | decode | 13.8 | 7.6 | 4.2 | 3.0 | 2.7 | **2.5** | 3.0 | **2.8** | 2.5 | 2.2 |
-| dickens, 6 | decode | 12.7 | 7.0 | 3.9 | 2.8 | 2.5 | **2.3** | 2.7 | **2.4** | 2.4 | 2.1 |
-| mozilla, 1 | decode | 65.6 | 36.9 | 20.2 | 14.0 | 12.3 | **11.2** | 15.1 | **11.8** | 13.2 | 10.7 |
-| mozilla, 6 | decode | 64.8 | 36.6 | 19.8 | 13.8 | 12.2 | **11.1** | 13.1 | **13.3** | 13.1 | 10.7 |
+| dickens 9.7 MB, 1 | encode | 46.9 | 24.3 | 12.5 | 8.5 | 7.3 | **6.4** | 6.7 | **6.2** | 6.3 | 6.3 |
+| dickens, 6 | encode | 156.1 | 80.7 | 41.7 | 28.0 | 24.1 | **21.3** | 22.0 | **20.7** | 20.8 | 20.7 |
+| mozilla 48.8 MB, 1 | encode | 221.4 | 114.4 | 58.7 | 39.6 | 34.4 | **30.4** | 28.8 | **28.4** | 28.3 | 27.6 |
+| mozilla, 6 | encode | 515.3 | 266.2 | 136.7 | 92.1 | 79.9 | **70.7** | 66.6 | **64.0** | 64.1 | 63.8 |
+| dickens, 1 | decode | 14.2 | 7.4 | 4.3 | 3.0 | 2.9 | **2.6** | 2.3 | **2.3** | 2.4 | 2.4 |
+| dickens, 6 | decode | 13.3 | 6.9 | 4.0 | 2.8 | 2.6 | **2.4** | 2.1 | **2.2** | 2.2 | 2.2 |
+| mozilla, 1 | decode | 67.1 | 35.9 | *83.9* | 13.6 | 12.2 | ***75.7*** | 10.9 | **10.3** | *74.6* | *74.6* |
+| mozilla, 6 | decode | 67.1 | 35.4 | 19.4 | 13.7 | 11.9 | **10.9** | 10.8 | **10.1** | 9.9 | 10.5 |
 
-Measured: encoding scales almost linearly to 8 lanes (7.3x on mozilla level 6), and the two efficiency cores add another
-**10–13%** (70.1 → 63.3 ms, 32.8 → 28.5 ms): workers take the next chunk from a queue (`ChunkScheduler`), so a slow core
-costs nothing at the end, and the E cores are worth about 0.4 of a P core each here. More than 10 lanes changes nothing.
-Decoding is the opposite: its segments are split evenly across the lanes, so 9 or 10 lanes put a segment on an efficiency
-core and the call waits for it (9 lanes: +20% on dickens, +35% on mozilla level 1, against 8); 16 lanes, which split the
-work finer, are 4–12% faster than 8. Interpretation (not tested): decode with more segments than lanes (or the same
-queue) would gain from the E cores the way the encoder does; the encoder should use `activeProcessorCount` lanes on this
-chip. The benchmark's rule ("lanes = P cores") is right for the decoder as written and leaves 10% on the table for the
-encoder. Not run on the M3 Ultra (8 E cores of 32; the rule may differ).
+Segments used (`lastSegmentCount`): 4 per lane up to the stream's chunk count (dickens: 40 at most); for mozilla level 1,
+**1 at 4, 8, 12, and 16 lanes** (in italics): the speculation was rejected and the whole stream decoded sequentially,
+in all four runs (two during the indexing, two after). 6, 7, 9, and 10 lanes (24–40 segments) decoded it in parallel.
+
+Measured:
+- Encoding scales almost linearly to 8 lanes (7.3x on mozilla level 6), and the two efficiency cores add another 3% on
+  dickens and 7–9% on mozilla (70.7 → 64.0 ms, 30.4 → 28.4 ms): workers take the next chunk from a queue (`ChunkScheduler`),
+  so a slow core costs nothing at the end. More than 10 lanes changes nothing. (The first run, on 2026-11-19, had 10–13% on
+  mozilla and 1% on dickens.)
+- The decoder now gains from the efficiency cores too: 10 lanes are 7–12% faster than 8 (dickens 2.6 → 2.3 ms, 2.4 → 2.2;
+  mozilla level 6 10.9 → 10.1), and 9 lanes are no slower. The first run, with one segment per lane split evenly, had
+  9–10 lanes 20–35% *slower* than 8 (a segment landed on an E core and the call waited for it). Taking segments from a queue
+  fixed that, as the first run's interpretation predicted.
+- **A regression, not seen by the benchmarks:** mozilla level 1 at 8 lanes (the benchmarks' lane count on this chip) takes
+  75.7 ms, 7x the 10.3 ms of 10 lanes and the 11.2 ms the old decoder took at 8. The old decoder decoded this stream in
+  parallel at every lane count. A sweep of segment counts over the whole corpus (every Silesia file, Main.js, and
+  Main.css, levels 1 and 6, 1–16 lanes) found no other case: only mozilla level 1, at 4, 8, 12, 13, 15, and 16 lanes. The
+  parallel benchmarks' inputs (dickens, samba, Main.js) decode in parallel at every count, so they can't show it. Which
+  check rejects the segments (a false `00 00 FF FF` at a split, or a segment that doesn't end where the next starts) was
+  not investigated. The 7x comes from rejecting the whole speculation for one bad split instead of decoding on
+  sequentially from that segment.
+
+The benchmark's rule ("lanes = P cores") now leaves 3–12% on the table for both codecs on this chip: `activeProcessorCount`
+lanes would be faster. Not run on the M3 Ultra (8 E cores of 32; the rule may differ).
 
 ### What the cores can do: instruction and memory measurements (one P core)
 
-Latency and throughput from dependent and eight-way independent chains of inline-asm instructions (scratch probe). The
-probe's calibration loop (a dependent `add`) read 2.82 GHz, below the 3.23 GHz the chip is documented to reach, so the
-numbers are scaled by the one assumption that a vector `add` has 2 cycles of latency and four a cycle (the four
-128-bit NEON pipes): treat cycles as ±15%.
+`Tools/cpu-probe insn` (re-run 2026-11-21): latency from one dependent chain of 32 copies of the instruction, throughput
+from 16 independent chains (7 for scalar instructions), best of 5, on a P core (`QOS_CLASS_USER_INTERACTIVE`). Cycles
+come from the clock measured in the same run with a dependent chain of scalar `add`s (1 cycle each): 3.209–3.221 GHz in
+every run, the chip's documented 3.23 GHz. Vector `add` then reads 2.00 cycles, the check that the clock held. Two runs
+agreed within 4% in throughput and 0.01 cycles in latency.
 
 | Instruction | Latency (cycles) | Throughput (per cycle) |
 |---|---|---|
 | `add`, `eor`, `eor3`, `bcax`, `shl`, `zip1`, `uzp1`, `ext`, `rev32` (16 B) | 2 | 4 |
-| `tbl` with 1 or 2 table registers | 2 | 4 |
-| `tbl` with 3 / 4 table registers | 4 | 1.9 / 1.3 |
-| `tbx` with 4 table registers | 8 | 1.0 |
-| `usra`, `mul.4s`, `umull`, `udot` | 3 | 2.7 |
-| `pmull`, `pmull2` (64×64 → 128) | 3 | 2.7 |
-| `aese` / `aesmc` | 3 / 2 | 2.7 / 4 |
-| `aese`+`aesmc` pair (fused) | 6 per pair | 2.6 pairs |
-| `fmla.4s` | 4 | 2.0 |
-| `sha256h`, `sha512h` | 5, 3 | 0.5 |
+| `umaxv.16b` | 3 | 4 |
+| `tbl` with 1 or 2 table registers, `tbx` with 1 | 2 | 4 |
+| `tbl` with 3 / 4 table registers | 4 | 2.0 / 1.33 |
+| `tbx` with 2 / 3 / 4 table registers | 4 / 6 / 8 | 1.9–2.0 / 1.3 / 0.92–0.97 |
+| `usra`, `mul.4s`, `umull`, `udot` | 3 | 3.9–4.0 |
+| `pmull`, `pmull2` (64×64 → 128) | 3 | 4 |
+| `aese` / `aesmc` | 3 / 2 | 4 / 4 |
+| `aese`+`aesmc` pair (fused) | 3 per pair | 3.7–3.95 pairs |
+| `fmla.4s` | 4 | 3.9–4.0 |
+| `sha256h`, `sha512h`, `sha1c` | 4, 2, 4 | 0.5, 0.5, 0.25 |
+| scalar `mul`, `crc32x` | 3, 3 | 2, 1 |
 
-So a multi-register `tbl` costs roughly one vector slot per table register after the first (2 registers: 1; 3: 2; 4: 3),
-and `tbx` with four, four, with eight cycles of latency: a lookup in a 64-byte table (`tbl` 4) is three slots on this
-core. `eor3` is as cheap as `eor` (the CRC and GHASH XOR trees already use it). AES and carry-less multiply are
-2.7 a cycle: a 10-round AES-128 block is ten `aese` with nine `aesmc` fused, at best 3.9 cycles per 16 bytes, 4.2
-bytes/cycle or 13 GB/s at 3.2 GHz; the measured AES-128-CTR (12 GB/s at 1 MB) runs at about 90% of that bound, so
-there is little left to find in the AES kernels on this core.
+What changed from the first run (2026-11-19), which used 8 chains and a calibration that read 2.82 GHz: every
+3-cycle instruction there read 2.7 a cycle (8 chains ÷ 3 cycles) and `fmla` 2.0 (8 ÷ 4); they all run 4 a cycle. The
+fused AES pair has 3 cycles of latency, not 6. `sha256h` and `sha512h` are 4 and 2 cycles (5 and 3 before, the
+calibration). The `tbl` and 4-register `tbx` rows were right.
 
-Memory (pointer chase, one pointer per 128-byte line; read loop with four `eor` accumulators):
+So a multi-register `tbl` costs one vector slot per table register after the first (2 registers: 1; 3: 2; 4: 3), and a
+`tbx` one per register (1: 1, up to 4: 4), with 2 cycles of latency per register after the first (4 registers: 8). A
+lookup in a 64-byte table (`tbl` 4) is three slots on this core. `eor3` is as cheap as `eor` (the CRC and GHASH XOR
+trees already use it). AES and carry-less multiply run 4 a cycle, the same as an `add`. So AES counter mode is limited by
+its chains, not its units: Bytes' kernel keeps eight blocks in flight (`AES.swift`), each round of the eight waits 3
+cycles for the last, and a group of 128 bytes takes about ten rounds of 3 cycles plus the final XOR (about 32 cycles),
+4 bytes a cycle or 12.8 GB/s at 3.21 GHz. The measured AES-128-CTR (12 GB/s at 1 MB) is at that bound. The units would
+take 12 blocks in about as many cycles (a round of 12 is 3 cycles of issue at 4 a cycle), about 1.5x; 11 round keys and
+12 states fit in 32 registers. Not tried (the first write-up said "about 90% of the bound, little left to find", from
+the 2.7-a-cycle reading).
+
+Memory, `Tools/cpu-probe latency` (pointer chase, one pointer per 128-byte line in random order across 16 KB pages, so
+working sets beyond the TLBs' reach include page walks; two runs agreed within 1 ns except 8 MB, 8.9–10.0):
 
 | Working set | Load-to-use latency |
 |---|---|
-| 16–128 KB (L1D) | 0.93–1.2 ns (about 3 cycles) |
-| 256 KB–2 MB (L2) | 5.3–5.6 ns (17–18 cycles) |
-| 4 / 8 MB | 6.3 / 8.5 ns |
-| 16 / 32 MB | 35 / 52 ns (system-level cache) |
-| 64 MB | 100 ns |
-| 128–256 MB (DRAM) | 121–124 ns |
+| 16–128 KB (L1D) | 0.93 ns (3.0 cycles) |
+| 256 KB–2 MB (L2) | 5.5 ns (17.6 cycles) |
+| 4 / 6 / 8 MB | 6.2–6.4 / 7.2 / 8.9–10.0 ns |
+| 12 / 16 / 24 / 32 MB | 31 / 40 / 52 / 70 ns (system-level cache, and page walks) |
+| 48 / 64 MB | 101 / 115 ns |
+| 128–512 MB (DRAM) | 122–125 ns |
 
-Read bandwidth, 256 MB per thread: 1 thread 61 GB/s; 2 threads 115 GB/s total; 3, 4, 6, 8 threads 114, 113, 102, 115;
-10 threads 126 GB/s. One P core already moves half of everything the CPU cluster can pull (the chip's 400 GB/s is for all
-agents, the GPU included); more than two cores add nothing for a pure read. `Bytes` reads at 60 GB/s on one core (the
-raw SIMD read is 61), at the probe's own ceiling.
+The first run had 16 / 32 / 64 MB at 35 / 52 / 100 ns (its access order isn't recorded); L1, L2, and DRAM agree.
+
+Bandwidth, `Tools/cpu-probe bandwidth` (each thread reads or stores its own buffer, about 4 GB per thread, best of 3; reads
+128 bytes a step into four `eor` accumulators, stores 128 bytes of one register a step):
+
+| Threads (256 MB each) | 1 | 2 | 3 | 4 | 6 | 8 | 10 |
+|---|---|---|---|---|---|---|---|
+| Read, GB/s total | 60.0 | 111.5–112.2 | 112–114 | 117–118 | 118–119 | 120 | 125 |
+| Store, GB/s total | 61.9 | 111.0 | | 104.2 | | 100.4 | 103.6 |
+
+One P core, in cache: reads 134 GB/s from L1 (32 KB; 42 bytes a cycle) and 86–87 GB/s from L2 (1–4 MB); stores 100 GB/s
+to L1 (31 bytes a cycle) and 72 GB/s to L2 (1 MB). One P core
+already moves half of everything the CPU cluster can pull (the chip's 400 GB/s is for all agents, the GPU included); more
+than two cores add little for a pure read, and all ten store less than two do. `Bytes` reads at 60 GB/s on one core (the
+raw SIMD read is 61), at the probe's own ceiling. (The first run: reads 61, 115, 114, 113, 102, 115, and 126 GB/s at
+1–10 threads; within 3% except 6 threads.)
 
 ### CRC-32: nothing to gain, and the 2.4x was noise
 
 NativeZip's first M1 Max run showed CRC-32 over 32 MB at 2.38x the M3's time. Probes show the PMULL fold running at
-58–62 GB/s on one core from 256 KB through 256 MB (Swift's `CRC32.checksum`: 61.6, 61.6, 58.4, 58.8 GB/s at 256 KB,
-4 MB, 32 MB, 128 MB; the C copy of the loop: the same). The raw load-only loop tops out at 86 GB/s in cache and 62 at 32 MB,
-so the fold is within 5% of the memory rate at 32 MB. Software prefetch (`prfm`) 256 B to 4 KB ahead changed nothing
-(±1%), 8 KB ahead was slower (−7% at 32 MB, −50% at 256 MB); two interleaved halves changed nothing; the buffer's
-alignment (offsets 0–240 bytes) changed nothing. The idle re-run of NativeZip measured 616 µs, the M3's 569.
+57–62 GB/s on one core from 256 KB through 256 MB. Re-run 2026-11-21: Swift's `CRC32.checksum` 59.8, 60.5, 58.3, 58.3 GB/s
+at 256 KB, 4 MB, 32 MB, 128 MB (the first run: 61.6, 61.6, 58.4, 58.8), and a C copy of the fold (8 accumulators of
+`pmull` + `eor3`) 61.4, 60.7, 57.1, 58.5. A raw load-only loop tops out at 84–85 GB/s in cache (L2) and 61 from 32 MB
+up, so the fold is within 5% of the memory rate at 32 MB and beyond. Software prefetch 256 B to 4 KB ahead changed at most
+2%, and 8 KB ahead was slower (−10% at 32 MB, −48 to −49% at 128 and 256 MB). Two interleaved halves (four accumulators
+each) changed nothing (58.7 against 58.4 at 128 MB), and the buffer's alignment (offsets 0–240 bytes in 16-byte steps,
+32 MB) changed nothing (57.8–58.6). The idle re-run of NativeZip measured 616 µs, the M3's 569. New in the re-run:
+libdeflate's `libdeflate_crc32` is 10% faster than the fold in cache (67.3 and 67.1 against 61.4 and 60.7 GB/s at 256 KB and 4 MB)
+and level with it from memory (about 60). In cache the fold is compute-bound: 16 `pmull` and 8 `eor3` per 128 bytes are
+6 cycles at 4 a cycle, 68 GB/s at 3.21 GHz, and it reaches 90% of that. zlib's `crc32` (macOS's) runs 31–32 GB/s.
 
 ### Not done
 
@@ -363,6 +426,11 @@ alignment (offsets 0–240 bytes) changed nothing. The idle re-run of NativeZip 
   avoid the loads. Raw SIMD stores run 62 GB/s on the M1 Max against 113 on the M3.
 - Base64's decoder, tuned around `tbl`/`tbx` micro-op counts on the M3: on this core a 4-register `tbl` is three slots and
   a `tbx` four with 8-cycle latency, so a window of 2-register lookups may rank differently; not tried.
+- AES counter mode (and AES-GCM's stitched loop) with 12 blocks in flight instead of 8: the eight-block kernel is at the
+  bound of its round chains, and the units allow about 1.5x (above); not tried, and the M3's rate for the fused pair isn't
+  known.
+- The parallel decoder's rejected speculation on mozilla level 1 at 4, 8, 12, 13, 15, and 16 lanes (above): cause not
+  investigated.
 - ChaCha20's eight-block layout, AES-GCM aggregation, Brotli's tag filter: unchanged, ranking on the M1 Max not tested.
 
 ## 2026-11-19, bzip2 decoding (for NativeAEA's `.xip` expansion)

@@ -1,0 +1,70 @@
+#!/bin/bash
+# cpu-probe — what one core of this Mac can do, measured with C and inline assembly (Tools/lib/cpu-probe.c):
+# instruction latency and throughput, load-to-use latency by working set, and read/store bandwidth by thread count.
+# The hardware numbers behind cost arguments ("a 4-register tbl is 3 vector slots", "two cores saturate memory").
+#
+# usage: Tools/cpu-probe freq
+#        Tools/cpu-probe insn [NAME...]
+#        Tools/cpu-probe latency [SIZE...]
+#        Tools/cpu-probe bandwidth read|store [--bytes SIZE] [THREADS...]
+#
+#   freq       the P-core clock in GHz, from a dependent chain of scalar adds (1 cycle each)
+#   insn       per instruction: latency in cycles (one dependent chain) and instructions per cycle (16 independent
+#              chains; 7 for scalar ones); NAME selects rows by name (`tbl 4 regs`) or id (`v_tbl4`)
+#   latency    a random pointer chase over every 128-byte line of each working set (default 16K…512M): ns and
+#              cycles. Lines are random across 16 KB pages, so sizes past the TLBs' reach include page walks.
+#   bandwidth  GB/s in total and per thread, best of 3; each thread reads or stores its own buffer (--bytes, default
+#              256M: DRAM; 32K: L1; 1M: L2) for about 4 GB. THREADS defaults to 1, 2, 4, and every logical CPU.
+#
+# Cycles are converted with the clock `freq` measures in the same run (printed as a comment): user space can't
+# read the cycle counter. Vector `add` reading exactly 2 cycles is the check that the clock held. Threads ask for
+# QOS_CLASS_USER_INTERACTIVE (performance cores). Results are tab-separated; comments start with #.
+#
+# Compiled with xcrun clang -O2 -mcpu=apple-m1 on first use (and when the source changes) into
+# ~/Library/Caches/experiments-tools/. Apple silicon only.
+#
+# examples (Bytes/Benchmarks/RESULTS.md, "What the cores can do", has the M1 Max's numbers):
+#   Tools/cpu-probe insn | column -t -s $'\t'
+#   Tools/cpu-probe insn 'tbl 3 regs' 'tbx 4 regs'
+#   Tools/cpu-probe latency 128K 2M 32M 256M
+#   Tools/cpu-probe bandwidth read 1 2 10
+#   Tools/cpu-probe bandwidth store --bytes 32K 1
+source "$(dirname "$0")/lib/common.sh"
+
+[[ "$(uname -m)" == arm64 ]] || die "cpu-probe needs Apple silicon (arm64)"
+[[ $# -ge 1 ]] || usage 2
+mode="$1"; shift
+
+source_file="$TOOLS_DIR/lib/cpu-probe.c"
+binary="$HOME/Library/Caches/experiments-tools/cpu-probe"
+if [[ ! -x "$binary" || "$source_file" -nt "$binary" ]]; then
+    mkdir -p "$(dirname "$binary")"
+    xcrun clang -O2 -mcpu=apple-m1 -o "$binary" "$source_file" || die "couldn't compile $source_file"
+fi
+
+case "$mode" in
+    freq|insn|latency) exec "$binary" "$mode" "$@" ;;
+    bandwidth)
+        [[ $# -ge 1 ]] || die "bandwidth needs read or store"
+        direction="$1"; shift
+        [[ "$direction" == read || "$direction" == store ]] || die "bandwidth needs read or store, not $direction"
+        bytes=256M
+        threads=()
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --bytes) bytes="$2"; shift ;;
+                [0-9]*) threads+=("$1") ;;
+                *) die "unknown option $1" ;;
+            esac
+            shift
+        done
+        [[ "$bytes" =~ ^[0-9]+[KMG]?$ ]] || die "bad size $bytes (e.g. 32K, 256M)"
+        if [[ ${#threads[@]} -eq 0 ]]; then
+            cpus="$(sysctl -n hw.logicalcpu)"
+            threads=(1 2 4 "$cpus")
+        fi
+        exec "$binary" bandwidth "$direction" "$bytes" "${threads[@]}"
+        ;;
+    -h|--help) usage ;;
+    *) die "unknown mode $mode (freq, insn, latency, bandwidth)" ;;
+esac

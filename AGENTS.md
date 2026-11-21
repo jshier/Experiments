@@ -210,6 +210,13 @@ value and end at its largest, with every bin keeping its bounds. Run it after ev
 kernel's local-socket throughput with blocking C sockets on plain threads (loopback TCP or a Unix socketpair):
 the ceiling to compare networking benchmarks against (SocketStream's transfers reach most of it).
 
+**`Tools/cpu-probe freq | insn [NAME...] | latency [SIZE...] | bandwidth read|store [--bytes SIZE] [THREADS...]`** — what
+one core of this Mac can do, in C and inline assembly: the P-core clock (a dependent scalar `add` chain), instruction
+latency and throughput in cycles (one dependent chain; 16 independent ones), load-to-use latency by working set (random
+pointer chase over 128-byte lines), and read/store bandwidth by thread count. The cost model behind "a 4-register `tbl`
+is 3 vector slots" or "two cores saturate memory"; run it on a new machine before reasoning about its micro-op costs.
+The M1 Max's numbers: `Bytes/Benchmarks/RESULTS.md`, "What the cores can do".
+
 **`Tools/toolchain …`** — non-Xcode toolchains: `list`, `install`, `register`, and running commands,
 programs (`--runtime`), and tests (`test`) with one. See Toolchains below.
 
@@ -767,13 +774,21 @@ A second machine (M1 Max, 2026-11-19; `Writeups/M1-Max-vs-M3-Ultra.md`, `Bytes/O
   kernel, or a plain Swift loop over the API) that disagrees with a benchmark row is the signal. `TestData/` has a
   `.metadata_never_index` marker for this.
 - **`udot` (FEAT_DotProd) was the unused instruction:** Adler-32's two sums are dot products against ones and against
-  64…1, 2x faster than the 16-bit Swift SIMD version (58 GB/s, libdeflate's rate). Swift SIMD has no widening dot
+  64…1, 1.9x faster than the 16-bit Swift SIMD version (57 GB/s, within 10% of libdeflate). Swift SIMD has no widening dot
   product; a `static inline` C wrapper (`bytes_crc_udot`), loop in Swift.
-- **Efficiency cores:** queue-fed workers (the DEFLATE encoder) gain 10–13% from them; statically split work (the parallel
-  decoder's segments) loses 20–35%, because one segment lands on a slow core. "Lanes = performance cores" suits only the
-  second kind.
-- **Measure a core's instructions rather than assuming:** `tbl` with 3 or 4 table registers is 2–3 vector slots and `tbx`
-  with 4 is 4 (8 cycles of latency) on the M1 Max; 1–2 registers are full speed.
+- **Efficiency cores:** queue-fed workers gain from them (the DEFLATE encoder 3–9%, the decoder 7–12% once it took
+  segments from a queue); statically split work loses (the decoder with one even segment per lane: 20–35%, because one
+  segment lands on a slow core). "Lanes = performance cores" suits only the second kind.
+- **Measure a core's instructions rather than assuming** (`Tools/cpu-probe insn`): on the M1 Max, `tbl` with 3 or 4 table
+  registers is 2–3 vector slots and `tbx` one per register (4: 8 cycles of latency); 1–2 `tbl` registers are full speed;
+  `udot`, `pmull`, `aese` run 4 a cycle at 3 cycles of latency, and `aese`+`aesmc` fuse (3 cycles a round).
+- **A throughput probe needs latency × rate independent chains:** the first M1 Max probe had 8, so every 3-cycle
+  instruction read 2.7 a cycle instead of 4, and two conclusions built on it were wrong (Adler-32 "bound by `udot`",
+  AES-CTR "90% of the bound": it is at the bound of its eight round chains, and 12 blocks could reach about 1.5x).
+  Calibrate cycles with a dependent scalar `add` chain (1 cycle); a vector `add` reading 2.00 cycles confirms it.
+- **Change a parallel splitter, sweep the corpus:** the decoder's four segments per lane rejected its speculation on one
+  stream (mozilla level 1) at 6 of 16 lane counts, sequentially 7x slower; the benchmarks' inputs never hit it. Check
+  `lastSegmentCount` over every corpus file and lane count.
 
 ## Tests
 

@@ -5,6 +5,12 @@ uses Bytes was run again there with the same compiler (Xcode 27.3, Swift 6.4.4) 
 saved baselines. Per-package tables are in each project's `RESULTS.md` (a section dated 2026-11-19); the hardware
 experiments are in `Bytes/Benchmarks/RESULTS.md` and `Bytes/OPTIMIZATION.md` (Part III, "The second machine: M1 Max against M3 Ultra").
 
+Updated 2026-11-21: the hardware probes (instructions, memory, bandwidth, checksums, parallel lanes, CRC variants) were
+run again on the same machine, the instruction, memory, and bandwidth ones as a new Tool, `Tools/cpu-probe`. The
+benchmark comparisons below are unchanged. The probe numbers are the new ones. Where the first run differed, the
+sections say so: the instruction throughputs and the AES conclusion were wrong, and the decoder's lane result changed
+with the decoder.
+
 ## The short version
 
 1. **One core is 1.3x slower, and the clock explains almost all of it.** Geometric mean of time (M1 Max over M3 Ultra)
@@ -14,8 +20,9 @@ experiments are in `Bytes/Benchmarks/RESULTS.md` and `Bytes/OPTIMIZATION.md` (Pa
    work follows the lane count: 2.4x apart for the parallel codecs, 3.1x for NativeAEA's threaded extraction, 1.9x for
    memory-bound reads on all cores (bandwidth ratio 2.05).
 3. **Nothing in the code needed to change for the M1 Max, with one exception we found.** `udot` (dot product) was unused: an
-   Adler-32 that uses it is 2x faster on the M1 Max (29.8 → 58.0 GB/s), now in Bytes. The two efficiency cores make the
-   parallel encoder 10–13% faster and the parallel decoder 20–35% slower.
+   Adler-32 that uses it is 1.9x faster on the M1 Max (29.6 → 56.9 GB/s), now in Bytes. With the two efficiency cores
+   added, the parallel encoder is 3–9% faster. So is the parallel decoder, 7–12%, since it started taking segments from a
+   queue; before that change the efficiency cores made it 20–35% slower.
 4. **Be careful with timing on a fresh machine.** Spotlight and photo analysis were indexing the new files during the first
    runs. One row came out 2.2x too slow. Re-runs on the idle machine agreed with the first runs to 1% overall.
 
@@ -67,12 +74,13 @@ experiments are in `Bytes/Benchmarks/RESULTS.md` and `Bytes/OPTIMIZATION.md` (Pa
 - **Short copies.** Back-references at distances 1–7 (equal instructions): 1.6–1.85x. A guess is partial-width loads that
   can't forward from recent stores; not probed.
 - **Mid-size inputs.** 1.06x at 1 KB, about 1.5x for 100–400 KB inputs, 1.3x for multi-MB: working sets that live in L2 on
-  the M1 Max (17–18 cycles) cost more there. Not isolated.
+  the M1 Max (17.6 cycles) cost more there. Not isolated.
 - **Where the M1 Max keeps up.** Hash functions (SHA-1/256, HMAC, PBKDF2: 1.14–1.21, below the clock ratio), CRC-32 with
   the hardware instructions (1.15 at 256 KB, 1.08 at 32 MB), the scalar-table Base64 (1.02–1.10 at some sizes), and
   small-input Zstd (0.97–1.04): latency-bound code that doesn't use the M3's clock.
-- **Many-core memory.** Ten cores read 126 GB/s on the M1 Max (two cores already reach 115); the M3's 32 cores read about
-  237 GB/s in Bytes' bandwidth benchmark. One P core alone gets 61 GB/s on the M1 Max.
+- **Many-core memory.** Ten cores read 125 GB/s on the M1 Max (two cores already reach 112), and store about 104 (two:
+  111); the M3's 32 cores read about 237 GB/s in Bytes' bandwidth benchmark. One P core alone reads 60 GB/s and stores 62
+  on the M1 Max (`Tools/cpu-probe bandwidth`, 2026-11-21).
 - **Parallel scaling.** Parallel inflate with 8 lanes is 5.6x faster than sequential on both machines. 8 lanes of the
   parallel codecs at 8 lanes on both chips: 1.2–1.65x apart (geomean 1.31); the full chips: 24 against 8 lanes, 2.4x.
 - **File-system work.** Extracting 2,000 small files: fastest with 4 workers on the M3 (64 ms), with 8 on the M1 Max (81 ms;
@@ -82,34 +90,42 @@ experiments are in `Bytes/Benchmarks/RESULTS.md` and `Bytes/OPTIMIZATION.md` (Pa
 
 ## What the M1 Max can do (measured on one P core)
 
+Re-measured 2026-11-21 with `Tools/cpu-probe` (now in the repository). The first probe had two errors. Its clock
+calibration read 2.82 GHz, and cycles were scaled from it ±15%; a scalar `add` chain now reads 3.21 GHz, and a vector
+`add` then comes out at exactly 2 cycles. And it ran 8 independent chains, which capped every 3-cycle instruction at
+2.7 a cycle; with 16 chains they run 4 a cycle. Details: `Bytes/Benchmarks/RESULTS.md`, "What the cores can do".
+
 | Instruction | Latency (cycles) | Per cycle |
 |---|---|---|
-| `add`, `eor`, `eor3`, `bcax`, `zip`, `uzp`, `ext`, `rev32`, `tbl` with 1–2 registers | 2 | 4 |
-| `udot`, `pmull`, `aese`, `mul`, `usra` | 3 | 2.7 |
-| `tbl` with 3 / 4 registers | 4 | 1.9 / 1.3 |
-| `tbx` with 4 registers | 8 | 1.0 |
-| `fmla.4s` | 4 | 2.0 |
-| `sha256h`, `sha512h` | 5, 3 | 0.5 |
+| `add`, `eor`, `eor3`, `bcax`, `zip`, `uzp`, `ext`, `rev32`, `tbl` with 1–2 registers, `tbx` with 1 | 2 | 4 |
+| `udot`, `pmull`, `aese`, `mul`, `usra` | 3 | 4 |
+| `aese`+`aesmc` (fused) | 3 per pair | 3.9 pairs |
+| `fmla.4s` | 4 | 4 |
+| `tbl` with 3 / 4 registers | 4 | 2 / 1.3 |
+| `tbx` with 2 / 3 / 4 registers | 4 / 6 / 8 | 2 / 1.3 / 0.95 |
+| `sha256h`, `sha512h` | 4, 2 | 0.5 |
 
-Cycles are scaled from a calibration that read 2.82 GHz (±15%). Memory: L1 3 cycles, L2 17–18 cycles, system-level cache
-35–52 ns, DRAM about 122 ns; one core reads 61 GB/s, ten cores 126.
+Memory: L1 3 cycles, L2 17.6 cycles, 16–32 MB 40–70 ns (system-level cache, with page walks: the chase is random across
+16 KB pages), DRAM about 123 ns; one core reads 60 GB/s, ten cores 125.
 
 ## M1 Max-specific optimizations explored
 
 | Idea | Result |
 |---|---|
-| **Adler-32 with `udot`** (FEAT_DotProd) | **Kept.** 29.8 → 58.0 GB/s (1 MB), −47% time, −51% instructions; 64 B inputs −12% time; zero mallocs; tests for the chunk boundaries. Matches libdeflate (64 GB/s). Bound by `udot` throughput. Gain on the M3 likely, unmeasured. |
-| Lanes = all cores for the encoder (the E cores) | **Measured, not applied.** +10–13% for the parallel DEFLATE encoder with 10 lanes against 8. |
-| More lanes than cores for the decoder | **Measured, not applied.** 16 lanes: 4–12% faster than 8; 9–10 lanes: 20–35% slower (a static segment lands on an E core). |
-| Software prefetch for the CRC-32 fold | No gain (±1%; a distance of 8 KB lost 7–50%). The fold already runs at the memory rate (58–62 GB/s). |
+| **Adler-32 with `udot`** (FEAT_DotProd) | **Kept.** 29.6 → 56.9 GB/s (1 MB, probe re-run 2026-11-21), −47% time, −51% instructions; 64 B inputs −12% time; zero mallocs; tests for the chunk boundaries. Within 10% of libdeflate (62 GB/s). Bound at 3 cycles per 64 bytes by both its 12 vector instructions and its accumulators' `udot` latency (68 GB/s; 83% reached). Gain on the M3 likely, unmeasured. |
+| Lanes = all cores for the encoder (the E cores) | **Measured, not applied.** +3% (dickens) to +7–9% (mozilla) for the parallel DEFLATE encoder with 10 lanes against 8 (first run: 10–13% on mozilla). |
+| Lanes = all cores for the decoder | **Measured, not applied.** With segments from a queue (the current decoder), 10 lanes are 7–12% faster than 8 and 9 no slower. The first run, with one segment per lane split evenly, had 9–10 lanes 20–35% slower. |
+| (Found by the lane probe) | The current decoder rejects its speculation on Silesia's mozilla at level 1 for 4, 8, 12, 13, 15, and 16 lanes and decodes it sequentially: 75.7 ms at 8 lanes against 10.3 at 10 (the old decoder: 11.2 at 8). No other corpus file or level does. Cause not investigated. |
+| Software prefetch for the CRC-32 fold | No gain (at most 2%; a distance of 8 KB lost 10–49%). The fold already runs at the memory rate (57–62 GB/s). |
 | Two-stream CRC, buffer alignment | No change. |
-| AES kernels | Nothing to find: AES-128-CTR is at about 90% of the `aese` bound. |
+| AES kernels | **Candidate, not tried.** AES-128-CTR (12 GB/s) is at the bound of its eight 3-cycle round chains; the units take almost 4 fused rounds a cycle, so 12 blocks in flight could reach about 1.5x. (The first write-up said "about 90% of the `aese` bound, nothing to find": the 2.7-a-cycle reading.) |
 | `eor3`, PMULL folding | Already used. |
 | Short back-reference copies; stores; Base64's `tbl`/`tbx` window | Candidates, not tried: see `Bytes/Benchmarks/RESULTS.md`. |
 
 The M1 and M3 have the same instruction-set features for these kernels, so an M1-only instruction was not on the table
 (no I8MM, BF16, SVE or SME on either chip that the code could use). What differs is the microarchitecture and the core
-layout, and the two things that paid were an instruction nobody had used yet and the efficiency cores.
+layout, and the two things that paid were an instruction nobody had used yet and the efficiency cores. The re-run adds a
+third candidate (more AES blocks in flight) and a regression (the decoder's fallback on mozilla level 1).
 
 ## Other things found
 

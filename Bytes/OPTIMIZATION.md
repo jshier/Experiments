@@ -147,9 +147,9 @@ about 0.25 ns.
 
 Inside the core, an instruction is split into smaller **micro-ops**, and some limits are counted in micro-ops rather than
 instructions. A table-lookup instruction that reads four table registers costs more micro-ops than one that reads a
-single register. On an M1 Max core, measured with probes (small test programs), a `tbl` ([section 2.4](#24-table-lookup-tbl-and-tbx)) with one or two table registers runs 4 per cycle, with
-three registers 1.9 per cycle, with four registers 1.3 per cycle, and a four-register `tbx` 1.0 per cycle.
-<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do: instruction and memory measurements (one P core)" table (tbl 1-2 regs: 4/cycle; 3: 1.9; 4: 1.3; tbx 4: 1.0) -->
+single register. On an M1 Max core, measured with `Tools/cpu-probe` (small test programs), a `tbl` ([section 2.4](#24-table-lookup-tbl-and-tbx)) with one or two table registers runs 4 per cycle, with
+three registers 2 per cycle, with four registers 1.3 per cycle, and a four-register `tbx` about 0.95 per cycle.
+<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do: instruction and memory measurements (one P core)" table, re-measured 2026-11-21 (tbl 1-2 regs: 4/cycle; 3: 2.0; 4: 1.33; tbx 4: 0.92-0.97) -->
 
 The core also runs instructions **out of order**: while an earlier instruction waits for its inputs, later ones that do
 not depend on it can run, within a window of a few hundred instructions. This is what lets two independent chains of
@@ -160,11 +160,16 @@ work overlap.
 
 Two numbers describe an instruction. Its **latency** is how many cycles pass before its result can be used. Its
 **throughput** is how many of that instruction the core can start per cycle. On the M1 Max, a vector `add` (an add on
-several values at once, [section 2](#2-simd-and-neon)) has 2 cycles of latency and a throughput of 4 per cycle. There are four 128-bit vector
-pipes (the units that execute vector instructions); the probe took these two values as its calibration, so the others are
-good to about ±15%. `udot` and `pmull` have 3 cycles of latency and run at 2.7 per cycle; `aese` has 3 cycles of latency
-at 2.7 per cycle, and `aesmc` 2 cycles at 4 per cycle. Sections [2.8](#28-dot-products-udot) and [2.9](#29-carry-less-multiply-crc-aes-and-sha-instructions) describe these instructions.
-<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" (calibration assumption: add 2 cycles, 4 a cycle; "treat cycles as ±15%"; table: udot, pmull: 3 / 2.7; aese/aesmc: 3, 2 / 2.7, 4) -->
+several values at once, [section 2](#2-simd-and-neon)) has 2 cycles of latency and a throughput of 4 per cycle: there are four 128-bit vector
+pipes (the units that execute vector instructions). `udot`, `pmull`, and `aese` have 3 cycles of latency and also run 4
+per cycle, and `aesmc` has 2 cycles at 4 per cycle; an `aese` followed by an `aesmc` on its result fuses into one
+operation, 3 cycles for the pair. Sections [2.8](#28-dot-products-udot) and [2.9](#29-carry-less-multiply-crc-aes-and-sha-instructions) describe these instructions.
+<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" table, re-measured 2026-11-21 with Tools/cpu-probe (clock 3.21 GHz from a scalar add chain; vector add 2.00 cycles, 4.0/cycle; udot, pmull, aese: 3 / 4; aesmc 2 / 4; aese+aesmc pair 3 / 3.9) -->
+
+Measuring throughput takes enough independent chains to cover the latency: at 4 per cycle and 3 cycles of latency, 12
+instructions must be in flight. The first probe used 8 chains, so every 3-cycle instruction read as 8 ÷ 3 = 2.7 per
+cycle, and `fmla` (4 cycles) as 2; with 16 chains, both run 4 per cycle.
+<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" (re-measurement note: 8 chains → 2.7; 16 chains → 4) -->
 
 A **dependency chain** is a sequence of instructions where each needs the previous one's result. A chain runs at the
 speed of its links' latencies, however wide the core is. A loop's longest chain is its **critical path**. So two loops
@@ -203,16 +208,17 @@ table, and the double round grew from 264 to 323 instructions in spills. That ch
 Main memory is far away (100 ns or more), so the CPU keeps recently used data in small fast **caches**. Memory moves in
 fixed-size blocks called **cache lines**: 128 bytes on Apple silicon (64 on most x86 chips). The first level (L1) is
 about 3 cycles away; the second (L2) is shared by a cluster of cores. Measured on the M1 Max by pointer-chasing (each
-load's address comes from the previous load), one pointer per 128-byte line:
+load's address comes from the previous load), one pointer per 128-byte line, in random order:
 
 | Working set | Load-to-use latency |
 |---|---|
-| 16–128 KB (L1 data) | 0.93–1.2 ns (about 3 cycles) |
-| 256 KB–2 MB (L2) | 5.3–5.6 ns (17–18 cycles) |
-| 16 / 32 MB | 35 / 52 ns (system-level cache) |
-| 128–256 MB (DRAM) | 121–124 ns |
+| 16–128 KB (L1 data) | 0.93 ns (3 cycles) |
+| 256 KB–2 MB (L2) | 5.5 ns (17.6 cycles) |
+| 4 / 8 MB | 6.3 / 9–10 ns |
+| 16 / 32 MB | 40 / 70 ns (system-level cache, and page walks) |
+| 128–512 MB (DRAM) | 122–125 ns |
 
-<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" memory table (M1 Max) -->
+<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" memory table (M1 Max, re-measured 2026-11-21 with Tools/cpu-probe latency) -->
 
 The M3 Ultra's performance-core clusters have 16 MB of L2 shared by 6 cores; the M1 Max's have 12 MB.
 <!-- src: Writeups/M1-Max-vs-M3-Ultra.md "The machines" table, "P-cluster L2" row -->
@@ -222,9 +228,9 @@ program asks. On the M3 Ultra one core reads about 72–77 GB/s from memory, and
 the 819 GB/s on the spec sheet is shared with the GPU and Neural Engine, and the CPU clusters' links cap at about 30% of
 it.
 <!-- src: Bytes/Benchmarks/RESULTS.md "The ceiling" (72 GB/s one thread; 245–250 GB/s 16–32 threads; ~72–77 GB/s per core; 30% of spec) -->
-On the M1 Max one core reads 61 GB/s, two already reach 115 GB/s, and all ten reach 126 GB/s, so beyond two, more cores
-add little for a pure read.
-<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" read bandwidth paragraph -->
+On the M1 Max one core reads 60 GB/s, two already reach 112 GB/s, and all ten reach 125 GB/s, so beyond two, more cores
+add little for a pure read. Stores are the same from one core (62 GB/s) and lower from all of them (about 104 GB/s).
+<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" bandwidth paragraph (re-measured 2026-11-21, Tools/cpu-probe bandwidth) -->
 
 Prefetching also explains a negative result. A software prefetch added to CRC-32 on the M1 Max did not help, because the
 fold already ran at the memory rate; a prefetch distance of 8 KB hurt.
@@ -269,10 +275,11 @@ counts are identical on both machines, one M1 Max core takes 1.31x as long as on
 instead: the parallel codecs are 2.4x apart.
 <!-- src: Writeups/M1-Max-vs-M3-Ultra.md "The short version" items 1-2 (1.31; clock 1.25; 4%; 2.4x for parallel codecs) -->
 
-E cores change how work should be split. On the M1 Max, the two E cores added 10–13% to the parallel DEFLATE encoder,
-whose workers take the next chunk from a queue. They cost the parallel decoder 20–35%, because its segments were split
-evenly across lanes (parallel workers; the word also names a SIMD register's slots, [section 2.1](#21-what-simd-is)). Part III (["Static splits and efficiency cores"](#static-splits-and-efficiency-cores)) has the measurements.
-<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help the encoder, hurt the decoder"; AGENTS.md "Efficiency cores" lesson -->
+E cores change how work should be split. On the M1 Max, the two E cores added 3–9% to the parallel DEFLATE encoder,
+whose workers take the next chunk from a queue. They cost the parallel decoder 20–35% while its segments were split
+evenly across lanes (parallel workers; the word also names a SIMD register's slots, [section 2.1](#21-what-simd-is)); since the decoder
+started taking segments from a queue too, they make it 7–12% faster. Part III (["Static splits and efficiency cores"](#static-splits-and-efficiency-cores)) has the measurements.
+<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help both codecs now" (re-run 2026-11-21); AGENTS.md "Efficiency cores" lesson -->
 
 ### 2. SIMD and NEON
 
@@ -484,10 +491,10 @@ shrn.8b v0, v0, #0x4                    ; shift each 16-bit lane right by 4, the
 `udot` (the `FEAT_DotProd` feature, present on every Apple silicon Mac from the M1 on) multiplies groups of four bytes
 from two vectors and adds each group's sum into a 32-bit lane: `acc[i] += a[4i]*b[4i] + a[4i+1]*b[4i+1] + …`.
 Adler-32 needs exactly two sums, the sum of the bytes and the position-weighted sum, and they are a dot product against
-all-ones and a dot product against `64, 63, …, 1`. Moving Adler-32 onto `udot` made it 2x faster on the M1 Max (29.8 to
-58.0 GB/s at 1 MB, in a probe), about libdeflate's speed, and on the M3 Ultra it cut the instructions for 1 MB from
+all-ones and a dot product against `64, 63, …, 1`. Moving Adler-32 onto `udot` made it 1.9x faster on the M1 Max (29.6 to
+56.9 GB/s at 1 MB, in a probe), within 10% of libdeflate's 62 GB/s, and on the M3 Ultra it cut the instructions for 1 MB from
 555 K to 271 K (−51%).
-<!-- src: Bytes/Sources/CBytesCRC/include/CBytesCRC.h bytes_crc_udot comment; Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster" (29 → 55 GB/s in the table; probe 29.8 → 58.0 GB/s at 1 MB); Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" (baselines speed-after → p3-spot, M3 Ultra) -->
+<!-- src: Bytes/Sources/CBytesCRC/include/CBytesCRC.h bytes_crc_udot comment; Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT: 2x faster" (29 → 55 GB/s in the table; probe re-run 2026-11-21: 29.6 → 56.9 GB/s at 1 MB, libdeflate 62.2); Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" (baselines speed-after → p3-spot, M3 Ultra) -->
 
 ```asm
 ; probe (clang -O2): vdotq_u32(acc, a, b)
@@ -587,10 +594,12 @@ one instruction. Bytes uses these for inputs under 256 bytes and for the end of 
 
 **`aese`, `aesmc`: one AES round.** `aese` does the AddRoundKey, SubBytes, and ShiftRows steps; `aesmc` does
 MixColumns. A round is the pair. AES-128 is ten `aese` with nine `aesmc` between them (the last round has no
-MixColumns), then an XOR with the last round key. On an M1 Max the core fuses the pair, which runs 2.6 per cycle with 6
-cycles of latency per pair, so a 10-round block is at best 3.9 cycles per 16 bytes. Bytes' AES-128-CTR (12 GB/s) runs
-at about 90% of that bound.
-<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" (aese+aesmc fused: 6 per pair, 2.6 pairs/cycle; 3.9 cycles per 16 bytes; measured 12 GB/s at about 90%) -->
+MixColumns), then an XOR with the last round key. On an M1 Max the core fuses the pair: 3 cycles of latency per round
+and almost 4 rounds per cycle. So the limit is the chain, not the units. Bytes' counter mode keeps eight blocks in
+flight, and each round of the eight waits 3 cycles for the last, so a group of 128 bytes takes about 32 cycles, about 4
+bytes a cycle or 12.8 GB/s at 3.2 GHz. The measured AES-128-CTR (12 GB/s) is at that bound. The units alone would
+allow about 1.5x that with 12 blocks in flight (a candidate, not tried: Part III, ["Crypto"](#9-crypto)).
+<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" (re-measured 2026-11-21: aese+aesmc pair 3 cycles, 3.9/cycle; AES.swift eight blocks interleaved; 8 blocks × 16 B / ~32 cycles; measured 12 GB/s) -->
 
 ```asm
 ; probe (clang -O2 -march=armv8.4-a+crypto): vaesmcq_u8(vaeseq_u8(state, roundKey))
@@ -1340,6 +1349,10 @@ toolchains, and tools.
 - **`Tools/socket-ceiling`** measures the kernel's local-socket throughput with blocking C sockets on plain threads, the
   ceiling for networking benchmarks (SocketStream's transfers reach most of it).
   <!-- src: AGENTS.md "Tools/socket-ceiling" -->
+- **`Tools/cpu-probe`** measures what one core can do, in C and inline assembly: the clock, instruction latency and
+  throughput in cycles, load-to-use latency by working set, and read/store bandwidth by thread count. The M1 Max numbers
+  in this document ([section 1](#1-how-a-modern-cpu-runs-your-code)) come from it.
+  <!-- src: AGENTS.md "Tools/cpu-probe" -->
 
 Anything that attaches to a process (Instruments' Allocations, `lldb`, `sample`) needs the target signed with the
 `com.apple.security.get-task-allow` entitlement; the tools that launch programs run a copy, `PROGRAM-debuggable`, signed
@@ -2571,9 +2584,10 @@ position-weighted sum is a dot product against `64, 63, …, 1`. Swift's SIMD ty
 `pmull`, the instruction is reached through a `static inline` C wrapper (`bytes_crc_udot`), and the loop is Swift: 64-byte
 blocks, four independent accumulators per sum, and 86 blocks per reduction so that no 32-bit lane overflows. <!-- src: Bytes/Sources/CBytesCRC/include/CBytesCRC.h bytes_crc_udot; Bytes/Sources/Bytes/Adler32.swift _updateDotProduct -->
 
-On an M1 Max (one core), Adler-32 went from 29.8 to 58.0 GB/s at 1 MB, with instructions −51% and 64-byte inputs −12% in
-time, reaching libdeflate's rate. The loop is 16 instructions per 64 bytes (8 `udot.4s`, 4 `add.4s`, 2 `ldp`, `subs`,
-`b.ne`), bound by `udot` throughput (about 2.7 a cycle there). <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-19, M1 Max experiments: Adler-32 with UDOT" -->
+On an M1 Max (one core), Adler-32 went from 29.6 to 56.9 GB/s at 1 MB, with instructions −51% and 64-byte inputs −12% in
+time, within 10% of libdeflate's 62 GB/s. The loop is 16 instructions per 64 bytes (8 `udot.4s`, 4 `add.4s`, 2 `ldp`,
+`subs`, `b.ne`). Its 12 vector instructions take 3 cycles on the four vector pipes, and each accumulator's `udot` waits 3
+cycles for the last, so both limits say 3 cycles per 64 bytes: 68 GB/s at 3.21 GHz, of which it reaches 83%. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-19, M1 Max experiments: Adler-32 with UDOT" (probe re-run 2026-11-21; udot 3 cycles, 4/cycle) -->
 
 On the M3 Ultra the same change cut Adler-32 of 1 MB from 555 K to 271 K instructions (−51%) and 16 K 64-byte inputs from
 2,345 K to 1,755 K (−25%); the 1 MB time went from 31 to 16 µs, measured under load. <!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" ("Adler-32 (its −25 to −51% against speed-after is the M1 Max work …)"); baselines CompressionBenchmarks speed-after → p3-spot (M3 Ultra), rows "Adler-32 1 MB: Bytes" and "Adler-32 64 B (×16 K): Bytes" --> `udot` was the instruction the
@@ -3833,8 +3847,9 @@ b.ne    L1                      ; loop while blocks remain
 (This is the function's source compiled on its own with `swiftc -O`; `Tools/loops` reports the same mix for the package
 build.) The eight accumulators are independent chains, so the `udot`s do not wait on each other.
 
-On an M1 Max, the result was 29.8 to 58.0 GB/s on 1 MB in a probe (the benchmark: 36 to 19 µs, against libdeflate's 18),
-instructions −51%, and 64-byte inputs −12% in time; at about 2.7 `udot` per cycle, 8 of them take 3 cycles for 64 bytes.
+On an M1 Max, the result was 29.6 to 56.9 GB/s on 1 MB in a probe (the benchmark: 36 to 19 µs, against libdeflate's 18),
+instructions −51%, and 64-byte inputs −12% in time. `udot` runs 4 per cycle with 3 cycles of latency, so the 12 vector
+instructions per 64 bytes and each accumulator's chain both come to 3 cycles: 68 GB/s at 3.21 GHz, 83% of it reached.
 86 blocks (5,504 bytes) go between reductions so no 32-bit lane overflows.<!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT" -->
 On the M3 Ultra the instructions fell from 555 K to 271 K for 1 MB (−51%) and from 2,345 K to 1,755 K for 16 K 64-byte
 inputs (−25%), baselines `speed-after` → `p3-spot`; its times were taken only under load.<!-- src: Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)"; baselines CompressionBenchmarks speed-after → p3-spot (M3 Ultra), rows "Adler-32 1 MB: Bytes" and "Adler-32 64 B (×16 K): Bytes" -->
@@ -4584,8 +4599,10 @@ in constant time.<!-- src: OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" fi
 #### AES-GCM
 
 - **Counter mode in eight-block batches**: eight independent `aese`/`aesmc` chains, as ChaCha20 needed eight blocks to
-  fill the pipes. AES-CTR went from 453 to 80 to 62 µs per MB on the M3 Ultra with unrolled eight-block batches, and AES-128-CTR runs at
-  about 90% of the `aese`+`aesmc` bound on an M1 Max core.<!-- src: OPTIMIZATION-old.md same; Bytes/Benchmarks/RESULTS.md "crypto in Swift" (453 → 80 → 62); RESULTS.md M1 section -->
+  fill the pipes. AES-CTR went from 453 to 80 to 62 µs per MB on the M3 Ultra with unrolled eight-block batches. On an M1
+  Max core, AES-128-CTR (12 GB/s) is at the bound for eight chains of fused `aese`+`aesmc` rounds at 3 cycles each (about 4
+  bytes a cycle); the units take almost 4 rounds a cycle, so 12 blocks in flight could reach about 1.5x (not tried; 11
+  round keys and 12 states fit in the 32 registers).<!-- src: OPTIMIZATION-old.md same; Bytes/Benchmarks/RESULTS.md "crypto in Swift" (453 → 80 → 62); RESULTS.md M1 section "What the cores can do" (re-measured 2026-11-21) -->
 - **GHASH** multiplies by the hash key with three `pmull`s (Karatsuba), sums eight blocks' products against the key's
   first eight powers before reducing once, and reduces with two more `pmull`s by the field's constant (0xC2 shifted)
   instead of shifts and XORs.<!-- src: OPTIMIZATION-old.md same -->
@@ -4741,18 +4758,24 @@ re-measured on an idle machine.<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel c
 #### Static splits and efficiency cores
 
 Apple silicon mixes performance (P) and efficiency (E) cores. Whether more lanes than P cores helps depends on how the work
-is handed out. Measured on an M1 Max (8 P and 2 E cores), with 256 KB chunks and 1–16 lanes:<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help the encoder, hurt the decoder" -->
+is handed out. Measured on an M1 Max (8 P and 2 E cores), with 256 KB chunks and 1–16 lanes:<!-- src: Bytes/Benchmarks/RESULTS.md "Parallel lanes: the efficiency cores help both codecs now; one stream falls back to sequential" -->
 
-- The **encoder** scales almost linearly to 8 lanes (7.3x on mozilla level 6), and the two E cores add another 10–13%
-  (70.1 to 63.3 ms). Workers take the next chunk from a queue, so a slow core costs nothing at the end.
-- The **decoder**, as measured, split its segments evenly across the lanes, so 9 or 10 lanes put a segment on an E core
-  and the call waited for it: 9 lanes were 20% slower on dickens and 35% slower on mozilla level 1 than 8. 16 lanes,
-  which split the work finer, were 4–12% faster than 8.
+- The **encoder** scales almost linearly to 8 lanes (7.3x on mozilla level 6), and the two E cores add another 3–9%
+  (mozilla level 6: 70.7 to 64.0 ms; dickens 3%). Workers take the next chunk from a queue, so a slow core costs nothing
+  at the end.
+- The **decoder**, as first measured, split its segments evenly across the lanes, so 9 or 10 lanes put a segment on an E
+  core and the call waited for it: 9 lanes were 20% slower on dickens and 35% slower on mozilla level 1 than 8. It now cuts
+  up to four segments per lane and lanes take the next segment in order, so a slow core holds up one small segment.
+  Re-measured: 10 lanes are now 7–12% *faster* than 8 (dickens 2.6 to 2.3 ms), and 9 are no slower.
 
-So "lanes = performance cores" suits statically divided work; a queue can use every core. The decoder's current design
-moves toward the queue: it cuts up to four segments per lane, and lanes take the next segment in order, so a slow core
-holds up one small segment (not re-measured on the M1 Max). The M3 Ultra has 24 P and 8 E cores; the rule was not measured
-there.<!-- src: Bytes/Benchmarks/RESULTS.md same; Writeups/M1-Max-vs-M3-Ultra.md "M1 Max-specific optimizations explored"; Bytes/Sources/BytesCompression/ParallelInflate.swift doc comment -->
+So "lanes = performance cores" suits statically divided work; a queue can use every core. The M3 Ultra has 24 P and 8 E
+cores; the rule was not measured there.
+
+The re-measurement also found a cost of the finer split. On one stream, Silesia's mozilla at level 1, the decoder rejects
+its speculation at 4, 8, 12, 13, 15, and 16 lanes and decodes the whole stream sequentially: 75.7 ms at 8 lanes, against
+10.3 ms at 10 and 11.2 ms for the old decoder at 8. Every other corpus file and level decodes in parallel at every lane
+count, including the benchmarks' inputs, which is why no benchmark showed it. Falling back for the whole stream, not just
+from the bad segment, is what makes one bad split cost 7x.<!-- src: Bytes/Benchmarks/RESULTS.md same; Writeups/M1-Max-vs-M3-Ultra.md "M1 Max-specific optimizations explored"; Bytes/Sources/BytesCompression/ParallelInflate.swift doc comment -->
 
 #### TLS records sealed in parallel
 
@@ -5215,27 +5238,30 @@ parallel codecs are 2.4x apart (geometric mean over 60 pairs), and memory-bound 
 the M3 Ultra (64 ms) and with 8 on the M1 Max (81 ms; 4 workers: 106 ms). A worker count found on one chip has a different knee on the
 other: derive worker counts from the machine.<!-- src: OPTIMIZATION-old.md "15." paragraph "Many cores"; Writeups/M1-Max-vs-M3-Ultra.md "File-system work" -->
 
-**What one M1 Max core measured** (probes; cycles scaled from a calibration that read 2.82 GHz, ±15%):<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "What the M1 Max can do" -->
+**What one M1 Max core measured** (`Tools/cpu-probe`, 2026-11-21; cycles from a 3.21 GHz clock measured in the same run):<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "What the M1 Max can do" -->
 
 | Instruction | Latency (cycles) | Per cycle |
 |---|---|---|
-| `add`, `eor`, `eor3`, `zip`, `uzp`, `ext`, `tbl` with 1–2 registers | 2 | 4 |
-| `udot`, `pmull`, `aese`, `mul`, `usra` | 3 | 2.7 |
-| `tbl` with 3 / 4 registers | 4 | 1.9 / 1.3 |
-| `tbx` with 4 registers | 8 | 1.0 |
-| `sha256h`, `sha512h` | 5, 3 | 0.5 |
+| `add`, `eor`, `eor3`, `zip`, `uzp`, `ext`, `tbl` and `tbx` with 1 register, `tbl` with 2 | 2 | 4 |
+| `udot`, `pmull`, `aese`, `mul`, `usra` | 3 | 4 |
+| `aese`+`aesmc` (fused) | 3 per pair | 3.9 pairs |
+| `fmla.4s` | 4 | 4 |
+| `tbl` with 3 / 4 registers | 4 | 2 / 1.3 |
+| `tbx` with 2 / 3 / 4 registers | 4 / 6 / 8 | 2 / 1.3 / 0.95 |
+| `sha256h`, `sha512h` | 4, 2 | 0.5 |
 <!-- src: Writeups/M1-Max-vs-M3-Ultra.md same table (rows selected) -->
 
-Memory: L1 3 cycles, L2 17–18 cycles, system-level cache 35–52 ns, DRAM about 122 ns; one core reads 61 GB/s, two 115
-GB/s, and all ten only 126 GB/s.<!-- src: Writeups/M1-Max-vs-M3-Ultra.md same section; Bytes/Benchmarks/RESULTS.md "What the cores can do" read bandwidth -->
+Memory: L1 3 cycles, L2 17.6 cycles, 16–32 MB 40–70 ns (system-level cache with page walks), DRAM about 123 ns; one core
+reads 60 GB/s, two 112 GB/s, and all ten only 125 GB/s.<!-- src: Writeups/M1-Max-vs-M3-Ultra.md same section; Bytes/Benchmarks/RESULTS.md "What the cores can do" read bandwidth -->
 Read as cost per lookup, this core's `tbl` with one or two table registers takes one vector slot, with four about three,
 and a four-register `tbx` four, with 8 cycles of latency ([section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name)).<!-- src: Bytes/Benchmarks/RESULTS.md "What the cores can do" paragraph after the table; AGENTS.md "Measure a core's instructions rather than assuming" -->
 
-**What changed in the code for the M1 Max.** One instruction nobody had used (`udot`; [section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name): Adler-32 from 29.8 to
-58.0 GB/s) and the efficiency cores ([section 10](#10-parallelism)). **What did not help:** software prefetch on CRC-32 (the fold already runs
-at the memory rate; a distance of 8 KB lost 7–50%), interleaving two halves, and buffer alignment; the AES kernels are
-already at about 90% of the `aese` bound. Candidates not tried: store-heavy and short-copy code, and Base64's decoder
-lookups (tuned around the M3's micro-op counts for `tbl` and `tbx`).<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "M1 Max-specific optimizations explored"; OPTIMIZATION-old.md "15." "What did not help" -->
+**What changed in the code for the M1 Max.** One instruction nobody had used (`udot`; [section 4](#4-write-simd-by-hand-and-reach-instructions-swift-cannot-name): Adler-32 from 29.6 to
+56.9 GB/s) and the efficiency cores ([section 10](#10-parallelism)). **What did not help:** software prefetch on CRC-32 (the fold already runs
+at the memory rate; a distance of 8 KB lost 10–49%), interleaving two halves, and buffer alignment. Candidates not tried:
+AES counter mode with 12 blocks in flight instead of 8 (it is at the bound of eight 3-cycle round chains, and the units
+allow about 1.5x more), store-heavy and short-copy code, and Base64's decoder lookups (tuned around the M3's micro-op
+counts for `tbl` and `tbx`).<!-- src: Writeups/M1-Max-vs-M3-Ultra.md "M1 Max-specific optimizations explored"; OPTIMIZATION-old.md "15." "What did not help" -->
 
 **The method, in three rules.** Keep Instructions beside times when comparing machines: they show whether the same code
 ran (771 of 773 matched). Where benchmarks name the chip's lane count, pair them by hand. And when a standalone probe (a C
