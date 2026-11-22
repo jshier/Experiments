@@ -960,3 +960,50 @@ line with its Silesia figures (dickens L3: 13.4, against libzstd's 14.9). Not me
 real corpora; these fixtures may favor DEFLATE. `Zstd + CRC`'s 3 mallocs are the decoder's tables, window, and
 input stash, made on the first zstd entry inside each measured sample (the benchmark creates its `ZipDecoder` there);
 a probe decoding the entry 2 and 4 times in one process counted the same allocations (`Tools/runtime-count`).
+
+## step17 (2026-11-22): every method in Swift (baselines `zipnative-old-{1,2}` → `zipnative-new-{1,2}`, M1 Max)
+
+Every compression method now decodes with BytesCompression; the library and `nunzip` no longer link zlib, Compression,
+or libbz2. Gone: NativeZip's own `Inflater` (DEFLATE and Deflate64) and `LZMADecoder`, the CBZip2 system-library
+target, the zlib backend (`ZipDecoder.Backend`, `--zlib`, `backend:` parameters), and whole-payload decryption.
+
+- DEFLATE and Deflate64: `DeflateDecoder(variant:)` and its new `decompress(_:into:historyCount:)`, which decodes
+  straight into ZipDecoder's two buffers after the history copied to their front (as `Inflater` did).
+- bzip2 (method 12): `BZip2Decoder.decompress(_:into:)`, streaming, output resumable mid-block (was libbz2).
+- LZMA (14): `LZMADecoder` (raw LZMA1, streaming, 20 bytes of input at most to progress); NativeZip parses the 4-byte
+  zip header and the properties. With the end-marker flag the decoder gets no size (the marker is required) and the
+  output is capped at the entry's size.
+- xz (95): `XZDecoder`, streaming (was Compression's `COMPRESSION_LZMA` stream).
+- Encrypted entries of every method now stream through the 256 KB staging buffer (Deflate64 and LZMA used to be
+  decrypted whole first): every decoder takes input split anywhere.
+- The `zlib` benchmark rows now measure zlib's `inflate` and `crc32_z` directly (the backend is gone); the zlib
+  extraction rows were dropped. New rows: `Inflate + CRC 32 MB text` and `Extract 32 MB text` for bzip2, LZMA, xz,
+  and Deflate64 (the Deflate64 fixture is `text.zip`'s DEFLATE stream marked method 9: it has no 258-byte match, so it
+  decodes the same either way).
+
+Measured on the M1 Max (not comparable with the M3 Ultra rows above), HEAD's code with the new benchmark rows against
+the new code, interleaved (old-1, new-1, old-2, new-2) on an otherwise idle machine. Instructions are exact; times are
+p50 wall clock, the two rounds averaged.
+
+| Benchmark | Instructions old → new | Change | Time old → new | Change |
+|---|---|---|---|---|
+| Inflate + CRC 32 MB text: bzip2 | 2,540 M → 1,534 M | −39.6% | 465 → 111 ms | −76% |
+| Inflate + CRC 32 MB text: LZMA | 1,481 M → 1,334 M | −9.9% | 178 → 146 ms | −18% |
+| Inflate + CRC 32 MB text: xz | 1,257 M → 1,352 M | +7.6% | 207 → 148 ms | −29% |
+| Inflate + CRC 32 MB text: Deflate64 | 240 M → 237 M | −1.2% | 19 → 19 ms | 0 |
+| Inflate + CRC 32 MB text: Bytes (DEFLATE) | 240 M → 236 M | −1.7% | 17 → 17 ms | 0 |
+| Inflate + CRC 32 MB raster: Bytes | 138 M → 136 M | −1.4% | 12 → 11.5 ms | −4% |
+| Inflate + CRC 2,000 small files: Bytes | 232 M → 232 M | 0 | 18.5 → 19 ms | (noise) |
+| Extract 32 MB text: bzip2 | 2,568 M → 1,563 M | −39.1% | 476 → 114 ms | −76% |
+| Extract 32 MB text: LZMA | 1,510 M → 1,364 M | −9.7% | 181 → 154 ms | −16% |
+| Extract 32 MB text: xz | 1,287 M → 1,381 M | +7.3% | 212 → 153 ms | −28% |
+| Extract 32 MB text: Deflate64 | 273 M → 268 M | −2.2% | 22 → 21 ms (2nd round) | −5% |
+| Extract 8 archives of 64 MB text (one pool) | 4,383 M → 4,292 M | −2.1% | 164 → 133 ms | (±20%: parallel) |
+| Zstd, stored, verify rows | unchanged | 0 | unchanged | — |
+
+xz runs more instructions than Compression's liblzma and is still 29% faster (fewer mispredictions: Bytes' range
+decoder takes bits from the borrow, see Bytes' RESULTS.md 2026-11-18). The cost is memory: LZMA and xz decode through a
+sliding window of the dictionary plus as much room (an 8 MiB dictionary: a 16 MiB window, grown by doubling), so peak
+resident memory for the one-entry rows went 26 → 58 MB (xz) and 35 → 52 MB (LZMA); bzip2 20 → 24 MB, DEFLATE
+unchanged. Per writer, so an extraction of many large xz entries holds about 16 MiB per writer decoding one; a smaller
+room trades memory for an extra copy of the dictionary per room's worth of output.

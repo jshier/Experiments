@@ -181,16 +181,9 @@ public struct LZMA2Decoder: ~Copyable {
 
     /// Sets every probability to one half and the state and distances to their start.
     private func resetState(_ registers: inout LZMARegisters, _ model: LZMAModel) {
-        let count = LZMAProbabilities.count(lc: model.lc, lp: model.literalPositionMask.nonzeroBitCount)
-        // Unsafe: filling the model. Safe: the workspace holds `count` probabilities (lc + lp <= 4 for LZMA2;
-        // raw LZMA grows the workspace first).
-        unsafe workspace.base.update(repeating: LZMAProbabilities.initial, count: count)
-        unsafe workspace.base[LZMAProbabilities.topSlot] = LZMAProbabilities.topValue
-        registers.state = 0
-        registers.rep0 = 1
-        registers.rep1 = 1
-        registers.rep2 = 1
-        registers.rep3 = 1
+        // Unsafe: the model's memory. Safe: the workspace holds the probabilities for lc + lp <= 4 (LZMA2), and
+        // raw LZMA grows it first.
+        unsafe LZMALoop.resetState(&registers, model, probabilities: workspace.base)
     }
 
     /// Decodes one LZMA chunk of `packed` bytes into `dictionary` up to position `limit`: it must fill the
@@ -199,20 +192,10 @@ public struct LZMA2Decoder: ~Copyable {
         _ input: UnsafePointer<UInt8>, packed: Int, _ registers: inout LZMARegisters, model: LZMAModel,
         dictionary: UnsafeMutablePointer<UInt8>, limit: Int
     ) throws(BytesError) {
-        // Unsafe: the range decoder's first five bytes, and the chunk's end. Safe: the caller checked that the
-        // input holds `packed` bytes, and they're checked here to be at least 5.
-        guard packed >= 5, unsafe input[0] == 0 else { throw .invalidValue }
-        let code = unsafe UInt32(input[1]) &<< 24 | UInt32(input[2]) &<< 16 | UInt32(input[3]) &<< 8 | UInt32(input[4])
-        var decoder = unsafe LZMARangeDecoder(
-            range: 0xFFFF_FFFF, code: code, input: input + 5, end: input + packed, probabilities: workspace.base, careful: true
+        // Unsafe and safe as `LZMALoop.decodeChunk`: the caller checked the input and output.
+        try unsafe LZMALoop.decodeChunk(
+            input, packed: packed, &registers, model: model, dictionary: dictionary, limit: limit, probabilities: workspace.base
         )
-        _ = try unsafe LZMALoop.decode(
-            &registers, &decoder, dictionary: dictionary, limit: limit, model: model, allowsEndMarker: false,
-            overrun: .invalidValue
-        )
-        guard registers.position == limit, unsafe decoder.input == decoder.end, decoder.code == 0 else {
-            throw .invalidValue
-        }
     }
 
     // MARK: Raw LZMA

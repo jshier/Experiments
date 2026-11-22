@@ -5,6 +5,7 @@ Every entry records a CRC-32 computed here (or by zip), so checking it tests the
 doesn't come from them. The 300 KB text sample is also written to the work directory (argv[2]) for the
 shell script.
 """
+import io
 import lzma
 import os
 import struct
@@ -111,6 +112,50 @@ large = text(5_000_000, 3)
 zip_with(os.path.join(out, "zstd-large.zip"), zipfile.ZIP_ZSTANDARD, [("large.txt", large)])
 patched(os.path.join(out, "zstd-zipcrypto.zip"), "large.txt",
         zipcrypto(zstd.compress(large), b"secret", zlib.crc32(large) >> 24), large, 93, flags=1)
+
+
+def payload_of(method, data):
+    """The payload and general-purpose flags `zipfile` writes for `data` compressed with `method` (for LZMA, its
+    zip header and properties before the stream, and flag bit 1: the stream ends with an end marker)."""
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=method) as z:
+        z.writestr("entry", data)
+    raw = buffer.getvalue()
+    assert raw[0:4] == b"PK\x03\x04"
+    flags, = struct.unpack_from("<H", raw, 6)
+    size, = struct.unpack_from("<I", raw, 18)
+    name_length, extra_length = struct.unpack_from("<HH", raw, 26)
+    start = 30 + name_length + extra_length
+    return raw[start:start + size], flags & 0x6
+
+
+def encrypted(path, name, method, payload, data, flags=0):
+    """A one-entry archive of `payload` (decompressing to `data` with `method`), encrypted with the traditional cipher
+    and the password "secret"."""
+    patched(path, name, zipcrypto(payload, b"secret", zlib.crc32(data) >> 24), data, method, flags=1 | flags)
+
+
+# The other methods over several of the decoder's 1 MB chunks, plain and with the traditional cipher (a decoder that
+# streams its input then takes it in pieces, as it's decrypted). All of them hold `medium`, the first 3.3 MB of
+# `large`: over 3 MiB, and no more, because the debug-built decoders take about a second for each 3 MB.
+medium = large[:3_300_000]
+zip_with(os.path.join(out, "lzma-large.zip"), zipfile.ZIP_LZMA, [("large.txt", medium)])
+patched(os.path.join(out, "xz-large.zip"), "large.txt", lzma.compress(medium, format=lzma.FORMAT_XZ), medium, 95)
+encrypted(os.path.join(out, "bzip2-zipcrypto.zip"), "large.txt", 12, payload_of(zipfile.ZIP_BZIP2, medium)[0], medium)
+lzma_payload, lzma_flags = payload_of(zipfile.ZIP_LZMA, medium)
+encrypted(os.path.join(out, "lzma-zipcrypto.zip"), "large.txt", 14, lzma_payload, medium, flags=lzma_flags)
+encrypted(os.path.join(out, "xz-zipcrypto.zip"), "large.txt", 95, lzma.compress(medium, format=lzma.FORMAT_XZ), medium)
+
+# Deflate64 with dynamic Huffman codes: zlib's raw DEFLATE, recorded as method 9. The two read a stream the same way
+# except for length symbol 285 (258 in DEFLATE; 3 plus 16 extra bits in Deflate64) and distance codes 30 and 31
+# (which DEFLATE never uses), so a stream with no match of length 258 is the same stream in both. `medium` has none:
+# 258 repeated bytes would be about 40 repeated words of its random sequence. A stream that had one would decode to
+# something else as Deflate64 and fail its CRC-32 (computed here, from `medium`), never pass by mistake.
+deflater = zlib.compressobj(9, zlib.DEFLATED, -15)
+deflate64_dynamic = deflater.compress(medium) + deflater.flush()
+patched(os.path.join(out, "deflate64-dynamic.zip"), "large.txt", deflate64_dynamic, medium, 9)
+encrypted(os.path.join(out, "deflate64-zipcrypto.zip"), "large.txt", 9, deflate64_dynamic, medium)
+
 # A method NativeZip doesn't read: PPMd (98), its payload not a real stream.
 patched(os.path.join(out, "ppmd.zip"), "sample.txt", b"\x07" * 64, sample, 98)
 
@@ -182,8 +227,12 @@ def deflate64_fixed(operations):
         dindex = max(i for i in range(32) if distance_bases[i] <= distance)
         w.code(dindex, 5)
         w.write(distance - distance_bases[dindex], distance_extra[dindex])
-        for _ in range(length):
-            output.append(output[-distance])
+        start = len(output) - distance
+        if length <= distance:
+            output += output[start:start + length]
+        else:  # Overlapping: a byte at a time.
+            for _ in range(length):
+                output.append(output[-distance])
     fixed_literal(w, 256)
     return w.finish(), bytes(output)
 
@@ -200,6 +249,26 @@ operations = [
 operations += [(65_538, 65_536)] * 40
 stream, data = deflate64_fixed(operations)
 patched(os.path.join(out, "deflate64.zip"), "deflate64.bin", stream, data, 9)
+
+# About 4.5 MB of fixed-Huffman Deflate64 in many shapes: short literal runs between matches of every length
+# (to 65,538) at every distance (to 65,536), so matches and their history cross the decoder's 1 MB chunks
+# anywhere. Seeded: the same stream every time.
+import random
+
+rng = random.Random(9)
+operations = [text(70_000, 4)]
+total = 70_000
+while total < 4_500_000:
+    operations.append(text(rng.randint(1, 120), rng.getrandbits(32)))
+    total += len(operations[-1])
+    distance = min(total, rng.choice([rng.randint(1, 300), rng.randint(32_769, 65_536), rng.randint(1, 65_536)]))
+    length = rng.randint(3, 300) if rng.random() < 0.7 else rng.randint(259, 30_000)
+    if rng.random() < 0.02:
+        length = 65_538
+    operations.append((length, distance))
+    total += length
+stream, data = deflate64_fixed(operations)
+patched(os.path.join(out, "deflate64-large.zip"), "deflate64.bin", stream, data, 9)
 
 # --- Names ------------------------------------------------------------------------------------------------
 # Info-ZIP's Unicode path field: an ASCII header name, the real UTF-8 name in field 0x7075.

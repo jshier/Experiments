@@ -32,20 +32,18 @@ extension ZipArchive {
     /// - Parameters:
     ///   - items: The work items.
     ///   - maxConcurrency: The most workers to use; values below 1 count as 1.
-    ///   - backend: The backend of each worker's decoder.
     ///   - weight: An item's relative cost, used for the largest-first order.
     ///   - body: Processes one item with its worker's decoder.
     /// - Throws: The first error `body` throws.
     nonisolated(nonsending) func forEachConcurrently<Item: Sendable>(
         _ items: [Item],
         maxConcurrency: Int,
-        backend: ZipDecoder.Backend,
         weight: (Item) -> UInt64,
         _ body: @escaping @concurrent @Sendable (Item, inout ZipDecoder) async throws -> Void
     ) async throws {
         let width = min(max(maxConcurrency, 1), items.count)
         guard width > 1 else {
-            var decoder = ZipDecoder(backend: backend)
+            var decoder = ZipDecoder()
             for item in items {
                 if Task.isCancelled { return }
                 try await body(item, &decoder)
@@ -58,7 +56,7 @@ extension ZipArchive {
         try await withThrowingDiscardingTaskGroup { group in
             for _ in 0..<width {
                 group.addTask {
-                    var decoder = ZipDecoder(backend: backend)
+                    var decoder = ZipDecoder()
                     while !Task.isCancelled, let index = queue.claim() {
                         try await body(ordered[index], &decoder)
                     }

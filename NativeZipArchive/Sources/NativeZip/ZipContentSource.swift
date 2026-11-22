@@ -7,15 +7,13 @@ final class ArchiveJob: Sendable {
     /// The entries being extracted (the caller's selection): jobs name them by index.
     let entries: [ZipEntry]
     let password: String?
-    let backend: ZipDecoder.Backend
     /// Where the archive's entries go in the destination, with a trailing `/` (empty: the destination itself).
     let prefix: String
 
-    init(archive: ZipArchive, entries: [ZipEntry], password: String?, backend: ZipDecoder.Backend, prefix: String) {
+    init(archive: ZipArchive, entries: [ZipEntry], password: String?, prefix: String) {
         self.archive = archive
         self.entries = entries
         self.password = password
-        self.backend = backend
         self.prefix = prefix
     }
 }
@@ -88,24 +86,24 @@ struct ZipContentSource: ContentSource {
         let payload = unsafe archive.file.buffer(range)
         guard let size = Int(exactly: entry.uncompressedSize) else { throw ZipError.corruptData(entry.path) }
         if entry.method == ZipArchive.Method.stored, !entry.isEncrypted {
-            try await unsafe writeStored(entry, payload: payload, size: size, backend: job.backend, to: &output)
+            try await unsafe writeStored(entry, payload: payload, size: size, to: &output)
             return
         }
-        let decoder = unsafe state.decoder(output.writerIndex, backend: job.backend)
+        let decoder = unsafe state.decoder(output.writerIndex)
         // Unsafe: the writer's own decoder slot (no other writer uses this index while it writes), at a stable address.
         try unsafe decoder.pointee!.beginEntry(payload, entry: entry, password: job.password)
         defer { unsafe decoder.pointee!.endEntry() }
         if entry.method != ZipArchive.Method.stored, entry.uncompressedSize >= overlapThreshold {
-            try await unsafe writeOverlapped(entry, decoder: decoder, size: size, backend: job.backend, to: &output)
+            try await unsafe writeOverlapped(entry, decoder: decoder, size: size, to: &output)
         } else {
-            try await unsafe writeInline(entry, decoder: decoder, size: size, backend: job.backend, to: &output)
+            try await unsafe writeInline(entry, decoder: decoder, size: size, to: &output)
         }
     }
 
     /// An unencrypted stored entry, from the mapped archive.
     @unsafe
     nonisolated(nonsending) private static func writeStored(
-        _ entry: ZipEntry, payload: UnsafeRawBufferPointer, size: Int, backend: ZipDecoder.Backend, to output: inout FileOutput
+        _ entry: ZipEntry, payload: UnsafeRawBufferPointer, size: Int, to output: inout FileOutput
     ) async throws {
         guard payload.count == size else {
             throw ZipError.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: UInt64(payload.count))
@@ -117,7 +115,7 @@ struct ZipContentSource: ContentSource {
         var offset = 0
         while offset < size {
             let piece = bytes.extracting(offset..<min(offset + storedPieceSize, size))
-            crc = ZipDecoder.crc32(crc, piece, backend: backend)
+            crc = ZipDecoder.crc32(crc, piece)
             try await output.write(piece)
             offset += piece.byteCount
         }
@@ -127,8 +125,7 @@ struct ZipContentSource: ContentSource {
     /// Decodes a chunk, writes it, then decodes the next, on the writer's task.
     @unsafe
     nonisolated(nonsending) private static func writeInline(
-        _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, backend: ZipDecoder.Backend,
-        to output: inout FileOutput
+        _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, to output: inout FileOutput
     ) async throws {
         // Unsafe: the writer's decoder (see `write`); chunks point into its buffers, which nothing else writes until
         // the next `nextChunk` into the same buffer.
@@ -141,7 +138,7 @@ struct ZipContentSource: ContentSource {
                 written += count
                 // More than the entry's size: its own error, before Disk's.
                 if written > size { try ZipArchive.check(entry, written: UInt64(written), crc: crc) }
-                crc = unsafe ZipDecoder.crc32(crc, RawSpan(_unsafeBytes: chunk.bytes), backend: backend)
+                crc = unsafe ZipDecoder.crc32(crc, RawSpan(_unsafeBytes: chunk.bytes))
                 try await output.write(unsafe RawSpan(_unsafeBytes: chunk.bytes))
             }
             if finished { break }
@@ -154,8 +151,7 @@ struct ZipContentSource: ContentSource {
     /// ``ZipDecoder/nextChunk(into:)``), handed over by a ``ChunkHandoff``.
     @unsafe
     nonisolated(nonsending) private static func writeOverlapped(
-        _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, backend: ZipDecoder.Backend,
-        to output: inout FileOutput
+        _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, to output: inout FileOutput
     ) async throws {
         // Unsafe (here and at `close` and `fail` below): a handoff of `Chunk`s, which are pointers into the decoder's
         // buffers. Safe: these calls move no chunk; `send` and `receive` say why theirs stay valid.
@@ -188,7 +184,7 @@ struct ZipContentSource: ContentSource {
                     let bytes = unsafe RawSpan(_unsafeBytes: chunk.bytes)
                     written += bytes.byteCount
                     guard written <= size else { throw ZipError.corruptData(entry.path) }
-                    crc = ZipDecoder.crc32(crc, bytes, backend: backend)
+                    crc = ZipDecoder.crc32(crc, bytes)
                     try await output.write(bytes)
                 }
             } catch {
@@ -208,42 +204,37 @@ struct DecoderSlot: @unchecked Sendable {
     let pointer: UnsafeMutablePointer<ZipDecoder?>
 }
 
-/// What the source's writers share: a decoder per writer and backend (made on first use), and which jobs are written
-/// (for replacements, which wait).
+/// What the source's writers share: a decoder per writer (made on first use), and which jobs are written (for
+/// replacements, which wait).
 @safe
 final class SourceState: Sendable {
     // Unchecked state below: raw slots, each used by one writer at a time (Disk's `FileOutput.writerIndex`).
     private let writers: Int
-    private nonisolated(unsafe) let bytesDecoders: UnsafeMutablePointer<ZipDecoder?>
-    private nonisolated(unsafe) let zlibDecoders: UnsafeMutablePointer<ZipDecoder?>
+    private nonisolated(unsafe) let decoders: UnsafeMutablePointer<ZipDecoder?>
     private let completion = Mutex(Completion())
 
     init(writers: Int) {
         self.writers = max(1, writers)
         // Unsafe: slots allocated and initialized here (to `nil`), deinitialized and freed in `deinit`.
-        unsafe bytesDecoders = .allocate(capacity: self.writers)
-        unsafe zlibDecoders = .allocate(capacity: self.writers)
+        unsafe decoders = .allocate(capacity: self.writers)
         for index in 0..<self.writers {
-            unsafe (bytesDecoders + index).initialize(to: nil)
-            unsafe (zlibDecoders + index).initialize(to: nil)
+            unsafe (decoders + index).initialize(to: nil)
         }
     }
 
     deinit {
         // Unsafe: the slots `init` made; no writer is left (the extraction has ended).
-        unsafe bytesDecoders.deinitialize(count: writers)
-        unsafe zlibDecoders.deinitialize(count: writers)
-        unsafe bytesDecoders.deallocate()
-        unsafe zlibDecoders.deallocate()
+        unsafe decoders.deinitialize(count: writers)
+        unsafe decoders.deallocate()
     }
 
-    /// Writer `index`'s decoder for `backend`, made on its first entry.
+    /// Writer `index`'s decoder, made on its first entry.
     @unsafe
-    func decoder(_ index: Int, backend: ZipDecoder.Backend) -> UnsafeMutablePointer<ZipDecoder?> {
+    func decoder(_ index: Int) -> UnsafeMutablePointer<ZipDecoder?> {
         precondition(index >= 0 && index < writers, "a writer index beyond the extraction's writers")
         // Unsafe: within the slots (checked above), used only by this writer.
-        let slot = unsafe (backend == .bytes ? bytesDecoders : zlibDecoders) + index
-        if unsafe slot.pointee == nil { unsafe slot.pointee = ZipDecoder(backend: backend) }
+        let slot = unsafe decoders + index
+        if unsafe slot.pointee == nil { unsafe slot.pointee = ZipDecoder() }
         return unsafe slot
     }
 

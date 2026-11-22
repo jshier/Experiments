@@ -5,21 +5,51 @@ import BytesTesting
 import Testing
 import zlib
 
-// The `Bytes` DEFLATE decoder against zlib: streams zlib compresses (raw DEFLATE, as zip stores it: Bytes'
-// `Zlib.compress`) must decode to the original, and corrupted streams must be rejected (never trap) exactly when
-// zlib rejects them.
+// NativeZip's DEFLATE decoding against zlib, a reference on the test side: streams zlib compresses (raw DEFLATE, as
+// zip stores it: BytesReferenceCodecs' `Zlib.compress`) must decode to the original, and corrupted streams must be
+// rejected (never trap) exactly when zlib's `inflate` rejects them.
 
 enum Outcome: Equatable {
     case decoded([UInt8])
     case failed
 }
 
-func inflate(_ payload: [UInt8], backend: ZipDecoder.Backend) -> Outcome {
-    var decoder = ZipDecoder(backend: backend)
+/// NativeZip's decoding of a raw DEFLATE stream.
+func inflate(_ payload: [UInt8]) -> Outcome {
+    var decoder = ZipDecoder()
     do {
         return try .decoded(DeflateBackends.inflate(payload.span.bytes, using: &decoder))
     } catch {
         return .failed
+    }
+}
+
+/// zlib's decoding of a raw DEFLATE stream, as zip readers use it: decoded until the stream's end, ignoring any bytes
+/// after it (BytesReferenceCodecs' `Zlib.decompress` rejects those); invalid or truncated streams fail.
+func zlibInflate(_ payload: [UInt8]) -> Outcome {
+    var stream = z_stream()
+    guard inflateInit2_(&stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK else { return .failed }
+    defer { inflateEnd(&stream) }
+    var output: [UInt8] = []
+    var chunk = [UInt8](repeating: 0, count: 1 << 16)
+    var input = payload
+    return input.withUnsafeMutableBufferPointer { input in
+        stream.next_in = input.baseAddress
+        stream.avail_in = uInt(input.count)
+        while true {
+            let (status, produced) = chunk.withUnsafeMutableBufferPointer { buffer in
+                stream.next_out = buffer.baseAddress
+                stream.avail_out = uInt(buffer.count)
+                let status = zlib.inflate(&stream, Z_NO_FLUSH)
+                return (status, buffer.count - Int(stream.avail_out))
+            }
+            output += chunk[..<produced]
+            switch status {
+            case Z_STREAM_END: return .decoded(output)
+            case Z_OK: continue
+            default: return .failed // Errors, and Z_BUF_ERROR: no progress possible (truncated).
+            }
+        }
     }
 }
 
@@ -47,13 +77,13 @@ private let sampleInputs: [(name: String, bytes: [UInt8])] = {
     ]
 }()
 
-/// What zlib makes of `bytes` at `level` with `strategy`, decoded by the `Bytes` backend.
+/// What zlib makes of `bytes` at `level` with `strategy`, decoded by NativeZip.
 func checkDecodesWhatZlibEncodes(_ name: String, _ bytes: [UInt8], level: Int32, strategy: Int32) {
     let compressed = Zlib.compress(bytes, level: level, strategy: strategy)
-    #expect(inflate(compressed, backend: .bytes) == .decoded(bytes), "\(name), level \(level), strategy \(strategy)")
+    #expect(inflate(compressed) == .decoded(bytes), "\(name), level \(level), strategy \(strategy)")
 }
 
-/// Mutated streams: the `Bytes` decoder must accept exactly what zlib accepts, with the same output. The first
+/// Mutated streams: NativeZip must accept exactly what zlib accepts, with the same output. The first
 /// `iterations` mutations of one seeded sequence.
 func checkCorruptStreamsMatchZlib(iterations: Int) {
     var rng = SplitMix64(seed: 42)
@@ -75,8 +105,8 @@ func checkCorruptStreamsMatchZlib(iterations: Int) {
             default: bytes.removeLast(Int.random(in: 0...min(16, bytes.count - 1), using: &rng))
             }
         }
-        let native = inflate(bytes, backend: .bytes)
-        let reference = inflate(bytes, backend: .zlib)
+        let native = inflate(bytes)
+        let reference = zlibInflate(bytes)
         #expect(native == reference, "\(bytes.prefix(32))…")
         if case .decoded = native { accepted += 1 } else { rejected += 1 }
     }
@@ -85,7 +115,7 @@ func checkCorruptStreamsMatchZlib(iterations: Int) {
 
 @Suite struct InflaterTests {
     /// Every sample but the multi-megabyte one at every level and strategy; that one (back-references across
-    /// chunks) at the default level and strategy, with both backends. Its other levels and strategies are in
+    /// chunks) at the default level and strategy. Its other levels and strategies are in
     /// `InflaterBulkTests`.
     @Test(arguments: [Z_DEFAULT_STRATEGY, Z_FILTERED, Z_HUFFMAN_ONLY, Z_RLE, Z_FIXED])
     func decodesWhatZlibEncodes(strategy: Int32) {
@@ -99,8 +129,6 @@ func checkCorruptStreamsMatchZlib(iterations: Int) {
     @Test func decodesWhatZlibEncodesLarge() {
         let large = samples().last!
         checkDecodesWhatZlibEncodes(large.name, large.bytes, level: 6, strategy: Z_DEFAULT_STRATEGY)
-        // Both backends agree, chunking included.
-        #expect(inflate(Zlib.compress(large.bytes), backend: .zlib) == .decoded(large.bytes))
     }
 
     /// The first 2,000 of `InflaterBulkTests`' 20,000 mutations.
@@ -109,14 +137,14 @@ func checkCorruptStreamsMatchZlib(iterations: Int) {
     }
 
     @Test func rejectsMalformedStreams() {
-        #expect(inflate([0x07], backend: .bytes) == .failed) // Block type 3.
-        #expect(inflate([0x01, 0x05, 0x00, 0x00, 0x00], backend: .bytes) == .failed) // Stored: NLEN isn't ~LEN.
-        #expect(inflate([], backend: .bytes) == .failed) // No block at all.
+        #expect(inflate([0x07]) == .failed) // Block type 3.
+        #expect(inflate([0x01, 0x05, 0x00, 0x00, 0x00]) == .failed) // Stored: NLEN isn't ~LEN.
+        #expect(inflate([]) == .failed) // No block at all.
         // A fixed block whose first symbol is a match reaching before the start: final bit 1, type 01,
         // length code 257 (0000001), distance code 0 (00000), packed least significant bit first.
-        #expect(inflate([0x03, 0x02], backend: .bytes) == .failed)
-        #expect(inflate([0x03, 0x02], backend: .zlib) == .failed)
-        #expect(inflate([0x03, 0x00], backend: .bytes) == .decoded([])) // An empty fixed block.
+        #expect(inflate([0x03, 0x02]) == .failed)
+        #expect(zlibInflate([0x03, 0x02]) == .failed)
+        #expect(inflate([0x03, 0x00]) == .decoded([])) // An empty fixed block.
     }
 }
 
@@ -128,8 +156,6 @@ func checkCorruptStreamsMatchZlib(iterations: Int) {
         for level: Int32 in [0, 1, 6, 9] where !(level == 6 && strategy == Z_DEFAULT_STRATEGY) {
             checkDecodesWhatZlibEncodes(large.name, large.bytes, level: level, strategy: strategy)
         }
-        // The original test checked both backends once per strategy.
-        #expect(inflate(Zlib.compress(large.bytes), backend: .zlib) == .decoded(large.bytes))
     }
 
     /// All 20,000 mutations.

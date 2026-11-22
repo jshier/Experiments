@@ -4,11 +4,14 @@ internal import CBytesCRC
 #endif
 
 /// A bzip2 decoder: the `.bz2` format of bzip2 0.9.5 and later (Julian Seward's), whole streams into a whole
-/// buffer.
+/// buffer, or into output of any size, as it's wanted.
 ///
 /// ```swift
 /// var decoder = BZip2Decoder()
 /// let consumed = try decoder.decompressAll(stream, into: &output)   // through the end-of-stream marker
+///
+/// decoder.reset()                                                   // the next stream, a buffer at a time
+/// let progress = try decoder.decompress(rest, into: &chunk)
 /// ```
 ///
 /// A stream is a 4-byte header (`BZh1` through `BZh9`, the block size in 100,000s), blocks, and an end marker
@@ -34,16 +37,25 @@ internal import CBytesCRC
 /// Apple silicon) is checked, and at the end the stream's. Blocks old encoders "randomized" (bzip2 0.9.0 and
 /// 0.9.5 did, for repetitive data; 1.0 never does) are decoded too.
 ///
-/// The decoder's workspace (12 MB: links for the largest block, its runs, tables) is allocated once, at
+/// ``decompress(_:into:)`` decodes a block at a time into the workspace and undoes its run-length coding
+/// straight into the caller's output, stopping wherever that fills (a block can expand far beyond its 900 KB
+/// through runs), so memory stays the workspace's however large the stream.
+///
+/// The decoder's workspace (7.8 MB: links for the largest block, its runs, tables) is allocated once, at
 /// creation; decoding allocates nothing. Malformed input throws; it never reads or writes outside the buffers.
 @safe
 public struct BZip2Decoder: ~Copyable {
     var workspace = BZip2Workspace()
+    /// Where ``decompress(_:into:)`` is in the current stream.
+    var streaming = BZip2StreamingState()
 
     /// Creates a decoder, allocating its workspace.
     public init() {}
 
     /// Decodes a bzip2 stream, and any streams that directly follow it, into `output`'s free capacity.
+    ///
+    /// The fastest way to decode, when the output has room for all of it. It discards any stream
+    /// ``decompress(_:into:)`` was decoding (as ``reset()`` does).
     ///
     /// - Parameters:
     ///   - input: The stream, at its `BZh` header. Bytes after the last stream's end marker (rounded up to a
@@ -60,6 +72,7 @@ public struct BZip2Decoder: ~Copyable {
     public mutating func decompressAll(
         _ input: RawSpan, decodedSize: Int? = nil, into output: inout OutputRawSpan
     ) throws(BytesError) -> Int {
+        reset()
         if let decodedSize {
             guard decodedSize >= 0 else { throw .invalidValue }
             guard decodedSize <= output.freeCapacity else { throw .insufficientCapacity }
@@ -568,15 +581,58 @@ enum BZip2Stream {
         _ block: UnsafePointer<UInt8>, count: Int, output: UnsafeMutablePointer<UInt8>, at start: Int,
         capacity: Int, overrun: BytesError
     ) throws(BytesError) -> Int {
+        // Unsafe: as `expand` says.
+        try unsafe expand(
+            block, count: count, from: BZip2Expansion(), output: output, at: start, capacity: capacity, stopsWhenFull: false,
+            overrun: overrun
+        ).end
+    }
+
+    /// ``expandRuns(_:count:output:at:capacity:overrun:)`` resumable: from `state`, stopping where the output
+    /// fills (mid-run if need be) instead of throwing.
+    ///
+    /// - Returns: Where it stopped (the block is done when `state.isDone(count:)`), and where the output ended.
+    @inline(never)
+    static func expandRunsResumably(
+        _ block: UnsafePointer<UInt8>, count: Int, from state: BZip2Expansion, output: UnsafeMutablePointer<UInt8>,
+        at start: Int, capacity: Int
+    ) throws(BytesError) -> (state: BZip2Expansion, end: Int) {
+        // Unsafe: as `expand` says.
+        try unsafe expand(
+            block, count: count, from: state, output: output, at: start, capacity: capacity, stopsWhenFull: true,
+            overrun: .insufficientCapacity
+        )
+    }
+
+    /// The run-length decoding, from `state`: with `stopsWhenFull`, it returns where the output fills; otherwise
+    /// a full output throws `overrun`.
+    @inline(__always)
+    static func expand(
+        _ block: UnsafePointer<UInt8>, count: Int, from state: BZip2Expansion, output: UnsafeMutablePointer<UInt8>,
+        at start: Int, capacity: Int, stopsWhenFull: Bool, overrun: BytesError
+    ) throws(BytesError) -> (state: BZip2Expansion, end: Int) {
         // Unsafe: block loads and output stores. Safe: 16-byte loads start at 3 or more and end by `count`;
-        // 16-byte stores run only with 16 bytes of room; every other store is checked against `capacity`.
+        // 16-byte stores run only with 16 bytes of room; every other store is checked against `capacity`, and
+        // `state.index` is at most `count` (it's only ever this function's own).
         @inline(always) func load(_ offset: Int) -> SIMD16<UInt8> {
             unsafe UnsafeRawPointer(block + offset).loadUnaligned(as: SIMD16<UInt8>.self)
         }
-        var index = 0
+        var index = state.index
         var end = start
-        var last = -1 // The previous byte; -1 after a run's count.
-        var same = 0 // Equal bytes ending at `last`, 1 through 4.
+        var last = state.last // The previous byte; -1 after a run's count.
+        var same = state.same // Equal bytes ending at `last`, 1 through 4.
+        if stopsWhenFull && state.pending > 0 {
+            // The rest of a run whose count didn't fit last time.
+            let room = capacity &- end
+            let written = min(state.pending, room)
+            unsafe repeatByte(output + end, UInt8(truncatingIfNeeded: last), count: written, room: room)
+            end &+= written
+            if written < state.pending {
+                return (BZip2Expansion(index: index, last: last, same: same, pending: state.pending &- written), end)
+            }
+            same = 0
+            last = -1
+        }
         while index < count {
             if same < 4 && index >= 3 && count &- index >= 16 && capacity &- end >= 16 {
                 // No 4 equal bytes end in these 16 (the 3 before them included): no count among them, and none
@@ -595,17 +651,27 @@ enum BZip2Stream {
                 }
             }
             let byte = Int(unsafe block[index])
-            index &+= 1
             if same == 4 {
                 // `byte` is the run's count: more of `last`.
-                guard byte <= capacity &- end else { throw overrun }
-                unsafe repeatByte(output + end, UInt8(truncatingIfNeeded: last), count: byte, room: capacity &- end)
+                index &+= 1
+                let room = capacity &- end
+                guard byte <= room else {
+                    guard stopsWhenFull else { throw overrun }
+                    // As much as fits; the rest next time.
+                    unsafe repeatByte(output + end, UInt8(truncatingIfNeeded: last), count: room, room: room)
+                    return (BZip2Expansion(index: index, last: last, same: same, pending: byte &- room), capacity)
+                }
+                unsafe repeatByte(output + end, UInt8(truncatingIfNeeded: last), count: byte, room: room)
                 end &+= byte
                 same = 0
                 last = -1
                 continue
             }
-            guard end < capacity else { throw overrun }
+            guard end < capacity else {
+                guard stopsWhenFull else { throw overrun }
+                return (BZip2Expansion(index: index, last: last, same: same, pending: 0), end)
+            }
+            index &+= 1
             unsafe output[end] = UInt8(truncatingIfNeeded: byte)
             end &+= 1
             same = byte == last ? same &+ 1 : 1
@@ -613,7 +679,7 @@ enum BZip2Stream {
         }
         // Four equal bytes always have a count after them.
         guard same != 4 else { throw .invalidValue }
-        return end
+        return (BZip2Expansion(index: index, last: last, same: same, pending: 0), end)
     }
 
     /// Writes `count` copies of `byte` with 16-byte stores when `room` leaves space for their overrun, exactly
@@ -712,6 +778,22 @@ struct BZip2SymbolState {
         runByte = UInt32(unsafe BZip2Stream.moveToFront(&front, list, index: isRun ? 0 : symbol &- 1))
         return false
     }
+}
+
+/// Where undoing a block's run-length coding stopped: the next byte of the block, the bytes before it, and the
+/// copies of a run still to write when the output filled in the middle of one.
+struct BZip2Expansion {
+    /// The next byte of the block to read.
+    var index = 0
+    /// The previous byte; -1 after a run's count.
+    var last = -1
+    /// Equal bytes ending at `last`, 1 through 4.
+    var same = 0
+    /// Copies of `last` still to write: a run's count that didn't fit.
+    var pending = 0
+
+    /// Whether all of a block of `count` bytes has been written.
+    func isDone(count: Int) -> Bool { index == count && pending == 0 }
 }
 
 /// What `decodeSymbols` needs from a block's tables.
@@ -971,6 +1053,9 @@ struct BZip2Bits {
     /// Whether bits past the end of the input were read.
     var isOverrun: Bool { bitPosition > end &<< 3 }
 
+    /// The input's bits not yet read (negative once zeros past its end have been).
+    var remainingBits: Int { end &<< 3 &- bitPosition }
+
     /// The error for a value that isn't valid: ``BytesError/insufficientData`` if it came from past the end.
     var failure: BytesError { isOverrun ? .insufficientData : .invalidValue }
 }
@@ -1083,7 +1168,13 @@ enum BZip2CRC {
 
     /// The CRC of `count` bytes at `data`.
     static func checksum(_ data: UnsafePointer<UInt8>, count: Int, tables: UnsafePointer<UInt32>) -> UInt32 {
-        var crc: UInt32 = 0xFFFF_FFFF
+        ~(unsafe extend(0xFFFF_FFFF, data, count: count, tables: tables))
+    }
+
+    /// Continues the unconditioned register `crc` (all ones to start, inverted at the end) with `count` bytes at
+    /// `data`: folded 64 bytes at a time where there are 64 or more, then with the tables.
+    static func extend(_ crc: UInt32, _ data: UnsafePointer<UInt8>, count: Int, tables: UnsafePointer<UInt32>) -> UInt32 {
+        var crc = crc
         var index = 0
         #if HardwareCRC && arch(arm64) && !Portable
         if count >= 64 {
@@ -1094,7 +1185,7 @@ enum BZip2CRC {
             crc = withUnsafeBytes(of: &block) { unsafe update(0, $0.baseAddress!.assumingMemoryBound(to: UInt8.self), 16, tables) }
         }
         #endif
-        return ~(unsafe update(crc, data + index, count &- index, tables))
+        return unsafe update(crc, data + index, count &- index, tables)
     }
 
     /// Updates the unconditioned register `crc` with `count` bytes at `data`, eight at a time with the tables.

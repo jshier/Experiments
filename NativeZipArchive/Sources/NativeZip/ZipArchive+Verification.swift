@@ -12,7 +12,6 @@ public extension ZipArchive {
     /// - Parameters:
     ///   - entries: The entries to check; all of the archive's by default.
     ///   - maxConcurrency: The most entries to decompress at once.
-    ///   - backend: Which DEFLATE and CRC-32 implementation to use.
     ///   - password: The password, for encrypted entries.
     /// - Returns: The entries that failed and why (the errors of ``contents(of:using:password:_:)``), in the
     ///   order given. Empty means every entry is intact. If the task is cancelled, the entries not checked are
@@ -21,13 +20,12 @@ public extension ZipArchive {
     func verify(
         _ entries: [ZipEntry]? = nil,
         maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount,
-        backend: ZipDecoder.Backend = .bytes,
         password: String? = nil
     ) async -> [(entry: ZipEntry, error: any Error)] {
         let indexed = Array((entries ?? self.entries).filter { $0.kind != .directory }.enumerated())
         let failures = FailureLog(count: indexed.count)
         // The body never throws (failures are recorded instead), so neither does the loop.
-        try? await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, backend: backend, weight: \.element.uncompressedSize) {
+        try? await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, weight: \.element.uncompressedSize) {
             [self] item, decoder in
             do {
                 try contents(of: item.element, using: &decoder, password: password) { _ in }

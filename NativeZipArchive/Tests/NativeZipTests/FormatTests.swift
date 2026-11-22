@@ -23,16 +23,43 @@ private func zip(_ arguments: [String], in directory: URL) throws {
     try ExternalTool.run("/usr/bin/zip", ["-q"] + arguments, in: directory)
 }
 
+/// One archive per method (and cipher) with a single entry of 3.3 to 6 MB: output over several of the decoder's 1 MB
+/// chunks, with matches reaching back across them; extraction takes its pipelined path (4 MB and up, below that one
+/// task decodes and writes each chunk in turn). bzip2-large's entry repeats 20 KB; deflate64-large's is fixed-Huffman
+/// Deflate64 with long matches at every distance; the stored and deflated ones hold 5.1 MB of one text, and the others
+/// 5 MB of another, or (LZMA, xz, bzip2-zipcrypto, and the dynamic Deflate64 ones) its first 3.3 MB.
+private let largeFixtures = [
+    "large-zipcrypto-stored.zip", "large-aes256-store.zip",
+    "large-zipcrypto-deflated.zip", "large-aes256-deflate.zip",
+    "deflate64-large.zip", "deflate64-dynamic.zip", "deflate64-zipcrypto.zip",
+    "bzip2-large.zip", "bzip2-zipcrypto.zip",
+    "lzma-large.zip", "lzma-zipcrypto.zip",
+    "xz-large.zip", "xz-zipcrypto.zip",
+    "zstd-large.zip", "zstd-zipcrypto.zip",
+]
+
 @Suite struct FormatTests {
-    @Test(arguments: ["bzip2.zip", "bzip2-large.zip", "lzma.zip", "xz.zip", "deflate64.zip", "zipcrypto.zip", "bsdtar-traditional.zip",
-                      "bsdtar-aes128.zip", "bsdtar-aes256.zip", "prefixed.zip", "prefixed-adjusted.zip",
-                      "large-zipcrypto-stored.zip", "large-zipcrypto-deflated.zip", "large-aes256-store.zip", "large-aes256-deflate.zip",
-                      "zstd.zip", "zstd-large.zip", "zstd-zipcrypto.zip"])
+    @Test(arguments: ["bzip2.zip", "lzma.zip", "xz.zip", "deflate64.zip", "zstd.zip", "zipcrypto.zip", "bsdtar-traditional.zip",
+                      "bsdtar-aes128.zip", "bsdtar-aes256.zip", "prefixed.zip", "prefixed-adjusted.zip"] + largeFixtures)
     func decodesAndVerifies(name: String) async throws {
         let archive = try fixture(name)
-        for backend in [ZipDecoder.Backend.bytes, .zlib] {
-            let failures = await archive.verify(backend: backend, password: "secret")
-            #expect(failures.isEmpty, "\(name): \(failures.map(\.error))")
+        let failures = await archive.verify(password: "secret")
+        #expect(failures.isEmpty, "\(name): \(failures.map(\.error))")
+    }
+
+    /// One decoder reads every method's entries in turn (each encrypted one too), then the small ones again in reverse:
+    /// nothing from one entry or method is left over for the next (each entry's size and CRC-32 are checked).
+    @Test func readsEveryMethodWithOneDecoder() throws {
+        let small = ["bzip2.zip", "lzma.zip", "xz.zip", "deflate64.zip", "zstd.zip", "zipcrypto.zip", "bsdtar-aes256.zip"]
+        let encrypted = ["bzip2-zipcrypto.zip", "lzma-zipcrypto.zip", "xz-zipcrypto.zip", "deflate64-zipcrypto.zip", "zstd-zipcrypto.zip"]
+        var decoder = ZipDecoder()
+        for name in small + encrypted + small.reversed() {
+            let archive = try fixture(name)
+            for entry in archive.entries {
+                var count: UInt64 = 0
+                try archive.contents(of: entry, using: &decoder, password: "secret") { count += UInt64($0.byteCount) }
+                #expect(count == entry.uncompressedSize, "\(name)")
+            }
         }
     }
 
@@ -42,6 +69,13 @@ private func zip(_ arguments: [String], in directory: URL) throws {
         #expect(try fixture("xz.zip").entries[0].method == ZipArchive.Method.xz)
         #expect(try fixture("zstd.zip").entries[0].method == ZipArchive.Method.zstd)
         #expect(try fixture("zipcrypto.zip").entries[0].encryption == .traditional)
+        for (name, method) in [("bzip2-zipcrypto.zip", ZipArchive.Method.bzip2), ("lzma-zipcrypto.zip", ZipArchive.Method.lzma),
+                               ("xz-zipcrypto.zip", ZipArchive.Method.xz), ("deflate64-zipcrypto.zip", ZipArchive.Method.deflate64)] {
+            let entry = try fixture(name).entries[0]
+            #expect(entry.method == method && entry.encryption == .traditional, "\(name)")
+        }
+        // Python's zipfile writes LZMA with an end marker (flag bit 1).
+        #expect(try fixture("lzma-zipcrypto.zip").entries[0].flags & 0x2 != 0)
         // AES entries report the real method, not 99. bsdtar writes AE-2 (no CRC) for small entries.
         let aes = try fixture("bsdtar-aes256.zip").entries[0]
         #expect(aes.method == ZipArchive.Method.deflated)
@@ -150,24 +184,33 @@ private func zip(_ arguments: [String], in directory: URL) throws {
         #expect(try FileManager.default.destinationOfSymbolicLink(atPath: directory.appending(path: "link").path) == "dir/target.txt")
     }
 
-    /// Large encrypted entries, decrypted in pieces as they're extracted (the 5 MB entries take the pipelined path).
-    @Test func extractsLargeEncryptedEntries() async throws {
+    /// Every method's large entries, plain and encrypted (decrypted in pieces as they're extracted), through the
+    /// pipelined path: decoded in a child task into two alternating buffers, each reading the other's end as history.
+    @Test func extractsLargeEntriesOfEveryMethod() async throws {
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
         let directory = temporary.url
         var options = ExtractionOptions()
         options.password = "secret"
-        let names = ["large-zipcrypto-stored.zip", "large-zipcrypto-deflated.zip", "large-aes256-store.zip", "large-aes256-deflate.zip"]
         let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
-            for name in names {
+            for name in largeFixtures {
                 _ = try await extractor.add(fixture(name), into: FilePath(name), options: options)
             }
         }
         #expect(failures.isEmpty, "\(failures)")
-        let expected = try Data(contentsOf: directory.appending(path: names[0]).appending(path: "large.txt"))
-        #expect(expected.count == 17 * 300_000)
-        for name in names.dropFirst() {
-            #expect(try Data(contentsOf: directory.appending(path: name).appending(path: "large.txt")) == expected, "\(name)")
+        // Beyond the CRC-32s: the texts the fixtures share (`largeFixtures`) compared.
+        let stored = try Data(contentsOf: directory.appending(path: "large-zipcrypto-stored.zip/large.txt"))
+        let text = try Data(contentsOf: directory.appending(path: "zstd-large.zip/large.txt"))
+        #expect(stored.count == 17 * 300_000 && text.count == 5_000_000)
+        for name in largeFixtures {
+            let entry = try fixture(name).entries[0]
+            let extracted = try Data(contentsOf: directory.appending(path: name).appending(path: entry.path))
+            #expect(UInt64(extracted.count) == entry.uncompressedSize, "\(name)")
+            switch extracted.count {
+            case stored.count: #expect(extracted == stored, "\(name)")
+            case text.count, 3_300_000: #expect(extracted == text.prefix(extracted.count), "\(name)")
+            default: break
+            }
         }
     }
 

@@ -159,11 +159,11 @@ struct LZMARangeDecoder {
     }
 
     /// Whether the input is still before `limit` (the fast loop's input limit), or in careful mode, not past
-    /// the end.
+    /// it (the input's end, or a streaming decoder's margin before it).
     @inline(__always)
     func hasInput(before limit: UnsafePointer<UInt8>) -> Bool {
         // Unsafe: comparing pointers only.
-        unsafe careful ? input <= end : input < limit
+        unsafe careful ? input <= limit : input < limit
     }
 
     /// Shifts in a byte when the range drops below 2^24.
@@ -443,23 +443,25 @@ enum LZMALoop {
     /// short of it only for an end marker or, in careful mode, input that ran out).
     ///
     /// - Parameters:
-    ///   - limit: The position to stop at. The fast loop stops `outputMargin` before it.
-    ///   - inputLimit: The fast loop stops when the input reaches it.
+    ///   - limit: The position no match may pass. The fast loop stops `outputMargin` before it.
+    ///   - stop: In careful mode, the position to stop starting symbols at: `limit`, or less for a streaming
+    ///     decoder (a match started before it may end past it, up to `limit`).
+    ///   - inputLimit: The fast loop stops when the input reaches it; the careful one when the input passes it.
     ///   - allowsEndMarker: Whether an end marker (distance `0xFFFF_FFFF`) may end the stream.
     ///   - overrun: The error for a match past `limit`.
     /// - Returns: Whether an end marker was decoded.
     @inline(__always)
     static func run(
         _ registers: inout LZMARegisters, _ decoder: inout LZMARangeDecoder, dictionary: UnsafeMutablePointer<UInt8>,
-        limit: Int, inputLimit: UnsafePointer<UInt8>, careful: Bool, lc: Int, literalPositionMask: Int,
-        positionMask: Int, dictionarySize: Int, allowsEndMarker: Bool, overrun: BytesError
+        limit: Int, stop carefulStop: Int, inputLimit: UnsafePointer<UInt8>, careful: Bool, lc: Int,
+        literalPositionMask: Int, positionMask: Int, dictionarySize: Int, allowsEndMarker: Bool, overrun: BytesError
     ) throws(BytesError) -> Bool {
         typealias P = LZMAProbabilities
         var rc = decoder.with(careful: careful) // This loop's mode, as a constant.
         var state = registers.state
         var rep0 = registers.rep0, rep1 = registers.rep1, rep2 = registers.rep2, rep3 = registers.rep3
         var position = registers.position
-        let stop = careful ? limit : limit &- outputMargin
+        let stop = careful ? carefulStop : limit &- outputMargin
         var endMarker = false
 
         // Unsafe: dictionary reads and writes. Safe: writes are below `limit` (checked per match in careful
@@ -576,7 +578,7 @@ enum LZMALoop {
         var localRegisters = registers
         var localDecoder = decoder
         let endMarker = try unsafe run(
-            &localRegisters, &localDecoder, dictionary: dictionary, limit: limit, inputLimit: inputLimit,
+            &localRegisters, &localDecoder, dictionary: dictionary, limit: limit, stop: limit, inputLimit: inputLimit,
             careful: false, lc: 3, literalPositionMask: 0, positionMask: 3, dictionarySize: dictionarySize,
             allowsEndMarker: allowsEndMarker, overrun: .invalidValue
         )
@@ -595,7 +597,7 @@ enum LZMALoop {
         var localRegisters = registers
         var localDecoder = decoder
         let endMarker = try unsafe run(
-            &localRegisters, &localDecoder, dictionary: dictionary, limit: limit, inputLimit: inputLimit,
+            &localRegisters, &localDecoder, dictionary: dictionary, limit: limit, stop: limit, inputLimit: inputLimit,
             careful: false, lc: model.lc, literalPositionMask: model.literalPositionMask,
             positionMask: model.positionMask, dictionarySize: model.dictionarySize, allowsEndMarker: allowsEndMarker,
             overrun: .invalidValue
@@ -605,18 +607,32 @@ enum LZMALoop {
         return endMarker
     }
 
-    /// The careful loop: every input byte and match checked.
-    @inline(never)
+    /// The careful loop to `limit`, while input remains (reading zeros past the end).
+    @inline(__always)
     static func careful(
         _ registers: inout LZMARegisters, _ decoder: inout LZMARangeDecoder, dictionary: UnsafeMutablePointer<UInt8>,
         limit: Int, model: LZMAModel, allowsEndMarker: Bool, overrun: BytesError
+    ) throws(BytesError) -> Bool {
+        // Unsafe and safe as the full form.
+        try unsafe careful(
+            &registers, &decoder, dictionary: dictionary, limit: limit, stop: limit, inputLimit: decoder.end, model: model,
+            allowsEndMarker: allowsEndMarker, overrun: overrun
+        )
+    }
+
+    /// The careful loop: every input byte and match checked. It starts symbols while the position is before
+    /// `stop` and the input not past `inputLimit`.
+    @inline(never)
+    static func careful(
+        _ registers: inout LZMARegisters, _ decoder: inout LZMARangeDecoder, dictionary: UnsafeMutablePointer<UInt8>,
+        limit: Int, stop: Int, inputLimit: UnsafePointer<UInt8>, model: LZMAModel, allowsEndMarker: Bool, overrun: BytesError
     ) throws(BytesError) -> Bool {
         // Unsafe: the loop's pointers. Safe: in careful mode it checks every input byte against `decoder.end` and
         // every match against `limit` and what's decoded.
         var localRegisters = registers
         var localDecoder = decoder
         let endMarker = try unsafe run(
-            &localRegisters, &localDecoder, dictionary: dictionary, limit: limit, inputLimit: decoder.end,
+            &localRegisters, &localDecoder, dictionary: dictionary, limit: limit, stop: stop, inputLimit: inputLimit,
             careful: true, lc: model.lc, literalPositionMask: model.literalPositionMask,
             positionMask: model.positionMask, dictionarySize: model.dictionarySize, allowsEndMarker: allowsEndMarker,
             overrun: overrun
@@ -667,6 +683,46 @@ enum LZMALoop {
             &registers, &decoder, dictionary: dictionary, limit: limit, model: model, allowsEndMarker: allowsEndMarker,
             overrun: overrun
         )
+    }
+
+    /// Sets every probability of `model` to one half and the state and distances to their start.
+    ///
+    /// - Parameter probabilities: The workspace, which holds `model`'s probabilities.
+    static func resetState(_ registers: inout LZMARegisters, _ model: LZMAModel, probabilities: UnsafeMutablePointer<UInt16>) {
+        let count = LZMAProbabilities.count(lc: model.lc, lp: model.literalPositionMask.nonzeroBitCount)
+        // Unsafe: filling the model. Safe: the caller's workspace holds `count` probabilities.
+        unsafe probabilities.update(repeating: LZMAProbabilities.initial, count: count)
+        unsafe probabilities[LZMAProbabilities.topSlot] = LZMAProbabilities.topValue
+        registers.state = 0
+        registers.rep0 = 1
+        registers.rep1 = 1
+        registers.rep2 = 1
+        registers.rep3 = 1
+    }
+
+    /// Decodes one LZMA2 chunk's LZMA data, `packed` bytes at `input`, into `dictionary` up to position `limit`:
+    /// it must fill the chunk exactly, consume its input exactly, and leave the range decoder finished.
+    ///
+    /// - Throws: ``BytesError/invalidValue`` for anything else.
+    static func decodeChunk(
+        _ input: UnsafePointer<UInt8>, packed: Int, _ registers: inout LZMARegisters, model: LZMAModel,
+        dictionary: UnsafeMutablePointer<UInt8>, limit: Int, probabilities: UnsafeMutablePointer<UInt16>
+    ) throws(BytesError) {
+        // Unsafe: the range decoder's first five bytes, and the chunk's end. Safe: the caller checked that the
+        // input holds `packed` bytes, and they're checked here to be at least 5; and that the dictionary holds
+        // `limit` bytes.
+        guard packed >= 5, unsafe input[0] == 0 else { throw .invalidValue }
+        let code = unsafe UInt32(input[1]) &<< 24 | UInt32(input[2]) &<< 16 | UInt32(input[3]) &<< 8 | UInt32(input[4])
+        var decoder = unsafe LZMARangeDecoder(
+            range: 0xFFFF_FFFF, code: code, input: input + 5, end: input + packed, probabilities: probabilities, careful: true
+        )
+        _ = try unsafe decode(
+            &registers, &decoder, dictionary: dictionary, limit: limit, model: model, allowsEndMarker: false,
+            overrun: .invalidValue
+        )
+        guard registers.position == limit, unsafe decoder.input == decoder.end, decoder.code == 0 else {
+            throw .invalidValue
+        }
     }
 
     /// Decodes what must be an end marker, at `registers.position`: a match whose distance is `0xFFFF_FFFF`.

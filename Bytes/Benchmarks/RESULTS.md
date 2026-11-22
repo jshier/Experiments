@@ -3114,3 +3114,44 @@ Tried and reverted:
 - **Brotli's last-distance check by four bytes at once** (q5): −24% instructions on random input, but +1.1 to +2.0% on
   the text and binary corpus at q5 and +6–8% at q9. `ShouldCompress` keeps most of the random-input gain (−16%) without
   the cost.
+
+## Streaming decoders for NativeZip (2026-11-22, M1 Max; baselines `zipnative-old-{1,2}` → `zipnative-new-{1,2}`)
+
+NativeZip now decodes every zip method with BytesCompression (NativeZipArchive's RESULTS.md, step17), which needed
+output streaming with bounded memory from decoders that only decoded into a whole-output buffer:
+
+- **`DeflateDecoder`**: `DeflateVariant` (`.deflate`, `.deflate64`: 64 KB window, length symbol 285 as base 3 + 16
+  extra bits, distance codes 30–31) through `init(variant:)` (raw only). Deflate64 has its own `@inline(never)` copy of
+  the symbol loop over one `@inline(__always)` body (no `merged` function). New
+  `decompress(_:into:historyCount:)` decodes into the caller's buffer after `historyCount` bytes of history (at least
+  `historySize`), which is how NativeZip decodes without a copy out of a window.
+  The decode loop also got faster for every stream: the per-symbol input check became an output limit worked out in
+  rounds (each iteration reads at most 16 bits per byte written, 20 for Deflate64, so the output limit guarantees 32
+  bytes of input), and `HuffmanEntry`'s fields are read as named `BitField`s instead of range subscripts (3–5% alone).
+- **`BZip2Decoder.decompress(_:into:)`** (`BZip2Streaming.swift`): a block decodes into the workspace, then its run
+  expansion writes straight into the output and stops anywhere, mid-run included (a block can expand far past
+  900 KB); symbol decoding pauses within 20 bits of the input's end, and a block's tables are read again when they run
+  past it, so input splits anywhere (at most a block's tables, 32 KB, unconsumed).
+- **`LZMADecoder`** (raw LZMA1) and **`XZDecoder`** (`LZMAStreaming.swift`, `XZDecoder.swift`): a flat window sliding
+  the last dictionary's worth to its front, grown by doubling up to the dictionary (or the stated size) plus room.
+  Raw LZMA's input splits anywhere: within 32 bytes of the input's end each symbol is first decoded without effect
+  (`LzmaDec_TryDummy`'s approach), at most 20 bytes needed to progress; xz goes an LZMA2 chunk (65,542 bytes) at a time.
+
+All three conform to `ResettableByteTransform`; errors latch until `reset`. Instructions (p50, exact; identical in both
+rounds):
+
+| Row | old | new | Change |
+|---|---|---|---|
+| Inflate dickens / samba / x-ray / xml: Bytes | 141 / 174 / 205 / 24 M | 129 / 159 / 187 / 22 M | −8.3 to −8.8% |
+| Inflate Main.js / Main.css / JSON 119 KB: Bytes | 28 M / 2,154 K / 584 K | 25 M / 1,970 K / 537 K | −8.0 to −10.7% |
+| Inflate gzip rows: Bytes | | | −6.9 to −9.0% |
+| Inflate JSON 1.6 KB, random 1 MB | 30 K, 213 K | same | 0 |
+| Inflate64 x-ray, Main.css (new) | — | 188 M, 1,971 K | within 0.2% of Inflate |
+| Inflate … history 1 MB (new, dickens, x-ray, Main.css) | — | same as `decompressAll` | 0 |
+| LZMA decode -6 (5 Silesia files): Bytes | | | −0.1 to −0.2% (shared helpers) |
+| LZMA stream raw / xz, 1 MiB out (new) | — | within 0.1–0.8% of whole | |
+| BZip2 decode -9 (7 inputs): Bytes | | | 0 to −0.2% |
+| BZip2 … streaming 1 MiB (new) | — | +0.2–0.5% of whole (1.6 KB: +2.4%) | |
+
+Against the references in the same run: DEFLATE now runs 1.37x libdeflate's instructions on dickens (was 1.50x) and
+1.12x zlib's (was 1.23x); bzip2 0.53–0.59x libbz2's; LZMA 0.90–1.14x liblzma's. Allocation gates for every streaming decoder read 0.

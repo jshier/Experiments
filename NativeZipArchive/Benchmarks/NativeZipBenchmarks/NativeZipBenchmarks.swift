@@ -1,8 +1,12 @@
 import Benchmark
+import Bytes
+import BytesReferenceCodecs
+import Compression
 @_spi(Benchmarking) import Disk
 import Foundation
 @_spi(Benchmarking) import NativeZip
 import System
+import zlib
 
 /// Disk's file system calls per iteration (the `SyscallCounting` trait: `swift package --traits SyscallCounting
 /// --scratch-path .build-syscalls --disable-sandbox benchmark`); not recorded without it.
@@ -86,78 +90,110 @@ let benchmarks: @Sendable () -> Void = {
         archive.entries.first { $0.kind == .file }!
     }
 
-    // Each DEFLATE benchmark runs with the `Bytes` decoder (the default) and with zlib.
-    for backend in [ZipDecoder.Backend.bytes, .zlib] {
-        let suffix = backend == .bytes ? "Bytes" : "zlib"
-
-        Benchmark("Inflate + CRC 32 MB text: \(suffix)", configuration: large) { benchmark in
-            let archive = try ZipArchive(url: Fixtures.largeText)
+    // NativeZip's DEFLATE rows ("Bytes"), each beside a "zlib" row of the same name. Until 2026-11-22 the zlib rows ran
+    // the library's zlib backend through the same `ZipArchive` calls; that backend is gone, so they're now a pure codec
+    // comparison: zlib's `inflate` into a reused 1 MB buffer and zlib's `crc32_z` over each chunk (`ZlibInflater`),
+    // called directly, which is the work the backend did. Rows that needed the backend in the library (verifying and
+    // extracting with zlib) were dropped.
+    for (name, url) in [("text", Fixtures.largeText), ("raster", Fixtures.raster)] {
+        // Raster: runs of 2- to 7-byte pixels, matches 2 to 7 bytes back, which copy a repeating pattern.
+        Benchmark("Inflate + CRC 32 MB \(name): Bytes", configuration: large) { benchmark in
+            let archive = try ZipArchive(url: url)
             let entry = firstFile(archive)
-            var decoder = ZipDecoder(backend: backend)
+            var decoder = ZipDecoder()
             benchmark.startMeasurement()
             for _ in benchmark.scaledIterations {
                 try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
             }
         }
 
-        // Runs of 2- to 7-byte pixels: matches 2 to 7 bytes back, which copy a repeating pattern.
-        Benchmark("Inflate + CRC 32 MB raster: \(suffix)", configuration: large) { benchmark in
-            let archive = try ZipArchive(url: Fixtures.raster)
-            let entry = firstFile(archive)
-            var decoder = ZipDecoder(backend: backend)
+        Benchmark("Inflate + CRC 32 MB \(name): zlib", configuration: large) { benchmark in
+            let entry = try firstFile(ZipArchive(url: url))
+            let data = try Data(contentsOf: url, options: .alwaysMapped)
+            let inflater = ZlibInflater()
             benchmark.startMeasurement()
             for _ in benchmark.scaledIterations {
+                let payload = PayloadLocator.payloadRange(of: entry, in: data)
+                let (count, crc) = inflater.decode(data.bytes.extracting(payload))
+                precondition(count == Int(entry.uncompressedSize) && crc == entry.crc32)
+            }
+        }
+    }
+
+    Benchmark("Inflate + CRC 2,000 small files: Bytes", configuration: large) { benchmark in
+        let archive = try ZipArchive(url: Fixtures.smallFiles)
+        let files = archive.entries.filter { $0.kind == .file }
+        var decoder = ZipDecoder()
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            for entry in files {
                 try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
             }
         }
+    }
 
-        Benchmark("Inflate + CRC 2,000 small files: \(suffix)", configuration: large) { benchmark in
-            let archive = try ZipArchive(url: Fixtures.smallFiles)
-            let files = archive.entries.filter { $0.kind == .file }
-            var decoder = ZipDecoder(backend: backend)
-            benchmark.startMeasurement()
-            for _ in benchmark.scaledIterations {
-                for entry in files {
-                    try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
-                }
+    Benchmark("Inflate + CRC 2,000 small files: zlib", configuration: large) { benchmark in
+        let files = try ZipArchive(url: Fixtures.smallFiles).entries.filter { $0.kind == .file }
+        let data = try Data(contentsOf: Fixtures.smallFiles, options: .alwaysMapped)
+        let inflater = ZlibInflater()
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            for entry in files {
+                let payload = PayloadLocator.payloadRange(of: entry, in: data)
+                let (count, crc) = inflater.decode(data.bytes.extracting(payload))
+                precondition(count == Int(entry.uncompressedSize) && crc == entry.crc32)
             }
         }
+    }
 
-        Benchmark("Verify 2,000 small files (parallel): \(suffix)") { benchmark in
-            let archive = try ZipArchive(url: Fixtures.smallFiles)
-            benchmark.startMeasurement()
-            for _ in benchmark.scaledIterations {
-                let failures = await archive.verify(backend: backend)
-                precondition(failures.isEmpty)
-            }
+    Benchmark("Verify 2,000 small files (parallel): Bytes") { benchmark in
+        let archive = try ZipArchive(url: Fixtures.smallFiles)
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            let failures = await archive.verify()
+            precondition(failures.isEmpty)
         }
+    }
 
-        extractionBenchmark("Extract 32 MB text: \(suffix)", archive: Fixtures.largeText, backend: backend, configuration: large)
-        extractionBenchmark("Extract 2,000 small files: \(suffix)", archive: Fixtures.smallFiles, backend: backend, configuration: files)
+    extractionBenchmark("Extract 32 MB text: Bytes", archive: Fixtures.largeText, configuration: large)
+    extractionBenchmark("Extract 2,000 small files: Bytes", archive: Fixtures.smallFiles, configuration: files)
 
-        // A stored entry is only a CRC: the backends' checksums end to end.
-        Benchmark("Stored + CRC 32 MB random: \(suffix)") { benchmark in
-            let archive = try ZipArchive(url: Fixtures.largeRandom)
-            let entry = firstFile(archive)
-            var decoder = ZipDecoder(backend: backend)
-            benchmark.startMeasurement()
-            for _ in benchmark.scaledIterations {
-                try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
-            }
+    // Random bytes, which zip deflates as DEFLATE's stored blocks: a copy and a CRC-32, no decoding to speak of.
+    Benchmark("Stored + CRC 32 MB random: Bytes") { benchmark in
+        let archive = try ZipArchive(url: Fixtures.largeRandom)
+        let entry = firstFile(archive)
+        var decoder = ZipDecoder()
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
         }
+    }
 
-        // CRC-32 alone, at the sizes zip entries come in: a large file (from memory), a cache-resident
-        // buffer, small files, and tiny ones. Each runs enough bytes per iteration (32 MB) to time. The
-        // bytes are made once, in setup (CRC-32's work doesn't depend on them).
-        for (label, size) in [("32 MB", 32 << 20), ("256 KB, in cache", 256 << 10), ("1 KB", 1 << 10), ("64 B", 64)] {
-            let repeats = (32 << 20) / size
+    Benchmark("Stored + CRC 32 MB random: zlib") { benchmark in
+        let entry = try firstFile(ZipArchive(url: Fixtures.largeRandom))
+        let data = try Data(contentsOf: Fixtures.largeRandom, options: .alwaysMapped)
+        let inflater = ZlibInflater()
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            let payload = PayloadLocator.payloadRange(of: entry, in: data)
+            let (count, crc) = inflater.decode(data.bytes.extracting(payload))
+            precondition(count == Int(entry.uncompressedSize) && crc == entry.crc32)
+        }
+    }
+
+    // CRC-32 alone, at the sizes zip entries come in: a large file (from memory), a cache-resident buffer, small
+    // files, and tiny ones. Each runs enough bytes per iteration (32 MB) to time. The bytes are made once, in setup
+    // (CRC-32's work doesn't depend on them). Bytes' `CRC32` (what NativeZip checks entries with) and zlib's.
+    for (label, size) in [("32 MB", 32 << 20), ("256 KB, in cache", 256 << 10), ("1 KB", 1 << 10), ("64 B", 64)] {
+        let repeats = (32 << 20) / size
+        for (suffix, checksum) in [("Bytes", { CRC32.checksum($0) }), ("zlib", zlibCRC32)] as [(String, (RawSpan) -> UInt32)] {
             Benchmark(
                 "CRC-32 \(label): \(suffix)",
                 configuration: .init(metrics: [.wallClock, .instructions, .throughput]),
                 closure: { (benchmark: Benchmark, bytes: [UInt8]) in
                     for _ in benchmark.scaledIterations {
                         for _ in 0..<repeats {
-                            blackHole(DeflateBackends.crc32(bytes.span.bytes, backend: backend))
+                            blackHole(checksum(bytes.span.bytes))
                         }
                     }
                 },
@@ -166,19 +202,40 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
+    // The other methods on the same 32 MB of text: decoded through `ZipArchive` (CRC-32 included), and extracted.
+    // Deflate64's stream is the DEFLATE row's, recorded as method 9 (`Fixtures.methodArchive`).
+    for method in Fixtures.Method.allCases {
+        Benchmark("Inflate + CRC 32 MB text: \(method.label)", configuration: large) { benchmark in
+            let archive = try ZipArchive(url: Fixtures.methodArchive(method))
+            let entry = firstFile(archive)
+            var decoder = ZipDecoder()
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+            }
+        } setup: {
+            try Fixtures.prepareMethod(method)
+        }
+        extractionBenchmark("Extract 32 MB text: \(method.label)", archive: Fixtures.methodArchive(method), configuration: large) {
+            try Fixtures.prepareMethod(method)
+        }
+    }
+
     // MARK: Building blocks
 
+    // Compression's one-shot raw DEFLATE decoder (`COMPRESSION_ZLIB`) through BytesReferenceCodecs, on the text row's
+    // payload, copied to an array once. Since 2026-11-22 each call also allocates its 32 MB output and copies it once
+    // (BytesReferenceCodecs' `AppleCompression.decode`); before, the library's hook decoded into one reused array.
     Benchmark("Backend: Compression.framework one-shot 32 MB", configuration: large) { benchmark in
         let archive = try ZipArchive(url: Fixtures.largeText)
         let entry = firstFile(archive)
-        // Grab the raw payload once via the archive's own bytes; decode it repeatedly.
         let data = try Data(contentsOf: Fixtures.largeText, options: .alwaysMapped)
-        let payload = PayloadLocator.payloadRange(of: entry, in: data)
-        var output = [UInt8](repeating: 0, count: Int(entry.uncompressedSize))
+        let payload = [UInt8](data[PayloadLocator.payloadRange(of: entry, in: data)])
+        let size = Int(entry.uncompressedSize)
         benchmark.startMeasurement()
         for _ in benchmark.scaledIterations {
-            let produced = DeflateBackends.compressionOneShot(data.bytes.extracting(payload), into: &output)
-            precondition(produced == output.count)
+            let output = AppleCompression.decode(payload, capacity: size, COMPRESSION_ZLIB)
+            precondition(output.count == size)
         }
     }
 
@@ -187,15 +244,14 @@ let benchmarks: @Sendable () -> Void = {
     // Each sample extracts into a new directory under `Fixtures.output` (a `.noindex` directory, which Spotlight
     // skips). Many small files are removed after each sample, outside the measurement; one large file is kept until
     // teardown (see `Fixtures.remove(_:)` for the measurements behind each).
-    func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil, backend: ZipDecoder.Backend = .bytes,
-                             progress: Bool = false, configuration: Benchmark.Configuration) {
+    func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil, progress: Bool = false,
+                             configuration: Benchmark.Configuration, setup: (@Sendable () throws -> Void)? = nil) {
         let removeEachSample = url == Fixtures.smallFiles
         var configuration = configuration
         configuration.metrics = extractionMetrics
         Benchmark(name, configuration: configuration) { benchmark in
             let archive = try ZipArchive(url: url)
             var options = NativeZip.ExtractionOptions()
-            options.backend = backend
             if let maxConcurrency { options.maxConcurrency = maxConcurrency }
             // Polled by nobody: the cost of counting (one relaxed add per file, or per chunk of a streamed one).
             if progress { options.progress = ExtractionProgress() }
@@ -208,6 +264,8 @@ let benchmarks: @Sendable () -> Void = {
                 if removeEachSample { Fixtures.remove(destination) }
             }
             recordDiskSyscalls(benchmark, since: before)
+        } setup: {
+            try setup?()
         } teardown: {
             Fixtures.removeOutput()
         }
@@ -348,4 +406,56 @@ enum PayloadLocator {
         let start = header + 30 + nameLength + extraLength
         return start..<start + Int(entry.compressedSize)
     }
+}
+
+/// zlib's raw DEFLATE decoder, called directly, for the "zlib" rows: each chunk decoded into one reused 1 MB buffer
+/// and checksummed with zlib's `crc32_z`, the work the library's zlib backend did. (BytesReferenceCodecs' `Zlib`
+/// decodes into a new array and copies its input, and has no CRC-32.)
+final class ZlibInflater {
+    /// On the heap: zlib keeps a pointer back to its stream and checks it on every call.
+    private let stream = UnsafeMutablePointer<z_stream>.allocate(capacity: 1)
+    private let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: 1 << 20, alignment: 16)
+
+    init() {
+        stream.initialize(to: z_stream())
+        // Negative window bits: raw DEFLATE (RFC 1951), as zip method 8 stores it.
+        precondition(inflateInit2_(stream, -MAX_WBITS, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK)
+    }
+
+    deinit {
+        inflateEnd(stream)
+        stream.deallocate()
+        buffer.deallocate()
+    }
+
+    /// Decodes a whole raw DEFLATE `payload` (traps if it's invalid or truncated).
+    ///
+    /// - Returns: The size and CRC-32 of its output.
+    func decode(_ payload: RawSpan) -> (count: Int, crc: UInt32) {
+        precondition(inflateReset(stream) == Z_OK)
+        var count = 0
+        var crc: uLong = 0
+        // The pointers describe `payload` and `buffer` exactly, and zlib keeps none past the loop.
+        payload.withUnsafeBytes { input in
+            stream.pointee.next_in = UnsafeMutablePointer(mutating: input.baseAddress?.assumingMemoryBound(to: Bytef.self))
+            stream.pointee.avail_in = uInt(input.count)
+            let output = buffer.baseAddress!.assumingMemoryBound(to: Bytef.self)
+            while true {
+                stream.pointee.next_out = output
+                stream.pointee.avail_out = uInt(buffer.count)
+                let status = inflate(stream, Z_NO_FLUSH)
+                let produced = buffer.count - Int(stream.pointee.avail_out)
+                crc = crc32_z(crc, output, produced)
+                count += produced
+                if status == Z_STREAM_END { break }
+                precondition(status == Z_OK, "zlib inflate: \(status)")
+            }
+        }
+        return (count, UInt32(crc))
+    }
+}
+
+/// zlib's CRC-32 of `bytes` (the pointer and count describe the span, for the call).
+func zlibCRC32(_ bytes: RawSpan) -> UInt32 {
+    bytes.withUnsafeBytes { UInt32(crc32_z(0, $0.baseAddress?.assumingMemoryBound(to: Bytef.self), $0.count)) }
 }

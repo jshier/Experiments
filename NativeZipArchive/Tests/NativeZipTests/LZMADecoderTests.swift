@@ -1,13 +1,18 @@
 import BytesTestSupport
 import BytesTesting
 import Foundation
-@testable import NativeZip
+@_spi(Testing) import NativeZip
 import Testing
 
-// The LZMA (zip method 14) decoder against liblzma's encoder: vectors made by
-// `Fixtures/lzma/make-lzma-vectors.sh` (into TestData/nativezip-lzma, through `Tools/test-data fetch`) must decode to the inputs their generators rebuild here, in output
-// steps of any size; truncated and corrupted payloads must throw, never trap. A small encoder below covers
-// what liblzma won't encode (lc + lp above 4).
+// LZMA (zip method 14) decoding against liblzma's encoder, through `ZipDecoder.decodePayload` (whatever decodes
+// method 14 there): vectors made by `Fixtures/lzma/make-lzma-vectors.sh` (into TestData/nativezip-lzma, through
+// `Tools/test-data fetch`) must decode to the inputs their generators rebuild here; truncated and corrupted payloads
+// must throw, never trap, and never decode to the wrong size. A small encoder below covers what liblzma won't encode
+// (lc + lp above 4). Errors are checked as the zip reader reports them: `unsupportedMethod` for a header it can't
+// read, `corruptData` for everything else.
+//
+// The output arrives in the decoder's 1 MiB chunks: resuming in steps of other sizes (1 byte to 64 KiB) was tested on
+// the decoder's own type, and is now its codec's own tests' business.
 
 /// One vector from `vectors.tsv`: a payload file, and how to rebuild what it decodes to.
 struct LZMAVector: CustomTestStringConvertible, Sendable {
@@ -104,43 +109,47 @@ enum LZMAInputs {
     }
 }
 
-/// Decodes a whole payload in steps of `bufferSize`, checking that each step but the last fills its buffer.
-func lzmaDecode(
-    _ payload: [UInt8], size: Int, hasEndMarker: Bool, bufferSize: Int = 65_536,
-    decoder: inout LZMADecoder
-) throws(LZMAError) -> [UInt8] {
-    try decoder.reset(payload: payload.span.bytes, uncompressedSize: UInt64(size), hasEndMarker: hasEndMarker)
+/// Decodes a whole zip LZMA payload with `decoder`, as an entry of `size` bytes whose flag bit 1 is `hasEndMarker`.
+func lzmaDecode(_ payload: [UInt8], size: Int, hasEndMarker: Bool, decoder: inout ZipDecoder) throws -> [UInt8] {
     var output: [UInt8] = []
-    var buffer = [UInt8](repeating: 0, count: bufferSize)
-    while true {
-        var span = buffer.mutableSpan
-        var bytes = span.mutableBytes
-        let (produced, finished) = try decoder.decode(payload.span.bytes, into: &bytes)
-        output += buffer.prefix(produced)
-        if finished { return output }
-        #expect(produced == bufferSize, "A step that didn't finish didn't fill its buffer")
-        if produced == 0 { return output } // Never loop forever on a broken decoder.
+    try decoder.decodePayload(
+        payload.span.bytes, method: ZipArchive.Method.lzma, uncompressedSize: UInt64(size), hasEndMarker: hasEndMarker
+    ) { chunk in
+        #expect(chunk.byteCount <= 1 << 20, "A chunk larger than the decoder's buffer")
+        chunk.withUnsafeBytes { output.append(contentsOf: $0) }
     }
+    return output
 }
 
-func lzmaDecode(
-    _ payload: [UInt8], size: Int, hasEndMarker: Bool, bufferSize: Int = 65_536
-) throws(LZMAError) -> [UInt8] {
-    var decoder = LZMADecoder()
-    return try lzmaDecode(payload, size: size, hasEndMarker: hasEndMarker, bufferSize: bufferSize, decoder: &decoder)
+func lzmaDecode(_ payload: [UInt8], size: Int, hasEndMarker: Bool) throws -> [UInt8] {
+    var decoder = ZipDecoder()
+    return try lzmaDecode(payload, size: size, hasEndMarker: hasEndMarker, decoder: &decoder)
 }
 
-/// What decoding did: the output, or the error.
+/// What decoding did: the output, or the zip reader's error.
 enum LZMAOutcome: Equatable {
     case decoded([UInt8])
-    case failed(LZMAError)
+    /// `ZipError.unsupportedMethod`: a zip LZMA header it can't read.
+    case unsupported
+    /// `ZipError.corruptData`: an invalid or truncated stream, or one that doesn't decode to the recorded size.
+    case corrupt
+    /// Any other error (none is expected).
+    case other(String)
 
-    init(_ body: () throws(LZMAError) -> [UInt8]) {
+    init(_ body: () throws -> [UInt8]) {
         do {
             self = try .decoded(body())
+        } catch ZipError.unsupportedMethod(_, _) {
+            self = .unsupported
+        } catch ZipError.corruptData(_) {
+            self = .corrupt
         } catch {
-            self = .failed(error)
+            self = .other("\(error)")
         }
+    }
+
+    var failed: Bool {
+        if case .decoded = self { false } else { true }
     }
 }
 
@@ -155,6 +164,7 @@ enum LZMAOutcome: Equatable {
         }
     }
 
+    /// Every vector, several of them over 1 MiB (matches and the window across the decoder's chunks).
     @Test(arguments: LZMAVector.all)
     func decodesVector(_ vector: LZMAVector) throws {
         let expected = vector.expected
@@ -163,35 +173,12 @@ enum LZMAOutcome: Equatable {
         #expect(decoded == expected)
     }
 
-    /// Steps of every size: matches split across steps, and the window's growth and wrap at any point.
-    @Test(arguments: [1_000, 1_024, 4_096, 4_099, 65_537])
-    func resumesInSmallSteps(bufferSize: Int) throws {
-        for name in ["sentences-3m-dict64k", "sentences-1m-dict4k", "text-nomarker", "runs"] {
-            let vector = LZMAVector.named(name)
-            let decoded = try lzmaDecode(
-                vector.payload, size: vector.size, hasEndMarker: vector.hasEndMarker, bufferSize: bufferSize
-            )
-            #expect(decoded == vector.expected, "\(name), \(bufferSize)-byte steps")
-        }
-    }
-
-    @Test func resumesOneByteAtATime() throws {
-        for name in ["text-marker", "runs", "records-lc2-lp2-pb3"] {
-            let vector = LZMAVector.named(name)
-            let decoded = try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: vector.hasEndMarker, bufferSize: 1)
-            #expect(decoded == vector.expected, "\(name)")
-        }
-    }
-
     /// One decoder for every entry, in an order where storage shrinks and grows: probabilities and the window
     /// are reused, and nothing from one entry leaks into the next.
     @Test func reusesOneDecoder() throws {
-        var decoder = LZMADecoder()
+        var decoder = ZipDecoder()
         for vector in LZMAVector.all + LZMAVector.all.reversed() {
-            let decoded = try lzmaDecode(
-                vector.payload, size: vector.size, hasEndMarker: vector.hasEndMarker, bufferSize: 10_000,
-                decoder: &decoder
-            )
+            let decoded = try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: vector.hasEndMarker, decoder: &decoder)
             #expect(decoded == vector.expected, "\(vector.name)")
         }
     }
@@ -199,16 +186,7 @@ enum LZMAOutcome: Equatable {
     @Test func emptyEntries() throws {
         for name in ["empty-marker", "empty-nomarker"] {
             let vector = LZMAVector.named(name)
-            var decoder = LZMADecoder()
-            try decoder.reset(payload: vector.payload.span.bytes, uncompressedSize: 0, hasEndMarker: vector.hasEndMarker)
-            // An empty buffer is enough to finish.
-            var buffer: [UInt8] = []
-            var span = buffer.mutableSpan
-            var bytes = span.mutableBytes
-            let result = try decoder.decode(vector.payload.span.bytes, into: &bytes)
-            #expect(result.produced == 0 && result.finished)
-            // And it stays finished.
-            #expect(try decoder.decode(vector.payload.span.bytes, into: &bytes).finished)
+            #expect(try lzmaDecode(vector.payload, size: 0, hasEndMarker: vector.hasEndMarker) == [], "\(name)")
         }
     }
 
@@ -217,11 +195,12 @@ enum LZMAOutcome: Equatable {
     @Test func endMarkerFlag() throws {
         for name in ["text-marker", "one-marker", "empty-marker", "random"] {
             let vector = LZMAVector.named(name)
-            #expect(try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: false) == vector.expected)
+            #expect(try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: false) == vector.expected, "\(name)")
         }
         for name in ["text-nomarker", "one-nomarker", "empty-nomarker", "runs"] {
             let vector = LZMAVector.named(name)
-            #expect(throws: LZMAError.self) { _ = try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: true) }
+            let outcome = LZMAOutcome { try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: true) }
+            #expect(outcome == .corrupt, "\(name)")
         }
     }
 
@@ -231,43 +210,39 @@ enum LZMAOutcome: Equatable {
         for name in ["text-marker", "text-nomarker", "records-lc0-lp4-pb0", "sentences-1m-dict4k"] {
             let vector = LZMAVector.named(name)
             for size in [vector.size - 1, vector.size + 1, vector.size / 2] {
-                let outcome = LZMAOutcome { () throws(LZMAError) in
-                    try lzmaDecode(vector.payload, size: size, hasEndMarker: vector.hasEndMarker)
-                }
-                #expect(outcome == .failed(.corruptData) || outcome == .failed(.truncated), "\(name), size \(size)")
+                let outcome = LZMAOutcome { try lzmaDecode(vector.payload, size: size, hasEndMarker: vector.hasEndMarker) }
+                #expect(outcome == .corrupt, "\(name), size \(size)")
             }
         }
     }
 
-    @Test func rejectsBadHeaders() {
-        let payload = LZMAVector.named("text-marker").payload
+    @Test func rejectsBadHeaders() throws {
+        let vector = LZMAVector.named("text-marker")
+        let payload = vector.payload
         func outcome(_ payload: [UInt8]) -> LZMAOutcome {
-            LZMAOutcome { () throws(LZMAError) in try lzmaDecode(payload, size: 200_000, hasEndMarker: true) }
+            LZMAOutcome { try lzmaDecode(payload, size: vector.size, hasEndMarker: true) }
         }
         var badSize = payload
         badSize[2] = 4
-        #expect(outcome(badSize) == .failed(.unsupportedHeader))
+        #expect(outcome(badSize) == .unsupported)
         var badProperties = payload
         badProperties[4] = 225 // pb 5
-        #expect(outcome(badProperties) == .failed(.unsupportedHeader))
+        #expect(outcome(badProperties) == .unsupported)
         var badFirstByte = payload
         badFirstByte[9] = 1
-        #expect(outcome(badFirstByte) == .failed(.corruptData))
+        #expect(outcome(badFirstByte) == .corrupt)
         var impossibleCode = payload
         impossibleCode.replaceSubrange(10..<14, with: [0xFF, 0xFF, 0xFF, 0xFF])
-        #expect(outcome(impossibleCode) == .failed(.corruptData))
+        #expect(outcome(impossibleCode) == .corrupt)
         for count in 0..<14 {
-            #expect(outcome(Array(payload.prefix(count))) == .failed(.truncated), "\(count) bytes")
+            #expect(outcome(Array(payload.prefix(count))) == .corrupt, "\(count) bytes")
         }
-        // After a failed reset, decoding throws the same error rather than reporting an empty entry.
-        var decoder = LZMADecoder()
-        #expect(throws: LZMAError.unsupportedHeader) {
-            try decoder.reset(payload: badSize.span.bytes, uncompressedSize: 200_000, hasEndMarker: true)
+        // After a failed entry, the same decoder decodes the next one.
+        var decoder = ZipDecoder()
+        for bad in [badSize, badFirstByte, Array(payload.prefix(20))] {
+            #expect(LZMAOutcome { try lzmaDecode(bad, size: vector.size, hasEndMarker: true, decoder: &decoder) }.failed)
+            #expect(try lzmaDecode(payload, size: vector.size, hasEndMarker: true, decoder: &decoder) == vector.expected)
         }
-        var buffer = [UInt8](repeating: 0, count: 16)
-        var span = buffer.mutableSpan
-        var bytes = span.mutableBytes
-        #expect(throws: LZMAError.unsupportedHeader) { _ = try decoder.decode(badSize.span.bytes, into: &bytes) }
     }
 
     /// The cuts every payload gets in the default run: the header (13 bytes) and the range coder's first bytes
@@ -292,22 +267,23 @@ enum LZMAOutcome: Equatable {
     static func checkTruncated(_ name: String, cuts: (Int) -> Set<Int>) {
         let vector = LZMAVector.named(name)
         let payload = vector.payload
+        var decoder = ZipDecoder()
         for cut in cuts(payload.count).sorted() {
-            let outcome = LZMAOutcome { () throws(LZMAError) in
-                try lzmaDecode(Array(payload.prefix(cut)), size: vector.size, hasEndMarker: vector.hasEndMarker, bufferSize: 4_096)
+            let outcome = LZMAOutcome {
+                try lzmaDecode(Array(payload.prefix(cut)), size: vector.size, hasEndMarker: vector.hasEndMarker, decoder: &decoder)
             }
-            #expect(outcome == .failed(.truncated), "\(name) cut to \(cut) of \(payload.count) bytes")
+            #expect(outcome == .corrupt, "\(name) cut to \(cut) of \(payload.count) bytes")
         }
     }
 
-    /// Cuts in the header, near the end, and a sample elsewhere: always `truncated`, never a trap or a short
+    /// Cuts in the header, near the end, and a sample elsewhere: always `corruptData`, never a trap or a short
     /// success.
     @Test(arguments: Self.truncatedNames)
     func rejectsTruncatedPayloads(_ name: String) {
         Self.checkTruncated(name, cuts: Self.fastCuts)
     }
 
-    /// Changed bytes: decoding throws or produces some output of the right size, never traps. With an end
+    /// Changed bytes: decoding throws `corruptData` or produces output of the right size, never traps. With an end
     /// marker, most changes are caught. 25 changes per vector (`LZMADecoderBulkTests` makes 200).
     @Test func survivesCorruptPayloads() {
         Self.checkCorruptPayloads(perVector: 25)
@@ -317,6 +293,7 @@ enum LZMAOutcome: Equatable {
         var rng = SplitMix64(seed: 99)
         var rejected = 0
         var total = 0
+        var decoder = ZipDecoder()
         for name in ["text-marker", "text-nomarker", "random", "runs", "records-lc0-lp0-pb0", "sentences-1m-lc1-lp1-pb1"] {
             let vector = LZMAVector.named(name)
             let payload = vector.payload
@@ -326,30 +303,35 @@ enum LZMAOutcome: Equatable {
                     let index = 14 + Int(rng.next() % UInt64(payload.count - 14))
                     corrupt[index] ^= UInt8(truncatingIfNeeded: 1 + rng.next() % 255)
                 }
-                let outcome = LZMAOutcome { () throws(LZMAError) in
-                    try lzmaDecode(corrupt, size: vector.size, hasEndMarker: vector.hasEndMarker, bufferSize: 3_000)
+                let outcome = LZMAOutcome {
+                    try lzmaDecode(corrupt, size: vector.size, hasEndMarker: vector.hasEndMarker, decoder: &decoder)
                 }
                 total += 1
                 switch outcome {
                 case let .decoded(bytes): #expect(bytes.count == vector.size)
-                case .failed: rejected += 1
+                case .corrupt: rejected += 1
+                default: Issue.record("\(name): \(outcome)")
                 }
             }
         }
         #expect(rejected > total / 2)
     }
 
-    /// Random bytes after valid headers, with every lc/lp/pb byte: no traps.
+    /// Random bytes after valid headers, with every lc/lp/pb byte: no traps, and `corruptData` or the right size.
     @Test func survivesRandomStreams() {
         var rng = SplitMix64(seed: 5)
         for properties in 0..<225 {
             var payload: [UInt8] = [9, 20, 5, 0, UInt8(properties), 0x00, 0x10, 0x00, 0x00, 0x00]
             payload += (0..<(64 + Int(rng.next() % 2_000))).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
             for hasEndMarker in [false, true] {
-                let outcome = LZMAOutcome { () throws(LZMAError) in
-                    try lzmaDecode(payload, size: 100_000, hasEndMarker: hasEndMarker, bufferSize: 7_000)
+                // A decoder each: resetting a reused one's probabilities (up to 3 million with lc 8 and lp 4) one by
+                // one is slow in debug builds.
+                let outcome = LZMAOutcome { try lzmaDecode(payload, size: 100_000, hasEndMarker: hasEndMarker) }
+                switch outcome {
+                case let .decoded(bytes): #expect(bytes.count == 100_000)
+                case .corrupt: break
+                default: Issue.record("properties \(properties): \(outcome)")
                 }
-                if case let .decoded(bytes) = outcome { #expect(bytes.count == 100_000) }
             }
         }
     }
@@ -365,10 +347,8 @@ enum LZMAOutcome: Equatable {
                 let payload = TestLZMAEncoder.encode(
                     input, lc: lc, lp: lp, pb: pb, dictionarySize: dictionarySize, endMarker: hasEndMarker
                 )
-                for bufferSize in [999, 65_536] {
-                    let decoded = try lzmaDecode(payload, size: input.count, hasEndMarker: hasEndMarker, bufferSize: bufferSize)
-                    #expect(decoded == input, "dictionary \(dictionarySize), \(bufferSize)-byte steps")
-                }
+                let decoded = try lzmaDecode(payload, size: input.count, hasEndMarker: hasEndMarker)
+                #expect(decoded == input, "dictionary \(dictionarySize), end marker \(hasEndMarker)")
             }
         }
     }
@@ -388,13 +368,15 @@ enum LZMAOutcome: Equatable {
             #expect(try lzmaDecode(payload, size: expected.count, hasEndMarker: false) == expected)
             cases.append((path, payload, expected.count, false))
         }
-        var decoder = LZMADecoder()
+        var decoder = ZipDecoder()
         for (name, payload, size, hasEndMarker) in cases {
             var best = Duration.seconds(100)
             let repeats = max(3, 20_000_000 / max(size, 1))
             for _ in 0..<repeats {
                 let start = ContinuousClock.now
-                _ = try lzmaDecode(payload, size: size, hasEndMarker: hasEndMarker, bufferSize: 1 << 20, decoder: &decoder)
+                try decoder.decodePayload(
+                    payload.span.bytes, method: ZipArchive.Method.lzma, uncompressedSize: UInt64(size), hasEndMarker: hasEndMarker
+                ) { _ in }
                 best = min(best, ContinuousClock.now - start)
             }
             let seconds = Double(best.components.attoseconds) / 1e18 + Double(best.components.seconds)
@@ -428,6 +410,37 @@ let lzmaIsDebugBuild: Bool = {
 /// they match as well, short repeats, matched literals, and the end marker. Writes a zip method-14 payload.
 /// Its streams are valid but not small; it exists for properties liblzma won't encode.
 struct TestLZMAEncoder {
+    /// Where each probability lives in the one array of them (the LZMA SDK's `LzmaDec.c` layout, in its order).
+    /// Each is an 11-bit probability that the next bit is 0, starting at one half.
+    enum Layout {
+        static let states = 12
+        /// `isMatch[state << 4 + posState]`: a literal (0) or a match (1).
+        static let isMatch = 0
+        /// `isRep[state]`: a new distance (0) or a repeated one (1).
+        static let isRep = 192
+        /// `isRepG0[state]`: rep0 (0), or rep1 through rep3 (1).
+        static let isRepG0 = isRep + states
+        /// `isRepG1[state]`: rep1 (0), or rep2 or rep3 (1).
+        static let isRepG1 = isRepG0 + states
+        /// `isRepG2[state]`: rep2 (0) or rep3 (1).
+        static let isRepG2 = isRepG1 + states
+        /// `isRep0Long[state << 4 + posState]`: a one-byte rep0 match (0) or a rep0 match with a length (1).
+        static let isRep0Long = isRepG2 + states
+        /// Four 6-bit trees of distance slots, by length (2, 3, 4, 5 or more).
+        static let distanceSlots = isRep0Long + 192
+        /// Reverse trees for the low bits of distances in slots 4 through 13.
+        static let specialDistances = distanceSlots + 4 << 6
+        /// A 4-bit reverse tree for the low bits of distances in slots 14 and up.
+        static let align = specialDistances + 128
+        /// The two length coders: `choice`, `choice2`, 16 low and 16 middle 3-bit trees (by posState), and an
+        /// 8-bit high tree.
+        static let lengthCoderSize = 2 + 16 << 3 + 16 << 3 + 256
+        static let matchLengths = align + 16
+        static let repeatLengths = matchLengths + lengthCoderSize
+        /// `0x300` probabilities per literal context: a plain 8-bit tree, then two more used with a match byte.
+        static let literals = repeatLengths + lengthCoderSize
+    }
+
     var probabilities: [UInt16]
     var low: UInt64 = 0
     var range: UInt32 = 0xFFFF_FFFF
@@ -439,7 +452,7 @@ struct TestLZMAEncoder {
         _ input: [UInt8], lc: Int, lp: Int, pb: Int, dictionarySize: Int, endMarker: Bool
     ) -> [UInt8] {
         var encoder = TestLZMAEncoder(
-            probabilities: [UInt16](repeating: 1024, count: LZMADecoder.literals + 0x300 << (lc + lp))
+            probabilities: [UInt16](repeating: 1024, count: Layout.literals + 0x300 << (lc + lp))
         )
         var state = 0
         var reps = [0, 0, 0, 0]
@@ -477,45 +490,45 @@ struct TestLZMAEncoder {
 
             if position > 0 && bestRep.length >= 2 && bestRep.length + 1 >= best.length {
                 let length = bestRep.length
-                encoder.bit(LZMADecoder.isMatch + state << 4 + positionState, 1)
-                encoder.bit(LZMADecoder.isRep + state, 1)
+                encoder.bit(Layout.isMatch + state << 4 + positionState, 1)
+                encoder.bit(Layout.isRep + state, 1)
                 if bestRep.index == 0 {
-                    encoder.bit(LZMADecoder.isRepG0 + state, 0)
-                    encoder.bit(LZMADecoder.isRep0Long + state << 4 + positionState, 1)
+                    encoder.bit(Layout.isRepG0 + state, 0)
+                    encoder.bit(Layout.isRep0Long + state << 4 + positionState, 1)
                 } else {
-                    encoder.bit(LZMADecoder.isRepG0 + state, 1)
+                    encoder.bit(Layout.isRepG0 + state, 1)
                     if bestRep.index == 1 {
-                        encoder.bit(LZMADecoder.isRepG1 + state, 0)
+                        encoder.bit(Layout.isRepG1 + state, 0)
                     } else {
-                        encoder.bit(LZMADecoder.isRepG1 + state, 1)
-                        encoder.bit(LZMADecoder.isRepG2 + state, bestRep.index - 2)
+                        encoder.bit(Layout.isRepG1 + state, 1)
+                        encoder.bit(Layout.isRepG2 + state, bestRep.index - 2)
                     }
                     let distance = reps.remove(at: bestRep.index)
                     reps.insert(distance, at: 0)
                 }
-                encoder.length(LZMADecoder.repeatLengths, length - 2, positionState)
+                encoder.length(Layout.repeatLengths, length - 2, positionState)
                 state = state < 7 ? 8 : 11
                 position += length
             } else if best.length >= 3 {
-                encoder.bit(LZMADecoder.isMatch + state << 4 + positionState, 1)
-                encoder.bit(LZMADecoder.isRep + state, 0)
-                encoder.length(LZMADecoder.matchLengths, best.length - 2, positionState)
+                encoder.bit(Layout.isMatch + state << 4 + positionState, 1)
+                encoder.bit(Layout.isRep + state, 0)
+                encoder.length(Layout.matchLengths, best.length - 2, positionState)
                 encoder.distance(best.distance, length: best.length - 2)
                 reps = [best.distance] + reps.prefix(3)
                 state = state < 7 ? 7 : 10
                 position += best.length
             } else if position > reps[0], input[position] == input[position - reps[0] - 1], position % 5 == 0 {
                 // A short repeat, now and then.
-                encoder.bit(LZMADecoder.isMatch + state << 4 + positionState, 1)
-                encoder.bit(LZMADecoder.isRep + state, 1)
-                encoder.bit(LZMADecoder.isRepG0 + state, 0)
-                encoder.bit(LZMADecoder.isRep0Long + state << 4 + positionState, 0)
+                encoder.bit(Layout.isMatch + state << 4 + positionState, 1)
+                encoder.bit(Layout.isRep + state, 1)
+                encoder.bit(Layout.isRepG0 + state, 0)
+                encoder.bit(Layout.isRep0Long + state << 4 + positionState, 0)
                 state = state < 7 ? 9 : 11
                 position += 1
             } else {
-                encoder.bit(LZMADecoder.isMatch + state << 4 + positionState, 0)
+                encoder.bit(Layout.isMatch + state << 4 + positionState, 0)
                 let previous = position > 0 ? Int(input[position - 1]) : 0
-                let base = LZMADecoder.literals + 0x300 * ((position & (1 << lp - 1)) << lc + previous >> (8 - lc))
+                let base = Layout.literals + 0x300 * ((position & (1 << lp - 1)) << lc + previous >> (8 - lc))
                 let byte = Int(input[position])
                 var symbol = 1
                 var bit = 7
@@ -542,9 +555,9 @@ struct TestLZMAEncoder {
         }
         if endMarker {
             let positionState = position & positionMask
-            encoder.bit(LZMADecoder.isMatch + state << 4 + positionState, 1)
-            encoder.bit(LZMADecoder.isRep + state, 0)
-            encoder.length(LZMADecoder.matchLengths, 0, positionState)
+            encoder.bit(Layout.isMatch + state << 4 + positionState, 1)
+            encoder.bit(Layout.isRep + state, 0)
+            encoder.length(Layout.matchLengths, 0, positionState)
             encoder.distance(0xFFFF_FFFF, length: 0)
         }
         for _ in 0..<5 {
@@ -629,13 +642,13 @@ struct TestLZMAEncoder {
             let top = Int.bitWidth - 1 - distance.leadingZeroBitCount
             slot = top << 1 | distance >> (top - 1) & 1
         }
-        tree(LZMADecoder.distanceSlots + min(length, 3) << 6, bitCount: 6, slot)
+        tree(Layout.distanceSlots + min(length, 3) << 6, bitCount: 6, slot)
         guard slot >= 4 else { return }
         let bitCount = slot >> 1 - 1
         let base = (2 | slot & 1) << bitCount
         let rest = distance - base
         if slot < 14 {
-            reverseTree(LZMADecoder.specialDistances + base - slot, bitCount: bitCount, rest)
+            reverseTree(Layout.specialDistances + base - slot, bitCount: bitCount, rest)
         } else {
             for bit in (4..<bitCount).reversed() {
                 range >>= 1
@@ -645,7 +658,7 @@ struct TestLZMAEncoder {
                     shiftLow()
                 }
             }
-            reverseTree(LZMADecoder.align, bitCount: 4, rest & 15)
+            reverseTree(Layout.align, bitCount: 4, rest & 15)
         }
     }
 }

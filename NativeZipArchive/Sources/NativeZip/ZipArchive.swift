@@ -558,7 +558,7 @@ public extension ZipArchive {
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
-    ///   - decoder: The decoder to use. Its ``ZipDecoder/backend`` picks the DEFLATE and CRC-32 implementations.
+    ///   - decoder: The decoder to use.
     ///   - password: The password, for encrypted entries.
     ///   - body: Called with each chunk, in order. Chunks are at most about 1 MB for compressed entries; a stored
     ///     entry arrives as one chunk.
@@ -576,18 +576,16 @@ public extension ZipArchive {
         let payload = try Self.payload(of: entry, in: archive)
 
         // Closure literals (not a local func passed as a value), so `crc` and `written` stay on the
-        // stack instead of being boxed on the heap: measured 2 mallocs per entry before this. The CRC is the
-        // backend's own (`Bytes`' or zlib's), so each backend is measured whole.
-        let backend = decoder.backend
+        // stack instead of being boxed on the heap: measured 2 mallocs per entry before this.
         var crc: UInt = 0
         var written: UInt64 = 0
         if entry.method == Method.stored, !entry.isEncrypted {
-            crc = ZipDecoder.crc32(0, payload, backend: backend)
+            crc = ZipDecoder.crc32(0, payload)
             written = UInt64(payload.byteCount)
             try body(payload)
         } else {
             try decoder.decode(payload, entry: entry, password: password) { chunk in
-                crc = ZipDecoder.crc32(crc, chunk, backend: backend)
+                crc = ZipDecoder.crc32(crc, chunk)
                 written += UInt64(chunk.byteCount)
                 try body(chunk)
             }
@@ -601,13 +599,12 @@ public extension ZipArchive {
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
-    ///   - backend: Which DEFLATE and CRC-32 implementation to use.
     ///   - password: The password, for encrypted entries.
     ///   - body: Called with each chunk of decompressed contents, in order.
     /// - Throws: The errors of ``contents(of:using:password:_:)``.
     @inlinable
-    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, password: String? = nil, _ body: (RawSpan) throws -> Void) throws {
-        var decoder = ZipDecoder(backend: backend)
+    func contents(of entry: ZipEntry, password: String? = nil, _ body: (RawSpan) throws -> Void) throws {
+        var decoder = ZipDecoder()
         try contents(of: entry, using: &decoder, password: password, body)
     }
 
@@ -633,13 +630,12 @@ public extension ZipArchive {
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
-    ///   - backend: Which DEFLATE and CRC-32 implementation to use.
     ///   - password: The password, for encrypted entries.
     /// - Returns: The decompressed bytes.
     /// - Throws: The errors of ``contents(of:using:password:_:)``.
-    func contents(of entry: ZipEntry, backend: ZipDecoder.Backend = .bytes, password: String? = nil) throws -> Data {
+    func contents(of entry: ZipEntry, password: String? = nil) throws -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
-        try contents(of: entry, backend: backend, password: password) { chunk in
+        try contents(of: entry, password: password) { chunk in
             result.append(chunk)
         }
         return result

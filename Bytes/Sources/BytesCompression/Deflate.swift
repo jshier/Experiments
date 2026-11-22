@@ -12,6 +12,35 @@ public enum DeflateFormat: Hashable, Sendable {
     case gzip
 }
 
+/// Which code a raw stream uses: DEFLATE (RFC 1951), or PKWARE's Deflate64.
+///
+/// Deflate64 ("enhanced deflate", zip method 9) is DEFLATE with three changes: a 64 KB window; length symbol 285
+/// followed by 16 extra bits, for matches of 3 to 65,538 bytes (DEFLATE's 285 is exactly 258); and distance symbols
+/// 30 and 31, with 14 extra bits each, reaching 32,769 to 65,536 bytes back. Block structure and headers are
+/// DEFLATE's. It only comes raw, in zip entries: ``DeflateDecoder/init(variant:)`` decodes it.
+public enum DeflateVariant: Hashable, Sendable {
+    /// DEFLATE: a 32 KB window, matches of 3 to 258 bytes.
+    case deflate
+    /// Deflate64: a 64 KB window, matches of 3 to 65,538 bytes.
+    case deflate64
+
+    /// How far back a match can reach, in bytes: the history a decoder keeps (32 KB or 64 KB).
+    public var windowSize: Int {
+        switch self {
+        case .deflate: 32 << 10
+        case .deflate64: 64 << 10
+        }
+    }
+
+    /// The longest match, in bytes: 258 or 65,538.
+    public var maximumMatchLength: Int {
+        switch self {
+        case .deflate: 258
+        case .deflate64: 65538
+        }
+    }
+}
+
 /// The zlib header's fields (RFC 1950, 2.2), as one big-endian `UInt16`: CMF (window size, method), then FLG
 /// (level, preset dictionary, check bits).
 enum ZlibHeader {
@@ -120,14 +149,23 @@ struct HuffmanEntry {
 
     @inline(__always) init(raw: UInt32) { self.raw = raw }
 
+    // The fields are read as named `BitField`s, as NativeZip's decoder read them. Read with the range
+    // subscripts and `Kind(rawBits:)` instead, the decode loop ran 3–5% more instructions (2026-11-22, all four
+    // changed together).
+
     /// Bits to consume: the code, plus a length's or distance's extra bits.
     /// Masked to 6 bits, the width a variable shift uses: so `BitBuffer.consume` can shift by the raw entry
     /// (ARM's `lsr` ignores the rest), keeping the mask off the decode loop's critical path.
-    @inline(__always) var totalBits: Int { Int(raw[bits: 0..<6]) }
-    @inline(__always) var codeLength: Int { Int(raw[Nibble.self, at: 8]) }
+    @inline(__always) var totalBits: Int { raw[Self.totalBitsField] }
+    @inline(__always) var codeLength: Int { raw[Self.codeLengthField] }
     /// Compiles to the same code as comparing the raw field: the optimizer folds the conversion away.
-    @inline(__always) var kind: Kind { Kind(rawBits: raw[Bits<3>.self, at: 12]) ?? .invalid }
-    @inline(__always) var value: Int { Int(raw[bits: 16..<32]) }
+    @inline(__always) var kind: Kind { raw[Self.kindField] ?? .invalid }
+    @inline(__always) var value: Int { raw[Self.valueField] }
+
+    static var totalBitsField: BitField<Int> { BitField(bits: 0...5) }
+    static var codeLengthField: BitField<Int> { BitField(bits: 8...11) }
+    static var kindField: BitField<Kind> { BitField(bits: 12...14) }
+    static var valueField: BitField<Int> { BitField(bits: 16...31) }
 
     /// The extra bits' value, from bits whose first is this entry's code's first.
     ///
@@ -154,13 +192,17 @@ enum DeflateAlphabet {
     /// - Parameters:
     ///   - symbol: The symbol the code stands for.
     ///   - codeLength: The code's length in bits.
+    ///   - deflate64: Whether the stream is Deflate64, where length symbol 285 takes 16 extra bits (lengths 3 to
+    ///     65,538) and distance symbols 30 and 31 are valid (14 extra bits each, up to 65,536 back).
     /// - Returns: A literal, end-of-block, or length or distance entry; `invalid` for reserved symbols
-    ///   (literal/length 286 and 287, distance 30 and 31).
+    ///   (literal/length 286 and 287, and in DEFLATE distance 30 and 31).
     @inline(__always)
-    func entry(_ symbol: Int, codeLength: Int) -> HuffmanEntry {
+    func entry(_ symbol: Int, codeLength: Int, deflate64: Bool) -> HuffmanEntry {
         switch self {
         case .literalLength:
             switch symbol {
+            case 285 where deflate64: // Base 3 and 16 extra bits: 31 bits at most, within `totalBits`' 6.
+                return HuffmanEntry(codeLength: codeLength, kind: .lengthOrDistance, value: 3, extraBits: 16)
             case 0..<256: return HuffmanEntry(codeLength: codeLength, kind: .literal, value: symbol)
             case 256: return HuffmanEntry(codeLength: codeLength, kind: .endOfBlock, value: 0)
             case 257..<286:
@@ -172,6 +214,11 @@ enum DeflateAlphabet {
             default: return HuffmanEntry(codeLength: codeLength, kind: .invalid, value: 0) // 286, 287
             }
         case .distance:
+            if deflate64, symbol == 30 || symbol == 31 { // Bases 32,769 and 49,153 fit the entry's 16-bit value.
+                return HuffmanEntry(
+                    codeLength: codeLength, kind: .lengthOrDistance, value: symbol == 30 ? 32769 : 49153, extraBits: 14
+                )
+            }
             guard symbol < 30 else { return HuffmanEntry(codeLength: codeLength, kind: .invalid, value: 0) }
             return HuffmanEntry(
                 codeLength: codeLength, kind: .lengthOrDistance,

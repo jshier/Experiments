@@ -5,7 +5,7 @@ import zlib
 
 /// Deterministic benchmark archives, generated once and cached in a fixed temporary directory.
 enum Fixtures {
-    static let version = 3
+    static let version = 4
     static let root = URL(filePath: NSTemporaryDirectory()).appending(path: "NativeZipBenchmarkFixtures-v\(version)")
 
     static var smallFiles: URL { root.appending(path: "small.zip") } // 2,000 text files, ~4–16 KB each
@@ -14,6 +14,24 @@ enum Fixtures {
     static var raster: URL { root.appending(path: "raster.zip") } // one 32 MB deflated file of pixel runs
     static var zstdText: URL { root.appending(path: "text-zstd.zip") } // the 32 MB text as Zstandard (method 93), level 3
     static var zstdRaster: URL { root.appending(path: "raster-zstd.zip") } // the 32 MB raster as Zstandard, level 3
+
+    /// The other zip methods, each on the 32 MB text in an archive of its own (``methodArchive(_:)``).
+    enum Method: String, CaseIterable, Sendable {
+        case bzip2, lzma, xz, deflate64
+
+        /// The method's name in benchmark names.
+        var label: String {
+            switch self {
+            case .bzip2: "bzip2"
+            case .lzma: "LZMA"
+            case .xz: "xz"
+            case .deflate64: "Deflate64"
+            }
+        }
+    }
+
+    /// The 32 MB text compressed with `method` (made by ``prepareMethod(_:)``, on first use).
+    static func methodArchive(_ method: Method) -> URL { root.appending(path: "text-\(method.rawValue).zip") }
 
     /// 20,000 text files of 1–8 KB in 200 directories: RESULTS.md's step15 small-file job.
     static var smallFiles20k: URL { root.appending(path: "small-20k.zip") }
@@ -82,6 +100,96 @@ enum Fixtures {
         try fileManager.createDirectory(at: output, withIntermediateDirectories: true)
         if fileManager.fileExists(atPath: largeRandom.path) { return }
         try prepareOriginal()
+    }
+
+    /// Makes `method`'s archive of the 32 MB text if it isn't there yet (a few seconds for bzip2, 10–20 s for LZMA and
+    /// xz; then cached), from the text ``prepare()`` left in `source/text`. No macOS tool writes these methods into zip
+    /// archives: each is the compressed file stored by `zip`, its headers then patched to name the method, with the
+    /// original's CRC-32 and size.
+    ///
+    /// - bzip2: `/usr/bin/bzip2 -9`, a whole `.bz2` stream (what method 12 stores).
+    /// - LZMA: `xz --format=lzma -6` (Homebrew's xz), its 13-byte `.lzma` header replaced by the zip method's 4-byte
+    ///   header and the 5 property bytes; flag bit 1 (an end marker) when the header doesn't record the size.
+    /// - xz: `xz -6`, the whole `.xz` stream (method 95).
+    /// - Deflate64: the DEFLATE row's own stream (`text.zip`'s), recorded as method 9. The two read a stream alike but
+    ///   for length symbol 285 (258 in DEFLATE, 3 plus 16 extra bits in Deflate64) and distance codes 30 and 31 (which
+    ///   DEFLATE never uses), so a stream with no match of length 258 is the same stream in both. That's checked here:
+    ///   the archive is decoded through NativeZip as Deflate64 and must match the text's CRC-32 and size, or this
+    ///   throws (no Deflate64 encoder is installed to make one otherwise).
+    static func prepareMethod(_ method: Method) throws {
+        try prepare()
+        let fileManager = FileManager.default
+        let archive = methodArchive(method)
+        if fileManager.fileExists(atPath: archive.path) { return }
+        let partial = root.appending(path: "partial-\(method.rawValue).zip")
+        try? fileManager.removeItem(at: partial)
+        let source = root.appending(path: "source/text/big.txt")
+        if method == .deflate64 {
+            try fileManager.copyItem(at: largeText, to: partial)
+            try patchHeaders(of: partial, method: 9)
+            var decoder = ZipDecoder()
+            let check = try ZipArchive(url: partial)
+            do {
+                try check.contents(of: check.entries.first { $0.kind == .file }!, using: &decoder) { _ in }
+            } catch {
+                throw ExternalTool.Failure(description: "The text's DEFLATE stream doesn't decode as Deflate64 (a match of length 258?): \(error)")
+            }
+            try fileManager.moveItem(at: partial, to: archive)
+            return
+        }
+        let work = root.appending(path: "method-work")
+        try? fileManager.removeItem(at: work)
+        try fileManager.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: work) }
+        let original = try Data(contentsOf: source)
+        try original.write(to: work.appending(path: "big.txt"))
+        let payload: Data
+        var flags: UInt16 = 0
+        switch method {
+        case .bzip2:
+            try ExternalTool.run("/usr/bin/bzip2", ["-9", "-k", "-f", "big.txt"], in: work)
+            payload = try Data(contentsOf: work.appending(path: "big.txt.bz2"))
+        case .lzma:
+            try ExternalTool.run("/usr/bin/env", ["xz", "--format=lzma", "-6", "-k", "-f", "big.txt"], in: work)
+            let alone = try Data(contentsOf: work.appending(path: "big.txt.lzma"))
+            // `.lzma`: 5 property bytes, the size in 8 bytes (all ones: unknown, so the stream ends with a marker),
+            // the stream. Zip's: LZMA SDK version 9.20, a 2-byte properties size (5), the properties, the stream.
+            payload = Data([9, 20, 5, 0]) + alone.prefix(5) + alone.dropFirst(13)
+            if alone[5..<13].allSatisfy({ $0 == 0xFF }) { flags = 0x2 }
+        case .xz:
+            try ExternalTool.run("/usr/bin/env", ["xz", "-6", "-k", "-f", "big.txt"], in: work)
+            payload = try Data(contentsOf: work.appending(path: "big.txt.xz"))
+        case .deflate64:
+            preconditionFailure("made above")
+        }
+        // Stored under the original's name, then patched.
+        try payload.write(to: work.appending(path: "big.txt"))
+        try ExternalTool.run("/usr/bin/zip", ["-q0j", partial.path, "big.txt"], in: work)
+        let crc = original.withUnsafeBytes { UInt32(crc32(0, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt($0.count))) }
+        try patchHeaders(of: partial, method: method == .bzip2 ? 12 : method == .lzma ? 14 : 95, flags: flags,
+                         crc: crc, size: UInt32(original.count))
+        try fileManager.moveItem(at: partial, to: archive)
+    }
+
+    /// Rewrites the last entry's method (and, if given, its CRC-32 and uncompressed size), and ORs `flags` into its
+    /// general-purpose flags, in both its central directory header and its local header.
+    private static func patchHeaders(of archive: URL, method: UInt16, flags: UInt16 = 0, crc: UInt32? = nil, size: UInt32? = nil) throws {
+        var raw = try [UInt8](Data(contentsOf: archive))
+        func load16(_ offset: Int) -> UInt16 { UInt16(raw[offset]) | UInt16(raw[offset + 1]) << 8 }
+        func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
+            withUnsafeBytes(of: value.littleEndian) { raw.replaceSubrange(offset..<(offset + $0.count), with: $0) }
+        }
+        let central = (0..<(raw.count - 4)).last { raw[$0] == 0x50 && raw[$0 + 1] == 0x4B && raw[$0 + 2] == 1 && raw[$0 + 3] == 2 }!
+        let local = Int(raw[central + 42]) | Int(raw[central + 43]) << 8 | Int(raw[central + 44]) << 16 | Int(raw[central + 45]) << 24
+        precondition(raw[local] == 0x50 && raw[local + 1] == 0x4B && raw[local + 2] == 3 && raw[local + 3] == 4)
+        // Local header: flags at 6, method at 8, CRC at 14, uncompressed size at 22. Central header: 8, 10, 16, 24.
+        for (base, flagsOffset, methodOffset, crcOffset, sizeOffset) in [(local, 6, 8, 14, 22), (central, 8, 10, 16, 24)] {
+            store(load16(base + flagsOffset) | flags, at: base + flagsOffset)
+            store(method, at: base + methodOffset)
+            if let crc { store(crc, at: base + crcOffset) }
+            if let size { store(size, at: base + sizeOffset) }
+        }
+        try Data(raw).write(to: archive)
     }
 
     /// The step15 jobs' archives (made on first use, about 30 s, then cached): a separate seed, so the fixtures above

@@ -148,11 +148,6 @@ struct NUnzip: AsyncParsableCommand {
     )
     var jobs: Int?
 
-    @Flag(name: .customLong("zlib"), help: "Decompress DEFLATE with zlib instead of the built-in decoder (for comparison).")
-    var useZlib = false
-
-    private var backend: ZipDecoder.Backend { useZlib ? .zlib : .bytes }
-
     func validate() throws {
         if let jobs, jobs < 1 { throw ValidationError("--jobs must be at least 1.") }
         if update != nil, mode != nil { throw ValidationError("-f and -u only apply to extraction.") }
@@ -335,7 +330,6 @@ struct NUnzip: AsyncParsableCommand {
                     options.restoreOwnership = restoreOwner
                     options.keepSetIDBits = keepSetID
                     options.lowercaseNames = lowercase >= 2 ? .all : lowercase == 1 ? .fromUppercaseHosts : .none
-                    options.backend = backend
                     options.password = password(for: zip, entries: selected, at: path)
                     options.update = switch update {
                     case nil: .all
@@ -531,7 +525,7 @@ struct NUnzip: AsyncParsableCommand {
     private func test(_ entries: [ZipEntry], in zip: ZipArchive, at path: String) async throws {
         if quiet < 2 { Console.out("Archive:  \(path)") }
         // Entries are verified in parallel; results are reported afterwards, in archive order.
-        let failed = await zip.verify(entries, maxConcurrency: jobs ?? ProcessInfo.processInfo.activeProcessorCount, backend: backend, password: password(for: zip, entries: entries, at: path))
+        let failed = await zip.verify(entries, maxConcurrency: jobs ?? ProcessInfo.processInfo.activeProcessorCount, password: password(for: zip, entries: entries, at: path))
         let errors = Dictionary(failed.map { ($0.entry.localHeaderOffset, $0.error) }, uniquingKeysWith: { first, _ in first })
         let width = min(entries.map(\.path.count).max() ?? 0, 60)
         for entry in entries where entry.kind != .directory {
@@ -557,7 +551,7 @@ struct NUnzip: AsyncParsableCommand {
     private func write(_ entries: [ZipEntry], from zip: ZipArchive, at path: String, withNames: Bool) throws {
         if withNames { header(zip, at: path) }
         let password = password(for: zip, entries: entries, at: path)
-        var decoder = ZipDecoder(backend: backend)
+        var decoder = ZipDecoder()
         var code: Int32 = 0
         for entry in entries where entry.kind == .file {
             if withNames, quiet == 0 { Console.out("\(Self.label(for: entry).leftPadded(to: 11)): \(entry.path)") }

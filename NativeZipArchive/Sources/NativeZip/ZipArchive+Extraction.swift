@@ -94,8 +94,6 @@ public struct ExtractionOptions {
     /// diaeresis), as Archive Utility does, instead of the archive's own bytes (the default, as Info-ZIP's `unzip`).
     /// APFS finds a file by either form but keeps the bytes it was made with, which is what a listing returns.
     public var decomposesNames = false
-    /// Which DEFLATE implementation decompresses.
-    public var backend = ZipDecoder.Backend.bytes
 
     public enum LowercaseNames: Sendable {
         case none, fromUppercaseHosts, all
@@ -326,7 +324,7 @@ public struct ZipExtractor: ~Copyable {
         let rootIndex = roots[prefix] ?? roots.count
         roots[prefix] = rootIndex
         let job = ArchiveJob(
-            archive: archive, entries: selected, password: options.password, backend: options.backend,
+            archive: archive, entries: selected, password: options.password,
             prefix: prefixCount > 0 ? prefix + "/" : ""
         )
         let jobIndex = record.jobs.count
@@ -401,7 +399,7 @@ public struct ZipExtractor: ~Copyable {
             guard let item = items[target], item != index else { continue }
             let entry = selected[index]
             guard ZipArchive.Method.isSupported(entry.method), !entry.isEncrypted || options.password != nil else { continue }
-            if linkDecoder == nil { linkDecoder = ZipDecoder(backend: options.backend) }
+            if linkDecoder == nil { linkDecoder = ZipDecoder() }
             var bytes: [UInt8] = []
             bytes.reserveCapacity(Int(entry.uncompressedSize))
             // One that can't be read is planned as a file, where its error is reported.
@@ -540,7 +538,7 @@ public struct ZipExtractor: ~Copyable {
         if !options.restoreTimestamps { metadata.times = EntryTimes() }
         if entry.kind == .symlink {
             // Read now (links are small), so the event can name the destination; made after every file.
-            if linkDecoder == nil { linkDecoder = ZipDecoder(backend: options.backend) }
+            if linkDecoder == nil { linkDecoder = ZipDecoder() }
             var target: [UInt8] = []
             try job.archive.contents(of: entry, using: &linkDecoder!, password: options.password) { target.append(copying: $0) }
             options.onEvent?(.linking(entry, path: relativePath(prefixCount..<count), destination: String(decoding: target, as: UTF8.self)))

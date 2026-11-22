@@ -35,11 +35,10 @@ let package = Package(
         .target(
             name: "NativeZip",
             dependencies: [
-                "CBZip2",
                 .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BytesMacros", package: "Bytes"),
                 .product(name: "BytesFoundation", package: "Bytes"),
-                // Streaming DEFLATE for encrypted entries, and zstd.
+                // Every compression method: DEFLATE and Deflate64, bzip2, LZMA, xz, Zstandard.
                 .product(name: "BytesCompression", package: "Bytes"),
                 // WinZip AES: AES, HMAC-SHA1, PBKDF2.
                 .product(name: "BytesCrypto", package: "Bytes"),
@@ -50,8 +49,6 @@ let package = Package(
             ],
             swiftSettings: strictSettings
         ),
-        // libbz2 from the SDK, for bzip2 entries (method 12).
-        .systemLibrary(name: "CBZip2", path: "Sources/CBZip2"),
         .executableTarget(
             name: "nunzip",
             dependencies: [
@@ -79,7 +76,11 @@ let package = Package(
             dependencies: [
                 "NativeZip",
                 .product(name: "Disk", package: "Disk"),
+                // `CRC32` for the CRC-32 rows.
+                .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
+                // Compression's one-shot DEFLATE decoder, the reference row.
+                .product(name: "BytesReferenceCodecs", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/NativeZipBenchmarks",
