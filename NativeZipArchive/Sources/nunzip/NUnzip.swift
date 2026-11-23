@@ -1,4 +1,6 @@
 import ArgumentParser
+import BytesAsync
+import Disk
 import Foundation
 import NativeZip
 import System
@@ -159,10 +161,7 @@ struct NUnzip: AsyncParsableCommand {
         // The main task runs at the default priority; the work runs in a child at `.userInitiated` (the user waits
         // for it), which the extraction's and verification's worker tasks inherit.
         let command = self
-        try await withThrowingTaskGroup { group in
-            group.addTask(priority: .userInitiated) { try await command.work() }
-            try await group.waitForAll()
-        }
+        try await withPriority(.userInitiated) { try await command.work() }
     }
 
     private func work() async throws {
@@ -242,8 +241,13 @@ struct NUnzip: AsyncParsableCommand {
             return zip
         } catch ZipError.notAZipArchive {
             Console.error("nunzip:  cannot find zipfile directory in '\(path)': it is not a zip archive, or it is truncated.")
-        } catch let error as Errno {
-            Console.error("nunzip:  cannot open '\(path)': \(error).")
+        } catch let error as DiskError {
+            // Info-ZIP's message for a file it can't open: the error alone (Disk's names the call and the path too).
+            if case .system(_, _, let code) = error {
+                Console.error("nunzip:  cannot open '\(path)': \(code).")
+            } else {
+                Console.error("nunzip:  cannot open '\(path)': \(error).")
+            }
         } catch {
             Console.error("nunzip:  error in '\(path)': \(error)")
         }

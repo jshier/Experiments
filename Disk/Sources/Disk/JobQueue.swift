@@ -186,7 +186,7 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
             case .closed:
                 return false
             case .full:
-                let start = DispatchClock.now
+                let start = MonotonicClock.now
                 // Suspend until a pop makes room (checked again under the lock: no lost wakeup), then retry.
                 await withContinuation { (continuation: Continuation<Void>) in
                     let wait = state.withLock { state in
@@ -196,7 +196,7 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
                     }
                     if !wait { continuation.resume() }
                 }
-                pushWaitNanoseconds.add(DispatchClock.now - start, ordering: .relaxed)
+                pushWaitNanoseconds.add(MonotonicClock.nanoseconds(since: start), ordering: .relaxed)
                 pushWaits.add(1, ordering: .relaxed)
             }
         }
@@ -257,20 +257,4 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
         for consumer in consumers { consumer.resume() }
         for producer in producers { producer.resume() }
     }
-}
-
-/// Nanoseconds of the monotonic clock (`mach_continuous_time` isn't needed: intervals only).
-enum DispatchClock {
-    @inline(__always)
-    static var now: Int { Int(clock_gettime_nsec_np(CLOCK_UPTIME_RAW)) }
-}
-
-/// A count several tasks add to, with an identity (arrays hold them; `Atomic` isn't copyable).
-final class Counter: Sendable {
-    private let atomic = Atomic<Int>(0)
-
-    @inline(__always)
-    func add(_ count: Int = 1) { atomic.add(count, ordering: .relaxed) }
-
-    var value: Int { atomic.load(ordering: .relaxed) }
 }

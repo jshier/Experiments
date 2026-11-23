@@ -309,30 +309,33 @@ extension LZMA2Decoder: @unchecked Sendable {}
 /// The decoder's probability model, allocated once, growing only for raw LZMA's larger literal contexts.
 @safe @usableFromInline // Exported for clients' destroys, as `ZstdWorkspace`.
 struct LZMAWorkspace: ~Copyable {
-    private(set) var base: UnsafeMutablePointer<UInt16>
+    private var memory: CodecWorkspace
     private(set) var count: Int
 
     init(count: Int) {
-        unsafe base = UnsafeMutablePointer<UInt16>.allocate(capacity: count)
-        // Unsafe: initializing fresh memory. Safe: `count` elements were just allocated.
-        unsafe base.initialize(repeating: LZMAProbabilities.initial, count: count)
-        unsafe base[LZMAProbabilities.topSlot] = LZMAProbabilities.topValue
+        memory = Self.allocate(count)
         self.count = count
+    }
+
+    /// The probabilities.
+    var base: UnsafeMutablePointer<UInt16> {
+        // Unsafe: the allocation as `UInt16`s. Safe: it holds `count` of them, initialized by `allocate`.
+        unsafe memory.base.assumingMemoryBound(to: UInt16.self)
     }
 
     /// Makes room for at least `count` probabilities.
     mutating func reserve(_ count: Int) {
         guard count > self.count else { return }
-        // Unsafe: replacing the allocation. Safe: the old one is freed once; the new one is initialized.
-        unsafe base.deallocate()
-        unsafe base = UnsafeMutablePointer<UInt16>.allocate(capacity: count)
-        unsafe base.initialize(repeating: LZMAProbabilities.initial, count: count)
-        unsafe base[LZMAProbabilities.topSlot] = LZMAProbabilities.topValue
+        memory = Self.allocate(count)
         self.count = count
     }
 
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` and `reserve` free it, each once.
-        unsafe base.deallocate()
+    /// `count` probabilities, each at its initial value.
+    private static func allocate(_ count: Int) -> CodecWorkspace {
+        let memory = CodecWorkspace(byteCount: count &* 2, zeroed: false)
+        // Unsafe: initializing fresh memory. Safe: it holds `count` `UInt16`s; the top slot is below `count`.
+        let base = unsafe memory.base.initializeMemory(as: UInt16.self, repeating: LZMAProbabilities.initial, count: count)
+        unsafe base[LZMAProbabilities.topSlot] = LZMAProbabilities.topValue
+        return memory
     }
 }

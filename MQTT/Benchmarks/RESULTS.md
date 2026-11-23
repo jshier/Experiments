@@ -11,6 +11,13 @@ One core parses the same 1.25 MB again and again, from cache. All 32 cores each 
 (4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput. Numbers
 are M3 Ultra unless a heading says otherwise; the 2026-11-19 section runs the same benchmarks on an M1 Max.
 
+## 2026-11-22: Bytes' cleanups, as a control (baselines `unify-old-{1,2}` → `unify-new-{1,2}`, M1 Max)
+
+The whole suite, two interleaved rounds against HEAD (5f28068), after Bytes' writers gained preconditions
+(`IntegerFields`, `ConvertibleFromBytes`), `ByteGroup.withBytes`, `includingPrefix:` on prefixed reads, and
+`[UInt8].append(_:as:_:)`. No MQTT code changed. Every row's instructions are within 0.1% in both rounds, mallocs
+unchanged.
+
 ## 2026-11-19: the same suite on an M1 Max (baselines `d2-final` → `m1max`)
 
 Every benchmark, run unchanged on a new machine and compared with the M3 Ultra's `d2-final` (2026-11-18). The

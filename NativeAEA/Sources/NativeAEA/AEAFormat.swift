@@ -246,8 +246,7 @@ public struct AEAPrologue: Sendable {
     }
 
     private static func bytes(_ reader: inout AlignedBytesReader, _ count: Int) throws(BytesError) -> [UInt8] {
-        let span = try reader.read(byteCount: count)
-        return span.withUnsafeBytes { unsafe Array($0) } // Copies the bytes out of a borrowed span: safe.
+        try [UInt8](copying: reader.read(byteCount: count))
     }
 
     /// The auth data as key-value entries, or `nil` when it isn't in that format.
@@ -257,21 +256,10 @@ public struct AEAPrologue: Sendable {
         var entries: [AEAAuthDataEntry] = []
         var reader = AlignedBytesReader(authData.span.bytes)
         do {
-            while reader.remainingByteCount > 0 {
-                let size = try Int(reader.read(Byte4.self, .littleEndian))
-                guard size >= 5 else { return nil }
-                var entry = AlignedBytesReader(try reader.read(byteCount: size - 4))
-                var key: [UInt8] = []
-                while true {
-                    let byte = try UInt8(entry.read(Byte.self))
-                    if byte == 0 { break }
-                    key.append(byte)
-                }
-                let value = try entry.read(byteCount: entry.remainingByteCount)
-                entries.append(AEAAuthDataEntry(
-                    key: String(decoding: key, as: UTF8.self),
-                    value: value.withUnsafeBytes { unsafe Array($0) } // Copies out of a borrowed span: safe.
-                ))
+            while !reader.isAtEnd {
+                var entry = try reader.read(sectionPrefixedBy: Byte4.self, .littleEndian, includingPrefix: true)
+                let key = try String(copying: entry.read(utf8TerminatedBy: 0))
+                entries.append(AEAAuthDataEntry(key: key, value: [UInt8](copying: entry.readRemainingBytes())))
             }
         } catch {
             return nil

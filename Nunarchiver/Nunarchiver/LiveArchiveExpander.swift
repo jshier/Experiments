@@ -1,3 +1,4 @@
+import BytesAsync
 import Darwin
 import Disk
 import Foundation
@@ -18,8 +19,6 @@ final class LiveArchiveExpander: ArchiveExpander {
         let started: ContinuousClock.Instant
         /// Whether a poll has yet read a fraction the bar can show.
         var hasShownFraction = false
-        /// The largest fraction a poll has read.
-        var furthestFraction = 0.0
     }
 
     private let running = Mutex<[UUID: Running]>([:])
@@ -41,23 +40,20 @@ final class LiveArchiveExpander: ArchiveExpander {
         // The work runs in a child task at user-initiated priority, whatever the caller's: a GUI app in the background
         // (no window yet, not frontmost) otherwise ran its writers at background QoS, every thread at priority 4 on the
         // efficiency cores (Xcode's xip: minutes instead of 10 s). A child task keeps the caller's cancellation.
-        let outcome = await withTaskGroup(of: ExpansionOutcome.self) { group in
-            group.addTask(priority: .userInitiated) {
-                do {
-                    return .expanded(try await Expander.expand(FilePath(archive.path), credentials: credentials, progress: progress))
-                } catch let request as CredentialRequest {
-                    return .needsCredential(request)
-                } catch {
-                    if Task.isCancelled || ExpansionFailure.isCancellation(error) { return .cancelled }
-                    // The failure as the package reported it (the call and the path, for file system errors), for
-                    // diagnosing from the system log: `log show --predicate 'subsystem == "com.jonshier.Nunarchiver"'`.
-                    Self.log.error(
-                        "\(archive.path, privacy: .public): failed: \(String(describing: error), privacy: .public) [\(String(reflecting: type(of: error)), privacy: .public)]"
-                    )
-                    return .failed(ExpansionFailure.message(error))
-                }
+        let outcome = await withPriority(.userInitiated) { () async -> ExpansionOutcome in
+            do {
+                return .expanded(try await Expander.expand(FilePath(archive.path), credentials: credentials, progress: progress))
+            } catch let request as CredentialRequest {
+                return .needsCredential(request)
+            } catch {
+                if Task.isCancelled || DiskError.isCancellation(error) { return .cancelled }
+                // The failure as the package reported it (the call and the path, for file system errors), for
+                // diagnosing from the system log: `log show --predicate 'subsystem == "com.jonshier.Nunarchiver"'`.
+                Self.log.error(
+                    "\(archive.path, privacy: .public): failed: \(String(describing: error), privacy: .public) [\(String(reflecting: type(of: error)), privacy: .public)]"
+                )
+                return .failed(ExpansionFailure.message(error))
             }
-            return await group.next() ?? .cancelled
         }
         // One line per archive (for timing the app against the packages' command-line tools).
         let seconds = (ContinuousClock.now - started) / .seconds(1)
@@ -101,23 +97,13 @@ final class LiveArchiveExpander: ArchiveExpander {
 
     func progress(of id: UUID) -> ExpansionProgress? {
         guard let expansion = running.withLock({ $0[id] }) else { return nil }
-        let progress = expansion.progress
-        var reading = ExpansionProgress(entries: progress.entries, bytes: progress.bytes)
-        reading.fraction = ExpansionProgress.fraction(
-            entries: reading.entries, of: progress.expectedEntries, bytes: reading.bytes, of: progress.expectedBytes
-        )
-        // The totals change under a running extraction (an estimate of the bytes, then exact counts once the archive
-        // has been walked), and the fraction with them: the bar never goes back.
-        if let fraction = reading.fraction {
-            reading.fraction = running.withLock { running in
-                let furthest = max(fraction, running[id]?.furthestFraction ?? 0)
-                running[id]?.furthestFraction = furthest
-                return furthest
-            }
-        }
+        // Disk's reading: bytes and entries together, and a fraction that never goes back while the totals change under
+        // a running extraction (an estimate of the bytes, then exact counts once the archive has been walked).
+        let counted = expansion.progress.read()
+        let reading = ExpansionProgress(entries: counted.entries, bytes: counted.bytes, fraction: counted.fraction)
         // Debug level: kept only while someone streams it (`log stream --level debug`), to watch the window's polls.
         Self.log.debug(
-            "poll: \(reading.entries, privacy: .public) of \(progress.expectedEntries, privacy: .public) entries, \(reading.bytes, privacy: .public) of \(progress.expectedBytes, privacy: .public) bytes, \(reading.fraction ?? -1, format: .fixed(precision: 3), privacy: .public)"
+            "poll: \(counted.entries, privacy: .public) of \(counted.expectedEntries, privacy: .public) entries, \(counted.bytes, privacy: .public) of \(counted.expectedBytes, privacy: .public) bytes, \(counted.fraction ?? -1, format: .fixed(precision: 3), privacy: .public)"
         )
         if !expansion.hasShownFraction, let fraction = reading.barFraction {
             // Once per expansion: when its row's bar stopped being indeterminate. (The window polls only once it's
@@ -152,14 +138,14 @@ enum Expander {
         let folder = archive.removingLastComponent().appending(folderName(for: archive))
         let opened = try format.open(archive, credentials: credentials)
         // The archive's quarantine on everything expanded, the folder included, as Archive Utility leaves them; a
-        // `.xip`'s contents get none (Archive Utility's, and `xip --expand`'s). The adapters ask Disk's writers for
-        // the entries'; this is the staging directory's own.
+        // `.xip`'s contents get none (Archive Utility's, and `xip --expand`'s). Stated once, here: the staging
+        // directory gets it now, and the packages give every entry their destination's.
         var options = DestinationOptions()
         options.quarantine = format == .xip ? nil : Quarantine(copyingFrom: archive)
         options.quarantinesDestination = true
         let staging = try Destination.staging(for: folder, options: options)
         do {
-            try await opened.extract(into: staging, quarantine: options.quarantine, progress: progress)
+            try await opened.extract(into: staging, progress: progress)
             try Task.checkCancellation()
             return URL(filePath: try staging.publishUnwrapped(as: folder).string)
         } catch {
@@ -196,17 +182,13 @@ enum ExpansionFailure: Error, CustomStringConvertible {
         }
     }
 
-    static func isCancellation(_ error: any Error) -> Bool {
-        if case .cancelled? = error as? DiskError { return true }
-        return error is CancellationError || AppleArchiveAdapter.isCancellation(error)
-    }
-
+    /// The alert's message for any error the expansion throws: its description as a sentence. Every package's errors
+    /// describe themselves (NativeAEA's and Disk's in lowercase without a period, ZipError's as sentences).
     static func message(_ error: any Error) -> String {
-        if let error = error as? ExpansionFailure { return error.description }
-        if let message = AppleArchiveAdapter.message(error) { return message }
-        if let message = ZipAdapter.message(error) { return message }
-        if let error = error as? DiskError { return String(describing: error) }
-        if let error = error as? Errno { return error.description }
-        return (error as NSError).localizedDescription
+        // Cocoa's errors (an `NSError`'s `description` is its domain and code) by their localized description.
+        if type(of: error) is NSError.Type { return (error as NSError).localizedDescription }
+        let description = String(describing: error)
+        let sentence = description.prefix(1).uppercased() + description.dropFirst()
+        return sentence.hasSuffix(".") ? sentence : sentence + "."
     }
 }

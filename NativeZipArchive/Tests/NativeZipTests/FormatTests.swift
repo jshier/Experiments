@@ -1,5 +1,6 @@
 import BytesTestSupport
 import Disk
+import DiskTestSupport
 import Foundation
 import NativeZip
 import System
@@ -313,7 +314,8 @@ private let largeFixtures = [
 
     /// With a quarantine, everything extracted gets the attribute (files, read-only ones too; listed directories;
     /// parents the archive doesn't list; symbolic links themselves), the destination doesn't, and contents and modes
-    /// are as without one. Through `ZipArchive.extract`'s option and `ZipExtractor`'s parameter.
+    /// are as without one. The destination's quarantine, through `ZipArchive.extract(into:)` (into a staging directory,
+    /// published after) and `ZipExtractor.extract(into:)`.
     @Test(arguments: [false, true]) func quarantinesWhatItExtracts(listsDirectories: Bool) async throws {
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
@@ -331,13 +333,7 @@ private let largeFixtures = [
         #expect(archive.entries.contains { $0.kind == .directory } == listsDirectories)
 
         let quarantine = Quarantine(value: Array("0083;673e3000;Safari;".utf8))
-        func attribute(_ url: URL) -> [UInt8]? {
-            let size = getxattr(url.path, "com.apple.quarantine", nil, 0, 0, XATTR_NOFOLLOW)
-            guard size >= 0 else { return nil }
-            var value = [UInt8](repeating: 0, count: size)
-            _ = getxattr(url.path, "com.apple.quarantine", &value, size, 0, XATTR_NOFOLLOW)
-            return value
-        }
+        func attribute(_ url: URL) -> [UInt8]? { extendedAttribute("com.apple.quarantine", of: url) }
         func mode(_ url: URL) -> mode_t {
             var info = stat()
             return lstat(url.path, &info) == 0 ? info.st_mode & 0o7777 : 0
@@ -348,12 +344,14 @@ private let largeFixtures = [
         try await archive.extract(to: FilePath(plain.path))
         for item in items { #expect(attribute(plain.appending(path: item)) == nil, "\(item)") }
 
-        var options = ExtractionOptions()
-        options.quarantine = quarantine
+        var destinationOptions = DestinationOptions()
+        destinationOptions.quarantine = quarantine
         let single = directory.appending(path: "single")
-        try await archive.extract(to: FilePath(single.path), options: options)
+        let staging = try Destination.staging(for: FilePath(single.path), options: destinationOptions)
+        try await archive.extract(into: staging)
+        #expect(try staging.publish(as: FilePath(single.path)) == FilePath(single.path))
         let pooled = directory.appending(path: "pooled")
-        let failures = try await ZipExtractor.extract(into: FilePath(pooled.path), quarantine: quarantine) { extractor in
+        let failures = try await ZipExtractor.extract(into: Destination(FilePath(pooled.path), options: destinationOptions)) { extractor in
             try await extractor.add(archive, into: "x/y")
         }
         #expect(failures.isEmpty)

@@ -13,6 +13,59 @@ swift package --traits SyscallCounting --scratch-path .build-syscalls --disable-
 Tools/bench-table Disk --metric 'wall|Disk syscalls|Malloc' syscalls disk-1
 ```
 
+## 2026-11-22, evening: bridges without allocations (baseline `alloc-new-1`; NativeAEA's RESULTS.md has the trace)
+
+A compressed large file's piece whose first chunk starts in earlier pieces (a bridge) cost two arrays: `Bridge.parts`
+in the queued job and `bridgeBases` (the bridged pieces' addresses) in the writer. Now `Bridge` holds its first part
+inline and an array only from the second, which only pieces smaller than a chunk make (NativeAEA's segment-sized pieces
+never do), and the writer gathers the head chunk from the bridged pieces where it compresses it, reading each address
+as it goes. `WriteJob` grows 256 → 328 bytes, the 16,384-slot ring 4.0 → 5.1 MiB (uninitialized: touched as it
+cycles). `writesLargeFilesInPieces` covers bridges of up to six pieces (12,000-byte pieces).
+
+| Benchmark | `unify-new-1`, `-2` → `alloc-new-1` |
+|---|---|
+| Single writer, Workers (20,000 files), Xcode-like LZBITMAP rows | instructions and mallocs unchanged (Xcode-like's own ±20 mallocs) |
+| Large file: 1 GB, LZBITMAP | 38 G, unchanged; mallocs 116 → 123 |
+| Large file: 1 GB, one write / 8 MiB writes | mallocs 100–110 → 108–117; instructions +11–13% (kernel: the volume was 98% full, NativeAEA's RESULTS.md) |
+
+The large-file rows' 7 more mallocs look per writer, not per piece: the same count in rows of 128 pieces and of one
+write, and NativeAEA's trace shows the writer tasks' allocator slabs (taken as an async stack first deepens) going 14 →
+21 in `Writer.run` and 0 → 8 in `writePiece`, consistent with larger frames holding larger jobs. Not traced in these
+rows themselves.
+
+## 2026-11-22, later: the cleanups (baselines `unify-old-{1,2}` → `unify-new-{1,2}`, M1 Max)
+
+HEAD (5f28068) against the cleanups, the whole suite, two interleaved rounds on an otherwise idle machine. In Disk:
+`Destination.reopened(with:)` (clients extract into the caller's `Destination`); `ExtractionProgress.read(entryWeight:)`
+(the entry-weighted fraction, never going back, moved from the app); `DiskError(wrapping:)`, `unwrapped`,
+`isCancellation`, `CancellationReporting`, `.endOfFile`, `.tooLarge`; `MappedFile(path:)` throws `DiskError`, and
+`InputFile.map(range:)`; counted `pread`/`read` for the `SyscallCounting` trait; the ACL parse on a
+`LittleEndianBytesReader`; `JobQueue`'s clock and counter from BytesAsync (`MonotonicClock`, `RelaxedCounter`);
+`DiskTestSupport` (a product: `readTree` with `readdir`, `SystemAttributes.ignoredByDefault`).
+
+Nothing Disk does changed by more than the rows' spread:
+- **Small files** (single writer and every worker/width combination, 2,000 and 20,000 files, the probes): instructions
+  within 0 to −1.5% where the table resolves them. Rows at 21–23 G show ±4.5%: one step of the table's two digits (22 G
+  against 23 G), in both directions across rows. Times within ±5%, both directions. `Single writer: 2,000 small files`
+  read −3.3% and −3.7% (2.11 → 2.03–2.04 G, kernel included).
+- **Mallocs:** unchanged but for `Workers: Xcode-like, LZBITMAP` (503 → 487, 491 → 511: the multi-writer row's own
+  ±20).
+- **1 GB single files** (`Large file: 1 GB, one write`, `8 MiB writes`, and the `Probe: 1 GB file` rows): instructions
+  −8 to +27% and times 0.3x–2.4x in either direction, **in the probes too, which are raw `pwrite`/DispatchIO calls in
+  the benchmark itself, unchanged between the trees**. These rows measure the kernel's state (page cache and APFS
+  allocation after a gigabyte written per sample, the new side always running after the old), not Disk's code. Judge
+  them only within one process.
+
+## 2026-11-22: `InputFile`, the read side (NativeAEA's RESULTS.md has the measurements)
+
+`InputFile` (`InputFile.swift`) is the read side beside `MappedFile` and `OutputFile`: `init(_: FilePath)` (read-only,
+`O_CLOEXEC`), `count` from `fstat`, `read(at:into:)` filling a `MutableRawSpan` or appending to an `OutputRawSpan` (a
+`pread` loop, EINTR retried, a short read at the end `.endOfFile`), `read(at:count:) -> [UInt8]` (size checked before
+allocating), `map(access:)`, and `contents(of:maximumCount:)` for small files (`read(2)` to the end, so FIFOs and
+`/dev/stdin` work; `.tooLarge` past the cap). `Sys.pread` and `Sys.read` are counted under `SyscallCounting`, and
+`MappedFile(path:)` opens through the counted wrappers. NativeAEA now reads every file through it; its instructions and
+data-path `pread`s are unchanged (2 `lseek`s and 2 `open`s fewer per archive).
+
 ## 2026-11-21 (later): publishing as Archive Utility does, measured against it (baselines `v1-before` → `v1-after`)
 
 Nunarchiver's last round: its output compared with Archive Utility's, item by item, and what differed fixed here and

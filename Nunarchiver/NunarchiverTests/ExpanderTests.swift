@@ -1,4 +1,6 @@
+import BytesTestSupport
 import Disk
+import DiskTestSupport
 import Foundation
 import System
 import Testing
@@ -88,7 +90,7 @@ import Testing
             try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
             try Data("hello\n".utf8).write(to: source.appending(path: "hello.txt"))
             let archive = directory.appending(path: "Archive.zip")
-            try run("/usr/bin/zip", ["-qr", archive.path, "Project"], in: directory.appending(path: "source"))
+            try ExternalTool.run("/usr/bin/zip", ["-qr", archive.path, "Project"], in: directory.appending(path: "source"))
             try FileManager.default.removeItem(at: directory.appending(path: "source"))
 
             for expected in ["Project", "Project 2", "Project 3"] {
@@ -116,7 +118,7 @@ import Testing
             #expect(setxattr(source.appending(path: "a.txt").path, "com.example.note", note, note.count, 0, 0) == 0)
             let archive = directory.appending(path: "Archive.zip")
             // The folder's contents, with `__MACOSX/._a.txt` for the attribute.
-            try run("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", source.path, archive.path])
+            try ExternalTool.run("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", source.path, archive.path])
             try FileManager.default.removeItem(at: source)
             let quarantine = Array("0081;673e3000;Safari;11111111-2222-3333-4444-555555555555".utf8)
             #expect(setxattr(archive.path, "com.apple.quarantine", quarantine, quarantine.count, 0, 0) == 0)
@@ -125,12 +127,14 @@ import Testing
                 let outcome = await LiveArchiveExpander().expand(archive, id: UUID(), credentials: ArchiveCredentials())
                 let folder = directory.appending(path: expected)
                 #expect(outcome == .expanded(folder))
-                let attributes = try FileManager.default.attributesOfItem(atPath: folder.path)
-                #expect((attributes[.posixPermissions] as? Int) == 0o700)
-                #expect(attribute("com.apple.quarantine", of: folder) == quarantine)
-                #expect(attribute("com.apple.quarantine", of: folder.appending(path: "a.txt")) == quarantine)
-                #expect(attribute("com.example.note", of: folder.appending(path: "a.txt")) == note)
-                #expect(try FileManager.default.contentsOfDirectory(atPath: folder.path).sorted() == ["a.txt", "b.txt"])
+                let item = try readItem(at: folder, including: .attributes)
+                #expect(item.mode == 0o700)
+                #expect(item.attributes?["com.apple.quarantine"] == quarantine)
+                // Listed with `readdir`, so a `._a.txt` left behind would show.
+                let tree = try readTree(folder, including: [.contents, .attributes])
+                #expect(tree.keys.sorted() == ["a.txt", "b.txt"])
+                #expect(tree["a.txt"]?.attributes == ["com.apple.quarantine": quarantine, "com.example.note": note])
+                #expect(tree["b.txt"]?.contents == Array("b.txt".utf8))
             }
             // No staging directory is left behind.
             let names = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
@@ -144,7 +148,7 @@ import Testing
             try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
             try Data("secret\n".utf8).write(to: source.appending(path: "secret.txt"))
             let archive = directory.appending(path: "Secret.zip")
-            try run("/usr/bin/zip", ["-q", "-P", "sesame", archive.path, "secret.txt"], in: source)
+            try ExternalTool.run("/usr/bin/zip", ["-q", "-P", "sesame", archive.path, "secret.txt"], in: source)
             try FileManager.default.removeItem(at: source)
             let expander = LiveArchiveExpander()
 
@@ -168,7 +172,7 @@ import Testing
             try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
             try Data("contents\n".utf8).write(to: source.appending(path: "file.txt"))
             let plain = directory.appending(path: "plain.aar")
-            try run("/usr/bin/aa", ["archive", "-d", source.path, "-o", plain.path, "-include-path", "file.txt"])
+            try ExternalTool.run("/usr/bin/aa", ["archive", "-d", source.path, "-o", plain.path, "-include-path", "file.txt"])
             try FileManager.default.removeItem(at: source)
             let expander = LiveArchiveExpander()
             let expanded = directory.appending(path: "file.txt")
@@ -177,7 +181,7 @@ import Testing
             }
 
             let password = directory.appending(path: "password.aea")
-            try run("/usr/bin/aea", ["encrypt", "-profile", "5", "-password-value", "correct horse battery staple 42", "-i", plain.path, "-o", password.path])
+            try ExternalTool.run("/usr/bin/aea", ["encrypt", "-profile", "5", "-password-value", "correct horse battery staple 42", "-i", plain.path, "-o", password.path])
             #expect(await expand(password, [:]) == .needsCredential(CredentialRequest(kind: .password)))
             #expect(await expand(password, [.password: "wrong"]) == .needsCredential(CredentialRequest(kind: .password, isRetry: true)))
             #expect(await expand(password, [.password: "correct horse battery staple 42"]) == .expanded(expanded))
@@ -185,7 +189,7 @@ import Testing
 
             let key = String(repeating: "0123456789abcdef", count: 4)
             let symmetric = directory.appending(path: "symmetric.aea")
-            try run("/usr/bin/aea", ["encrypt", "-profile", "1", "-key-value", "hex:\(key)", "-i", plain.path, "-o", symmetric.path])
+            try ExternalTool.run("/usr/bin/aea", ["encrypt", "-profile", "1", "-key-value", "hex:\(key)", "-i", plain.path, "-o", symmetric.path])
             #expect(await expand(symmetric, [:]) == .needsCredential(CredentialRequest(kind: .key)))
             #expect(await expand(symmetric, [.key: "not a key"]) == .needsCredential(CredentialRequest(kind: .key, isRetry: true)))
             #expect(await expand(symmetric, [.key: String(key.reversed())]) == .needsCredential(CredentialRequest(kind: .key, isRetry: true)))
@@ -198,15 +202,15 @@ import Testing
                 // A scalar with a leading zero byte makes a PEM `aea` can't parse (1 in 256): make another.
                 var signed = false
                 for _ in 0..<8 where !signed {
-                    try run("/usr/bin/openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", secret.path])
-                    try run("/usr/bin/openssl", ["ec", "-in", secret.path, "-pubout", "-out", open.path])
-                    signed = (try? run("/usr/bin/aea", ["encrypt", "-profile", "0", "-sign-priv", secret.path, "-i", plain.path, "-o", directory.appending(path: "probe.aea").path])) != nil
+                    try ExternalTool.run("/usr/bin/openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", secret.path])
+                    try ExternalTool.run("/usr/bin/openssl", ["ec", "-in", secret.path, "-pubout", "-out", open.path])
+                    signed = (try? ExternalTool.run("/usr/bin/aea", ["encrypt", "-profile", "0", "-sign-priv", secret.path, "-i", plain.path, "-o", directory.appending(path: "probe.aea").path])) != nil
                 }
                 try #require(signed)
                 try FileManager.default.removeItem(at: directory.appending(path: "probe.aea"))
             }
             let signed = directory.appending(path: "signed.aea")
-            try run("/usr/bin/aea", ["encrypt", "-profile", "0", "-sign-priv", privateKey.path, "-i", plain.path, "-o", signed.path])
+            try ExternalTool.run("/usr/bin/aea", ["encrypt", "-profile", "0", "-sign-priv", privateKey.path, "-i", plain.path, "-o", signed.path])
             #expect(await expand(signed, [:]) == .needsCredential(CredentialRequest(kind: .signingPublicKey)))
             #expect(await expand(signed, [.signingPublicKey: "nonsense"]) == .needsCredential(CredentialRequest(kind: .signingPublicKey, isRetry: true)))
             let other = try String(contentsOf: otherPublicKey, encoding: .utf8)
@@ -233,7 +237,7 @@ import Testing
                 try contents.write(to: source.appending(path: "file-\(index).txt"))
             }
             let archive = directory.appending(path: "Many.zip")
-            try run("/usr/bin/zip", ["-q", "-r", "-1", archive.path, "."], in: source)
+            try ExternalTool.run("/usr/bin/zip", ["-q", "-r", "-1", archive.path, "."], in: source)
             try FileManager.default.removeItem(at: source)
 
             let expander = LiveArchiveExpander()
@@ -259,42 +263,11 @@ import Testing
         }
     }
 
-    private func attribute(_ name: String, of url: URL) -> [UInt8]? {
-        let size = getxattr(url.path, name, nil, 0, 0, XATTR_NOFOLLOW)
-        guard size >= 0 else { return nil }
-        var value = [UInt8](repeating: 0, count: size)
-        // Unsafe: `getxattr` writes through a pointer. Safe: the array's own storage, `size` bytes, the most it's
-        // told it may write.
-        return getxattr(url.path, name, &value, size, 0, XATTR_NOFOLLOW) == size ? value : nil
-    }
-
-    private struct ToolFailure: Error, CustomStringConvertible {
-        var description: String
-    }
-
-    private func run(_ tool: String, _ arguments: [String], in directory: URL? = nil) throws {
-        let process = Process()
-        process.executableURL = URL(filePath: tool)
-        process.arguments = arguments
-        process.currentDirectoryURL = directory
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw ToolFailure(description: "\(tool) \(arguments.joined(separator: " ")): exit \(process.terminationStatus)") }
-    }
-
     /// A directory of the test's own, removed when `body` returns.
     private func withTemporaryDirectory(_ body: (URL) async throws -> Void) async throws {
-        let url = try makeTemporaryDirectory()
-        defer { try? FileManager.default.removeItem(at: url) }
-        try await body(url)
-    }
-
-    private func makeTemporaryDirectory() throws -> URL {
         // Resolved (`/private/var/…`): the expander reports where things went from the descriptor's own path.
-        let url = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appending(path: "NunarchiverTests-\(UUID().uuidString).noindex")
-        try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
-        return url
+        let directory = try TemporaryDirectory(prefix: "NunarchiverTests", resolvingSymbolicLinks: true)
+        defer { directory.remove() }
+        try await body(directory.url)
     }
 }

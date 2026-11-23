@@ -1,4 +1,5 @@
 import BytesAsync
+import Disk
 import Foundation
 import Synchronization
 import System
@@ -23,7 +24,7 @@ extension AEAArchive {
             active: decoders + max(0, options.extraBuffers) + 2
         )
         let stream = try SegmentStream(
-            archive: self, pool: pool, decoders: decoders, backend: options.decoder,
+            archive: self, pool: pool, decoders: decoders,
             verifyMACs: options.verifyMACs, verifyChecksums: options.verifyChecksums, input: options.input
         )
         return AEAPayload(stream, options: options, held: held)
@@ -128,7 +129,7 @@ final class AEAPayload: ChunkSource {
         // The segments' pool stays as it started: writers hold the block stream's buffers (its pool is sized for them).
         return BlockStream(
             .upstream(segments), layout: .pbz(compression, blockSize: blockSize),
-            decoders: options.decodeThreads, extraBuffers: options.extraBuffers + held, backend: options.decoder
+            decoders: options.decodeThreads, extraBuffers: options.extraBuffers + held
         )
     }
 
@@ -155,22 +156,17 @@ public final class AppleArchiveFile: Sendable {
     public let compression: AEACompression?
     /// The largest block (`pbz`), or the slice plain streams are read in.
     public let blockSize: Int
-    private let descriptor: FileDescriptor
+    /// The archive file, open for reading (Disk's `InputFile`).
+    private let file: InputFile
     private let size: Int
 
     public init(path: FilePath) throws(AEAError) {
-        let descriptor: FileDescriptor
-        do {
-            descriptor = try FileDescriptor.open(path, .readOnly, options: [.closeOnExec])
-        } catch {
-            throw .fileSystem("open \(path)", error as? Errno ?? .ioError)
-        }
-        self.descriptor = descriptor
+        let file = try AEAArchive.open(path)
+        self.file = file
         self.path = path
         do {
-            size = try AEAArchive.fileSize(descriptor)
-            var head = [UInt8](repeating: 0, count: min(size, PBZ.headerSize))
-            try AEAArchive.read(descriptor, at: 0, into: &head)
+            size = file.count
+            let head = try AEAArchive.read(file, at: 0, count: min(size, PBZ.headerSize))
             let detected: AEACompression? = head.withUnsafeBytes { unsafe PBZ.compression($0) }
             if let detected {
                 guard head.count == PBZ.headerSize else { throw AEAError.invalidArchive("a pbz header is cut short") }
@@ -184,22 +180,15 @@ public final class AppleArchiveFile: Sendable {
                 compression = nil
                 blockSize = 16 << 20
             }
-        } catch {
-            try? descriptor.close()
-            throw error as? AEAError ?? .invalidArchive("unreadable")
         }
-    }
-
-    deinit {
-        try? descriptor.close()
     }
 
     /// The decoded contents as a chunk source (not yet running).
     func source(_ options: AEAReadOptions, heldBeyondDecoding held: Int) -> BlockStream {
         let layout: BlockStream.Layout = if let compression { .pbz(compression, blockSize: blockSize) } else { .plain(sliceSize: blockSize) }
         return BlockStream(
-            .file(descriptor, start: 0, end: size), layout: layout, decoders: options.decodeThreads,
-            extraBuffers: options.extraBuffers + held, backend: options.decoder
+            .file(file, start: 0, end: size), layout: layout, decoders: options.decodeThreads,
+            extraBuffers: options.extraBuffers + held
         )
     }
 
@@ -207,10 +196,15 @@ public final class AppleArchiveFile: Sendable {
     /// starts from the file's size as its estimate of the bytes (the stream's, for a plain archive; low for `pbz`).
     @concurrent @discardableResult
     public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
-        try await Extractor.extract(
-            source(options.read, heldBeyondDecoding: options.writerThreads), to: destination, options: options, archivePath: path,
-            quarantineDestination: true, expectedBytes: size
-        )
+        let target = try Extractor.open(destination, options: options, archivePath: path, quarantinesDestination: true)
+        return try await Extractor.extract(source(options.read, heldBeyondDecoding: options.writerThreads), into: target, options: options, expectedBytes: size)
+    }
+
+    /// Extracts the archive into `destination`, a directory the caller opened; see ``AEAArchive/extract(into:options:)``.
+    @concurrent @discardableResult
+    public func extract(into destination: Destination, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
+        let target = try Extractor.reopen(destination, options: options)
+        return try await Extractor.extract(source(options.read, heldBeyondDecoding: options.writerThreads), into: target, options: options, expectedBytes: size)
     }
 
     /// Decodes the archive and calls `body` with each entry, in order; see ``AEAArchive/forEachEntry(options:_:)``.

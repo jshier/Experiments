@@ -66,25 +66,25 @@ public struct ExtractionOptions {
     public var password: String?
     /// Progress reporting. Paths are relative to the destination.
     public var onEvent: ((ExtractionEvent) -> Void)?
-    /// For ``ZipArchive/extract(_:to:options:)``: the most files written at once (Disk's writers, each decoding its
-    /// own). `nil`, the default: Disk's machine defaults, one writer per performance core with a quarter of them (2 to
-    /// 6) in file system calls at once.
+    /// For ``ZipArchive/extract(_:to:options:)`` and ``ZipArchive/extract(_:into:options:)``: the most files written at
+    /// once (Disk's writers, each decoding its own). `nil`, the default: Disk's machine defaults, one writer per
+    /// performance core with a quarter of them (2 to 6) in file system calls at once.
     public var maxConcurrency: Int?
-    /// For ``ZipArchive/extract(_:to:options:)``: where entries and bytes are counted as they're written, for a client
-    /// to poll (a timer reading `fractionCompleted`; nothing is published). Its totals are set from the central
-    /// directory before anything is written. ``ZipExtractor`` takes its own, for every archive it adds.
+    /// For ``ZipArchive/extract(_:to:options:)`` and ``ZipArchive/extract(_:into:options:)``: where entries and bytes
+    /// are counted as they're written, for a client to poll (a timer reading `read()`; nothing is published). Its
+    /// totals are set from the central directory before anything is written. ``ZipExtractor`` takes its own, for every
+    /// archive it adds.
+    ///
+    /// (The `com.apple.quarantine` attribute everything extracted gets is the destination's: Disk's
+    /// `DestinationOptions.quarantine`, for ``ZipArchive/extract(_:into:options:)``.)
     public var progress: ExtractionProgress?
-    /// For ``ZipArchive/extract(_:to:options:)``: the `com.apple.quarantine` attribute everything extracted gets, so
-    /// Gatekeeper treats it as it treats the archive (`Quarantine(copyingFrom: archivePath)`, as Archive Utility does;
-    /// `nil`, the default, as Info-ZIP's `unzip` does). Files get it from their writers while they're open, directories
-    /// (the ones the archive doesn't list too) and links after; the destination directory itself doesn't.
-    /// ``ZipExtractor`` takes its own, for every archive it adds.
-    public var quarantine: Quarantine?
     /// Merge AppleDouble entries into the items they describe instead of extracting them as files: `._NAME` beside
     /// `NAME`, or `__MACOSX/…/._NAME` (what `ditto -c -k` and the Finder's Compress write for extended attributes, Finder
     /// info, resource forks, and ACLs). On by default, as Archive Utility, `ditto -x -k`, and macOS's `unzip` do. An
-    /// entry is merged only if it parses as AppleDouble and the archive holds its file or directory; anything else
-    /// named that way is extracted as the file it is. Directory entries under `__MACOSX` aren't made (files extracted
+    /// entry is merged only if it parses as AppleDouble and the archive holds its file, directory, or symbolic link;
+    /// anything else named that way is extracted as the file it is. Every attribute the archive holds is restored,
+    /// `com.apple.provenance` included (as `ditto -x` and `aa extract` restore it), and a link's go on the link itself
+    /// (`ditto -x` drops them; ``Planner`` sets them without following it). Directory entries under `__MACOSX` aren't made (files extracted
     /// there make their parents). Off with ``junkPaths``.
     public var mergesAppleDouble = true
     /// Apply the archive's modification dates to symbolic links themselves, as Archive Utility does (Info-ZIP's `unzip`
@@ -128,22 +128,37 @@ extension ZipArchive {
     ///   failures; `CancellationError` if the task is cancelled.
     @concurrent
     public func extract(_ entries: [ZipEntry]? = nil, to destination: FilePath, options: ExtractionOptions = .init()) async throws {
-        // No more writers than files: an idle writer still costs its task (about 6 mallocs and 1 system call each, and
-        // 1 M instructions for 23 of them: RESULTS.md, 2026-11-20 follow-ups).
-        let files = (entries ?? self.entries).count { $0.kind == .file }
         _ = try await ZipExtractor.extract(
-            into: destination, maxConcurrency: options.maxConcurrency ?? max(1, min(DiskDefaults.writers, files)), stopOnFirstError: true,
-            progress: options.progress, quarantine: options.quarantine
+            into: destination, maxConcurrency: writers(for: entries, options), stopOnFirstError: true, progress: options.progress
         ) { extractor in
             try await extractor.add(self, entries: entries, options: options)
         }
+    }
+
+    /// Extracts `entries` (all of them by default) into `destination`, a directory the caller opened (a staging
+    /// directory an app publishes when it's done): as ``extract(_:to:options:)``, with NativeZip's policies on a
+    /// duplicate of the destination's descriptor (`Destination.reopened(with:)`), so nothing is looked up by path.
+    /// Everything extracted gets the destination's quarantine (its options'); the directory itself is left as it is.
+    @concurrent
+    public func extract(_ entries: [ZipEntry]? = nil, into destination: Destination, options: ExtractionOptions = .init()) async throws {
+        _ = try await ZipExtractor.extract(
+            into: destination, maxConcurrency: writers(for: entries, options), stopOnFirstError: true, progress: options.progress
+        ) { extractor in
+            try await extractor.add(self, entries: entries, options: options)
+        }
+    }
+
+    /// The writers for one archive: no more than files, since an idle writer still costs its task (about 6 mallocs and
+    /// 1 system call each, and 1 M instructions for 23 of them: RESULTS.md, 2026-11-20 follow-ups).
+    private func writers(for entries: [ZipEntry]?, _ options: ExtractionOptions) -> Int {
+        options.maxConcurrency ?? max(1, min(DiskDefaults.writers, (entries ?? self.entries).count { $0.kind == .file }))
     }
 }
 
 /// Extracts any number of archives into one destination with one pool of writers, writing files while it's still
 /// planning.
 ///
-/// ``extract(into:maxConcurrency:stopOnFirstError:progress:quarantine:_:)`` opens the destination and starts Disk's writers
+/// ``extract(into:maxConcurrency:stopOnFirstError:progress:_:)`` opens the destination and starts Disk's writers
 /// (`Extraction`), then calls its closure, which adds archives with ``add(_:entries:into:options:)``. Adding plans
 /// an archive serially, in archive order: it sanitizes paths, applies the overwrite and update policies (asking, if the
 /// policy asks), reports events, and resolves entries that would land on the same item (the later one replaces the
@@ -206,7 +221,8 @@ public struct ZipExtractor: ~Copyable {
     ///
     /// - Parameters:
     ///   - destination: The directory to extract into, created if needed. A relative path is resolved against the
-    ///     current directory.
+    ///     current directory. Nothing extracted gets a quarantine: for one, open a `Destination` with it and use the
+    ///     `Destination` form.
     ///   - maxConcurrency: The most files written at once (Disk's writers). `nil`: Disk's machine defaults (one per
     ///     performance core).
     ///   - stopOnFirstError: Whether the first failure stops everything and is thrown, or failures are
@@ -214,10 +230,6 @@ public struct ZipExtractor: ~Copyable {
     ///   - progress: Where entries and bytes are counted as they're written, for a client to poll. Each
     ///     ``add(_:entries:into:options:)`` adds its archive's entries and uncompressed bytes to the totals (from the
     ///     central directory) before planning them; entries it skips are taken off again.
-    ///   - quarantine: The `com.apple.quarantine` attribute everything extracted gets (every archive's entries: one
-    ///     destination, one attribute), or `nil` for none. Disk's writers set it on each file while it's open, and
-    ///     the passes after them on directories and links: one more call per entry (Disk/RESULTS.md: 13–17% on
-    ///     small files). The destination directory itself is left alone.
     ///   - plan: Adds archives with ``add(_:entries:into:options:)``. It runs while files are written.
     /// - Returns: Every failure, in plan order (empty if everything was extracted).
     /// - Throws: Whatever `plan` throws; with `stopOnFirstError`, the first failure's error; `CancellationError` if
@@ -228,23 +240,59 @@ public struct ZipExtractor: ~Copyable {
         maxConcurrency: Int? = nil,
         stopOnFirstError: Bool = false,
         progress: ExtractionProgress? = nil,
-        quarantine: Quarantine? = nil,
         _ plan: (inout ZipExtractor) async throws -> Void
     ) async throws -> [ExtractionFailure] {
         let root = (destination.isAbsolute ? destination : FilePath(FileManager.default.currentDirectoryPath).pushing(destination))
             .lexicallyNormalized()
-        var destinationOptions = DestinationOptions()
+        let target = try Destination(root, options: destinationOptions(quarantine: nil))
+        return try await extract(target, maxConcurrency: maxConcurrency, stopOnFirstError: stopOnFirstError, progress: progress, plan)
+    }
+
+    /// Extracts the archives `plan` adds into `destination`, a directory the caller opened (a staging directory an app
+    /// publishes when it's done), with NativeZip's policies on a duplicate of its descriptor (`Destination.reopened(with:)`):
+    /// nothing is looked up by path.
+    ///
+    /// Everything extracted, every archive's entries, gets the destination's quarantine (its options'): Disk's writers
+    /// set it on each file while it's open, and the passes after them on directories (the ones the archives don't
+    /// list too) and links: one more call per entry (Disk/RESULTS.md: 13–17% on small files). The destination directory
+    /// itself is left as its caller opened it.
+    ///
+    /// The other parameters, the result, and the errors are as for the `FilePath` form.
+    @concurrent
+    public static func extract(
+        into destination: Destination,
+        maxConcurrency: Int? = nil,
+        stopOnFirstError: Bool = false,
+        progress: ExtractionProgress? = nil,
+        _ plan: (inout ZipExtractor) async throws -> Void
+    ) async throws -> [ExtractionFailure] {
+        let target = try destination.reopened(with: destinationOptions(quarantine: destination.options.quarantine))
+        return try await extract(target, maxConcurrency: maxConcurrency, stopOnFirstError: stopOnFirstError, progress: progress, plan)
+    }
+
+    /// NativeZip's policies for a destination, with `quarantine` on everything extracted.
+    private static func destinationOptions(quarantine: Quarantine?) -> DestinationOptions {
+        var options = DestinationOptions()
         // Planning applies the overwrite policy (an existing item it keeps isn't queued): what's left replaces.
-        destinationOptions.existingItems = .replace
+        options.existingItems = .replace
         // Archived modes as they are, as Info-ZIP restores them (planning strips setuid, setgid, and sticky unless
         // asked, and gives entries without a mode the umask's).
-        destinationOptions.permissions = .exact
-        destinationOptions.keepsSpecialBits = true
+        options.permissions = .exact
+        options.keepsSpecialBits = true
         // Owners are in the metadata only when asked; Disk sets them only as root.
-        destinationOptions.restoresOwnership = true
+        options.restoresOwnership = true
         // What's extracted gets it; the destination itself doesn't (the caller's directory).
-        destinationOptions.quarantine = quarantine
-        let target = try Destination(root, options: destinationOptions)
+        options.quarantine = quarantine
+        return options
+    }
+
+    /// The extraction into `target`, opened with ``destinationOptions(quarantine:)``. `@concurrent`, as its callers are: the
+    /// planning closure stays in their task's region, so Disk's extraction can take it.
+    @concurrent
+    private static func extract(
+        _ target: Destination, maxConcurrency: Int?, stopOnFirstError: Bool, progress: ExtractionProgress?,
+        _ plan: (inout ZipExtractor) async throws -> Void
+    ) async throws -> [ExtractionFailure] {
         let caseSensitive = target.isCaseSensitive
 
         // Disk's defaults otherwise: writers make their scratch on their first job, and large-file slots on first use
@@ -277,9 +325,7 @@ public struct ZipExtractor: ~Copyable {
         } catch {
             switch error {
             case .plan(let error): throw error
-            case .disk(.cancelled): throw CancellationError()
-            case .disk(.source(let error)): throw error
-            case .disk(let error): throw error
+            case .disk(let error): throw error.unwrapped
             }
         }
 
@@ -289,7 +335,7 @@ public struct ZipExtractor: ~Copyable {
             guard failure.tag >= 0, failure.tag < record.tags.count else { continue }
             let (jobIndex, entryIndex) = record.tags[failure.tag]
             let job = record.jobs[Int(jobIndex)]
-            let error: any Error = failure.error.sourceError ?? (failure.error == .cancelled ? CancellationError() : failure.error)
+            let error = failure.error.unwrapped
             let relative = failure.path.hasPrefix(job.prefix) ? String(failure.path.dropFirst(job.prefix.count)) : failure.path
             failures.append((failure.tag, ExtractionFailure(
                 archive: job.archive.url, entry: job.entries[Int(entryIndex)], path: FilePath(relative), error: error
@@ -308,9 +354,9 @@ public struct ZipExtractor: ~Copyable {
     ///     itself by default.
     ///   - options: Path handling, timestamps, overwrite and update policies, password, and events (its
     ///     `maxConcurrency` and `progress` are the extraction's, given to
-    ///     ``extract(into:maxConcurrency:stopOnFirstError:progress:quarantine:_:)``).
+    ///     ``extract(into:maxConcurrency:stopOnFirstError:progress:_:)``).
     /// - Returns: The failures planning found (also returned by
-    ///   ``extract(into:maxConcurrency:stopOnFirstError:progress:quarantine:_:)``): entries that can't be read, symbolic links
+    ///   ``extract(into:maxConcurrency:stopOnFirstError:progress:_:)``): entries that can't be read, symbolic links
     ///   that couldn't be read. (Directories that couldn't be made are among the extraction's failures.)
     /// - Throws: With `stopOnFirstError`, the first failure's error; `CancellationError` if the task is cancelled;
     ///   `DiskError.unsafePath` for a `subdirectory` that isn't a relative path inside the destination.
@@ -383,14 +429,15 @@ public struct ZipExtractor: ~Copyable {
             candidates.append((index, target))
         }
         guard !candidates.isEmpty else { return nil }
-        // Files and directories by name (a directory's without its `/`).
+        // Files, directories, and symbolic links by name (a directory's without its `/`). A link's AppleDouble file holds
+        // its own attributes (`ditto -c` writes one for any link that has some, `com.apple.provenance` included): they
+        // go on the link, as the archive's other attributes go on their items.
         var items: [String: Int] = [:]
         items.reserveCapacity(selected.count)
         for (index, entry) in selected.enumerated() {
             switch entry.kind {
-            case .file: items[entry.path] = index
+            case .file, .symlink: items[entry.path] = index
             case .directory: items[entry.path.hasSuffix("/") ? String(entry.path.dropLast()) : entry.path] = index
-            case .symlink: break
             }
         }
         var merged: Set<Int> = []
@@ -405,7 +452,7 @@ public struct ZipExtractor: ~Copyable {
             // One that can't be read is planned as a file, where its error is reported.
             guard (try? job.archive.contents(of: entry, using: &linkDecoder!, password: options.password) { bytes.append(copying: $0) }) != nil,
                   let appleDouble = AppleDouble(
-                      bytes, skippingQuarantine: destination.options.quarantine != nil, forDirectory: selected[item].kind == .directory
+                      bytes, skippingQuarantine: destination.options.quarantine != nil, keepsResourceFork: selected[item].kind == .file
                   )
             else { continue }
             merged.insert(index)
@@ -546,7 +593,7 @@ public struct ZipExtractor: ~Copyable {
             // As Info-ZIP does, only the owner (no mode) on the link; its time when asked (Archive Utility's).
             record.links.append(PlanRecord.Link(
                 path: Array(path[0..<count]), target: target, owner: metadata.owner,
-                times: options.restoreLinkTimestamps ? metadata.times : EntryTimes(), tag: tag
+                times: options.restoreLinkTimestamps ? metadata.times : EntryTimes(), appleDouble: appleDouble, tag: tag
             ))
             return true
         }
@@ -600,7 +647,11 @@ public struct ZipExtractor: ~Copyable {
             let bytes = link.path
             let target = link.target
             let entryPath = try EntryPath(validating: bytes.span.bytes)
-            try planner.symbolicLink(entryPath, target: target.span.bytes, metadata: EntryMetadata(owner: link.owner, times: link.times), tag: link.tag)
+            let token = try planner.symbolicLink(
+                entryPath, target: target.span.bytes, metadata: EntryMetadata(owner: link.owner, times: link.times),
+                attachments: link.appleDouble != nil, tag: link.tag
+            )
+            if let appleDouble = link.appleDouble { try Self.attach(appleDouble, to: token, in: &planner) }
         }
     }
 }
@@ -613,6 +664,8 @@ final class PlanRecord {
         var target: [UInt8]
         var owner: Owner?
         var times: EntryTimes
+        /// The link's own AppleDouble file, merged: its attributes go on the link.
+        var appleDouble: AppleDouble?
         var tag: Int
     }
 

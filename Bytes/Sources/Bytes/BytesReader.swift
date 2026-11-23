@@ -6,7 +6,9 @@ public enum BitOrder: Hashable, Sendable {
     case leastSignificantFirst
 }
 
-/// An error reading ``BytesReader``. A read that throws doesn't consume anything.
+/// An error from Bytes and the modules built on it: reading with a ``BytesReader``, writing with a
+/// ``BytesWriter``, decoding and encoding with the codecs (malformed or truncated data, too little output
+/// room), and parallel work that was cancelled. A read that throws doesn't consume anything.
 public enum BytesError: Error, Hashable, Sendable {
     /// Fewer bits remain than the read needs, or a seek went past the end.
     case insufficientData
@@ -1575,33 +1577,7 @@ enum Load {
     }
 }
 
-// MARK: - Copying out
-
-public extension [UInt8] {
-    /// Creates an array with a copy of `bytes`: the byte counterpart of `String(copying:)`, for keeping
-    /// what a span read from ``BytesReader`` borrows.
-    ///
-    /// - Parameter bytes: The bytes to copy.
-    @inlinable
-    init(copying bytes: RawSpan) {
-        // Unsafe: the span's memory as a buffer pointer. Safe: it's only read, within the closure, by the
-        // standard library's `Array` initializer (a `memcpy`). Not `init(unsafeUninitializedCapacity:)`
-        // with a `memcpy`: that called an unspecialized allocator, `ContiguousArray._allocateBufferUninitialized`,
-        // and copying an MQTT packet's payload took about 590 instructions more per packet.
-        self = bytes.withUnsafeBytes { buffer in unsafe Array(buffer) }
-    }
-
-    /// Appends a copy of `bytes`: the appending counterpart of ``init(copying:)``.
-    ///
-    /// - Parameter bytes: The bytes to copy.
-    @inlinable
-    mutating func append(copying bytes: RawSpan) {
-        // Unsafe: the span's memory as a buffer pointer. Safe: it's only read, within the closure, by the
-        // standard library's bulk append (a `memcpy`). Through a `BytesWriter` instead, it measured 37
-        // instructions against 13, with a trap path for an error that can't happen.
-        bytes.withUnsafeBytes { buffer in unsafe append(contentsOf: buffer) }
-    }
-}
+// MARK: - Comparing and searching
 
 public extension RawSpan {
     /// Whether the span starts with `prefix`'s bytes: one load and a compare, and `false` if the span is

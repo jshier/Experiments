@@ -1,4 +1,5 @@
 import BytesTestSupport
+import DiskTestSupport
 import Foundation
 @testable import NativeAEA
 import System
@@ -47,7 +48,7 @@ import Testing
             options.writerThreads = threads
             let statistics = try await file.extract(to: FilePath(destination.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
-            #expect(try readTree(destination) == readTree(source), "\(threads) threads")
+            #expect(try readTree(destination, including: .entries) == readTree(source, including: .entries), "\(threads) threads")
         }
     }
 
@@ -69,7 +70,7 @@ import Testing
             options.writerThreads = threads
             let statistics = try await archive.extract(to: FilePath(destination.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
-            #expect(try readTree(destination) == readTree(source), "\(threads) threads")
+            #expect(try readTree(destination, including: .entries) == readTree(source, including: .entries), "\(threads) threads")
         }
         var count = 0
         try await archive.forEachEntry { _ in count += 1 }

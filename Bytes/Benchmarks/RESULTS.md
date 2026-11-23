@@ -3155,3 +3155,49 @@ rounds):
 
 Against the references in the same run: DEFLATE now runs 1.37x libdeflate's instructions on dickens (was 1.50x) and
 1.12x zlib's (was 1.23x); bzip2 0.53–0.59x libbz2's; LZMA 0.90–1.14x liblzma's. Allocation gates for every streaming decoder read 0.
+
+## Cleanups after the unification (2026-11-22, M1 Max; baselines `unify-old-{1,2}` → `unify-new-{1,2}`)
+
+The priority list's Bytes items, measured against HEAD (5f28068) in two interleaved rounds (old-1, new-1, old-2,
+new-2; each tree with its own benchmark sources, rows compared by name), on an otherwise idle machine. `CompressionBenchmarks`
+filtered to the decoders, CRC-64, Deflate 1/6/9 and Brotli q5 encoding. Instructions are exact and agreed in both
+rounds unless a range is given; times are p50 wall clock, round by round.
+
+- **DEFLATE's decode loop rewritten on locals** (`DeflateDecoder.swift`, `Deflate.swift`): a `FastBits` fast loop with
+  unchecked refills and stores and its own match copy (`@inline(always)`), libdeflate-style table entries whose flags
+  decide with one `tbnz`; each round's bounds are proven once, in comments.
+- **LZMA and xz:** one window allocation, made once and not zeroed, its room capped at 4 MiB (`LZMAWindow.defaultRoomLimit`)
+  and sized from the stated size when there is one.
+- **bzip2's run expansion** tightened (`BZip2Decoder.expand`).
+- **Consolidations:** `CodecWorkspace`/`GrowableWorkspace` (`Workspace.swift`), one `pmull` fold for CRC-32 and CRC-64
+  (`CRCFold.swift`), bzip2's CRC tables as a literal, DEFLATE's zlib and gzip framing on `DeflateFormat`, one `LZHash`,
+  `HuffmanCodeBuilder.canonicalCodewords`, `likely`/`unlikely` shared at `package` level. No row moved for these alone.
+- **`Decompressor`/`DecompressionFormat`**, one decoder over every format, LZMA and xz state made on the first streaming
+  call (a whole-buffer decode no longer builds two probability models). New rows: `Decompressor xz -6 dickens: 1 MiB out`
+  (618 M, the same as `LZMA stream xz -6 dickens: 1 MiB out`) and `Allocations:Decompressor_every_format` (0).
+- **Writers' preconditions** (`IntegerFields.swift`, `ConvertibleFromBytes`): the per-value rows in `BytesBenchmarks`
+  didn't move (the agent's own A/B; that target wasn't in this run).
+
+| Row (Bytes) | Instructions old → new | Change | Time, round 1 / round 2 |
+|---|---|---|---|
+| Inflate dickens / samba / x-ray / xml | 129 / 159 / 187 / 22 M → 78 / 102 / 120 / 14 M | −35.8 to −39.5% | dickens 11.0 → 11.0 ms; others −5 to −9% |
+| Inflate Main.js / Main.css / JSON 119 KB | 25 M / 1,970 K / 537 K → 16 M / 1,230 K / 335 K | −36.0 to −37.8% | −6.5 to −7.3% / −1.2 to −5.6% / −7.3 to −9.5% |
+| Inflate gzip and zlib rows | | −33.3 to −37.9% | −3.8 to −8.7% |
+| Inflate … streaming 4 KB / 64 KB | | −34.6 to −38.6% | −2.8 to −10% |
+| Inflate … history 1 MB | | same as `decompressAll` | |
+| Inflate64 Main.css, x-ray | 1,970 K, 188 M → 1,230 K, 120 M | −36.2 to −37.7% | −11 to −14% |
+| Inflate JSON 1.6 KB (and gzip) | 30 K (31 K) → 27 K | −10.0% (−12.9%) | −1.4% |
+| BZip2 decode -9 mozilla / samba / JSON 119 KB / xml | | −9.7 / −3.5 / −2.8 / −1.7% | mozilla −2.2 / −3.1% |
+| BZip2 decode -9 dickens, x-ray | 640 M, 638 M | 0 | |
+| LZMA decode -6, LZMA/xz streaming | | 0 to +0.3% | within ±2% |
+| Deflate 1/6/9, Brotli q5 encoding, CRC-64 | | 0 | within the rounds' spread (±5%) |
+
+Against the references in the same run: DEFLATE now runs fewer instructions than libdeflate (dickens 78 M against 94 M,
+0.83x; samba 0.90x, x-ray 0.95x, Main.js 0.84x, JSON 119 KB 0.87x) and 0.68–0.78x zlib's, and its time matches
+libdeflate's on dickens and samba (11 and 15 ms), 4–6% behind on x-ray, xml, and Main.js. The instruction cut is
+large and the time cut small because the loop is bound by load latency and mispredictions (`Tools/counters`), not by
+instruction count. bzip2 is 0.48–0.59x libbz2's instructions; LZMA 0.98–1.14x liblzma's.
+
+The LZMA window's memory shows in NativeZip's rows (Bytes' compression rows don't record it): peak resident memory
+for a 32 MB xz entry 58–60 → 30–33 MB, LZMA 52–54 → 30–33 MB, six fewer mallocs per decode stream (8 → 2 per `Inflate +
+CRC` row) at no instruction cost. Every allocation gate reads 0.

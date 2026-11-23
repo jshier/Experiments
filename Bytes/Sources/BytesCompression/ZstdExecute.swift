@@ -195,16 +195,16 @@ extension ZstdBlockDecoder {
             // `wildEnd`. Lengths are below 2^18 and offsets below 2^31, so the sums can't overflow.
             let sequenceLength = literalLength &+ matchLength
             let reach = unsafe position - prefixStart // How far back the history goes.
-            if zstdLikely(
+            if likely(
                 unsafe literalLength <= literalEnd - literal && sequenceLength <= wildEnd - position
                     && offset <= reach &+ literalLength
             ) {
                 unsafe ZstdCopy.copy16(position, literal)
-                if zstdUnlikely(literalLength > 16) {
+                if unlikely(literalLength > 16) {
                     unsafe ZstdCopy.wild16(position + 16, literal + 16, literalLength &- 16)
                 }
                 let match = unsafe position + literalLength
-                if zstdLikely(offset >= 16) {
+                if likely(offset >= 16) {
                     unsafe ZstdCopy.wild16(match, match - offset, matchLength)
                 } else {
                     unsafe ZstdCopy.overlapping(match, offset: offset, count: matchLength)

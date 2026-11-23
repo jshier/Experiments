@@ -251,31 +251,6 @@ func lzma2Controls(_ data: [UInt8]) -> Set<UInt8> {
     return controls
 }
 
-/// The `xz` command, if installed.
-func xzCommand() -> URL? {
-    ["/opt/homebrew/bin/xz", "/usr/local/bin/xz", "/usr/bin/xz"].lazy.map { URL(filePath: $0) }.first {
-        FileManager.default.isExecutableFile(atPath: $0.path)
-    }
-}
-
-/// `xz ARGUMENTS` with `data` as its input, writing to its output.
-func runXZ(_ command: URL, _ arguments: [String], _ data: [UInt8]) throws -> [UInt8] {
-    let directory = try TemporaryDirectory(prefix: "lzma-tests")
-    defer { directory.remove() }
-    let input = directory.path("input")
-    try Data(data).write(to: input)
-    let process = Process()
-    process.executableURL = command
-    process.arguments = arguments + ["--stdout", "--keep", input.path]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    try process.run()
-    let output = pipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    precondition(process.terminationStatus == 0, "xz \(arguments) failed")
-    return [UInt8](output)
-}
-
 // MARK: - Tests
 
 @Suite("LZMA, LZMA2, and xz decoding")
@@ -354,7 +329,7 @@ struct LZMADecoderTests {
     }
 
     @Test func decodesFilesFromTheCommand() throws {
-        guard let xz = xzCommand() else { return }
+        guard let xz = ExternalTool.locate("xz") else { return }
         let samples = lzmaSamples().filter { ["text", "records", "random then text", "odd", "one byte", "empty"].contains($0.name) }
         let settings: [[String]] = [
             ["-0"], ["-9", "--extreme"], ["--check=none"], ["--check=crc32"], ["--check=sha256"],
@@ -363,7 +338,7 @@ struct LZMADecoderTests {
         ]
         for (name, data) in samples {
             for setting in settings {
-                let compressed = try runXZ(xz, ["--compress", "--format=xz"] + setting, data)
+                let compressed = try ExternalTool.output(xz, ["--compress", "--format=xz"] + setting + ["--stdout"], input: data)
                 #expect(xzDecode(compressed, capacity: data.count) == .success(data), "\(name): xz \(setting)")
             }
         }
@@ -371,7 +346,7 @@ struct LZMADecoderTests {
         let text = samples.first { $0.name == "text" }!.bytes
         var decoder = LZMA2Decoder()
         for setting in [["-6"], ["--lzma1=preset=6,lc=0,lp=4,pb=0"]] {
-            let compressed = try runXZ(xz, ["--compress", "--format=lzma"] + setting, text)
+            let compressed = try ExternalTool.output(xz, ["--compress", "--format=lzma"] + setting + ["--stdout"], input: text)
             var output = [UInt8](repeating: 0, count: text.count)
             let consumed = try output.withOutputRawSpan { span throws(BytesError) in try decoder.decompressLZMAFile(compressed.span.bytes, into: &span) }
             #expect(consumed == compressed.count && output == text, "xz --format=lzma \(setting)")

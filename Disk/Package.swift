@@ -30,6 +30,9 @@ let package = Package(
     platforms: [.macOS(.v27)],
     products: [
         .library(name: "Disk", targets: ["Disk"]),
+        // Reading extracted trees in tests (items, extended attributes, ACLs, APFS compression): Disk's, NativeAEA's,
+        // and NativeZip's. No Swift Testing, like Bytes' BytesTestSupport.
+        .library(name: "DiskTestSupport", targets: ["DiskTestSupport"]),
     ],
     traits: [
         .trait(
@@ -56,10 +59,17 @@ let package = Package(
             ],
             swiftSettings: librarySettings
         ),
+        .target(
+            name: "DiskTestSupport",
+            swiftSettings: commonSettings + [.strictMemorySafety()]
+        ),
         .testTarget(
             name: "DiskTests",
             dependencies: [
                 "Disk",
+                "DiskTestSupport",
+                .product(name: "Bytes", package: "Bytes"),
+                .product(name: "BytesAsync", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
             ],

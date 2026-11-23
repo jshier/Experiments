@@ -35,6 +35,13 @@ refuses it with `EPERM`; the entry's other attributes are set). A `com.apple.qua
 left out when the extraction sets its own. Archive Utility refuses an archive with such entries outright ("Error 79");
 `ditto -x -k` drops the unmatched ones.
 
+(2026-11-22: a symbolic link's AppleDouble entry is now merged too: its attributes go on the link itself, set without
+following it, `com.apple.provenance` included, where `ditto -x -k` drops them. `AppleDoubleTests.leavesWhatItCannotMerge`
+expects the merge, `matchesDitto` compares links' attributes with the archived link's, and `restoresALinksAttributes`
+checks a hand-made link AppleDouble entry. The tests read trees with Disk's `DiskTestSupport`, which leaves
+`com.apple.provenance` out by default: in a session macOS tracks, the kernel puts it on everything made, references
+included.)
+
 **Benchmarks** (`v1-before` → `v1-after`, one run each, **under load**): the archives measured have no AppleDouble
 entries, so this is the cost of the name scan and the new options' tests. Mallocs and system calls are the firm
 numbers; instructions on these rows include the kernel's and move ±10% between runs of unchanged code.
@@ -1007,3 +1014,41 @@ sliding window of the dictionary plus as much room (an 8 MiB dictionary: a 16 Mi
 resident memory for the one-entry rows went 26 → 58 MB (xz) and 35 → 52 MB (LZMA); bzip2 20 → 24 MB, DEFLATE
 unchanged. Per writer, so an extraction of many large xz entries holds about 16 MiB per writer decoding one; a smaller
 room trades memory for an extra copy of the dictionary per room's worth of output.
+
+## step18 (2026-11-22): one `Decompressor`, the cleanups (baselines `unify-old-{1,2}` → `unify-new-{1,2}`, M1 Max)
+
+HEAD (5f28068, step17) against the cleanups, two interleaved rounds on an otherwise idle machine, each tree with its
+own benchmark sources (rows compared by name). Changes in NativeZip: `ZipDecoder` drives one `Decompressor` for every
+method (unencrypted entries up to 1 MiB decode whole, DEFLATE with history into the output, the rest streamed);
+ZipCrypto's cipher updates through `CRC32.updateRegister`; `extract(_:into: Destination)` and
+`ZipExtractor.extract(into:)` (`ExtractionOptions.quarantine` gone: the `Destination` carries it); `RelaxedCounter`;
+a symbolic link's AppleDouble merged into the link. Most of the gain is Bytes' DEFLATE loop (Bytes' RESULTS.md, same
+date).
+
+| Benchmark | Instructions old → new | Change (both rounds) | Time, round 1 / round 2 |
+|---|---|---|---|
+| Inflate + CRC 32 MB text: Bytes | 236 M → 147 M | −37.7% | 17 → 16 ms, both |
+| Inflate + CRC 32 MB text: Deflate64 | 237 M → 148 M | −37.6% | 20 → 16 / 19 → 16 ms |
+| Inflate + CRC 32 MB raster: Bytes | 136 M → 116 M | −14.7% | 12 → 11 ms, both |
+| Inflate + CRC 2,000 small files: Bytes | 232 M → 162 M | −30.2% | 19 → 18 / 18 → 18 ms |
+| Verify 2,000 small files (parallel): Bytes | 263 M → 192 M | −27.0% (mallocs 147 → 137) | 4.74 → 4.67 / 4.74 → 4.64 ms |
+| Extract 32 MB text: Bytes (and progress, Deflate64) | 259–264 M → 173–175 M | −32.8 to −33.8% | 0 to −15% (Deflate64 −14 to −15%) |
+| Extract 8 archives of 64 MB text (one pool) | 4,140–4,230 M → 2,780–2,800 M | −32.9 / −33.8% | 141 → 91 / 94 → 89 ms (parallel: ±20%) |
+| Extract 2,000 small files: Bytes | 3,260 / 2,930 M → 2,990 / 2,880 M | −8.2 / −1.6% (kernel included) | 168 → 152 / 127 → 133 ms |
+| Inflate + CRC / Extract 32 MB text: LZMA, xz | | −0.1 to +0.1% | −0.7 to −2.0% |
+| Inflate + CRC / Extract 32 MB text: bzip2 | | 0 to +0.1% | −0.9 to −2.7% |
+| Zstd, stored, central directory rows | | 0 to +0.4% | unchanged |
+| zlib reference rows | 218 / 91 / 213 M | 0 | unchanged |
+
+Memory: the LZMA window's room is capped and allocated once, so the 32 MB entries' peak resident memory fell from
+52–60 MB to 30–33 MB (`Inflate + CRC … LZMA` 52 → 30 MB, xz 58 → 30–31 MB; `Extract … LZMA` 54 → 33 MB, xz 60 → 33 MB),
+and their mallocs 8 → 2 (`Extract`: 111–112 → 105–106). The step17 note's 16 MiB per writer decoding an xz entry is now
+at most 4 MiB of room beyond the dictionary.
+
+DEFLATE in NativeZip now runs fewer instructions than zlib in the same harness on text (147 M against 218 M for 32 MB)
+and more on raster (116 M against 91 M: zlib's long-run path is cheaper), and is faster on both (16 against 18 ms for
+text, 11 against 13 ms for raster).
+
+New rows, on the new side only (no old value): `Inflate + CRC 32 MB text: ZipCrypto` (241 M, 55–56 ms), `…: AES-256`
+(181 M, 20 ms), and `Decrypt + CRC 32 MB text: ZipCrypto, stored` (493 M, 201 ms). Against a run of the old cipher
+during the work (instructions, one round), `CRC32.updateRegister` cut ZipCrypto stored 40.6% and deflated 16.9%.

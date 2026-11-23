@@ -23,11 +23,12 @@ public import Bytes
 ///
 /// ``init(variant:)`` makes a decoder for raw Deflate64 streams (zip method 9): see ``DeflateVariant``.
 ///
-/// The decode loop is libdeflate's design on `Bytes`' ``BitBuffer``: packed table entries holding a
-/// length's base and extra-bit count, the next entry looked up before the current symbol is finished, up
-/// to three literals per refill, and matches copied 16 bytes at a time with an overrun. It runs while at
-/// least 32 bytes of input remain, so it never checks for the end; within 32 bytes of the end a careful
-/// loop decodes one symbol at a time, and stops at the start of a code that isn't all there.
+/// The decode loop is libdeflate's design: packed table entries holding a length's base and extra-bit count
+/// and flags tested one bit at a time, the next entry looked up before the current symbol is finished, up to
+/// three literals per refill, and matches copied 16 bytes at a time with an overrun. It runs while at least
+/// 32 bytes of input remain, and room for a match, so its bit buffer, stores, and copies need no checks;
+/// within 32 bytes of the end a careful loop (on ``BitBuffer``) decodes one symbol at a time, and stops at
+/// the start of a code that isn't all there.
 @safe
 public struct DeflateDecoder: ~Copyable {
     /// The stream's state and tables: separate from the window, so decoding can borrow both.
@@ -313,7 +314,7 @@ struct InflateStream: ~Copyable {
         self.variant = variant
         tables = UniqueArray(repeating: 0, count: Self.totalTableSize)
         stage = Self.initialStage(format)
-        checksum = Self.initialChecksum(format)
+        checksum = format.initialChecksum
         // The fixed code is valid, so building it can't throw.
         try! buildTable(Deflate.fixedLiteralLengths.span, .literalLength, at: Self.fixedLiterals, rootBits: Self.literalRootBits)
         try! buildTable(InlineArray<32, UInt8>(repeating: 5).span, .distance, at: Self.fixedDistances, rootBits: Self.distanceRootBits)
@@ -325,10 +326,6 @@ struct InflateStream: ~Copyable {
         case .zlib: .zlibHeader
         case .gzip: .gzipHeader
         }
-    }
-
-    private static func initialChecksum(_ format: DeflateFormat) -> UInt32 {
-        format == .zlib ? 1 : 0
     }
 
     /// Prepares to decode a new stream. Keeps the tables.
@@ -345,7 +342,7 @@ struct InflateStream: ~Copyable {
         bitOffset = 0
         gzipFlags = .zero
         headerCRC = CRC32()
-        checksum = Self.initialChecksum(format)
+        checksum = format.initialChecksum
         length = 0
     }
 
@@ -461,13 +458,9 @@ struct InflateStream: ~Copyable {
     ///
     /// - Parameter bytes: Bytes just decoded.
     private mutating func updateChecksum(_ bytes: RawSpan) {
-        switch format {
-        case .raw: break
-        case .zlib: checksum = Adler32.checksum(bytes, continuing: checksum)
-        case .gzip:
-            checksum = CRC32.checksum(bytes, continuing: checksum)
-            length &+= UInt32(truncatingIfNeeded: bytes.byteCount)
-        }
+        guard format != .raw else { return }
+        checksum = format.checksum(bytes, continuing: checksum)
+        length &+= UInt32(truncatingIfNeeded: bytes.byteCount)
     }
 
     // MARK: Container headers and trailers
@@ -552,20 +545,13 @@ struct InflateStream: ~Copyable {
     /// - Throws: ``BytesError/mismatch`` for a wrong checksum or length.
     private func readTrailer(_ input: RawSpan, at position: inout Int) throws(BytesError) -> Bool {
         var reader = try BytesReader(input, atBitPosition: position)
+        let trailer: RawSpan
         do throws(BytesError) {
-            switch format {
-            case .raw: break
-            case .zlib:
-                guard try reader.read(Byte4.self, .bigEndian) == checksum else { throw BytesError.mismatch }
-            case .gzip:
-                let trailer = try reader.read(byteCount: 8)
-                var fields = AlignedBytesReader(trailer)
-                guard try fields.read(Byte4.self, .littleEndian) == checksum,
-                      try fields.read(Byte4.self, .littleEndian) == length else { throw BytesError.mismatch }
-            }
+            trailer = try reader.read(byteCount: format.trailerSize)
         } catch .insufficientData {
             return false
         }
+        guard format.trailerMatches(trailer, checksum: checksum, length: length) else { throw .mismatch }
         position = reader.bitPosition
         return true
     }
@@ -769,6 +755,9 @@ struct InflateStream: ~Copyable {
     }
 
     /// The fast loop, specialized by the two wrappers above on a constant `deflate64`.
+    ///
+    /// libdeflate's `decompress_template.h` on locals, with no bounds checks of its own (2026-11-22): checked
+    /// accesses (`BitBuffer`'s refill, the writer's stores and copies) cost 2–3 instructions each, 12–20 a match.
     @inline(__always)
     private static func decodeSymbols(
         _ input: RawSpan, from bitPosition: Int,
@@ -776,114 +765,231 @@ struct InflateStream: ~Copyable {
         into output: inout MutableRawSpan, at end: Int, deflate64: Bool
     ) throws(BytesError) -> (bitPosition: Int, end: Int, stop: SymbolStop) {
         precondition(literals.count == tableSize && distances.count == distanceTableSize)
-        var bits = try BitBuffer(input, atBitPosition: bitPosition, bitOrder: .leastSignificantFirst)
-        var writer = try AlignedBytesWriter(&output, atByteOffset: end)
+        precondition(bitPosition >= 0 && end >= 0 && end <= output.byteCount, "Position outside the buffers")
         let inputBits = input.byteCount &<< 3
-        let roomLimit = writer.byteCount &+ writer.remainingByteCount &- fastRoom
+        let roomLimit = output.byteCount &- fastRoom
+        // Not even one iteration's worth: leave it all to the careful loop.
+        guard inputBits &- bitPosition >= fastInputBits, end <= roomLimit else { return (bitPosition, end, .nearEnd) }
 
-        // The fast loop. The next symbol's entry is looked up ahead of time (as libdeflate does): at the top
-        // of each iteration it's ready, so decoding doesn't wait for a refill, a mask, and a table load first.
-        // After a match, the next lookup happens before the match is copied, overlapping the two.
-        //
         // It checks only the output against a limit, made in rounds: where the room ends, or sooner where the
-        // input could. Every iteration takes at most `maximumBitsPerByte` bits per byte it writes (a literal 15
-        // bits, a match of 3 or more at most 48, or Deflate64's 60), so while the output is at most
-        // `out + (input left - 32 bytes) / maximumBitsPerByte`, at least 32 bytes of input are left. Checking
-        // the input every iteration as well cost 4–5% more instructions (NativeZip's decoder, which this one
-        // replaces, read its whole input and had no such check). A round takes a few instructions, and a call
-        // has a few dozen to a few hundred.
-        let maximumBitsPerByte = deflate64 ? 20 : 16
-        bits.refill()
-        var entry = lookup(literals, bits.bits, rootBits: literalRootBits)
+        // input could. Every iteration takes at most 16 bits per byte it writes (a literal 15 bits, a match of
+        // 3 or more at most 48), or for Deflate64 20 (a match's 60), so while the output is at most `out + (input
+        // left - 32 bytes) / 16` (Deflate64: `* 3 / 64`, shifts rather than a division by 20, whose constant
+        // took a register), at least 32 bytes of input are left when an iteration starts, and `fastRoom` bytes of
+        // output. A round takes a few instructions, and a call has a few dozen to a few hundred.
+        //
+        // That makes every access in an iteration safe unchecked: its refills load 8 bytes at most 20 bytes
+        // past its starting bit (93 bits consumed, then 63 buffered), and it writes at most three literals, or
+        // two and a match of up to 258 bytes and the copy's 32-byte overrun.
+        var bits = FastBits(input, at: bitPosition)
+        var out = end
+        // The output as a local: through the `inout` parameter, its base address was loaded from memory before
+        // every store (the stores might change it, as far as LLVM can tell).
+        var buffer = output._mutatingExtracting(0..<output.byteCount)
+        // The next symbol's entry is looked up ahead of time (as libdeflate does): at the top of each iteration
+        // it's ready, so decoding doesn't wait for a refill, a mask, and a table load first. After a match, the
+        // next lookup happens before the match is copied, overlapping the two.
+        var entry = rootEntry(literals, bits.buffer, rootBits: literalRootBits)
         rounds: while true {
-            let inputLeft = inputBits &- bits.bitPosition &- fastInputBits
-            let limit = min(roomLimit, writer.byteCount &+ inputLeft / maximumBitsPerByte)
-            guard inputLeft >= 0, writer.byteCount <= limit else { break rounds }
-            fast: while writer.byteCount <= limit {
-                if entry.kind == .literal {
-                    // Literals come in runs: up to three per refill (15 bits each of the 56 or more buffered).
-                    // Each lookup after a literal reads valid bits (41, then 26 or more left), and a refill only
-                    // adds bits above them, so an entry that isn't a literal stays valid across the refill.
-                    bits.consume(bitCount: entry.totalBits)
-                    try writer.write(Byte(truncatingIfNeeded: entry.value))
-                    // Root entries first: a literal there can't be a subtable link, so the common case skips
-                    // that check. Anything else is resolved below.
-                    entry = rootEntry(literals, bits.bits, rootBits: literalRootBits)
-                    if entry.kind == .literal {
-                        bits.consume(bitCount: entry.totalBits)
-                        try writer.write(Byte(truncatingIfNeeded: entry.value))
-                        entry = rootEntry(literals, bits.bits, rootBits: literalRootBits)
-                        if entry.kind == .literal {
-                            bits.consume(bitCount: entry.totalBits)
-                            try writer.write(Byte(truncatingIfNeeded: entry.value))
-                            // 11 or more bits are left: enough for the root lookup, which then doesn't wait for the
-                            // refill's load (only a long code's subtable lookup needs the refilled bits).
-                            let root = rootEntry(literals, bits.bits, rootBits: literalRootBits)
-                            bits.refill()
-                            entry = resolve(root, literals, bits.bits, rootBits: literalRootBits)
-                            continue
+            let inputLeft = inputBits &- bits.position &- fastInputBits
+            guard inputLeft >= 0 else { break rounds }
+            let limit = min(roomLimit, out &+ (deflate64 ? (inputLeft &* 3) &>> 6 : inputLeft &>> 4))
+            guard out <= limit else { break rounds }
+            fast: while out <= limit {
+                // 56 or more bits buffered. A link consumes nothing (its `totalBits` is 0).
+                var saved = bits.buffer
+                bits.consume(entry)
+                if entry.isLiteral {
+                    // Literals come in runs: up to three per refill, each a root code of 11 bits at most. After
+                    // two, 34 or more bits are left: enough for any literal/length code (a link, then 15 bits), or
+                    // a length (20) and the distance's root lookup (8).
+                    let first = entry
+                    entry = rootEntry(literals, bits.buffer, rootBits: literalRootBits)
+                    saved = bits.buffer
+                    bits.consume(entry)
+                    Self.store(first, &buffer, at: out)
+                    out &+= 1
+                    if entry.isLiteral {
+                        let second = entry
+                        entry = rootEntry(literals, bits.buffer, rootBits: literalRootBits)
+                        saved = bits.buffer
+                        bits.consume(entry)
+                        Self.store(second, &buffer, at: out)
+                        out &+= 1
+                        if entry.isLiteral {
+                            // 23 or more bits are left: enough for the next root lookup, made before the refill
+                            // so it doesn't wait for the refill's load.
+                            let third = entry
+                            entry = rootEntry(literals, bits.buffer, rootBits: literalRootBits)
+                            bits.refill(input)
+                            Self.store(third, &buffer, at: out)
+                            out &+= 1
+                            continue fast
                         }
                     }
-                    // 26 or more bits: enough to resolve any code.
-                    entry = resolve(entry, literals, bits.bits, rootBits: literalRootBits)
-                    // A match needs up to 48 bits: 15 + 5 for its length, 15 + 13 for its distance.
-                    bits.refill()
                 }
-                switch entry.kind {
-                case .literal:
-                    // A long literal code, from a subtable: rare. 56 or more bits buffered.
-                    bits.consume(bitCount: entry.totalBits)
-                    try writer.write(Byte(truncatingIfNeeded: entry.value))
-                    entry = lookup(literals, bits.bits, rootBits: literalRootBits)
-                case .lengthOrDistance:
-                    // 48 or more bits buffered. After the length, 28 or more: enough for the distance, decoded
-                    // from a copy of them, so the refill started here overlaps it instead of delaying it. After
-                    // the distance, 28 or more remain: enough for the next root lookup, made before a second
-                    // refill (which the next symbol needs, if it's another match) for the same reason.
-                    // Deflate64 needs up to 60: 15 + 16 for the length, 15 + 14 for the distance, so it refills
-                    // between them instead.
-                    let length = entry.value &+ entry.extra(bits.bits)
-                    let lengthBits = entry.totalBits
-                    bits.consume(bitCount: entry.totalBits)
-                    let window: UInt64
-                    if deflate64 {
-                        bits.refill()
-                        window = bits.bits
-                    } else {
-                        window = bits.bits
-                        bits.refill()
-                    }
-                    let distanceEntry = lookup(distances, window, rootBits: distanceRootBits)
-                    guard distanceEntry.kind == .lengthOrDistance else { throw .invalidValue }
-                    let distance = distanceEntry.value &+ distanceEntry.extra(window)
-                    bits.consume(bitCount: distanceEntry.totalBits)
-                    let root = rootEntry(literals, bits.bits, rootBits: literalRootBits)
-                    bits.refill()
-                    entry = resolve(root, literals, bits.bits, rootBits: literalRootBits)
-                    // Throws `invalidValue` for a distance reaching before the output's start.
-                    if deflate64 {
-                        // The loop's room covers DEFLATE's longest match. A longer Deflate64 one that doesn't
-                        // fit (the copy checks, writing nothing) is left to the careful loop, from its start.
-                        // A check of its own before the copy cost 4% on pixel runs.
-                        do throws(BytesError) {
-                            try writer.copy(fromDistance: distance, count: length, allowingOverrun: true)
-                        } catch .insufficientCapacity {
-                            let start = bits.bitPosition &- lengthBits &- distanceEntry.totalBits
-                            return (start, writer.byteCount, .nearEnd)
+                if entry.isExceptional {
+                    if entry.isSubtable {
+                        // A code longer than the root: its subtable's entry for the bits after the root's (the link
+                        // consumed none). A literal, a length, or the end of the block.
+                        entry = subtableEntry(entry, literals, bits.buffer, rootBits: literalRootBits)
+                        saved = bits.buffer
+                        bits.consume(entry)
+                        if entry.isLiteral {
+                            let literal = entry
+                            entry = rootEntry(literals, bits.buffer, rootBits: literalRootBits)
+                            bits.refill(input)
+                            Self.store(literal, &buffer, at: out)
+                            out &+= 1
+                            continue fast
                         }
-                    } else {
-                        try writer.copy(fromDistance: distance, count: length, allowingOverrun: true)
                     }
-                case .endOfBlock:
-                    bits.consume(bitCount: entry.totalBits)
-                    return (bits.bitPosition, writer.byteCount, .endOfBlock)
-                default:
-                    throw .invalidValue
+                    if entry.isExceptional {
+                        if entry.isEndOfBlock {
+                            return (bits.position, out, .endOfBlock)
+                        }
+                        // Deflate64's symbol 285, marked exceptional so that only it pays for this check: it reaches
+                        // 65,538 bytes, past the room the loop keeps (a DEFLATE match's). One that can't be copied
+                        // with the overrun is left to the careful loop, from the length's code.
+                        guard deflate64, entry.isLongLength else { throw .invalidValue }
+                        // The extra bits by the fields, not `extra(saved:)`: its shift by `raw >> 8` sees the
+                        // exceptional flag here, and the mask LLVM kept for it took a register in the whole loop.
+                        let length = entry.value &+ entry.extra(saved)
+                        if buffer.byteCount &- out < length &+ AlignedBytesWriter.copyOverrun {
+                            return (bits.position &- entry.totalBits, out, .nearEnd)
+                        }
+                        // Its 31 bits can leave fewer than the distance's root lookup needs.
+                        bits.refill(input)
+                    }
                 }
+
+                // A match. Its length's code and extra bits are consumed, and 14 or more bits are left: enough for
+                // the distance's root lookup (any length but Deflate64's symbol 285 takes 20 bits at most).
+                let length = entry.value &+ entry.extra(saved: saved)
+                entry = rootEntry(distances, bits.buffer, rootBits: distanceRootBits)
+                if entry.isExceptional {
+                    // A subtable link (or an invalid code): up to 15 + 14 bits, then the next root lookup's 11.
+                    bits.refill(input)
+                    guard entry.isSubtable else { throw .invalidValue }
+                    entry = subtableEntry(entry, distances, bits.buffer, rootBits: distanceRootBits)
+                    guard !entry.isExceptional else { throw .invalidValue }
+                } else if bits.count < distanceRootBits &+ (deflate64 ? 14 : 13) &+ literalRootBits {
+                    // A root code's 8 bits and 13 extra (Deflate64: 14), then the next root lookup's 11.
+                    bits.refill(input)
+                }
+                saved = bits.buffer
+                bits.consume(entry)
+                let distance = entry.value &+ entry.extra(saved: saved)
+                guard distance <= out else { throw .invalidValue } // Before the output's start.
+                entry = rootEntry(literals, bits.buffer, rootBits: literalRootBits)
+                bits.refill(input)
+                try Self.copyMatch(&buffer, at: out, distance: distance, length: length)
+                out &+= length
             }
         }
 
-        return (bits.bitPosition, writer.byteCount, .nearEnd)
+        return (bits.position, out, .nearEnd)
+    }
+
+    /// The fast loop's bit buffer: libdeflate's. `left`'s low 6 bits count the valid bits in `buffer`, and its
+    /// higher bits are garbage, because consuming an entry subtracts the whole raw entry rather than masking its
+    /// count first (its bits 6 and up don't change the low 6 bits of the difference).
+    ///
+    /// A struct with mutating methods rather than nested functions over captured variables, which can stay in
+    /// memory behind access checks.
+    private struct FastBits {
+        var buffer: UInt64 = 0
+        var left = 0
+        /// The next byte to load.
+        var next: Int
+
+        /// Starts at bit `position` of `input`, refilled.
+        ///
+        /// - Precondition: 8 bytes or more of `input` from `position / 8`.
+        @inline(__always)
+        init(_ input: RawSpan, at position: Int) {
+            next = position &>> 3
+            refill(input)
+            buffer &>>= UInt64(truncatingIfNeeded: position & 7)
+            left &-= position & 7
+        }
+
+        /// The number of valid bits.
+        @inline(__always) var count: Int { left & 63 }
+
+        /// The position of the next bit to consume, from the start of the input.
+        @inline(__always) var position: Int { next &<< 3 &- count }
+
+        /// Loads 8 bytes above the valid bits, keeping 56 to 63 valid: `BitBuffer`'s refill, unchecked.
+        ///
+        /// - Precondition: 8 bytes of `input` from ``next``.
+        @inline(__always)
+        mutating func refill(_ input: RawSpan) {
+            // Unsafe: an unchecked 8-byte load. Safe: the fast loop runs only while 32 bytes or more of input
+            // are left at an iteration's start, and an iteration's refills load at most 20 bytes past it.
+            let word = unsafe input.unsafeLoadUnaligned(fromUncheckedByteOffset: next, as: UInt64.self)
+            buffer |= UInt64(littleEndian: word) &<< UInt64(truncatingIfNeeded: left)
+            next &+= 7 &- ((left &>> 3) & 7)
+            left |= 56
+        }
+
+        /// Consumes an entry's bits: shifts by its low 6 bits, and subtracts the whole entry.
+        @inline(__always)
+        mutating func consume(_ entry: HuffmanEntry) {
+            buffer &>>= UInt64(entry.raw)
+            left &-= Int(entry.raw)
+        }
+    }
+
+    /// Writes a literal, unchecked.
+    ///
+    /// - Precondition: `offset` is within `output` (the fast loop keeps `fastRoom` bytes past it).
+    @inline(__always)
+    private static func store(_ literal: HuffmanEntry, _ output: inout MutableRawSpan, at offset: Int) {
+        // Unsafe: an unchecked store. Safe: the fast loop's output limit leaves room for an iteration's writes.
+        unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: literal.raw &>> 16), toUncheckedByteOffset: offset, as: UInt8.self)
+    }
+
+    /// Moves a `T` from `source` to `destination` within `output`, unchecked.
+    @unsafe @inline(__always)
+    private static func move<T: BitwiseCopyable>(_: T.Type, from source: Int, to destination: Int, in output: inout MutableRawSpan) {
+        let value = unsafe output.bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: source, as: T.self)
+        unsafe output.storeBytes(of: value, toUncheckedByteOffset: destination, as: T.self)
+    }
+
+    /// Copies a match in the fast loop: 16 or 8 bytes at a time with an overrun of up to 32 bytes, libdeflate's
+    /// copy with no branch on the length up to 32. Distances below 8 go through the writer's exact copy (a
+    /// `memset` for 1, a pattern fill for 2–7).
+    ///
+    /// - Precondition: `1 <= distance <= offset`, and `length + 32` bytes of room after `offset`.
+    @inline(always)
+    private static func copyMatch(_ output: inout MutableRawSpan, at offset: Int, distance: Int, length: Int) throws(BytesError) {
+        let source = offset &- distance
+        // Unsafe: unchecked moves. Safe: the fast loop checked the distance and keeps `length + 32` bytes of room;
+        // a move of n bytes at `index` reads up to `offset + index + n - distance`, at most `offset + index` when
+        // `distance >= n`: bytes already final.
+        if distance >= 16 {
+            unsafe move(SIMD16<UInt8>.self, from: source, to: offset, in: &output)
+            unsafe move(SIMD16<UInt8>.self, from: source &+ 16, to: offset &+ 16, in: &output)
+            var index = 32
+            while index < length {
+                unsafe move(SIMD16<UInt8>.self, from: source &+ index, to: offset &+ index, in: &output)
+                index &+= 16
+            }
+        } else if distance >= 8 {
+            unsafe move(UInt64.self, from: source, to: offset, in: &output)
+            unsafe move(UInt64.self, from: source &+ 8, to: offset &+ 8, in: &output)
+            unsafe move(UInt64.self, from: source &+ 16, to: offset &+ 16, in: &output)
+            unsafe move(UInt64.self, from: source &+ 24, to: offset &+ 24, in: &output)
+            var index = 32
+            while index < length {
+                unsafe move(UInt64.self, from: source &+ index, to: offset &+ index, in: &output)
+                index &+= 8
+            }
+        } else {
+            var writer = try AlignedBytesWriter(&output, atByteOffset: offset)
+            try writer.copy(fromDistance: distance, count: length)
+        }
     }
 
     /// Decodes symbols near the end of the input or output: one at a time, each finished only if its bits are
@@ -980,7 +1086,22 @@ struct InflateStream: ~Copyable {
     private static func resolve(
         _ entry: HuffmanEntry, _ table: Span<UInt32>, _ bits: UInt64, rootBits: Int
     ) -> HuffmanEntry {
-        guard entry.kind == .subtable else { return entry }
+        guard entry.isSubtable else { return entry }
+        return subtableEntry(entry, table, bits, rootBits: rootBits)
+    }
+
+    /// The subtable's entry that the link `entry` leads to, for the bits after the root's.
+    ///
+    /// - Parameters:
+    ///   - entry: A subtable link.
+    ///   - table: The table `entry` came from.
+    ///   - bits: The buffered bits `entry` was looked up with.
+    ///   - rootBits: The root table's index width.
+    /// - Returns: The subtable's entry.
+    @inline(__always)
+    private static func subtableEntry(
+        _ entry: HuffmanEntry, _ table: Span<UInt32>, _ bits: UInt64, rootBits: Int
+    ) -> HuffmanEntry {
         // Shift, then mask: `bits(from:upTo:)` masks first, which needs the sum, and grew `decodeSymbols` by 5
         // instructions.
         let index = Int(truncatingIfNeeded: bits.bits(from: rootBits, count: entry.codeLength))

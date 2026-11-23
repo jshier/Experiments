@@ -22,7 +22,8 @@ public protocol ContentSource: Sendable {
 
     /// Gives a writer the file's bytes: in one ``FileOutput/write(_:)`` (most files: written as they are), or
     /// several (decoded a chunk at a time). Runs on the writer, outside the file system limit: decoding here is CPU
-    /// work like compression.
+    /// work like compression. A source's own errors go in ``DiskError/source(_:)`` (``DiskError/init(wrapping:)`` makes
+    /// cancellation ``DiskError/cancelled``); a client hands them on with ``DiskError/unwrapped``.
     func write(_ contents: Contents, to output: inout FileOutput) async throws(DiskError)
 
     /// The writer is done with `contents`. Called exactly once per scheduled file, whatever happened.

@@ -62,39 +62,14 @@ struct ExpansionProgress: Equatable, Sendable {
     var entries = 0
     /// Bytes of file contents written to disk so far (the files' own sizes, before any APFS compression).
     var bytes = 0
-    /// Done, from 0 to 1, when the totals are known (see ``fraction(entries:of:bytes:of:)``).
+    /// Done, from 0 to 1, when the totals are known: Disk's `ExtractionProgress.read()`, by bytes and entries together
+    /// (each entry as 64 KiB, so a `.xip`'s hard links, which write no bytes, move the bar), never going back.
     var fraction: Double?
 
     /// Everything counted is written and the expansion hasn't ended: what's left is counted by nothing (directories'
     /// permissions and times, moving the result into place). The row says so instead of showing a full bar.
     var isFinishing: Bool {
         (fraction ?? 0) >= 1
-    }
-
-    /// What an entry weighs against bytes of contents in ``fraction(entries:of:bytes:of:)``: 64 KiB. Roughly what
-    /// making one costs (Xcode's archives on an M3 Ultra: about 30,000 entries a second where contents are written
-    /// at 1.5 to 2.5 GB a second); it only has to keep the bar moving at a believable pace through both kinds of
-    /// work.
-    static let entryWeight = 65_536
-
-    /// How far along an extraction is, from 0 to 1, by its bytes and its entries together: `nil` when neither total
-    /// is known, by whichever is when only one is.
-    ///
-    /// Bytes alone leave out the work that writes none: a `.xip`'s hard links (a third of Xcode's expansion: the
-    /// bar sat full, then indeterminate, for 3.4 s of 10.2), symbolic links, and directories. Entries alone would
-    /// stall on a large file. So each entry counts as ``entryWeight`` bytes, on both sides of the ratio.
-    ///
-    /// - Parameters:
-    ///   - entries: Entries made so far, of `expectedEntries` (0: not known).
-    ///   - bytes: Bytes of contents written so far, of `expectedBytes` (0: not known).
-    static func fraction(entries: Int, of expectedEntries: Int, bytes: Int, of expectedBytes: Int) -> Double? {
-        guard expectedEntries > 0 || expectedBytes > 0 else { return nil }
-        // The counters run ahead of an estimated total (and are read a moment apart): never past it.
-        let weight = Double(entryWeight)
-        let done = (expectedBytes > 0 ? Double(min(bytes, expectedBytes)) : 0)
-            + (expectedEntries > 0 ? Double(min(entries, expectedEntries)) * weight : 0)
-        let total = Double(max(0, expectedBytes)) + Double(max(0, expectedEntries)) * weight
-        return min(1, max(0, done / total))
     }
 
     /// The percent a row reports (VoiceOver's value, the first-fraction log line): `nil` until the extraction has

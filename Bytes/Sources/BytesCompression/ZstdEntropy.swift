@@ -6,16 +6,6 @@ internal import Bytes
 // libzstd's (`fse_decompress.c`, `huf_decompress.c`, `zstd_decompress_block.c`), so the tables match its
 // entry for entry.
 
-@_transparent
-func zstdLikely(_ condition: Bool) -> Bool {
-    Bool(Builtin.int_expect_Int1(condition._value, true._value))
-}
-
-@_transparent
-func zstdUnlikely(_ condition: Bool) -> Bool {
-    Bool(Builtin.int_expect_Int1(condition._value, false._value))
-}
-
 // MARK: - Workspace
 
 /// A decoder's tables and literal buffer, in one allocation made once.
@@ -57,14 +47,15 @@ struct ZstdWorkspace: ~Copyable {
     static var weightsOffset: Int { nextOffset + 256 * 2 }
     static var size: Int { weightsOffset + 256 + 64 }
 
-    let base: UnsafeMutableRawPointer
+    let memory = CodecWorkspace(byteCount: size)
+
+    // Unsafe: the allocation's address. Safe: valid while the workspace (which owns it) lives.
+    var base: UnsafeMutableRawPointer { unsafe memory.base }
 
     /// Allocates the workspace, zeroed, and builds the code and predefined tables.
     init() {
-        unsafe base = UnsafeMutableRawPointer.allocate(byteCount: Self.size, alignment: 64)
-        // Unsafe: initializing and filling fresh memory. Safe: the allocation is `size` bytes, and each region
-        // written is within it, at the offsets above.
-        unsafe base.initializeMemory(as: UInt8.self, repeating: 0, count: Self.size)
+        // Unsafe: filling the zeroed memory. Safe: the allocation is `size` bytes, and each region written is
+        // within it, at the offsets above.
         for alphabet in [ZstdSequenceAlphabet.literalLength, .offset, .matchLength] {
             let codes = unsafe (base + alphabet.codesOffset).assumingMemoryBound(to: UInt64.self)
             for code in 0...alphabet.maximumSymbol {
@@ -90,42 +81,11 @@ struct ZstdWorkspace: ~Copyable {
         }
     }
 
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` frees it, once.
-        unsafe base.deallocate()
-    }
-
     /// A pointer `offset` bytes into the workspace.
     @inline(__always)
     func pointer(_ offset: Int) -> UnsafeMutableRawPointer {
-        // Unsafe: pointer arithmetic. Safe: every caller passes one of the region offsets above.
-        unsafe base + offset
-    }
-}
-
-/// A raw byte buffer owned by a decoder: its streaming window or its input stash. Grows by replacement.
-@safe @usableFromInline // Exported for clients' destroys, as `ZstdWorkspace`.
-struct ZstdBuffer: ~Copyable {
-    private(set) var base: UnsafeMutableRawPointer?
-    private(set) var capacity = 0
-
-    init() {}
-
-    /// Makes room for at least `capacity` bytes, zeroed, discarding the contents if it reallocates.
-    mutating func reserve(_ capacity: Int) {
-        guard capacity > self.capacity else { return }
-        // Unsafe: replacing the allocation. Safe: the old one is freed exactly once, and the new one is
-        // zeroed before anything reads it.
-        unsafe base?.deallocate()
-        let memory = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 64)
-        unsafe memory.initializeMemory(as: UInt8.self, repeating: 0, count: capacity)
-        unsafe base = memory
-        self.capacity = capacity
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` and `reserve` free it, each once.
-        unsafe base?.deallocate()
+        // Unsafe and safe as `CodecWorkspace.pointer`: every caller passes one of the region offsets above.
+        unsafe memory.pointer(offset)
     }
 }
 
@@ -222,7 +182,7 @@ struct ZstdReverseBits {
         // Unsafe: pointer distance and an 8-byte load. Safe: `position - bytes > start`, and the load is at or
         // below the previous position, whose 8 bytes are in the stream.
         let available = unsafe position - start
-        if zstdLikely(available > bytes) {
+        if likely(available > bytes) {
             unsafe position -= bytes
             consumed &= 7
             container = UInt64(littleEndian: unsafe position.loadUnaligned(as: UInt64.self))

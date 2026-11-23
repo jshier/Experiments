@@ -146,7 +146,7 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 ### Variable-size data
 
 - ``LEB128``
-- ``GenericBytesReader/read(sectionPrefixedBy:_:)``
+- ``GenericBytesReader/read(sectionPrefixedBy:_:includingPrefix:)``
 - ``GenericBytesReader/read(utf8PrefixedBy:_:)``
 - ``GenericBytesReader/read(bytesTerminatedBy:)``
 - ``GenericBytesReader/read(utf8TerminatedBy:)``

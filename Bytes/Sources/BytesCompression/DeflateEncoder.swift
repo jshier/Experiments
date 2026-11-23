@@ -57,7 +57,7 @@ public struct DeflateEncoder: ~Copyable {
         self.level = min(max(level, 0), 9)
         compressor = DeflateCompressor(level: self.level)
         window = UniqueArray(repeating: 0, count: Self.windowCapacity)
-        checksum = format == .zlib ? 1 : 0
+        checksum = format.initialChecksum
     }
 
     /// Prepares to encode a new stream, discarding anything not yet delivered. Keeps the allocations.
@@ -69,7 +69,7 @@ public struct DeflateEncoder: ~Copyable {
         finalBlockWritten = false
         isFinished = false
         flushed = false
-        checksum = format == .zlib ? 1 : 0
+        checksum = format.initialChecksum
         length = 0
     }
 
@@ -227,48 +227,19 @@ public struct DeflateEncoder: ~Copyable {
     // MARK: - Container
 
     private mutating func updateChecksum(_ bytes: RawSpan) {
-        switch format {
-        case .raw: break
-        case .zlib: checksum = Adler32.checksum(bytes, continuing: checksum)
-        case .gzip:
-            checksum = CRC32.checksum(bytes, continuing: checksum)
-            length &+= UInt32(truncatingIfNeeded: bytes.byteCount)
-        }
+        checksum = format.checksum(bytes, continuing: checksum)
+        length &+= UInt32(truncatingIfNeeded: bytes.byteCount)
     }
 
     private mutating func writeHeader() {
         headerWritten = true
-        switch format {
-        case .raw:
-            break
-        case .zlib:
-            let header = ZlibHeader.header(level: level)
-            let bytes: InlineArray<2, UInt8> = [UInt8(header >> 8), UInt8(header & 0xFF)]
-            compressor.stage(bytes.span.bytes)
-        case .gzip:
-            // Magic, DEFLATE, no flags, no time, extra flags (2 slowest, 4 fastest), unknown OS.
-            let extra: UInt8 = level >= 8 ? 2 : level <= 1 ? 4 : 0
-            let bytes: InlineArray<10, UInt8> = [0x1F, 0x8B, 8, 0, 0, 0, 0, 0, extra, 255]
-            compressor.stage(bytes.span.bytes)
-        }
+        let header = format.header(level: level)
+        if header.count > 0 { compressor.stage(header.bytes.span.bytes.extracting(0..<header.count)) }
     }
 
     private mutating func writeTrailer() {
         compressor.alignOutput()
-        switch format {
-        case .raw:
-            break
-        case .zlib:
-            let bytes: InlineArray<4, UInt8> = [
-                UInt8(checksum >> 24), UInt8(checksum >> 16 & 0xFF), UInt8(checksum >> 8 & 0xFF), UInt8(checksum & 0xFF),
-            ]
-            compressor.stage(bytes.span.bytes)
-        case .gzip:
-            let bytes: InlineArray<8, UInt8> = [
-                UInt8(checksum & 0xFF), UInt8(checksum >> 8 & 0xFF), UInt8(checksum >> 16 & 0xFF), UInt8(checksum >> 24),
-                UInt8(length & 0xFF), UInt8(length >> 8 & 0xFF), UInt8(length >> 16 & 0xFF), UInt8(length >> 24),
-            ]
-            compressor.stage(bytes.span.bytes)
-        }
+        let trailer = format.trailer(checksum: checksum, length: length)
+        if trailer.count > 0 { compressor.stage(trailer.bytes.span.bytes.extracting(0..<trailer.count)) }
     }
 }

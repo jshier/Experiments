@@ -35,6 +35,23 @@ enum LZBuffers {
     }
 }
 
+/// The match finders' hash, shared by the DEFLATE and Brotli encoders: libdeflate's, the top bits of a multiply.
+enum LZHash {
+    /// The top `bits` bits of `value` times 0x1E35A7BD.
+    @inline(__always)
+    static func hash(_ value: UInt32, bits: Int) -> Int {
+        Int(truncatingIfNeeded: (value &* 0x1E35_A7BD) &>> UInt32(32 &- bits))
+    }
+
+    /// The 4 bytes at `offset`, little-endian, unchecked.
+    @inline(__always)
+    static func load32(_ buffer: RawSpan, _ offset: Int) -> UInt32 {
+        // Unsafe: an unchecked load. Safe: every caller keeps 4 bytes at `offset` inside the buffer (each encoder's
+        // file says how).
+        UInt32(littleEndian: unsafe buffer.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt32.self))
+    }
+}
+
 enum LZCopy {
     /// The most bytes ``wild(_:_:_:)`` and ``match(_:offset:count:)`` write (and read) past the bytes copied.
     static var overrun: Int { 16 }
@@ -66,7 +83,7 @@ enum LZCopy {
     static func match(_ destination: UnsafeMutableRawPointer, offset: Int, count: Int) {
         // Unsafe: moves within the output. Safe: the callers checked that the match starts in the output
         // and left room past it; each 16-byte move at `offset >= 16` reads only bytes already written.
-        if zstdLikely(offset >= 16) {
+        if likely(offset >= 16) {
             unsafe wild(destination, UnsafeRawPointer(destination - offset), count)
         } else {
             unsafe ZstdCopy.overlapping(destination, offset: offset, count: count)

@@ -1,7 +1,7 @@
-public import System
+public import Disk
 
 /// Why an archive couldn't be read, verified, or extracted.
-public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
+public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible, CancellationReporting {
     /// The file doesn't start with `AEA1`.
     case notAnAEAFile
     /// The profile number isn't one of the six.
@@ -29,8 +29,9 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     case invalidArchive(String)
     /// An entry's path is absolute, has `..` or empty components, or contains NUL.
     case unsafePath(String)
-    /// A file system call failed.
-    case fileSystem(String, Errno)
+    /// Reading the archive or writing what's in it failed: Disk's error as it threw it (the call, the path, and the
+    /// `errno`; an entry that exists; a path that leads out of the destination; …).
+    case disk(DiskError)
     /// The task was cancelled: the operation stopped early.
     case cancelled
 
@@ -49,14 +50,29 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
         case .unsupportedCompression(let byte): "unsupported segment compression '\(Unicode.Scalar(byte))'"
         case .invalidArchive(let why): "invalid Apple Archive stream: \(why)"
         case .unsafePath(let path): "unsafe path: \(path)"
-        case .fileSystem(let what, let errno): "\(what): \(errno)"
+        case .disk(let error): error.description
         case .cancelled: "cancelled"
         }
     }
 
-    /// A file system error with the path it happened at; other errors as they are.
-    func at(_ path: String) -> AEAError {
-        if case .fileSystem(let what, let code) = self { return .fileSystem("\(what) \(path)", code) }
-        return self
+    /// Whether this is ``cancelled`` (or Disk's cancellation): for `DiskError.isCancellation(_:)`.
+    public var isCancellation: Bool {
+        switch self {
+        case .cancelled, .disk(.cancelled): true
+        default: false
+        }
+    }
+
+    /// Disk's failure as the archive's: Disk's own as ``disk(_:)``, except what has a case here (an unsafe entry path, a
+    /// source's ``AEAError``, an archive file that ends early, cancellation).
+    init(_ error: DiskError) {
+        switch error {
+        case .unsafePath(let path): self = .unsafePath(path)
+        // `InputFile` reading the archive: it ends before its format says.
+        case .endOfFile: self = .truncated
+        case .source(let error as AEAError): self = error
+        case .cancelled: self = .cancelled
+        default: self = .disk(error)
+        }
     }
 }

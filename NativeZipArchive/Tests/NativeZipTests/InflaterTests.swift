@@ -53,29 +53,9 @@ func zlibInflate(_ payload: [UInt8]) -> Outcome {
     }
 }
 
-/// Inputs that exercise every block type and match shape (made once: several megabytes take a while in debug).
-func samples() -> [(name: String, bytes: [UInt8])] { sampleInputs }
-
-private let sampleInputs: [(name: String, bytes: [UInt8])] = {
-    var rng = SplitMix64(seed: 7)
-    let words = ["swift", "byte", "span", "inflate", "huffman", "window", " ", "\n", "the", "a"]
-    var text: [UInt8] = []
-    while text.count < 200_000 {
-        text += Array(words.randomElement(using: &rng)!.utf8)
-    }
-    let random = (0..<100_000).map { _ in UInt8.random(in: 0...255, using: &rng) }
-    let runs = (0..<100_000).map { UInt8(($0 / 1000) % 3) } // Long runs: distance-1 matches.
-    let periodic = (0..<100_000).map { UInt8(truncatingIfNeeded: $0 % 7) } // Short distances.
-    // Several megabytes, so output spans chunks and back-references reach across them.
-    var large: [UInt8] = []
-    while large.count < 3 << 20 {
-        large += text.prefix(Int.random(in: 1_000...50_000, using: &rng)); large += random.prefix(500)
-    }
-    return [
-        ("empty", []), ("one byte", [0x41]), ("text", text), ("random", random), ("runs", runs),
-        ("periodic", periodic), ("large", large),
-    ]
-}()
+/// Inputs that exercise every block type and match shape, "large" last (made once: several megabytes take a while in
+/// debug).
+func samples() -> [(name: String, bytes: [UInt8])] { SampleBytes.deflateSamples }
 
 /// What zlib makes of `bytes` at `level` with `strategy`, decoded by NativeZip.
 func checkDecodesWhatZlibEncodes(_ name: String, _ bytes: [UInt8], level: Int32, strategy: Int32) {

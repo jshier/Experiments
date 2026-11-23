@@ -169,7 +169,7 @@ func openRecord(_ protection: inout TLSRecordProtection, _ record: [UInt8]) thro
         var sealer = TLSRecordSealer(secret: secret)
         var opener = TLSRecordOpener(secret: secret)
         var rng = SplitMix64(seed: UInt64(suite.rawValue))
-        let message = randomBytes(40_000, using: &rng)
+        let message = rng.bytes(40_000)
         var wire: [UInt8] = []
         _ = try sealer.transform(message.span.bytes.extracting(0..<10), appending: &wire, flush: .flush)
         _ = try sealer.transform(message.span.bytes.extracting(10...), appending: &wire, flush: .flush)
@@ -198,7 +198,7 @@ func openRecord(_ protection: inout TLSRecordProtection, _ record: [UInt8]) thro
         let secret = TLSSecret([UInt8](repeating: 9, count: 32).span.bytes, suite: .aes128GCMSHA256)
         var rng = SplitMix64(seed: 17)
         // 20 full records and a partial one, in pieces that end mid-record, then a flush.
-        let message = randomBytes(20 * TLSRecord.maximumPlaintext + 1_000, using: &rng)
+        let message = rng.bytes(20 * TLSRecord.maximumPlaintext + 1_000)
         func seal(lanes: Int) throws -> [UInt8] {
             var sealer = TLSRecordSealer(secret: secret, recordLimit: recordLimit)
             sealer.sealingLanes = lanes

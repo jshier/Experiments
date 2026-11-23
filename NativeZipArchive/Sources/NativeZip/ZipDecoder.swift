@@ -3,11 +3,11 @@ internal import BytesAsync
 internal import BytesCompression
 import Synchronization
 
-/// Reusable decompression state: decoders for every supported method plus output buffers.
+/// Reusable decompression state: a decoder for every supported method plus output buffers.
 ///
 /// Create one per worker and pass it to ``ZipArchive/contents(of:using:password:_:)``. Every method decodes with
-/// `BytesCompression`, in Swift: DEFLATE and Deflate64, bzip2, LZMA, xz, and Zstandard. Its buffers and each
-/// method's decoder are allocated once (a decoder on the first entry that needs it), so steady-state decoding
+/// `BytesCompression`'s `Decompressor`, in Swift: DEFLATE and Deflate64, bzip2, LZMA, xz, and Zstandard. Its buffers
+/// and each method's state are allocated once (a method's on the first entry that needs it), so steady-state decoding
 /// performs no allocations. Encrypted entries are decrypted in pieces into a staging buffer the decoder owns, as
 /// their decompressor takes input: no entry is held whole in memory. It's `~Copyable` because it uniquely owns its
 /// buffers.
@@ -20,27 +20,24 @@ public struct ZipDecoder: ~Copyable {
     /// front of each.
     static let historySize = 64 << 10
 
-    /// What decodes the current entry. `inflate` is DEFLATE or Deflate64, straight into the output buffers after
-    /// the history; `zstdWhole` is a Zstandard entry that fits one chunk, decoded in one call straight into the
-    /// output buffer (no window). The others stream through their decoder's own window.
-    private enum Codec {
-        case inflate(deflate64: Bool), bzip2, lzma, xz, zstd, zstdWhole
+    /// How the current entry decodes.
+    private enum Mode {
+        /// An unencrypted entry of at most a chunk, of any method: one call straight into the output buffer, no
+        /// window, checked against the recorded size.
+        case whole(size: Int)
+        /// DEFLATE or Deflate64: straight into the output buffers, after this much of the last output as history.
+        case history(Int)
+        /// The others: through the method's own window, a chunk at a time.
+        case stream
     }
 
     /// Decrypted input waiting for a decompressor, 256 KB: decryption fills it as the decompressor drains it. Each
     /// decoder needs far less than this to make progress (at most a 64 KB LZMA2 chunk, for xz).
     static let stagingSize = 256 << 10
 
-    /// DEFLATE and Deflate64, each made on its first entry.
-    private var inflater: DeflateDecoder?
-    private var inflater64: DeflateDecoder?
-    /// The other methods' decoders, each made on its first entry. LZMA's and xz's windows grow to the largest
-    /// dictionary they've needed (no larger than an entry).
-    private var bzip2: BZip2Decoder?
-    private var lzma: LZMADecoder?
-    private var xz: XZDecoder?
-    /// Zstandard (its tables are 160 KB; streaming adds a window).
-    private var zstd: ZstdDecoder?
+    /// Every method's decoder, each method's state made on its first entry. LZMA's and xz's window (one, shared)
+    /// grows to the largest dictionary they've needed (no larger than an entry).
+    private var decompressor = Decompressor()
     /// Decrypted input for the decompressors, refilled as they consume it. Made on the first encrypted entry, so
     /// decoders that never see one (a worker per core, verifying) don't allocate it.
     private var staging: ByteBuffer?
@@ -55,7 +52,7 @@ public struct ZipDecoder: ~Copyable {
     /// The current unencrypted entry's compressed input, and how much of it the decoder has consumed.
     private var input = unsafe UnsafeRawBufferPointer(start: nil, count: 0)
     private var consumed = 0
-    private var codec = Codec.inflate(deflate64: false)
+    private var mode = Mode.stream
     /// For an LZMA entry whose flags say it ends with an end marker: the most output it may produce (the decoder
     /// is then given no size, so the marker is required). `nil` otherwise.
     private var outputLimit: UInt64?
@@ -92,7 +89,7 @@ public struct ZipDecoder: ~Copyable {
     @usableFromInline
     mutating func inflate(_ payload: RawSpan, path: String, _ body: (RawSpan) throws -> Void) throws {
         try payload.withUnsafeBytes { input in
-            try unsafe begin(input, method: ZipArchive.Method.deflated, size: 0, endMarker: false, path: path)
+            try unsafe begin(input, method: ZipArchive.Method.deflated, size: nil, endMarker: false, path: path)
             try run(path: path, body)
         }
     }
@@ -345,7 +342,12 @@ public struct ZipDecoder: ~Copyable {
 
     // MARK: Stepping
 
-    private mutating func begin(_ input: UnsafeRawBufferPointer, method: UInt16, size: UInt64, endMarker: Bool, path: String) throws {
+    /// Starts decoding an entry's `input` with `method`'s decoder.
+    ///
+    /// - Parameters:
+    ///   - size: The entry's recorded size; `nil` for a bare stream of unknown size (``inflate(_:path:_:)``).
+    ///   - endMarker: For LZMA, general-purpose flag bit 1: the stream ends with an end marker.
+    private mutating func begin(_ input: UnsafeRawBufferPointer, method: UInt16, size: UInt64?, endMarker: Bool, path: String) throws {
         unsafe self.input = input
         consumed = 0
         lastEnd = 0
@@ -353,47 +355,43 @@ public struct ZipDecoder: ~Copyable {
         outputLimit = nil
         // `prepareInput` made the staging buffer for an encrypted entry: it starts empty.
         if staging != nil { staging!.removeAll() }
+        let format: DecompressionFormat
         switch method {
-        case ZipArchive.Method.deflated:
-            codec = .inflate(deflate64: false)
-            if inflater == nil { inflater = DeflateDecoder(variant: .deflate) }
-            inflater!.reset()
-        case ZipArchive.Method.deflate64:
-            codec = .inflate(deflate64: true)
-            if inflater64 == nil { inflater64 = DeflateDecoder(variant: .deflate64) }
-            inflater64!.reset()
-        case ZipArchive.Method.bzip2:
-            codec = .bzip2
-            if bzip2 == nil { bzip2 = BZip2Decoder() }
-            bzip2!.reset()
-        case ZipArchive.Method.xz:
-            // Zip method 95 stores a whole `.xz` stream.
-            codec = .xz
-            if xz == nil { xz = XZDecoder() }
-            xz!.reset()
-        case ZipArchive.Method.zstd:
-            if zstd == nil { zstd = ZstdDecoder() }
-            zstd!.reset()
-            // Small and unencrypted: one call into the output buffer, which is the history. (A wrong size in the
-            // header makes it throw for lack of room, as corrupt data.)
-            codec = decryptor == nil && size <= UInt64(Self.chunkSize) ? .zstdWhole : .zstd
-        case ZipArchive.Method.lzma:
-            codec = .lzma
-            try beginLZMA(size: size, endMarker: endMarker, path: path)
-        default:
-            throw ZipError.unsupportedMethod(method, path)
+        case ZipArchive.Method.deflated: format = .deflate(.raw)
+        case ZipArchive.Method.deflate64: format = .deflate64
+        case ZipArchive.Method.bzip2: format = .bzip2
+        case ZipArchive.Method.zstd: format = .zstd
+        // Zip method 95 stores a whole `.xz` stream; the recorded size keeps a small entry's window small.
+        case ZipArchive.Method.xz: format = .xz(sizeHint: size.flatMap { Int(exactly: $0) })
+        case ZipArchive.Method.lzma: format = try lzmaFormat(size: size, endMarker: endMarker, path: path)
+        default: throw ZipError.unsupportedMethod(method, path)
+        }
+        do throws(BytesError) {
+            try decompressor.reset(for: format)
+        } catch {
+            throw ZipError.corruptData(path)
+        }
+        // Small and unencrypted: one call into the output buffer, which is the history, with no window. (A wrong
+        // size in the header makes it throw, as corrupt data.)
+        if decryptor == nil, let size, size <= UInt64(Self.chunkSize) {
+            mode = .whole(size: Int(size))
+        } else if let history = format.historySize {
+            mode = .history(history)
+        } else {
+            mode = .stream
         }
     }
 
     /// Reads an LZMA entry's zip header (APPNOTE 5.8.8: a 2-byte version, the properties' size, 5, as 2 bytes, then
-    /// the properties: the lc/lp/pb byte and the dictionary size) and starts the decoder on the raw stream after it.
+    /// the properties: the lc/lp/pb byte and the dictionary size) and returns the format of the raw stream after it.
     ///
     /// With the end-marker flag the decoder is given no size, so the stream must end with a marker, and the output is
-    /// limited to `size` here; without it, the stream ends at `size`, with a marker or without one.
+    /// limited to `size` here (and the window to it); without it, the stream ends at `size`, with a marker or without
+    /// one.
     ///
     /// - Throws: ``ZipError/unsupportedMethod(_:_:)`` for a header or properties this decoder can't read;
     ///   ``ZipError/corruptData(_:)`` for a payload too short to hold them.
-    private mutating func beginLZMA(size: UInt64, endMarker: Bool, path: String) throws {
+    private mutating func lzmaFormat(size: UInt64?, endMarker: Bool, path: String) throws -> DecompressionFormat {
         // An encrypted entry's header is in its first decrypted bytes.
         while unsafe pendingInput().count < 9, refillInput() > 0 {}
         let header = unsafe pendingInput()
@@ -409,14 +407,9 @@ public struct ZipDecoder: ~Copyable {
             throw ZipError.unsupportedMethod(ZipArchive.Method.lzma, path)
         }
         consumeInput(9)
-        guard size <= UInt64(Int.max) else { throw ZipError.corruptData(path) }
-        if lzma == nil { lzma = LZMADecoder() }
-        do throws(BytesError) {
-            try lzma!.reset(properties: properties, uncompressedSize: endMarker ? nil : Int(size))
-        } catch {
-            throw ZipError.corruptData(path)
-        }
+        guard let size, let count = Int(exactly: size) else { throw ZipError.corruptData(path) }
         if endMarker { outputLimit = size }
+        return .lzma(properties, uncompressedSize: endMarker ? nil : count, sizeHint: endMarker ? count : nil)
     }
 
     /// Decodes the next chunk into buffer `index` (0 or 1).
@@ -429,18 +422,18 @@ public struct ZipDecoder: ~Copyable {
     private mutating func step(into index: Int, path: String) throws -> (chunk: UnsafeRawBufferPointer, finished: Bool) {
         let output = unsafe index == 0 ? buffers.0 : buffers.1
         do throws(BytesError) {
-            switch codec {
-            case let .inflate(deflate64):
-                return try unsafe inflateStep(into: index, output, deflate64: deflate64)
-            case .zstdWhole:
-                // Unsafe: spans over this decoder's buffer (all of it: the decoder may write past the content, into
-                // free capacity) and the entry's input, in the mapped archive; the output span is finalized before
-                // return.
+            switch mode {
+            case let .history(historySize):
+                return try unsafe inflateStep(into: index, output, historySize: historySize)
+            case let .whole(size):
+                // Unsafe: spans over this decoder's buffer (all of it: a decoder may write past the content, into
+                // free capacity) and the entry's pending input, in the mapped archive (see `pendingInput`); the
+                // output span is finalized before return.
                 var span = unsafe OutputRawSpan(buffer: output, initializedCount: 0)
-                _ = try unsafe zstd!.decompressAll(RawSpan(_unsafeBytes: input), into: &span)
+                _ = try unsafe decompressor.decompressAll(RawSpan(_unsafeBytes: pendingInput()), into: &span, decodedSize: size)
                 let produced = unsafe span.finalize(for: output)
                 return unsafe (UnsafeRawBufferPointer(rebasing: output[..<produced]), true)
-            case .bzip2, .lzma, .xz, .zstd:
+            case .stream:
                 let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
                 let (count, finished) = try unsafe streamStep(into: chunk)
                 produced &+= UInt64(count)
@@ -457,9 +450,9 @@ public struct ZipDecoder: ~Copyable {
     ///
     /// - Returns: The chunk (excluding history) and whether the stream ended.
     private mutating func inflateStep(
-        into index: Int, _ output: UnsafeMutableRawBufferPointer, deflate64: Bool
+        into index: Int, _ output: UnsafeMutableRawBufferPointer, historySize: Int
     ) throws(BytesError) -> (chunk: UnsafeRawBufferPointer, finished: Bool) {
-        let history = min(deflate64 ? 64 << 10 : 32 << 10, lastEnd)
+        let history = min(historySize, lastEnd)
         if history > 0 {
             let previous = unsafe lastBuffer == 0 ? buffers.0 : buffers.1
             unsafe output.baseAddress!.copyMemory(from: previous.baseAddress! + (lastEnd - history), byteCount: history)
@@ -473,9 +466,7 @@ public struct ZipDecoder: ~Copyable {
         while true {
             // Unsafe: the pending input, used before it's consumed or refilled (see `pendingInput`).
             let source = unsafe RawSpan(_unsafeBytes: pendingInput())
-            let progress = deflate64
-                ? try inflater64!.decompress(source, into: &span, historyCount: end)
-                : try inflater!.decompress(source, into: &span, historyCount: end)
+            let progress = try decompressor.decompress(source, into: &span, historyCount: end)
             consumeInput(progress.consumed)
             end &+= progress.produced
             if progress.status == .finished { finished = true; break }
@@ -502,14 +493,7 @@ public struct ZipDecoder: ~Copyable {
         while span.freeCapacity > 0 {
             // Unsafe: the pending input, used before it's consumed or refilled (see `pendingInput`).
             let source = unsafe RawSpan(_unsafeBytes: pendingInput())
-            let progress: TransformProgress
-            switch codec {
-            case .bzip2: progress = try bzip2!.decompress(source, into: &span)
-            case .lzma: progress = try lzma!.decompress(source, into: &span)
-            case .xz: progress = try xz!.decompress(source, into: &span)
-            case .zstd: progress = try zstd!.decompress(source, into: &span)
-            case .inflate, .zstdWhole: preconditionFailure("Not a streaming codec")
-            }
+            let progress = try decompressor.decompress(source, into: &span)
             consumeInput(progress.consumed)
             if progress.status == .finished { finished = true; break }
             if progress.status == .needsOutput { break }

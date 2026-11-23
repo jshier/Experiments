@@ -1,6 +1,8 @@
+import BytesAsync
 import BytesTestSupport
 import Darwin
 @testable import Disk
+import DiskTestSupport
 import Foundation
 import System
 import Testing
@@ -21,7 +23,7 @@ import Testing
             try writer.writeFile(path, contents: bytes.span.bytes, metadata: EntryMetadata(mode: 0o640, times: times))
         }
         let url = directory.path("out/a/b/c.txt")
-        let item = try item(url)
+        let item = try readItem(at: url)
         #expect(item.contents == bytes)
         #expect(item.mode == 0o640)
         let info = stat(url)!
@@ -36,7 +38,7 @@ import Testing
         let destination = try Destination(directory.filePath("out"))
         var writer = FileWriter(destination)
         try withPath("f") { try writer.writeFile($0, contents: ([1, 2, 3] as [UInt8]).span.bytes, metadata: EntryMetadata(mode: 0o777)) }
-        #expect(try item(directory.path("out/f")).mode == 0o777 & ~UInt16(mask))
+        #expect(try readItem(at: directory.path("out/f")).mode == 0o777 & ~UInt16(mask))
         #expect(getumask() == mask)
     }
 
@@ -52,8 +54,8 @@ import Testing
         try withPath("setuid") { try writer.writeFile($0, contents: ([1] as [UInt8]).span.bytes, metadata: EntryMetadata(mode: 0o4755)) }
         try withPath("sticky-dir") { try destination.makeDirectory($0, metadata: EntryMetadata(mode: 0o1777)) }
         try withPath("sticky-dir") { try destination.finishDirectory($0, metadata: EntryMetadata(mode: 0o1777)) }
-        #expect(try item(directory.path("out/setuid")).mode == (keep ? 0o4755 : 0o755))
-        #expect(try item(directory.path("out/sticky-dir")).mode == (keep ? 0o1777 : 0o777))
+        #expect(try readItem(at: directory.path("out/setuid")).mode == (keep ? 0o4755 : 0o755))
+        #expect(try readItem(at: directory.path("out/sticky-dir")).mode == (keep ? 0o1777 : 0o777))
     }
 
     @Test func ignoresOwnersUnlessRootAndAsked() throws {
@@ -87,7 +89,7 @@ import Testing
             let info = stat(url)!
             #expect(info.st_mtimespec.tv_sec == 1_234_567_890, "\(name) \(form)")
             #expect(info.st_flags & UInt32(UF_HIDDEN) != 0)
-            #expect(try item(url).contents == bytes, "\(name)")
+            #expect(try readItem(at: url).contents == bytes, "\(name)")
             if form != .plain { #expect(info.st_flags & UInt32(UF_COMPRESSED) != 0) }
         }
         try withPath("locked") {
@@ -112,7 +114,7 @@ import Testing
         let form = try withPath("bare") { try writer.writeFile($0, contents: bytes.span.bytes, storage: .compressed(.appleArchive)) }
         #expect(form == .inline)
         #expect(stat(directory.path("out/bare"))!.st_flags & UInt32(UF_COMPRESSED) != 0)
-        #expect(try item(directory.path("out/bare")).contents == bytes)
+        #expect(try readItem(at: directory.path("out/bare")).contents == bytes)
 
         var blob = ExtendedAttributeBlob()
         blob.append(name: "com.example.tag", value: ([7] as [UInt8]).span.bytes)
@@ -131,8 +133,8 @@ import Testing
             let info = stat(url)!
             #expect(info.st_mtimespec.tv_sec == 1_234_567_890, "\(name)")
             #expect(info.st_flags & UInt32(UF_COMPRESSED) != 0, "\(name)")
-            #expect(extendedAttribute(url, "com.example.tag") == [7])
-            #expect(try item(url).contents == source.files[index])
+            #expect(extendedAttribute("com.example.tag", of: url) == [7])
+            #expect(try readItem(at: url).contents == source.files[index])
         }
     }
 
@@ -154,9 +156,9 @@ import Testing
                 try planner.addExtendedAttributes(attributes.span.bytes, to: token)
         }
         let url = directory.path("out/ro")
-        #expect(try item(url).mode == 0o444)
-        #expect(extendedAttribute(url, "com.example.tag") == [7, 8, 9])
-        #expect(extendedAttribute(url, "com.example.empty") == [])
+        #expect(try readItem(at: url).mode == 0o444)
+        #expect(extendedAttribute("com.example.tag", of: url) == [7, 8, 9])
+        #expect(extendedAttribute("com.example.empty", of: url) == [])
     }
 
     @Test func makesLinksAndSpecialFiles() throws {
@@ -171,11 +173,11 @@ import Testing
         try withPath("dir/link") { try destination.makeSymbolicLink($0, to: Array("file".utf8).span.bytes, metadata: EntryMetadata(mode: 0o644, times: times)) }
         try withPath("dir/second") { second in try withPath("dir/file") { try destination.makeHardLink(second, to: $0) } }
         try withPath("pipe") { try destination.makeSpecialFile($0, .fifo, metadata: EntryMetadata(mode: 0o640)) }
-        let link = try item(directory.path("out/dir/link"))
-        #expect(link.type == "link" && link.linkTarget == "file" && link.mode == 0o644 && link.modification == 1_111_111_111)
+        let link = try readItem(at: directory.path("out/dir/link"), including: .modification)
+        #expect(link.kind == .symbolicLink && link.linkTarget == "file" && link.mode == 0o644 && link.modification?.seconds == 1_111_111_111)
         #expect(stat(directory.path("out/dir/second"))!.st_ino == stat(directory.path("out/dir/file"))!.st_ino)
-        let pipe = try item(directory.path("out/pipe"))
-        #expect(pipe.type == "fifo" && pipe.mode == 0o640)
+        let pipe = try readItem(at: directory.path("out/pipe"))
+        #expect(pipe.kind == .fifo && pipe.mode == 0o640)
         // Devices: refused unless allowed.
         #expect(throws: DiskError.self) { try withPath("null") { try destination.makeSpecialFile($0, .characterDevice(0x0300_0002)) } }
     }
@@ -197,7 +199,7 @@ import Testing
         try withPath("d") { try destination.finishDirectory($0, metadata: EntryMetadata()) }
         try withPath("d/l") { try destination.makeSymbolicLink($0, to: Array("f".utf8).span.bytes) }
         for path in ["out", "out/d", "out/d/f", "out/d/l"] {
-            #expect(extendedAttribute(directory.path(path), "com.apple.quarantine") == value, "\(path)")
+            #expect(extendedAttribute("com.apple.quarantine", of: directory.path(path)) == value, "\(path)")
         }
     }
 
@@ -211,7 +213,7 @@ import Testing
             var writer = FileWriter(destination)
             try withPath("f") { try writer.writeFile($0, contents: ([1] as [UInt8]).span.bytes) }
             let result = Result { try withPath("f") { try writer.writeFile($0, contents: ([2, 2] as [UInt8]).span.bytes) } }
-            let contents = try item(directory.path("\(policy)/f")).contents
+            let contents = try readItem(at: directory.path("\(policy)/f")).contents
             switch policy {
             case .fail:
                 #expect(throws: DiskError.self) { try result.get() }
@@ -239,7 +241,7 @@ import Testing
             published.append(try staging.publish(as: final).lastComponent!.string)
         }
         #expect(published == ["Archive", "Archive 2", "Archive 3"])
-        #expect(try item(directory.path("Archive 3/file2")).contents == [2])
+        #expect(try readItem(at: directory.path("Archive 3/file2")).contents == [2])
         // Discarding removes the staging tree, read-only parts included.
         let staging = try Destination.staging(for: final)
         try withPath("ro") { try staging.makeDirectory($0, metadata: EntryMetadata(mode: 0o500)) }
@@ -271,7 +273,7 @@ import Testing
     /// Each file's source call knows its writer, for state kept per writer (a decoder each).
     @Test func tellsTheSourceItsWriter() async throws {
         final class IndexSource: ContentSource, @unchecked Sendable {
-            let seen = Counter()
+            let seen = RelaxedCounter()
             let writers: Int
             init(writers: Int) { self.writers = writers }
             func write(_ contents: Int, to output: inout FileOutput) async throws(DiskError) {
@@ -337,9 +339,9 @@ import Testing
         }
         #expect(report.files == 3 && report.directories == 2)
         for path in ["out/a", "out/a/b", "out/a/b/c", "out/a/b/c/one", "out/a/two", "out/listed", "out/top", "out/x", "out/x/y", "out/x/y/link"] {
-            #expect(extendedAttribute(directory.path(path), "com.apple.quarantine") == value, "\(path)")
+            #expect(extendedAttribute("com.apple.quarantine", of: directory.path(path)) == value, "\(path)")
         }
-        #expect(extendedAttribute(directory.path("out"), "com.apple.quarantine") == nil)
+        #expect(extendedAttribute("com.apple.quarantine", of: directory.path("out")) == nil)
         #expect(stat(directory.path("out/a/b")).map { $0.st_mode & 0o777 } == 0o750)
         // An unlisted parent keeps the mode `mkdir` gave it.
         #expect(stat(directory.path("out/a/b/c")).map { $0.st_mode & 0o777 } == 0o755 & ~getumask())
@@ -351,8 +353,8 @@ import Testing
         defer { directory.remove() }
         let destination = try Destination(directory.filePath("out"))
         try await extract([("a/b/one", [1])], into: destination)
-        #expect(extendedAttribute(directory.path("out/a"), "com.apple.quarantine") == nil)
-        #expect(extendedAttribute(directory.path("out/a/b/one"), "com.apple.quarantine") == nil)
+        #expect(extendedAttribute("com.apple.quarantine", of: directory.path("out/a")) == nil)
+        #expect(extendedAttribute("com.apple.quarantine", of: directory.path("out/a/b/one")) == nil)
     }
 }
 
@@ -375,12 +377,42 @@ import Testing
         }
         let empty = try MappedFile(path: directory.filePath("empty"))
         #expect(empty.count == 0 && empty.bytes.isEmpty && empty.buffer(0..<0).baseAddress == nil)
-        #expect(throws: Errno.noSuchFileOrDirectory) { _ = try MappedFile(path: directory.filePath("missing")) }
+        let missing = directory.filePath("missing")
+        #expect(throws: DiskError.system("open", path: missing.string, .noSuchFileOrDirectory)) { _ = try MappedFile(path: missing) }
         // A prefix of an open file, whose descriptor can go once it's mapped.
         let descriptor = try FileDescriptor.open(directory.filePath("file"), .readOnly)
         let prefix = try MappedFile(descriptor, count: 4_096, access: .sequential)
         try descriptor.close()
         #expect(Array(prefix.buffer(0..<4_096)) == Array(bytes[..<4_096]))
+    }
+
+    /// A range of a file maps from any offset (not just page boundaries); ranges past the end are refused.
+    @Test func mapsRanges() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let bytes = testBytes(100_000, seed: 8, compressible: false)
+        try Data(bytes).write(to: directory.path("file"))
+        let file = try InputFile(directory.filePath("file"))
+        for range in [0..<100_000, 1..<2, 4_095..<4_097, 16_384..<50_000, 99_999..<100_000, 70_000..<70_000] {
+            let mapped = try file.map(range: range, access: .sequential)
+            #expect(mapped.count == range.count)
+            #expect(mapped.bytes.withUnsafeBytes { Array($0) } == Array(bytes[range]), "\(range)")
+        }
+        #expect(throws: DiskError.endOfFile(file.path.string)) { _ = try file.map(range: 99_000..<100_001) }
+    }
+
+    /// The unsafe read fills memory the caller manages, as the span form does, and reports a short file.
+    @Test func readsIntoRawBuffers() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let bytes = testBytes(10_000, seed: 3, compressible: false)
+        try Data(bytes).write(to: directory.path("file"))
+        let file = try InputFile(directory.filePath("file"))
+        let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: 5_000, alignment: 16)
+        defer { unsafe buffer.deallocate() }
+        try unsafe file.read(at: 4_000, into: buffer)
+        #expect(unsafe Array(buffer) == Array(bytes[4_000..<9_000]))
+        #expect(throws: DiskError.endOfFile(file.path.string)) { try unsafe file.read(at: 6_000, into: buffer) }
     }
 
     /// An output file takes writes at any offset, refuses to replace unless asked, and truncates when it does.

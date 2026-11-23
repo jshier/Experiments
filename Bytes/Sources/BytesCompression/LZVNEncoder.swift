@@ -357,7 +357,7 @@ struct Emitter {
         // and 4-byte literal store, and its continuations (2 bytes per 271): more than the 10 bytes Compression's
         // checks keep free after a literal's pieces and the 1 after a match.
         let need = literalCount &+ (literalCount &+ length) &>> 7 &+ 32
-        if zstdLikely(unsafe need <= end - position && literalCount &+ 16 <= inputEnd - (input + start)) {
+        if likely(unsafe need <= end - position && literalCount &+ 16 <= inputEnd - (input + start)) {
             unsafe write(literal: input + start, literalCount, length, match.distance, previousDistance, exact: false)
         } else {
             try unsafe matchExactly(literalCount, length, match.distance, previousDistance, literal: input + start)
@@ -598,20 +598,12 @@ struct LZMatchTable: ~Copyable {
     /// The highest stored position, plus room.
     static var positionLimit: Int { Int(Int32.max) &- 64 }
 
-    let base: UnsafeMutableRawPointer
+    let memory = CodecWorkspace(byteCount: size)
     /// The next input's bias.
     var nextBias = gap
 
-    init() {
-        unsafe base = UnsafeMutableRawPointer.allocate(byteCount: Self.size, alignment: 64)
-        // Unsafe: initializing fresh memory. Safe: `size` bytes were just allocated.
-        unsafe base.initializeMemory(as: UInt8.self, repeating: 0, count: Self.size)
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` frees it, once.
-        unsafe base.deallocate()
-    }
+    // Unsafe: the allocation's address. Safe: valid while the table (which owns it) lives.
+    var base: UnsafeMutableRawPointer { unsafe memory.base }
 
     /// The bias for an input of `byteCount` bytes, clearing the table first if the bias ran high. The next input's
     /// is reserved before encoding, so that an encode that throws (or rebases, which only lowers its bias) leaves

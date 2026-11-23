@@ -1,3 +1,6 @@
+#if DISK_SYSCALL_COUNTING
+import BytesAsync
+#endif
 import Darwin
 
 /// The file system calls Disk makes, each through a wrapper here, so the `SyscallCounting` trait can count them.
@@ -9,14 +12,14 @@ import Darwin
 enum SyscallKind: Int, CaseIterable, Sendable {
     case openat, close, pwrite, mkdirat, fsetxattr, fsetattrlist, setattrlistat, fchflags
     case symlinkat, linkat, unlinkat, mkfifoat, mknodat, fstatat, fstat, fgetxattr, fremovexattr, setxattr, aclSet
-    case renameat, other
+    case renameat, pread, read, other
 }
 
 #if DISK_SYSCALL_COUNTING
 /// One atomic counter per kind of call.
 final class SyscallCounters: Sendable {
     static let shared = SyscallCounters()
-    let counts: [Counter] = SyscallKind.allCases.map { _ in Counter() }
+    let counts: [RelaxedCounter] = SyscallKind.allCases.map { _ in RelaxedCounter() }
 }
 #endif
 
@@ -84,6 +87,20 @@ enum Sys {
         countSyscall(.pwrite)
         // Unsafe: `bytes` to `pwrite`. Safe: the caller's `count` readable bytes, read only during the call.
         return unsafe Darwin.pwrite(descriptor, bytes, count, off_t(offset))
+    }
+
+    @inline(__always)
+    static func pread(_ descriptor: Int32, _ bytes: UnsafeMutableRawPointer, _ count: Int, _ offset: Int) -> Int {
+        countSyscall(.pread)
+        // Unsafe: `bytes` to `pread`. Safe: the caller's `count` writable bytes, written only during the call.
+        return unsafe Darwin.pread(descriptor, bytes, count, off_t(offset))
+    }
+
+    @inline(__always)
+    static func read(_ descriptor: Int32, _ bytes: UnsafeMutableRawPointer, _ count: Int) -> Int {
+        countSyscall(.read)
+        // Unsafe: `bytes` to `read`. Safe: the caller's `count` writable bytes, written only during the call.
+        return unsafe Darwin.read(descriptor, bytes, count)
     }
 
     @inline(__always)

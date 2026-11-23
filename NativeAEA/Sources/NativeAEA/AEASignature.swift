@@ -1,6 +1,8 @@
 import Bytes
 import BytesCrypto
+import Disk
 import Foundation
+public import System
 
 /// Where the key that signed an archive comes from.
 public enum AEASigningKey: Sendable {
@@ -17,10 +19,18 @@ public enum AEASigningKey: Sendable {
 
     /// Reads a public key from a PEM (`-----BEGIN PUBLIC KEY-----`) or raw X9.63 file, as `aea -sign-pub` takes.
     public static func publicKey(contentsOf url: URL) throws(AEAError) -> AEASigningKey {
-        guard let data = try? Data(contentsOf: url) else { throw .untrustedSigningKey("can't read \(url.path)") }
-        if data.count == 65 { return .publicKey(Array(data)) }
-        guard let text = String(data: data, encoding: .utf8), let key = try? P256.PublicKey(pemRepresentation: text) else {
-            throw .untrustedSigningKey("\(url.path) isn't a P-256 public key")
+        try publicKey(contentsOf: FilePath(url.path(percentEncoded: false)))
+    }
+
+    /// Reads a public key from a PEM (`-----BEGIN PUBLIC KEY-----`) or raw X9.63 file, as `aea -sign-pub` takes.
+    public static func publicKey(contentsOf path: FilePath) throws(AEAError) -> AEASigningKey {
+        // Read with Disk's `InputFile`, at most 64 KiB (a PEM public key is about 180 bytes).
+        guard let data = try? InputFile.contents(of: path, maximumCount: AEAKeys.keyFileLimit) else {
+            throw .untrustedSigningKey("can't read \(path)")
+        }
+        if data.count == 65 { return .publicKey(data) }
+        guard let text = String(validating: data, as: UTF8.self), let key = try? P256.PublicKey(pemRepresentation: text) else {
+            throw .untrustedSigningKey("\(path) isn't a P-256 public key")
         }
         return .publicKey(key.x963Representation)
     }
@@ -122,7 +132,7 @@ enum AEASignature {
         }
         let certificate = try CertificateChain.parse(leafDER.span.bytes, "the leaf certificate")
         guard certificate.namedCurve == .prime256v1 else { throw .untrustedSigningKey("the leaf certificate's key isn't P-256") }
-        let key = certificate.publicKey.withUnsafeBytes { unsafe Array($0) } // Copies a borrowed span: safe.
+        let key = [UInt8](copying: certificate.publicKey)
         return AEASigner(publicKey: key, subject: certificate.subject.commonName, isTrusted: trusted)
     }
 }
@@ -225,7 +235,7 @@ enum CertificateChain {
         // signature included): Apple Root CA - G3 by fingerprint, or a given root's exact bytes; or a given root that
         // issued it.
         guard let anchors else {
-            let lastDigest = SHA256.hash(last.span.bytes).span.withUnsafeBytes { unsafe Array($0) } // Copies a local digest: safe.
+            let lastDigest = [UInt8](copying: SHA256.hash(last.span.bytes).span.bytes)
             guard lastDigest == policy.root else {
                 throw .untrustedSigningKey("the chain doesn't end at \(policy.rootName)")
             }

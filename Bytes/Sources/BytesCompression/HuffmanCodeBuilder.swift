@@ -194,6 +194,36 @@ enum HuffmanCodeBuilder {
             }
             length &-= 1
         }
+        assignCanonicalCodewords(lengths.span, lengthCounts: lengthCounts, maximumLength: maximumLength, into: &nodes, count: count)
+    }
+
+    /// Assigns canonical codewords, bit-reversed, for code lengths (DEFLATE's fixed codes, and codes read or
+    /// built elsewhere).
+    ///
+    /// - Parameters:
+    ///   - lengths: Each symbol's code length, at most 15; 0 for unused symbols.
+    ///   - codewords: Receives each symbol's codeword; as long as `lengths`.
+    static func canonicalCodewords(_ lengths: Span<UInt8>, _ codewords: inout MutableSpan<UInt32>) {
+        var lengthCounts = InlineArray<16, Int>(repeating: 0)
+        for index in lengths.indices {
+            lengthCounts[Int(lengths[index])] &+= 1
+        }
+        lengthCounts[0] = 0
+        assignCanonicalCodewords(lengths, lengthCounts: lengthCounts, maximumLength: 15, into: &codewords, count: lengths.count)
+    }
+
+    /// Assigns the canonical codewords (RFC 1951, 3.2.2), bit-reversed: shorter codes first, and in symbol order
+    /// within a length.
+    ///
+    /// - Parameters:
+    ///   - lengths: Each symbol's code length, at most `maximumLength`.
+    ///   - lengthCounts: How many symbols have each length from 1 (entry 0 is ignored).
+    ///   - codewords: Receives the first `count` symbols' codewords.
+    @inline(__always)
+    private static func assignCanonicalCodewords(
+        _ lengths: Span<UInt8>, lengthCounts: InlineArray<16, Int>, maximumLength: Int, into codewords: inout MutableSpan<UInt32>,
+        count: Int
+    ) {
         var nextCode = InlineArray<16, UInt32>(repeating: 0)
         if maximumLength >= 2 {
             for length in 2...maximumLength {
@@ -202,7 +232,7 @@ enum HuffmanCodeBuilder {
         }
         for symbol in 0..<count {
             let length = Int(lengths[symbol])
-            nodes[symbol] = reversed(nextCode[length], length: length)
+            codewords[symbol] = reversed(nextCode[length], length: length)
             nextCode[length] &+= 1
         }
     }

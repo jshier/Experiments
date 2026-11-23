@@ -21,7 +21,8 @@
 /// forms, which may overwrite scratch bytes after what they write.
 ///
 /// A single value too large for the field it's written as (`write(0x0100_0000, as: Byte3.self,
-/// .bigEndian)`) is a programming error: debug builds trap, and release builds write the low bytes. Bulk
+/// .bigEndian)`) is a programming error, and traps in every build (a check that folds away when the value's
+/// range is known; `write(_:as:)` of an unsigned `Bits` field traps only in debug builds). Bulk
 /// and generating writes always write the low bytes, unchecked, so their loops vectorize, and so does
 /// ``GenericBytesWriter/write(_:bitCount:)``, by design, like `init(truncatingIfNeeded:)`.
 ///
@@ -362,8 +363,7 @@ public extension GenericBytesWriter {
     /// ```
     ///
     /// - Parameters:
-    ///   - value: The integer to write. It should fit in `T.byteCount` bytes: debug builds trap if it
-    ///     doesn't, release builds write its low bytes.
+    ///   - value: The integer to write. It must fit in `T.byteCount` bytes: every build traps if it doesn't.
     ///   - type: The ``ByteGroup`` type, which sets the width.
     ///   - byteOrder: The order to write the bytes in.
     /// - Throws: ``BytesError/insufficientCapacity`` if fewer than `T.byteCount` whole bytes remain.
@@ -371,7 +371,7 @@ public extension GenericBytesWriter {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func write<T: ByteGroup>(_ value: T.Integer, as _: T.Type, _ byteOrder: ByteOrder) throws(BytesError) {
-        assert(value <= T._mask, "\(value) doesn't fit in \(T.byteCount) bytes")
+        precondition(value <= T._mask, "\(value) doesn't fit in \(T.byteCount) bytes")
         try write(T(value, byteOrder))
     }
 

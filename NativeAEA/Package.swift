@@ -51,6 +51,9 @@ let package = Package(
                 "NativeAEA",
                 // `ExtractionProgress`, for `--progress`.
                 .product(name: "Disk", package: "Disk"),
+                // `String(hexadecimal:)`, `withPriority`.
+                .product(name: "Bytes", package: "Bytes"),
+                .product(name: "BytesAsync", package: "Bytes"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: strictSettings
@@ -61,6 +64,10 @@ let package = Package(
                 "NativeAEA",
                 // `ExtractionProgress`, for the progress test.
                 .product(name: "Disk", package: "Disk"),
+                // Reading extracted trees: items, extended attributes, ACLs, `decmpfs`.
+                .product(name: "DiskTestSupport", package: "Disk"),
+                .product(name: "Bytes", package: "Bytes"),
+                .product(name: "BytesAsync", package: "Bytes"),
                 .product(name: "BytesCrypto", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
@@ -73,6 +80,10 @@ let package = Package(
                 "NativeAEA",
                 // `ExtractionProgress`, for the progress benchmark.
                 .product(name: "Disk", package: "Disk"),
+                // The segment benchmarks' decoders: BytesCompression's, and Compression's as the reference.
+                .product(name: "Bytes", package: "Bytes"),
+                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesReferenceCodecs", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],

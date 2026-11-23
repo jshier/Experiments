@@ -1,3 +1,4 @@
+import BytesAsync
 import Disk
 import Foundation
 import System
@@ -19,7 +20,7 @@ extension AEAArchive {
     public func decrypt(
         to destination: FilePath, range: Range<Int>? = nil, overwrite: Bool = false, options: AEAReadOptions = .init()
     ) async throws(AEAError) -> AEAStatistics {
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = MonotonicClock.now
         let wanted = range.map { $0.clamped(to: 0..<rootHeader.rawSize) } ?? 0..<rootHeader.rawSize
         // The segments overlapping the range (raw offsets are increasing).
         let first = segments.firstIndex { $0.rawOffset + $0.rawSize > wanted.lowerBound } ?? segments.count
@@ -38,7 +39,7 @@ extension AEAArchive {
         let decoders = max(1, options.decodeThreads)
         let pool = SegmentBufferPool(count: decoders + max(0, options.extraBuffers) + 1, segmentCapacity: rootHeader.segmentSize)
         let stream = try SegmentStream(
-            archive: self, pool: pool, decoders: decoders, backend: options.decoder,
+            archive: self, pool: pool, decoders: decoders,
             verifyMACs: options.verifyMACs, verifyChecksums: options.verifyChecksums, input: options.input, segments: needed
         )
         var written = 0
@@ -51,7 +52,7 @@ extension AEAArchive {
                     let segment = segments[index]
                     // The part of this segment inside the range.
                     let low = max(wanted.lowerBound, segment.rawOffset), high = min(wanted.upperBound, segment.rawOffset + segment.rawSize)
-                    let start = DispatchTime.now().uptimeNanoseconds
+                    let start = MonotonicClock.now
                     // Unsafe: a span over the decoded segment. Safe: within its `rawSize` bytes, in a buffer this task
                     // holds until the `defer` above releases it, after the write.
                     let bytes = unsafe RawSpan(_unsafeStart: pool.segmentBase(buffer) + (low - segment.rawOffset), byteCount: high - low)
@@ -61,7 +62,7 @@ extension AEAArchive {
                         throw AEAError(error)
                     }
                     written += high - low
-                    writeNanoseconds += Int(DispatchTime.now().uptimeNanoseconds - start)
+                    writeNanoseconds += MonotonicClock.nanoseconds(since: start)
                 }
                 return nil
             } catch {
@@ -71,7 +72,7 @@ extension AEAArchive {
         if let failure { throw failure }
         var statistics = AEAStatistics()
         statistics.fileBytes = written
-        statistics.seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        statistics.seconds = MonotonicClock.seconds(since: started)
         statistics.decodeSeconds = Double(stream.counters.busy.load(ordering: .relaxed)) / 1e9
         statistics.readSeconds = Double(stream.counters.read.load(ordering: .relaxed)) / 1e9
         statistics.writeSeconds = Double(writeNanoseconds) / 1e9

@@ -96,7 +96,6 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
     let archive: AEAArchive
     let pool: SegmentBufferPool
     private let decoderCount: Int
-    private let backend: SegmentDecoderBackend
     private let verifyMACs: Bool
     private let verifyChecksums: Bool
     private let input: SegmentInput
@@ -128,7 +127,7 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
     private var consumed: Int
 
     init(
-        archive: AEAArchive, pool: SegmentBufferPool, decoders: Int, backend: SegmentDecoderBackend,
+        archive: AEAArchive, pool: SegmentBufferPool, decoders: Int,
         verifyMACs: Bool, verifyChecksums: Bool, input: SegmentInput, segments range: Range<Int>? = nil
     ) throws(AEAError) {
         self.archive = archive
@@ -137,15 +136,15 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
         nextSegment.store(self.range.lowerBound, ordering: .relaxed)
         consumed = self.range.lowerBound
         decoderCount = max(1, min(decoders, self.range.count))
-        self.backend = backend
         self.verifyMACs = verifyMACs
         self.verifyChecksums = verifyChecksums
         self.input = input
         if input == .mapped {
-            do throws(Errno) {
-                mapping = try MappedFile(archive.descriptor, count: archive.rootHeader.containerSize, access: .sequential)
+            // The whole file: its size is the container's (checked when the archive opened).
+            do throws(DiskError) {
+                mapping = try archive.file.map(access: .sequential)
             } catch {
-                throw .fileSystem("mmap", error)
+                throw AEAError(error)
             }
         } else {
             mapping = nil
@@ -183,8 +182,8 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
     /// Waits for segment `index` and takes its buffer (the consumer's, to release), or with `taking` false only
     /// looks at it.
     nonisolated(nonsending) func next(_ index: Int, taking: Bool = true) async throws(AEAError) -> Int {
-        let start = DispatchTime.now().uptimeNanoseconds
-        defer { counters.wait.add(Int(DispatchTime.now().uptimeNanoseconds - start), ordering: .relaxed) }
+        let start = MonotonicClock.now
+        defer { counters.wait.add(MonotonicClock.nanoseconds(since: start), ordering: .relaxed) }
         while true {
             switch state.withLock({ Self.take(index, taking: taking, &$0) }) {
             case .some(.success(let buffer)): return buffer
@@ -236,7 +235,7 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
     }
 
     nonisolated(nonsending) private func decodeTask() async {
-        var codec = SegmentCodec(compression: archive.rootHeader.compression, backend: backend)
+        var codec = SegmentCodec(compression: archive.rootHeader.compression)
         let readBuffer = makeReadBuffer()
         while !cancelled.load(ordering: .relaxed), !Task.isCancelled {
             guard let buffer = await pool.acquire() else { return }
@@ -255,12 +254,11 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
     ///
     /// - Returns: `false` when there's nothing more to decode (the end, a failure, or a stop).
     private func decodeNext(into buffer: Int, codec: inout SegmentCodec, readBuffer: RawStorage?) -> Bool {
-        let index = nextSegment.add(1, ordering: .relaxed).oldValue
-        guard index < range.upperBound, !cancelled.load(ordering: .relaxed) else {
+        guard let index = nextSegment.claim(below: range.upperBound), !cancelled.load(ordering: .relaxed) else {
             pool.release(buffer)
             return false
         }
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = MonotonicClock.now
         do throws(AEAError) {
             try decode(index, into: buffer, codec: &codec, readBuffer: readBuffer)
         } catch {
@@ -268,7 +266,7 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
             stop(error)
             return false
         }
-        counters.busy.add(Int(DispatchTime.now().uptimeNanoseconds - started), ordering: .relaxed)
+        counters.busy.add(MonotonicClock.nanoseconds(since: started), ordering: .relaxed)
         let consumer: Continuation<Void>? = state.withLock { state in
             state.slots[index] = buffer
             guard state.waitingFor == index else { return nil }
@@ -286,9 +284,9 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
         if segment.isStored, mapping == nil {
             // Stored as is: read straight into the output, then MACed, decrypted in place, and checked there, with no
             // copy through the read buffer (as `BlockStream` reads stored blocks).
-            let readStart = DispatchTime.now().uptimeNanoseconds
-            try unsafe AEAArchive.readFully(archive.descriptor, at: segment.fileOffset, into: output).get() // `rawSize` == `compressedSize` bytes: safe.
-            counters.read.add(Int(DispatchTime.now().uptimeNanoseconds - readStart), ordering: .relaxed)
+            let readStart = MonotonicClock.now
+            try unsafe AEAArchive.readFully(archive.file, at: segment.fileOffset, into: output) // `rawSize` == `compressedSize` bytes: safe.
+            counters.read.add(MonotonicClock.nanoseconds(since: readStart), ordering: .relaxed)
             if verifyMACs {
                 try unsafe SegmentChecks.verifyMAC(archive, segment: index, stored: RawSpan(_unsafeBytes: UnsafeRawBufferPointer(output))) // The output, this decoder's: safe.
             }
@@ -303,30 +301,33 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
         }
         if let readBuffer { readBuffer.reuse(segment.compressedSize) }
         defer { if let readBuffer { readBuffer.giveBack(segment.compressedSize) } }
-        var stored: UnsafeRawBufferPointer
+        // `read` and `stored` are constants, each set once on every path: a `var` here, assigned in branches and
+        // borrowed by the spans below, was boxed on the heap (one allocation per segment).
+        let read: UnsafeRawBufferPointer
         if let mapping {
             // Unsafe: a buffer into the mapping. Safe: within it (segment offsets are checked against the file's size
             // when the archive opens, and `buffer` checks again); the stream keeps the mapping while decoders run.
-            unsafe stored = mapping.buffer(segment.fileOffset..<segment.fileOffset + segment.compressedSize)
+            unsafe read = mapping.buffer(segment.fileOffset..<segment.fileOffset + segment.compressedSize)
         } else {
             let readBuffer = readBuffer!
-            let readStart = DispatchTime.now().uptimeNanoseconds
+            let readStart = MonotonicClock.now
             // The read buffer holds the largest segment: `compressedSize` fits.
             let destination = unsafe UnsafeMutableRawBufferPointer(start: readBuffer.base, count: segment.compressedSize)
-            try unsafe AEAArchive.readFully(archive.descriptor, at: segment.fileOffset, into: destination).get()
-            counters.read.add(Int(DispatchTime.now().uptimeNanoseconds - readStart), ordering: .relaxed)
-            unsafe stored = UnsafeRawBufferPointer(destination)
+            try unsafe AEAArchive.readFully(archive.file, at: segment.fileOffset, into: destination)
+            counters.read.add(MonotonicClock.nanoseconds(since: readStart), ordering: .relaxed)
+            unsafe read = UnsafeRawBufferPointer(destination)
         }
         if verifyMACs {
-            try unsafe SegmentChecks.verifyMAC(archive, segment: index, stored: RawSpan(_unsafeBytes: stored)) // `stored` outlives the call: safe.
+            try unsafe SegmentChecks.verifyMAC(archive, segment: index, stored: RawSpan(_unsafeBytes: read)) // `read` outlives the call: safe.
         }
+        let stored: UnsafeRawBufferPointer
         if archive.isEncrypted {
             // MACed as stored, then decrypted: a segment stored uncompressed (mapped input) straight into the output; a
             // compressed one into the read buffer (in place when it was read there), then decoded from it.
             let key = archive.segmentKeys[index]
             let target = unsafe segment.isStored ? output : UnsafeMutableRawBufferPointer(start: readBuffer!.base, count: segment.compressedSize)
             var targetSpan = unsafe MutableRawSpan(_unsafeBytes: target) // Within the output or the read buffer, both this decoder's: safe.
-            unsafe key.crypt(RawSpan(_unsafeBytes: stored), into: &targetSpan)
+            unsafe key.crypt(RawSpan(_unsafeBytes: read), into: &targetSpan)
             if segment.isStored {
                 if verifyChecksums {
                     try unsafe SegmentChecks.verifyChecksum(archive, segment: index, raw: RawSpan(_unsafeBytes: UnsafeRawBufferPointer(output)))
@@ -334,6 +335,8 @@ final class SegmentStream: ChunkSource, @unchecked Sendable {
                 return
             }
             unsafe stored = UnsafeRawBufferPointer(target)
+        } else {
+            unsafe stored = read
         }
         try unsafe codec.decode(stored, into: output, segment: index)
         if verifyChecksums {

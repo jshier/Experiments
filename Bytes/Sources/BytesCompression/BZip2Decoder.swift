@@ -154,7 +154,6 @@ enum BZip2Stream {
         var bits = unsafe BZip2Bits(input, end: count, at: start &+ 4)
         var produced = outputStart
         var combinedCRC: UInt32 = 0
-        let crcTables = unsafe UnsafePointer((workspace + BZip2Workspace.crcTables).assumingMemoryBound(to: UInt32.self))
         let block = unsafe (workspace + BZip2Workspace.runs).assumingMemoryBound(to: UInt8.self)
         while true {
             let magic = bits.read(48)
@@ -185,7 +184,7 @@ enum BZip2Stream {
             if randomized { unsafe derandomize(block, count: length) }
             let blockStart = produced
             produced = try unsafe expandRuns(UnsafePointer(block), count: length, output: output, at: produced, capacity: capacity, overrun: overrun)
-            let crc = unsafe BZip2CRC.checksum(output + blockStart, count: produced &- blockStart, tables: crcTables)
+            let crc = unsafe BZip2CRC.checksum(output + blockStart, count: produced &- blockStart)
             guard crc == storedCRC else { throw .invalidValue }
             combinedCRC = (combinedCRC &<< 1 | combinedCRC &>> 31) ^ crc
         }
@@ -337,7 +336,7 @@ enum BZip2Stream {
         // Unsafe: loads and stores within the list. Safe: `index` is below 256, the list's size; 16-byte moves
         // start at 16 or more and end at `index`.
         let lanes = SIMD16<UInt8>(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
-        if zstdLikely(index < 16) {
+        if likely(index < 16) {
             // The byte picked with a `tbl` (every lane), then lanes 1 through `index` take the lane before them
             // and lane 0 the byte: an `ext` and a select. All in registers, about 6 cycles from one move to the
             // next.
@@ -490,7 +489,7 @@ enum BZip2Stream {
             let target = unsafe starts[Int(byte)]
             unsafe starts[Int(byte)] = target &+ length
             let to = unsafe tt + Int(target &+ byte &<< 2)
-            if zstdLikely(position &+ length <= rowEnd) {
+            if likely(position &+ length <= rowEnd) {
                 // Every row this run links to has one byte: a ramp.
                 var links = SIMD4<UInt32>(repeating: (position &+ rowByte &<< 2) &<< 8 | byte) &+ ramp
                 var offset = 0
@@ -640,7 +639,8 @@ enum BZip2Stream {
                 let bytes = load(index)
                 let differences = (load(index &- 3) ^ load(index &- 2)) | (load(index &- 2) ^ load(index &- 1))
                     | (load(index &- 1) ^ bytes)
-                if !ByteLanes(differences).matching(0).any {
+                let ends = ByteLanes(differences).matching(0)
+                if !ends.any {
                     unsafe UnsafeMutableRawPointer(output + end).storeBytes(of: bytes, as: SIMD16<UInt8>.self)
                     end &+= 16
                     index &+= 16
@@ -648,6 +648,18 @@ enum BZip2Stream {
                     last = Int(byte)
                     same = unsafe byte != block[index &- 2] ? 1 : byte != block[index &- 3] ? 2 : 3
                     continue
+                }
+                // The lanes before the first where 4 equal bytes end are copied as they are. (One byte at a time,
+                // the 16 were checked again at every byte.) When there are 3 or more, they set `same`, and the
+                // byte there is the run's fourth, below.
+                let clear = ends.nibbleMask.trailingZeroBitCount &>> 2
+                if clear >= 3 {
+                    unsafe UnsafeMutableRawPointer(output + end).storeBytes(of: bytes, as: SIMD16<UInt8>.self)
+                    end &+= clear
+                    index &+= clear
+                    let byte = unsafe block[index &- 1]
+                    last = Int(byte)
+                    same = unsafe byte != block[index &- 2] ? 1 : byte != block[index &- 3] ? 2 : 3
                 }
             }
             let byte = Int(unsafe block[index])
@@ -747,7 +759,7 @@ struct BZip2SymbolState {
         // indexed by bytes.
         let primary = unsafe table.assumingMemoryBound(to: UInt16.self)
         var entry = Int(unsafe primary[Int(truncatingIfNeeded: bits.bits &>> UInt64(64 &- BZip2Stream.tableBits))])
-        if zstdUnlikely(entry < 1 &<< 9) {
+        if unlikely(entry < 1 &<< 9) {
             // A long code, an invalid one, or the end of the block (which the primary table leaves out, so that
             // this one test covers it).
             entry = unsafe BZip2Tables.decodeSlowly(bits.bits, table: table, alphabetSize: alphabetSize)
@@ -766,7 +778,7 @@ struct BZip2SymbolState {
         // add 1 or 2 times 2^shift more of the run's byte (bijective base 2) and move index 0 (no change); an
         // index (2 and up, less 1) ends the run, stored where it's always stored, and starts one of the byte it
         // moves to the front.
-        guard zstdLikely(shift < 21) else { throw bits.failure }
+        guard likely(shift < 21) else { throw bits.failure }
         let isRun = symbol < 2
         let added = isRun ? (symbol &+ 1) &<< shift : 1
         unsafe runs[runCount] = UInt32(truncatingIfNeeded: runLength) &<< 8 | runByte
@@ -904,12 +916,12 @@ enum BZip2Segments {
             var lane = 0
             while lane < active {
                 let entry = unsafe tt[rows[lane]]
-                if zstdLikely(entry < mark) {
+                if likely(entry < mark) {
                     let write = unsafe writes[lane]
                     unsafe arena[write] = UInt8(truncatingIfNeeded: entry)
                     unsafe rows[lane] = Int(truncatingIfNeeded: entry &>> 8)
                     unsafe writes[lane] = write &+ 1
-                    if zstdUnlikely((write &+ 1) & (pageSize &- 1) == 0) { newPage(lane) }
+                    if unlikely((write &+ 1) & (pageSize &- 1) == 0) { newPage(lane) }
                     lane &+= 1
                     continue
                 }
@@ -986,7 +998,7 @@ struct BZip2Bits {
     /// Fills the register to at least 56 bits.
     @inline(__always)
     mutating func refill() {
-        if zstdLikely(end &- next >= 8) {
+        if likely(end &- next >= 8) {
             // Unsafe: an 8-byte load. Safe: the branch checked that 8 bytes remain.
             let word = UInt64(bigEndian: unsafe input.loadUnaligned(fromByteOffset: next, as: UInt64.self))
             bits |= word &>> UInt64(truncatingIfNeeded: count)
@@ -1146,46 +1158,33 @@ enum BZip2Tables {
 /// bzip2's CRC: CRC-32's polynomial (0x04C11DB7) most significant bit first, initial and final value all ones
 /// (CRC-32/BZIP2). Apple silicon folds 64 bytes per step with `pmull`; the rest takes eight 256-entry tables
 /// ("slicing by 8"), 8 bytes per step.
-enum BZip2CRC {
-    /// Fills eight tables of 256: the first, each byte's CRC; table `k`, the CRC of a byte followed by `k`
-    /// zeros.
-    static func makeTables(_ tables: UnsafeMutablePointer<UInt32>) {
-        // Unsafe: stores to the 2,048 entries.
-        for byte in 0..<256 {
-            var crc = UInt32(byte) &<< 24
-            for _ in 0..<8 {
-                crc = crc & 0x8000_0000 != 0 ? crc &<< 1 ^ 0x04C1_1DB7 : crc &<< 1
-            }
-            unsafe tables[byte] = crc
-        }
-        for table in 1..<8 {
-            for byte in 0..<256 {
-                let previous = unsafe tables[(table &- 1) &* 256 &+ byte]
-                unsafe tables[table &* 256 &+ byte] = previous &<< 8 ^ tables[Int(previous &>> 24)]
-            }
-        }
-    }
+package enum BZip2CRC {
+    // `tables`: BZip2CRCTables.swift (`package` for the tests that check it).
 
     /// The CRC of `count` bytes at `data`.
-    static func checksum(_ data: UnsafePointer<UInt8>, count: Int, tables: UnsafePointer<UInt32>) -> UInt32 {
-        ~(unsafe extend(0xFFFF_FFFF, data, count: count, tables: tables))
+    static func checksum(_ data: UnsafePointer<UInt8>, count: Int) -> UInt32 {
+        ~(unsafe extend(0xFFFF_FFFF, data, count: count))
     }
 
     /// Continues the unconditioned register `crc` (all ones to start, inverted at the end) with `count` bytes at
     /// `data`: folded 64 bytes at a time where there are 64 or more, then with the tables.
-    static func extend(_ crc: UInt32, _ data: UnsafePointer<UInt8>, count: Int, tables: UnsafePointer<UInt32>) -> UInt32 {
-        var crc = crc
-        var index = 0
-        #if HardwareCRC && arch(arm64) && !Portable
-        if count >= 64 {
-            let folded = unsafe fold(crc, UnsafeRawPointer(data), count)
-            index = folded.count
-            // The folded block, in memory order, continued with the rest.
-            var block = reverse(folded.state)
-            crc = withUnsafeBytes(of: &block) { unsafe update(0, $0.baseAddress!.assumingMemoryBound(to: UInt8.self), 16, tables) }
+    static func extend(_ crc: UInt32, _ data: UnsafePointer<UInt8>, count: Int) -> UInt32 {
+        tables.withUnsafeBufferPointer { tables in
+            // The tables' base address, valid in this closure (2,048 entries, a static literal).
+            let tables = tables.baseAddress!
+            var crc = crc
+            var index = 0
+            #if HardwareCRC && arch(arm64) && !Portable
+            if count >= 64 {
+                let folded = unsafe fold(crc, UnsafeRawPointer(data), count)
+                index = folded.count
+                // The folded block, in memory order, continued with the rest.
+                var block = CRCFold.reverse(folded.state)
+                crc = withUnsafeBytes(of: &block) { unsafe update(0, $0.baseAddress!.assumingMemoryBound(to: UInt8.self), 16, tables) }
+            }
+            #endif
+            return unsafe update(crc, data + index, count &- index, tables)
         }
-        #endif
-        return unsafe update(crc, data + index, count &- index, tables)
     }
 
     /// Updates the unconditioned register `crc` with `count` bytes at `data`, eight at a time with the tables.
@@ -1209,12 +1208,6 @@ enum BZip2CRC {
         }
         return crc
     }
-
-    /// A vector's bytes in reverse order: memory order to a 128-bit polynomial's, first byte highest.
-    @inline(__always)
-    static func reverse(_ v: SIMD16<UInt8>) -> SIMD16<UInt8> {
-        SIMD16(v[15], v[14], v[13], v[12], v[11], v[10], v[9], v[8], v[7], v[6], v[5], v[4], v[3], v[2], v[1], v[0])
-    }
 }
 
 #if HardwareCRC && arch(arm64) && !Portable
@@ -1234,32 +1227,14 @@ extension BZip2CRC {
     ///
     /// - Returns: The folded block, byte-reversed (a polynomial), whose CRC from zero continued with the bytes
     ///   after `count` (rounded down to 16) is the CRC of all of them; and that rounded count.
+    // Not inlined, as before the body was shared with CRC-64's.
+    @inline(never)
     static func fold(_ crc: UInt32, _ input: UnsafeRawPointer, _ count: Int) -> (state: SIMD16<UInt8>, count: Int) {
-        // Unsafe: 16-byte loads. Safe: each is below `count` (checked by the loops), which the caller's buffer
-        // holds.
-        @inline(always) func load(_ offset: Int) -> SIMD16<UInt8> {
-            reverse(unsafe input.loadUnaligned(fromByteOffset: offset, as: SIMD16<UInt8>.self))
-        }
-        var x0 = load(0) ^ bitCast(SIMD2<UInt64>(0, UInt64(crc) &<< 32), to: SIMD16<UInt8>.self)
-        var x1 = load(16), x2 = load(32), x3 = load(48)
-        var index = 64
-        let fold512 = Self.fold512
-        while count &- index >= 64 {
-            x0 = bytes_crc_fold(x0, load(index), fold512)
-            x1 = bytes_crc_fold(x1, load(index &+ 16), fold512)
-            x2 = bytes_crc_fold(x2, load(index &+ 32), fold512)
-            x3 = bytes_crc_fold(x3, load(index &+ 48), fold512)
-            index &+= 64
-        }
-        let fold128 = Self.fold128
-        var x = bytes_crc_fold(x0, x1, fold128)
-        x = bytes_crc_fold(x, x2, fold128)
-        x = bytes_crc_fold(x, x3, fold128)
-        while count &- index >= 16 {
-            x = bytes_crc_fold(x, load(index), fold128)
-            index &+= 16
-        }
-        return (x, index)
+        // Unsafe and safe as `CRCFold.fold`: `count` bytes at `input`, at least 64 (the caller checks).
+        unsafe CRCFold.fold(
+            bitCast(SIMD2<UInt64>(0, UInt64(crc) &<< 32), to: SIMD16<UInt8>.self), input, count, reversed: true,
+            fold512: fold512, fold128: fold128
+        )
     }
 }
 #endif
@@ -1309,7 +1284,8 @@ enum BZip2Randomization {
 /// The decoder's workspace, one allocation made once (7.8 MB): the links forward (`tt`, 2²⁰ entries, more than
 /// the largest block's 900,000 and its padding) and back (`back`, for blocks walked from both ends, smaller than
 /// `BZip2Segments.minimumBlock`), the block's runs (then its bytes, and the segments' pages), the Huffman tables,
-/// selectors, move-to-front list, byte counts and starts, code lengths, and CRC tables.
+/// selectors, move-to-front list, byte counts and starts, and code lengths. (The CRC tables are a static literal,
+/// `BZip2CRC.tables`.)
 @safe @usableFromInline
 struct BZip2Workspace: ~Copyable {
     static var tt: Int { 0 } // 2²⁰ 4-byte entries
@@ -1323,21 +1299,11 @@ struct BZip2Workspace: ~Copyable {
     static var starts: Int { frequencies &+ 1024 } // 256 4-byte starts
     static var lengths: Int { starts &+ 1024 } // 6 rows of `lengthsStride`
     static var lengthsStride: Int { 264 }
-    static var crcTables: Int { lengths &+ 6 &* 264 } // 8 × 256 4-byte entries
-    static var size: Int { crcTables &+ 8192 }
+    static var size: Int { lengths &+ 6 &* 264 }
 
-    let base: UnsafeMutableRawPointer
+    /// Zeroed: zeros keep every link below 2²⁰ even before a block writes it.
+    let memory = CodecWorkspace(byteCount: size)
 
-    init() {
-        unsafe base = UnsafeMutableRawPointer.allocate(byteCount: Self.size, alignment: 64)
-        // Unsafe: initializing fresh memory. Safe: `size` bytes were just allocated. (Zeros keep every link
-        // below 2²⁰ even before a block writes it.)
-        unsafe base.initializeMemory(as: UInt8.self, repeating: 0, count: Self.size)
-        unsafe BZip2CRC.makeTables((base + Self.crcTables).assumingMemoryBound(to: UInt32.self))
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` frees it, once.
-        unsafe base.deallocate()
-    }
+    // Unsafe: the allocation's address. Safe: valid while the workspace (which owns it) lives.
+    var base: UnsafeMutableRawPointer { unsafe memory.base }
 }

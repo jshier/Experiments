@@ -1,3 +1,4 @@
+import BytesAsync
 import Foundation
 
 /// An entry of the archive, for listing.
@@ -9,7 +10,7 @@ public struct AAEntry: Sendable {
     public var size: Int { header.data?.count ?? 0 }
 }
 
-/// Settings for reading segments: how many decode at once, with which decoder, and what's checked.
+/// Settings for reading segments: how many decode at once, how they're read, and what's checked.
 public struct AEAReadOptions: Sendable {
     public init() {}
 
@@ -17,7 +18,6 @@ public struct AEAReadOptions: Sendable {
     public var decodeThreads = ProcessInfo.processInfo.activeProcessorCount
     /// Decoded segments held at once beyond one per decoder: room for writing to lag decoding.
     public var extraBuffers = 8
-    public var decoder = SegmentDecoderBackend.bytes
     public var input = SegmentInput.read
     /// Check each segment's MAC (over its stored bytes) before decoding it.
     public var verifyMACs = true
@@ -90,9 +90,9 @@ extension AEAArchive {
     }
 
     nonisolated(nonsending) private func list(_ options: AEAReadOptions, _ body: ((AAEntry) -> Void)?) async throws(AEAError) -> AEAStatistics {
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = MonotonicClock.now
         var statistics = try await Lister.list(payload(options, heldBeyondDecoding: 0), body)
-        statistics.seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        statistics.seconds = MonotonicClock.seconds(since: started)
         return statistics
     }
 }
@@ -121,7 +121,7 @@ enum Lister {
     nonisolated(nonsending) static func list(
         _ source: some ChunkSource, format: StreamFormat = .appleArchive, _ body: ((AAEntry) -> Void)?
     ) async throws(AEAError) -> AEAStatistics {
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = MonotonicClock.now
         var sink = ListingSink(body: body)
         let failure: AEAError? = await source.withDecoding { _ in
             do throws(AEAError) {
@@ -135,7 +135,7 @@ enum Lister {
         if let failure { throw failure }
         var statistics = sink.statistics
         sink.diskCompression.add(to: &statistics.filesByDiskCompression)
-        statistics.seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        statistics.seconds = MonotonicClock.seconds(since: started)
         statistics.decodeSeconds = Double(source.counters.busy.load(ordering: .relaxed)) / 1e9
         statistics.readSeconds = Double(source.counters.read.load(ordering: .relaxed)) / 1e9
         statistics.peakSegmentBuffers = source.pool.peakInUse.load(ordering: .relaxed)

@@ -213,8 +213,9 @@ AEA segments are all described up front, in `archive.segments`, so the decoders 
      mapping with `--input mapped` (Disk's `MappedFile`, read `.sequential`: `mmap` with `MADV_SEQUENTIAL`).
   2. `SegmentChecks.verifyMAC`: HMAC-SHA256 under the segment's key.
   3. For encrypted profiles, AES-CTR decryption, in place in the read buffer.
-  4. `SegmentCodec.decode` into the pool buffer: Bytes' LZMA2/xz, LZFSE, LZBITMAP, LZ4, LZRAVEN, or zlib decoder,
-     or Compression's with `--decoder system`.
+  4. `SegmentCodec.decode` into the pool buffer: Bytes' LZMA2/xz, LZFSE, LZBITMAP, LZ4, LZRAVEN, LZVN, or zlib
+     decoder. (Compression's, once chosen with `--decoder system`, went 2026-11-22: the benchmarks keep it as a
+     reference row.)
   5. `SegmentChecks.verifyChecksum`: SHA-256 or Murmur64 of the raw bytes, whichever the root header names (or
      none).
 
@@ -311,8 +312,9 @@ For a xip, this means 32 decoders working through 617 blocks of 16 MiB, each blo
     buffers, so `buffersInUse` reaches 0 after a failure too.
 - **The carry region** holds a header split across two chunks. The walker copies the partial header's first bytes
   just before the next chunk's bytes, so every header is contiguous in memory. File contents are never copied.
-- **The slack** lets Compression's decoders be asked for one byte more than expected, which detects a segment that
-  decodes long, and leaves room for 16-byte copy loops.
+- **The slack** leaves room for 16-byte copy loops. (It also let Compression's decoders, when they were a choice, be
+  asked for one byte more than expected, to detect a segment that decodes long; Bytes' decoders check the exact
+  size and the input consumed instead.)
 
 A buffer stays out of the pool until the walker has moved past it **and** every job pointing into it has been
 written. This is how memory stays bounded: decoders suspend when the pool is empty, and the walker suspends when
@@ -627,6 +629,16 @@ into the path ring, and no heap allocation; a suspension allocates nothing in re
 per operation.
 The Bytes codecs used here (xz, LZVN, LZBITMAP, LZFSE, bzip2) and RSA verification have zero-malloc benchmark
 thresholds.
+
+Checked by tracing every heap allocation of an extraction (2026-11-22: LLDB breakpoints on `swift_slowAlloc`, `malloc`,
+`calloc`, and `realloc` printing backtraces, grouped by the first frame in this code; RESULTS.md has the method). The
+synthetic archive (189 segments, 30,363 entries, 28 files over a segment) makes about 540 allocations in the pipeline,
+none per file and none per segment: the pool and its reference counts, each decoder's task, read buffer, and LZMA state,
+each writer's task, scratch, and encoder workspaces (made on first use), each task allocator's slabs as its async stack
+first deepens, Disk's queue, context, and large-file slots, and the passes after the walk. Two per-data allocations were
+found and removed: a heap box per segment for a local `var` pointer in `SegmentStream.decode` (assigned in branches and
+borrowed by spans: now constants), and two arrays per bridged piece of a large file in Disk (now held in the job). The
+rest of the process's ~2,800 are argument parsing, the runtime's metadata caches, and process start.
 
 ## 10. Listing and decrypting
 

@@ -7,6 +7,114 @@ and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIV
 synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
 M1 Max's (baseline `m1max`).
 
+## 2026-11-22, evening: allocations in an extraction, traced (baseline `alloc-new-1` against `unify-new-{1,2}`, M1 Max)
+
+**Method.** `Tools/allocations` (Instruments) gives counts by size class, but most responsible callers came back as
+truncated stacks. What attributed them: LLDB breakpoints on `swift_slowAlloc`, `malloc`, `malloc_type_malloc`, `calloc`,
+and `realloc` (`breakpoint command add` → `bt 14; continue`), the release `nunarchiver-debuggable` extracting the
+synthetic archive (189 segments, 30,363 entries, 30,000 files, 28 over a segment; about 40 s under the debugger), then
+each stop grouped by its first frame in this code (an allocation through `swift_slowAlloc` stops twice: the inner
+`malloc` stop is dropped). A conditional breakpoint (`-c '$x0 > 1000000'`) lists the large ones alone.
+
+**What it found.** 7,364 heap allocations in the whole process (3,697 stops after dropping inner ones), none per file:
+argument parsing, the runtime's metadata caches, and process start make about 2,800. Every allocation over 1 MB is a
+buffer, made once (each decoder's read buffer, each writer's staging and compression output, the pool, the job queue).
+Two grew with the data:
+
+- **A heap box per segment** (185 of 189) in `SegmentStream.decode`: a 32-byte `swift_allocObject` holding the local
+  `var stored: UnsafeRawBufferPointer`, which was assigned in branches and borrowed by `RawSpan`s. Two constants, each set
+  once on every path, need no box (`BlockStream`'s decode already used a `let`).
+- **Two arrays per bridged piece** in Disk (a large file's piece whose first chunk starts in the piece before: one per
+  segment boundary inside a large file here, 92–176 depending on timing): the job's `Bridge.parts` and the writer's
+  `bridgeBases`. Disk's RESULTS.md, same date.
+
+What stays is sized by the operation's shape, not its data: each decoder's task, read buffer, and LZMA2 state (made on
+its first segment); each writer's task, scratch, and encoder workspaces (on first use); the task allocator's slabs as
+each task's async stack first deepens; the pool and one `RelaxedCounter` per buffer; Disk's context, queue, and
+large-file slots (reused: 14 slots for 28 large files); the passes after the walk. Pipeline allocations in the trace:
+796 → 542; the process: 3,697 → 3,350.
+
+| Benchmark (synthetic) | Mallocs `unify-new-1`, `-2` → `alloc-new-1` | Instructions | Peak memory |
+|---|---|---|---|
+| Extract: archived | 822, 815 → 476 (−42%) | 401 G, unchanged | 1,454 → 1,458 MB |
+| Extract: archived, progress | 822, 822 → 477 (−42%) | 401 G, unchanged | 1,453 → 1,458 MB |
+| Extract: lzfse | 827, 834 → 486 (−41%) | 533–534 G, unchanged | 1,455 → 1,460 MB |
+| Extract: none | 561, 559 → 378 (−33%) | 291 G, unchanged | 1,439 → 1,442 MB |
+| List, decode, open, parse rows | unchanged | unchanged | unchanged |
+
+Times were within the runs' spread (−1 to −5%, one run). The benchmark's malloc counter sees fewer allocations than the
+trace (about 480 against 3,350), but the same ones went. That also accounts for the earlier "13–24 more mallocs than
+HEAD" (the section below): the extraction is now 330–350 below HEAD's count.
+
+**A full disk looks like a regression.** NativeZip's rows run right after read +7–8 M instructions per 32 MB extraction
+(every codec, so the writing side) and the 8-archive row 3–5x slower. The volume was 98% full, with `mediaanalysisd` and
+`corespotlightd` each using a core. With 20 GB of this session's scratch trees removed (39 GiB free), an interleaved
+control (the current tree with only `Bridge` reverted: `jobsz-ctl-{1,2}` against `jobsz-cur-{1,2}`, NativeZip's
+baselines) read 174–177 M against 174–175 M, the same as before the change. Check free space before believing a
+kernel-heavy row.
+
+## 2026-11-22, later: the cleanups (baselines `unify-old-{1,2}` → `unify-new-{1,2}`, M1 Max)
+
+HEAD (5f28068) against the cleanups, two interleaved rounds on an otherwise idle machine, the synthetic archive. In
+NativeAEA: segments decode through one `Decompressor` (`SegmentCodec`, no per-format decoders or Compression backend);
+WKMS's JSON has its own reader on Bytes; every read goes through Disk's `InputFile`; `extract(into: Destination)`;
+`AEAError.disk(DiskError)` replaces `.fileSystem`; `MonotonicClock` and `RelaxedCounter` from BytesAsync; nunarchiver's
+progress from `ExtractionProgress.read()`, its work started with `withPriority`.
+
+| Benchmark | Instructions | Mallocs old → new | Time, round 1 / round 2 |
+|---|---|---|---|
+| Decode segment 0: bytes (system: the Compression reference) | 1.13 G (929 M), 0 to +0.1% | 0 | +0.8% / 0 |
+| Make segment decoder: bytes | 75 K, 0 | 2 → 2 | |
+| Parse headers: segment 0 | 63 K, 0 | 0 | |
+| Open and verify | 1.91 → 1.88–1.90 M (−0.6 to −1.6%) | 30 → 30 | +2.9% / +1.7% (0.17 ms) |
+| List (decode, verify, parse) | 260 G, 0 | 31.0 K → 31.0 K | −0.7% / +1.1% |
+| Extract: archived / archived, progress | 401 G, 0 to +0.2% | 802–806 → 815–822 | +0.8 / −3.3%; +3.6 / +1.0% |
+| Extract: lzfse | 533–534 G, 0 | 810 → 827–834 | +3.3% / −3.8% |
+| Extract: none | 291 G, 0 | 539–540 → 559–561 | −0.9% / −1.0% |
+
+Instructions and times didn't change: the decoders were BytesCompression's before too, and the moves to Disk and
+BytesAsync were moves. One thing is measured and not explained: every extraction makes 13–24 more mallocs (about
++2–4% of ~800, steady in both rounds; nothing in 6 seconds of time). It's on the writing side: listing, which decodes,
+verifies, and parses the same segments, kept its 31,000 exactly; `SegmentCodec`'s `Decompressor` and `LZFSEDecoder`
+make the same allocations, constructed (2 blocks each) and decoding (the same `malloc` calls under `Tools/runtime-count`
+for 1 and 3 decodes); and NativeZip's extractions through the same Disk code kept theirs exactly. Next step if it
+matters: `Tools/allocations` on the extraction, both trees.
+
+## 2026-11-22: every format in Swift, every file through Disk (baselines `aeanative-old-{1,2}` → `aeanative-new-{1,2}`, M1 Max)
+
+- **No system decoders:** `SegmentDecoderBackend` (`.bytes`/`.system`), `AEAReadOptions.decoder`, nunarchiver's
+  `--decoder`, the `SegmentDecoding` SPI, and `import Compression` are gone; every compression (LZMA/xz, LZFSE, LZVN,
+  LZ4 raw and `bv41`, LZBITMAP, LZRAVEN, zlib) decodes with BytesCompression. WKMS's auth-data JSON is read by a strict
+  reader on Bytes (`JSON.swift`: an object of string members, every escape, surrogate pairs) instead of `JSONDecoder`.
+  The audit found no other system parser (XAR TOC and xip `Metadata` use `XMLScanner`, PEM/DER BytesCrypto, Base64
+  BytesBase64).
+- **Every read through Disk:** Disk's new `InputFile` (`open` with `O_CLOEXEC`, `count`, full `pread`s with EINTR
+  retried and `.endOfFile` for short reads, `contents(of:maximumCount:)` for key files, `map(access:)`) replaces the
+  archive readers' own `FileDescriptor` loops (`AEAArchive`, `XIPArchive`, `AppleArchiveFile`, `prologue(at:)`,
+  BlockStream's file input, `storedBytes`) and Foundation's `Data(contentsOf:)` for key files (library and
+  nunarchiver: `--sign-pub`, `--key-file`, `--recipient-priv`, `--password-file`, `--fcs-key`; `/dev/stdin` works).
+  New `FilePath` overloads of `publicKey(contentsOf:)` and `recipientPrivateKey(contentsOf:)`. Syscalls verifying a pbz
+  `.aar`: `pread` 23 → 24 (the magic sniff, was a `read`), `lseek` 2 → 0, `open` 8 → 6; the data path's reads unchanged.
+- The `Decode segment 0`/`Make segment decoder` rows now decode in the benchmark target (`SegmentDecoder.swift`, the
+  same thin wrapper over BytesCompression's decoders); the `system` rows are Compression through BytesReferenceCodecs.
+  `List …: system` was removed (no whole-pipeline reference without the backend).
+
+HEAD (`5f28068`) and the new code, interleaved, the same benchmark sources; instructions exact, times p50:
+
+| Benchmark | Instructions old → new | Time old → new | Mallocs |
+|---|---|---|---|
+| Open and verify: synthetic | 1,901 K → 1,874 K (−1.4%) | 175 → 172 µs | 30 → 30 |
+| List (decode, verify, parse): synthetic | 260 G → 260 G | 3.83 → 3.69 s | 31 K |
+| Extract: synthetic: archived | 401.5 G → 401 G | 5.85 → 5.96 s (file system, ±20%) | 812 → 800 |
+| Extract: synthetic: lzfse | 534 G → 534 G | 6.86 → 7.01 s (file system) | 822 → 806 |
+| Extract: synthetic: none | 291 G → 290.5 G | 4.55 → 4.46 s | 549 → 542 |
+| Decode segment 0 (bytes / Compression) | 1,132 M / 929 M, unchanged | 121 / 133 ms | 0 |
+
+Nothing measurable changed, which is the point: the formats were already decoded by Bytes by default, and the reads
+are per header and per block. `MetadataTests.restoresMetadataAsAppleDoes` fails in sessions whose terminal app is
+quarantined (provenance tracking): `aa extract` run from them writes a fresh `com.apple.quarantine` instead of the
+archive's, and every file gets `com.apple.provenance`. NativeAEA's output is right; the test's reference isn't.
+
 ## 2026-11-21 (later): Archive Utility's folder and a `.xip`'s directory times, as options; keys for an app (baselines `cleanup-after` → `v1-after`)
 
 Nunarchiver's output was compared with Archive Utility's, item by item (corpus, method, and the table by archive:

@@ -138,7 +138,7 @@ public extension GenericBytesReader {
 
 public extension BytesWriter {
     /// Writes `value`'s raw value as a `width`-bit field. A raw value that doesn't fit is a programming
-    /// error: debug builds trap, release builds write its low `width` bits.
+    /// error, and traps in every build.
     ///
     /// - Parameters:
     ///   - value: The value whose raw value to write.
@@ -149,8 +149,10 @@ public extension BytesWriter {
     mutating func write<R: RawRepresentable, let width: Int>(
         _ value: R, as fieldType: Bits<width>.Type
     ) throws(BytesError) where R.RawValue: BinaryInteger {
-        assert(Bits<width>(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in \(width) bits")
-        try write(Bits<width>(truncatingIfNeeded: value.rawValue))
+        guard let field = Bits<width>(exactly: value.rawValue) else {
+            preconditionFailure("\(value.rawValue) doesn't fit in \(width) bits")
+        }
+        try write(field)
     }
 
     /// Writes `value`'s raw value as a byte: the bit-addressable form of the one width both kinds of writer
@@ -164,15 +166,14 @@ public extension BytesWriter {
     @_lifetime(self: copy self)
     mutating func write<R: RawRepresentable>(_ value: R, as fieldType: Byte.Type) throws(BytesError)
         where R.RawValue: BinaryInteger {
-        assert(Byte(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in 8 bits")
-        try write(Byte(truncatingIfNeeded: value.rawValue))
+        guard let byte = Byte(exactly: value.rawValue) else { preconditionFailure("\(value.rawValue) doesn't fit in 8 bits") }
+        try write(byte)
     }
 }
 
 public extension GenericBytesWriter {
     /// Writes `value`'s raw value as a byte: as the ``Bits`` form, for the one width both kinds of writer
-    /// write. A raw value that doesn't fit is a programming error: debug builds trap, release builds write its
-    /// low 8 bits.
+    /// write. A raw value that doesn't fit is a programming error, and traps in every build.
     ///
     /// - Parameters:
     ///   - value: The value whose raw value to write.
@@ -182,12 +183,12 @@ public extension GenericBytesWriter {
     @_lifetime(self: copy self)
     mutating func write<R: RawRepresentable>(_ value: R, as fieldType: Byte.Type) throws(BytesError)
         where R.RawValue: BinaryInteger {
-        assert(Byte(exactly: value.rawValue) != nil, "\(value.rawValue) doesn't fit in 8 bits")
-        try write(Byte(truncatingIfNeeded: value.rawValue))
+        guard let byte = Byte(exactly: value.rawValue) else { preconditionFailure("\(value.rawValue) doesn't fit in 8 bits") }
+        try write(byte)
     }
 
     /// Writes `value`'s raw value as a `T` field in `byteOrder`. A raw value that doesn't fit is a
-    /// programming error: debug builds trap, release builds write its low `T.byteCount` bytes.
+    /// programming error, and traps in every build.
     ///
     /// - Parameters:
     ///   - value: The value whose raw value to write.
@@ -199,9 +200,10 @@ public extension GenericBytesWriter {
     mutating func write<R: RawRepresentable, T: ByteGroup>(
         _ value: R, as fieldType: T.Type, _ byteOrder: ByteOrder
     ) throws(BytesError) where R.RawValue: BinaryInteger {
-        assert(T.Integer(exactly: value.rawValue).map { $0 <= T._mask } ?? false,
-               "\(value.rawValue) doesn't fit in \(T.byteCount) bytes")
-        try write(T.Integer(truncatingIfNeeded: value.rawValue) & T._mask, as: T.self, byteOrder)
+        guard let integer = T.Integer(exactly: value.rawValue), integer <= T._mask else {
+            preconditionFailure("\(value.rawValue) doesn't fit in \(T.byteCount) bytes")
+        }
+        try write(integer, as: T.self, byteOrder)
     }
 }
 

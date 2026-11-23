@@ -1,3 +1,4 @@
+import Bytes
 import BytesCrypto
 import BytesTestSupport
 import Foundation
@@ -42,8 +43,10 @@ import Testing
         #expect(archive.segments.map(\.rawSize).reduce(0, +) == writer.bytes.count)
         #expect(archive.segments.count == (writer.bytes.count + 65_535) / 65_536)
         // The identifier is what `aea id` prints.
-        let id = try ExternalTool.run("/usr/bin/aea", ["id", "-i", url.path]).trimmingCharacters(in: .whitespacesAndNewlines)
-        #expect(archive.identifier.map { ($0 < 16 ? "0" : "") + String($0, radix: 16) }.joined() == id)
+        let id = String(decoding: try ExternalTool.output("/usr/bin/aea", ["id", "-i", url.path]), as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let identifier = archive.identifier
+        #expect(String(hexadecimal: identifier.span.bytes) == id)
     }
 
     @Test(arguments: ["lzma", "lzfse", "lzbitmap", "lzraven", "lz4", "zlib", "copy"])

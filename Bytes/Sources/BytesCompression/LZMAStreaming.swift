@@ -7,11 +7,12 @@ public import Bytes
 // fast loop a wrap check on every match and matched literal). Positions are window offsets; when the window is
 // full and everything in it delivered, the last dictionary's worth of bytes moves to the front (a slide, by a
 // multiple of 64 so positions keep their low bits, which lp and pb select probabilities by). The room beyond the
-// dictionary is as large as the dictionary up to 16 MiB (and at least 256 KiB for raw LZMA, 4 MiB for xz, whose
-// chunks of up to 2 MiB decode whole), so a slide moves no more than a byte per byte decoded up to 16 MiB
-// dictionaries, and four at 64 MiB. The window starts at 256 KiB and doubles as output reaches its end, up to the
-// dictionary (or the stream's size, when that's known and smaller) plus the room: a large dictionary on a small
-// stream costs only the stream's size.
+// dictionary is as large as the dictionary up to `LZMAWindow.defaultRoomLimit` (and at least 256 KiB for raw LZMA,
+// 2 MiB for xz, whose chunks of up to 2 MiB decode whole): each slide moves the dictionary once per room's worth of
+// output. The window is allocated at its final size, the dictionary (or the stream's size, when that's known and
+// smaller) plus the room, when the stream starts: no doubling, so no copies and no old and new windows held at once.
+// It isn't zeroed (the decode loops read only bytes they wrote, as in the caller's output for `LZMA2Decoder`), so a
+// large dictionary on a small stream makes resident only the pages the stream's output reaches.
 //
 // Input split anywhere works for raw LZMA. The fast loop runs while more than `LZMALoop.inputMargin` bytes
 // remain, the careful loop while more than `tailMargin` do (no symbol reads more than 20), and below that each
@@ -21,32 +22,58 @@ public import Bytes
 /// A streaming decoder's dictionary window.
 @safe @usableFromInline // Exported for clients' destroys, as `LZMAWorkspace`.
 struct LZMAWindow: ~Copyable {
-    private(set) var base: UnsafeMutablePointer<UInt8>?
-    private(set) var capacity = 0
+    private var memory = GrowableWorkspace()
     /// Bytes below this offset have been delivered.
     var delivered = 0
     /// Bytes of the current dictionary that slides moved out of the window.
     var discarded = 0
-    /// The most the window grows to for the current dictionary.
+    /// The window's size for the current dictionary, and what it would be with no stated size.
     private var target = 0
+    private var fullTarget = 0
 
     init() {}
 
-    /// The smallest allocation.
-    static var minimumCapacity: Int { 1 << 18 }
+    /// The most room beyond the dictionary, unless a decoder sets its own: slides move the dictionary once per
+    /// this much output.
+    /// 4 MiB: for `xz -6`'s 8 MiB dictionary a 12 MiB window instead of 16, for 0.3–0.4% more instructions on
+    /// streams past the window (samba, 20.6 MB; none below it). 2 MiB cost 0.9–1.0%, 1 MiB 1.8% (2026-11-22, M1 Max:
+    /// Benchmarks/CompressionBenchmarks/LZMAStreamingBenchmarks.swift's streaming rows with each limit).
+    static var defaultRoomLimit: Int { 4 << 20 }
 
-    /// Starts a dictionary at offset 0. The window may grow to the dictionary (`dictionarySize`, no more than
-    /// `maximumDictionarySize`) plus room for decoding beyond it, or to `knownSize` if that's smaller. The room is
-    /// as large as the dictionary up to 16 MiB, so a slide moves no more than a byte per byte decoded below that
-    /// (and four above), and at least `minimumRoom`.
-    mutating func start(dictionarySize: Int, knownSize: Int?, maximumDictionarySize: Int, minimumRoom: Int) {
+    /// The start of the window, `nil` before the first stream that needs one.
+    var base: UnsafeMutablePointer<UInt8>? {
+        guard let base = unsafe memory.base else { return nil }
+        // Unsafe: the allocation as bytes. Safe: raw memory, only ever used as bytes.
+        return unsafe base.assumingMemoryBound(to: UInt8.self)
+    }
+
+    /// The window's allocated size: the largest any stream has needed.
+    var capacity: Int { memory.byteCount }
+
+    /// Starts a dictionary at offset 0. The window is the dictionary (`dictionarySize`, no more than
+    /// `maximumDictionarySize`) plus room for decoding beyond it, or `knownSize` if that's smaller. The room is as
+    /// large as the dictionary up to `roomLimit`, and at least `minimumRoom`.
+    mutating func start(dictionarySize: Int, knownSize: Int?, maximumDictionarySize: Int, minimumRoom: Int, roomLimit: Int) {
         delivered = 0
         discarded = 0
         let kept = min(dictionarySize, maximumDictionarySize)
-        target = kept &+ max(minimumRoom, min(kept, 16 << 20))
+        fullTarget = kept &+ max(minimumRoom, min(kept, roomLimit))
+        target = fullTarget
         if let knownSize, knownSize < target {
             target = (knownSize &+ 63) & ~63
         }
+    }
+
+    /// Frees the window: a decoder done with large streams.
+    mutating func free() {
+        memory.free()
+    }
+
+    /// Exchanges the windows of two decoders, so one allocation serves whichever is decoding.
+    ///
+    /// - Precondition: Neither has output waiting (both are restarted before use).
+    mutating func exchangeMemory(with other: inout LZMAWindow) {
+        swap(&memory, &other.memory)
     }
 
     /// Restarts the dictionary at offset 0, everything having been delivered: an LZMA2 dictionary reset.
@@ -55,8 +82,8 @@ struct LZMAWindow: ~Copyable {
         discarded = 0
     }
 
-    /// Makes room for `needed` bytes after `position`, everything before it having been delivered: grows the
-    /// window toward its target, or slides the last `dictionarySize` bytes to the front.
+    /// Makes room for `needed` bytes after `position`, everything before it having been delivered: allocates the
+    /// window at its size for the dictionary, or slides the last `dictionarySize` bytes to the front.
     ///
     /// - Throws: ``BytesError/insufficientCapacity`` if keeping the dictionary would take more than
     ///   `maximumDictionarySize` bytes.
@@ -66,7 +93,11 @@ struct LZMAWindow: ~Copyable {
         if capacity &- position >= needed { return }
         precondition(delivered == position, "LZMA window made room with output undelivered")
         if capacity < target {
-            grow(to: min(target, max(capacity &* 2, position &+ needed, Self.minimumCapacity)), preserving: position)
+            // The whole window at once. Not zeroed: the decode loops read only bytes they wrote, so pages beyond
+            // the output aren't touched (or made resident). A window outgrown by a later stream at least doubles
+            // (up to the size with no stated size), so streams of growing sizes reallocate only a few times.
+            let size = capacity == 0 ? target : max(target, min(capacity &* 2, fullTarget))
+            memory.grow(to: size, preserving: position, zeroed: false)
             if capacity &- position >= needed { return }
         }
         let keep = min(position, dictionarySize)
@@ -81,23 +112,6 @@ struct LZMAWindow: ~Copyable {
             discarded &+= shift
         }
         guard capacity &- position >= needed else { throw .insufficientCapacity }
-    }
-
-    /// Reallocates to `newCapacity` bytes, keeping the first `count`.
-    private mutating func grow(to newCapacity: Int, preserving count: Int) {
-        guard newCapacity > capacity else { return }
-        // Unsafe: replacing the allocation. Safe: the new one is initialized (the first `count` bytes from the
-        // old, which holds them, the rest zeros), and the old one is freed once.
-        let memory = UnsafeMutablePointer<UInt8>.allocate(capacity: newCapacity)
-        if let base = unsafe base {
-            unsafe memory.initialize(from: base, count: count)
-            unsafe (memory + count).initialize(repeating: 0, count: newCapacity &- count)
-            unsafe base.deallocate()
-        } else {
-            unsafe memory.initialize(repeating: 0, count: newCapacity)
-        }
-        unsafe base = memory
-        capacity = newCapacity
     }
 
     /// Copies undelivered bytes, up to `end`, into `output`, as many as fit.
@@ -119,11 +133,6 @@ struct LZMAWindow: ~Copyable {
         // span lives no longer than this borrow of it.
         let span = unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: base! + start, count: end &- start))
         return unsafe _overrideLifetime(span, borrowing: self)
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` and `grow` free it, each once.
-        unsafe base?.deallocate()
     }
 }
 
@@ -287,9 +296,10 @@ extension LZMALoop {
 ///
 /// The decoder keeps a dictionary window of its own and copies decoded bytes out of it, so the output can be any
 /// size, and the input can be split anywhere: ``decompress(_:into:)`` stops at the start of a symbol whose input
-/// isn't all there. The window is allocated as output needs it, up to the dictionary size (or the stream's size,
-/// when that's known and smaller) plus a few MiB of room, and kept across ``reset(properties:uncompressedSize:)``s;
-/// the probability model is allocated at creation (and grows once for lc + lp above 4).
+/// isn't all there. The window is allocated when the stream starts, at the dictionary size (or the stream's size, or
+/// the size hint, when that's known and smaller) plus room (as large as the dictionary up to
+/// `windowRoomLimit`), and kept across ``reset(properties:uncompressedSize:sizeHint:)``s; only the pages the output
+/// reaches become resident. The probability model is allocated at creation (and grows once for lc + lp above 4).
 ///
 /// The decode loops are ``LZMA2Decoder``'s, unchanged; decoding streams costs under 1% more instructions than
 /// ``LZMA2Decoder/decompressLZMA(_:properties:uncompressedSize:into:)``, which decodes into the caller's whole
@@ -304,14 +314,20 @@ public struct LZMADecoder: ~Copyable {
     /// large dictionary in its header decodes).
     public let maximumDictionarySize: Int
 
+    /// The most room the window keeps beyond the dictionary: a slide moves the dictionary to the window's front once
+    /// per this much output (at most), so a smaller room saves memory and costs copies. `package` for the benchmarks
+    /// that measure the trade; it applies from the next stream.
+    package var windowRoomLimit = LZMAWindow.defaultRoomLimit
+
     private var workspace = LZMAWorkspace(count: LZMAProbabilities.count(lc: 3, lp: 0))
-    private var window = LZMAWindow()
+    var window = LZMAWindow()
     private var registers = LZMARegisters()
     private var range: UInt32 = 0xFFFF_FFFF
     private var code: UInt32 = 0
     private var model = LZMAModel(lc: 3, literalPositionMask: 0, positionMask: 3, dictionarySize: 0)
     private var properties: LZMAProperties?
     private var uncompressedSize: Int?
+    private var sizeHint: Int?
     private var stage = Stage.idle
     private var failure: BytesError?
 
@@ -343,7 +359,7 @@ public struct LZMADecoder: ~Copyable {
     ///
     /// - Parameters:
     ///   - properties: lc, lp, pb, and the dictionary size, from the container.
-    ///   - uncompressedSize: As for ``reset(properties:uncompressedSize:)``.
+    ///   - uncompressedSize: As for ``reset(properties:uncompressedSize:sizeHint:)``.
     ///   - maximumDictionarySize: The most dictionary the window may keep.
     /// - Throws: ``BytesError/invalidValue`` for a negative size.
     public init(
@@ -360,19 +376,28 @@ public struct LZMADecoder: ~Copyable {
     ///   - properties: lc, lp, pb, and the dictionary size, from the container.
     ///   - uncompressedSize: The decompressed size, if the container states it: the stream may then end with an
     ///     end marker or without one. With `nil`, it must end with an end marker.
+    ///   - sizeHint: The most the stream decodes to, when the container records it but the stream must still end
+    ///     with an end marker (a zip entry with general-purpose flag bit 1): the window is made no larger (one an
+    ///     earlier stream made larger stays). A stream that outgrows a window smaller than its dictionary throws
+    ///     ``BytesError/insufficientCapacity``. Ignored with `uncompressedSize`, which caps the window itself.
     /// - Throws: ``BytesError/invalidValue`` for a negative size.
-    public mutating func reset(properties: LZMAProperties, uncompressedSize: Int? = nil) throws(BytesError) {
+    public mutating func reset(properties: LZMAProperties, uncompressedSize: Int? = nil, sizeHint: Int? = nil) throws(BytesError) {
         if let uncompressedSize, uncompressedSize < 0 { throw .invalidValue }
+        if let sizeHint, sizeHint < 0 { throw .invalidValue }
         self.properties = properties
         self.uncompressedSize = uncompressedSize
+        self.sizeHint = sizeHint
         model = LZMAModel(properties: properties)
         workspace.reserve(LZMAProbabilities.count(lc: properties.literalContextBits, lp: properties.literalPositionBits))
         registers = LZMARegisters()
         // Unsafe: the model's memory. Safe: reserved for these properties just above.
         unsafe LZMALoop.resetState(&registers, model, probabilities: workspace.base)
+        // A hint leaves the stream's end to its marker, so the window holds the hinted output plus the room a step
+        // asks for (64 KiB) and a longest match: symbols start while the position is a longest match from the end.
+        let hinted = sizeHint.flatMap { $0 <= 1 << 60 ? $0 &+ (1 << 16) &+ 2 &* LZMALoop.longestMatch : nil }
         window.start(
-            dictionarySize: model.dictionarySize, knownSize: uncompressedSize, maximumDictionarySize: maximumDictionarySize,
-            minimumRoom: 1 << 18
+            dictionarySize: model.dictionarySize, knownSize: uncompressedSize ?? hinted,
+            maximumDictionarySize: maximumDictionarySize, minimumRoom: 1 << 18, roomLimit: windowRoomLimit
         )
         range = 0xFFFF_FFFF
         code = 0
@@ -380,12 +405,12 @@ public struct LZMADecoder: ~Copyable {
         stage = .header
     }
 
-    /// Starts the same stream again: the last ``reset(properties:uncompressedSize:)``'s properties and size.
-    /// Without one, the decoder stays without a stream.
+    /// Starts the same stream again: the last ``reset(properties:uncompressedSize:sizeHint:)``'s properties, size,
+    /// and hint. Without one, the decoder stays without a stream.
     public mutating func reset() {
         guard let properties else { return }
-        // A size that was accepted once is accepted again.
-        try? reset(properties: properties, uncompressedSize: uncompressedSize)
+        // A size and hint that were accepted once are accepted again.
+        try? reset(properties: properties, uncompressedSize: uncompressedSize, sizeHint: sizeHint)
     }
 
     /// Whether the stream has ended and all its output has been delivered.

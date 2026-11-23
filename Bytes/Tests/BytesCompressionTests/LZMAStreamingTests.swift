@@ -136,7 +136,7 @@ struct LZMAStreamingTests {
         }
     }
 
-    /// Larger than the window's room (4 MiB) with a 64 KiB dictionary: the window slides, and matches reach back
+    /// Larger than the window's room (2 MiB) with a 64 KiB dictionary: the window slides, and matches reach back
     /// across slides. The default dictionary (8 MiB) keeps it all.
     @Test func xzSlidesTheWindow() {
         let large = largeSample()
@@ -168,6 +168,60 @@ struct LZMAStreamingTests {
         let large = largeSample()
         let far = xzCompress(Array((large + large).prefix(5 << 20)), options: lzmaOptions(preset: 0, dictionary: 8 << 20))
         #expect(streamXZ(far, outputChunk: 1 << 20, decoder: &small) == .failure(.insufficientCapacity))
+    }
+
+    /// Size hints, as zip records every entry's size: a new decoder's window is no larger than the hint, so a stream
+    /// decodes with its own size as the hint (input split and whole), and one that outgrows a hint smaller than its
+    /// dictionary fails instead of growing the window. (A window an earlier stream made larger stays.) Smaller rooms
+    /// than the dictionary slide more often and decode the same.
+    @Test func sizeHints() throws {
+        let data = Array(largeSample().prefix(1 << 20))
+        let xz = xzCompress(data, preset: 6) // An 8 MiB dictionary; xz states no sizes in its block headers.
+        var decoder = XZDecoder()
+        decoder.reset(sizeHint: data.count / 2)
+        #expect(streamXZ(xz, outputChunk: 65_536, decoder: &decoder) == .failure(.insufficientCapacity))
+        for split in [nil, [7, 19, 1000], [65_542]] as [[Int]?] {
+            decoder.reset(sizeHint: data.count)
+            #expect(streamXZ(xz, outputChunk: 65_536, split: split, decoder: &decoder) == .success(data), "split \(String(describing: split))")
+        }
+        decoder.reset(sizeHint: nil)
+        #expect(streamXZ(xz, outputChunk: 65_536, decoder: &decoder) == .success(data))
+
+        // Raw LZMA with its end marker and no size (zip's flag bit 1): the hint caps the window.
+        let properties = try LZMAProperties(byte: 0x5D, dictionarySize: 8 << 20)
+        let lzma = lzma1Compress(data, options: lzmaOptions(preset: 6), marker: true)
+        var lzmaDecoder = LZMADecoder()
+        func stream(hint: Int?, split: [Int]? = nil) throws -> Result<(output: [UInt8], consumed: Int), BytesError> {
+            try lzmaDecoder.reset(properties: properties, sizeHint: hint)
+            return streamDecode(lzma, outputChunk: 65_536, split: split) { (input, output) throws(BytesError) in
+                try lzmaDecoder.decompress(input, into: &output)
+            }
+        }
+        #expect(try stream(hint: data.count / 2).map(\.output) == .failure(.insufficientCapacity))
+        // `reset()` keeps the hint.
+        lzmaDecoder.reset()
+        #expect(streamDecode(lzma, outputChunk: 65_536) { (input, output) throws(BytesError) in
+            try lzmaDecoder.decompress(input, into: &output)
+        }.map(\.output) == .failure(.insufficientCapacity))
+        for split in [nil, [7, 19, 1000]] as [[Int]?] {
+            #expect(try stream(hint: data.count, split: split).map(\.output) == .success(data), "split \(String(describing: split))")
+        }
+
+        // Rooms smaller than the dictionary (1 MiB here): more slides, the same output. (xz keeps a chunk's 2 MiB
+        // whatever the limit.)
+        let large = Array((largeSample() + largeSample().reversed()).prefix(3 << 20))
+        let small = try LZMAProperties(byte: 0x5D, dictionarySize: 1 << 20)
+        let raw = lzma1Compress(large, options: lzmaOptions(preset: 6, dictionary: 1 << 20), marker: true)
+        let xzLarge = xzCompress(large, options: lzmaOptions(preset: 6, dictionary: 1 << 20))
+        for room in [1 << 18, 1 << 19] {
+            lzmaDecoder.windowRoomLimit = room
+            try lzmaDecoder.reset(properties: small)
+            #expect(streamDecode(raw, outputChunk: 1 << 20, split: [100_000]) { (input, output) throws(BytesError) in
+                try lzmaDecoder.decompress(input, into: &output)
+            }.map(\.output) == .success(large), "room \(room)")
+            decoder.windowRoomLimit = room
+            #expect(streamXZ(xzLarge, outputChunk: 1 << 20, split: [100_000], decoder: &decoder) == .success(large), "room \(room)")
+        }
     }
 
     @Test func xzEdgeCases() {

@@ -18,10 +18,11 @@ import Testing
 
     @Test func extractionThrowsWhenCancelled() async throws {
         let archive = try ZipArchive(url: TestData.file(set: "nativezip-formats", name: "zstd-large.zip"))
-        let out = FileManager.default.temporaryDirectory.appending(path: "NativeZipCancellation-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: out) }
+        let directory = try TemporaryDirectory(prefix: "NativeZipCancellation")
+        defer { directory.remove() }
+        let out = FilePath(directory.path("out").path)
         await #expect(throws: CancellationError.self) {
-            try await Self.cancelled { try await archive.extract(to: FilePath(out.path)) }
+            try await Self.cancelled { try await archive.extract(to: out) }
         }
     }
 

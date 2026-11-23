@@ -32,9 +32,10 @@ struct AppleDouble {
     ///
     /// - Parameters:
     ///   - skippingQuarantine: Leave a `com.apple.quarantine` attribute out (the extraction sets its own).
-    ///   - forDirectory: The item is a directory: a resource fork is left out (a directory can't have one: setting it
-    ///     fails with `EPERM`; `ditto` warns and goes on, Archive Utility refuses the archive).
-    init?(_ bytes: [UInt8], skippingQuarantine: Bool, forDirectory: Bool) {
+    ///   - keepsResourceFork: The item is a file, which can have a resource fork. For a directory or a symbolic link the
+    ///     fork is left out (a directory can't have one: setting it fails with `EPERM`; `ditto` warns and goes on,
+    ///     Archive Utility refuses the archive).
+    init?(_ bytes: [UInt8], skippingQuarantine: Bool, keepsResourceFork: Bool) {
         func word(_ offset: Int) -> Int? {
             guard offset >= 0, offset + 4 <= bytes.count else { return nil }
             return Int(bytes[offset]) << 24 | Int(bytes[offset + 1]) << 16 | Int(bytes[offset + 2]) << 8 | Int(bytes[offset + 3])
@@ -58,7 +59,7 @@ struct AppleDouble {
                 guard !readAttributes(bytes, header: offset + 34, skippingQuarantine: skippingQuarantine) else { continue }
                 return nil
             case 2:
-                if length > 0, !forDirectory {
+                if length > 0, keepsResourceFork {
                     attributes.append(name: "com.apple.ResourceFork", value: bytes.span.bytes.extracting(offset..<offset + length))
                 }
             default:

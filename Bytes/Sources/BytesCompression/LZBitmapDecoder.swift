@@ -170,12 +170,13 @@ struct LZBitmapWorkspace: ~Copyable {
     static var bitmapAreaOffset: Int { periodAreaOffset + 2 + maximumGroups * 2 + 64 }
     static var byteCount: Int { bitmapAreaOffset + maximumGroups + 32 }
 
-    let base: UnsafeMutableRawPointer
+    let memory = CodecWorkspace(byteCount: byteCount, alignment: 16)
+
+    // Unsafe: the allocation's address. Safe: valid while the workspace (which owns it) lives.
+    var base: UnsafeMutableRawPointer { unsafe memory.base }
 
     init() {
-        unsafe base = UnsafeMutableRawPointer.allocate(byteCount: Self.byteCount, alignment: 16)
-        // Unsafe: initializing the fresh allocation. Safe: the offsets are within `byteCount`.
-        unsafe base.initializeMemory(as: UInt8.self, repeating: 0, count: Self.byteCount)
+        // Unsafe: stores into the zeroed allocation. Safe: the offsets are within `byteCount`.
         for bitmap in 0..<256 {
             var literal = 0
             for lane in 0..<8 {
@@ -185,11 +186,6 @@ struct LZBitmapWorkspace: ~Copyable {
             }
             unsafe base.storeBytes(of: UInt8(literal), toByteOffset: Self.shufflesOffset &+ bitmap &* 16 &+ 8, as: UInt8.self)
         }
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` frees it, once.
-        unsafe base.deallocate()
     }
 }
 

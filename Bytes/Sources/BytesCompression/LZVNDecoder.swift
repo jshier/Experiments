@@ -75,16 +75,16 @@ public struct LZVNDecoder: Sendable {
         while true {
             guard unsafe ip < inputEnd else { throw .insufficientData }
             let opcode = Int(unsafe ip.load(as: UInt8.self))
-            if zstdLikely(opcode < 0xE0) {
+            if likely(opcode < 0xE0) {
                 // A literal of 0 to 3 bytes, then a match: LLMMMDDD DDDDDDDD (small distance), LLMMM111 DDDDDDDD
                 // DDDDDDDD (large), LLMMM110 (previous), or 101LLMMM DDDDDDMM DDDDDDDD (medium).
                 var literalLength = opcode &>> 6
                 var matchLength = (opcode &>> 3) & 7 &+ 3
                 var opcodeLength = 1
                 let low = opcode & 7
-                if zstdLikely(UInt(bitPattern: opcode &- 0xA0) >= 0x20) {
+                if likely(UInt(bitPattern: opcode &- 0xA0) >= 0x20) {
                     // Undefined: 0x70–0x7F and 0xD0–0xDF.
-                    if zstdUnlikely((0x2080 &>> (opcode &>> 4)) & 1 != 0) { throw .invalidValue }
+                    if unlikely((0x2080 &>> (opcode &>> 4)) & 1 != 0) { throw .invalidValue }
                     // (Choosing the distance and opcode length with selects rather than these branches ran 12–18%
                     // more instructions, 10% faster on dickens, 5% slower on the 1.6 KB JSON: kept as branches.)
                     if low < 6 {
@@ -95,7 +95,7 @@ public struct LZVNDecoder: Sendable {
                         guard unsafe inputEnd - ip >= 3 else { throw .insufficientData }
                         distance = Int(UInt16(littleEndian: unsafe ip.loadUnaligned(fromByteOffset: 1, as: UInt16.self)))
                         opcodeLength = 3
-                    } else if zstdUnlikely(opcode < 0x40) {
+                    } else if unlikely(opcode < 0x40) {
                         // No literal and the previous distance: the end of the stream (6), no operation (0x0E,
                         // 0x16), or undefined.
                         if opcode == 6 {
@@ -115,7 +115,7 @@ public struct LZVNDecoder: Sendable {
                     opcodeLength = 3
                 }
                 let sequenceLength = literalLength &+ matchLength
-                if zstdLikely(unsafe opcodeLength &+ literalLength <= inputFast &- (ip - input) && sequenceLength <= outputFast &- (op - output)) {
+                if likely(unsafe opcodeLength &+ literalLength <= inputFast &- (ip - input) && sequenceLength <= outputFast &- (op - output)) {
                     // The literal as one 4-byte move: at most 3 bytes, the rest overwritten by the match.
                     unsafe op.storeBytes(of: ip.loadUnaligned(fromByteOffset: opcodeLength, as: UInt32.self), as: UInt32.self)
                     unsafe ip += opcodeLength &+ literalLength
@@ -142,7 +142,7 @@ public struct LZVNDecoder: Sendable {
                     literalLength = Int(unsafe ip.load(fromByteOffset: 1, as: UInt8.self)) &+ 16
                     opcodeLength = 2
                 }
-                if zstdLikely(unsafe opcodeLength &+ literalLength <= inputFast &- (ip - input) && literalLength <= outputFast &- (op - output)) {
+                if likely(unsafe opcodeLength &+ literalLength <= inputFast &- (ip - input) && literalLength <= outputFast &- (op - output)) {
                     unsafe LZCopy.wild(op, ip + opcodeLength, literalLength)
                 } else {
                     guard unsafe opcodeLength &+ literalLength <= inputEnd - ip else { throw .insufficientData }
@@ -162,7 +162,7 @@ public struct LZVNDecoder: Sendable {
                     unsafe ip += 1
                 }
                 guard unsafe UInt(bitPattern: distance &- 1) < UInt(bitPattern: op - base) else { throw .invalidValue }
-                if zstdLikely(unsafe matchLength <= outputFast &- (op - output)) {
+                if likely(unsafe matchLength <= outputFast &- (op - output)) {
                     unsafe LZCopy.match(op, offset: distance, count: matchLength)
                 } else {
                     guard unsafe matchLength <= outputEnd - op else { throw .insufficientCapacity }

@@ -219,6 +219,68 @@ import Testing
         #expect(bytes.count == 70)
     }
 
+    /// An integer's bytes appended in either order, at even and odd widths, match what a writer writes.
+    @Test func appendIntegerInByteOrder() throws {
+        var bytes: [UInt8] = [0xEE]
+        bytes.append(0x0102_0304, as: Byte4.self, .littleEndian)
+        bytes.append(0x0102_0304, as: Byte4.self, .bigEndian)
+        bytes.append(0x0A0B0C, as: Byte3.self, .bigEndian)
+        bytes.append(0x0A0B0C, as: Byte3.self, .littleEndian)
+        bytes.append(0x01_0203_0405_0607_0809, as: Byte9.self, .bigEndian)
+        bytes.append(0xBEEF, as: Byte2.self, .littleEndian)
+        #expect(bytes == [
+            0xEE, 4, 3, 2, 1, 1, 2, 3, 4, 0x0A, 0x0B, 0x0C, 0x0C, 0x0B, 0x0A, 1, 2, 3, 4, 5, 6, 7, 8, 9, 0xEF, 0xBE,
+        ])
+        let written = try [UInt8](byteCapacity: 25) { (writer) throws(BytesError) in
+            try writer.write(0x0102_0304, as: Byte4.self, .littleEndian)
+            try writer.write(0x0102_0304, as: Byte4.self, .bigEndian)
+            try writer.write(0x0A0B0C, as: Byte3.self, .bigEndian)
+            try writer.write(0x0A0B0C, as: Byte3.self, .littleEndian)
+            try writer.write(0x01_0203_0405_0607_0809, as: Byte9.self, .bigEndian)
+            try writer.write(0xBEEF, as: Byte2.self, .littleEndian)
+        }
+        #expect(Array(bytes.dropFirst()) == written)
+    }
+
+    /// A group's bytes as a span, in memory order.
+    @Test func groupBytesAsSpan() {
+        let odd = Byte3(0x0A0B0C, .bigEndian).withBytes { [UInt8](copying: $0) }
+        #expect(odd == [0x0A, 0x0B, 0x0C])
+        let wide = Byte16(1, .littleEndian).withBytes { [UInt8](copying: $0) }
+        #expect(wide == [1] + [UInt8](repeating: 0, count: 15))
+        #expect(Byte8(0x0102_0304_0506_0708, .littleEndian).withBytes { [UInt8](copying: $0) } == [8, 7, 6, 5, 4, 3, 2, 1])
+    }
+
+    /// The generic integer writers check their range in every build: a value that doesn't fit traps rather than
+    /// writing its low bytes.
+    @Test func genericIntegerWritesTrapWhenTheyDontFit() async {
+        await #expect(processExitsWith: .failure) {
+            _ = try? [UInt8](byteCapacity: 4) { (writer) throws(BytesError) in try writer.write(Int(1 << 24), as: Byte3.self, .bigEndian) }
+        }
+        await #expect(processExitsWith: .failure) {
+            _ = try? [UInt8](byteCapacity: 4) { (writer) throws(BytesError) in try writer.write(Int(-1), as: Byte2.self, .littleEndian) }
+        }
+        await #expect(processExitsWith: .failure) {
+            _ = try? [UInt8](byteCapacity: 4) { (writer) throws(BytesError) in try writer.write(-32_769, asSigned: Byte2.self, .littleEndian) }
+        }
+        await #expect(processExitsWith: .failure) {
+            var bytes: [UInt8] = []
+            bytes.append(1 << 24, as: Byte3.self, .littleEndian)
+        }
+    }
+
+    /// The limits themselves fit, signed values at odd widths included.
+    @Test func genericIntegerWritesAtTheLimits() throws {
+        let bytes = try [UInt8](byteCapacity: 13) { (writer) throws(BytesError) in
+            try writer.write(Int((1 << 24) - 1), as: Byte3.self, .bigEndian)
+            try writer.write(UInt64(0), as: Byte2.self, .bigEndian)
+            try writer.write(-8_388_608, asSigned: Byte3.self, .bigEndian)
+            try writer.write(Int8(-2), asSigned: Byte3.self, .littleEndian)
+            try writer.write(Int64(-2), asSigned: Byte2.self, .bigEndian)
+        }
+        #expect(bytes == [0xFF, 0xFF, 0xFF, 0, 0, 0x80, 0, 0, 0xFE, 0xFF, 0xFF, 0xFF, 0xFE])
+    }
+
     @Test func stringBuilder() throws {
         let text = try String(utf8Capacity: 5) { writer throws(BytesError) in
             try writer.write(0x68_65_6C_6C_6F as Byte5)

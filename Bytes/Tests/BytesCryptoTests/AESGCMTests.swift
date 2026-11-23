@@ -52,9 +52,9 @@ import Testing
             #expect(case1.tag == hex("58e2fccefa7e3061367f1d57a4e7455a"))
         }
         var rng = SplitMix64(seed: 0xE0 &+ UInt64(keyLength))
-        let key = randomBytes(keyLength, using: &rng), nonce = randomBytes(12, using: &rng)
+        let key = rng.bytes(keyLength), nonce = rng.bytes(12)
         let aead = AESGCM(key: key.span.bytes)
-        for (plaintext, aad) in [([UInt8](), [UInt8]()), ([], randomBytes(13, using: &rng)), (randomBytes(17, using: &rng), [])] {
+        for (plaintext, aad) in [([UInt8](), [UInt8]()), ([], rng.bytes(13)), (rng.bytes(17), [])] {
             let ours = seal(key, nonce, plaintext, aad)
             let theirs = try CryptoKit.AES.GCM.seal(plaintext, using: SymmetricKey(data: key), nonce: CryptoKit.AES.GCM.Nonce(data: nonce), authenticating: aad)
             let label = "\(plaintext.count)-byte plaintext, \(aad.count)-byte AAD"
@@ -76,11 +76,11 @@ import Testing
     @Test(arguments: [16, 32])
     func matchesCryptoKit(keyLength: Int) throws {
         var rng = SplitMix64(seed: UInt64(keyLength))
-        let key = randomBytes(keyLength, using: &rng)
+        let key = rng.bytes(keyLength)
         for length in Array(0...300) + [511, 512, 513, 1023, 1024, 4097, 16_384 + 17] {
-            let nonce = randomBytes(12, using: &rng)
-            let aad = randomBytes(length % 37, using: &rng)
-            let plaintext = randomBytes(length, using: &rng)
+            let nonce = rng.bytes(12)
+            let aad = rng.bytes(length % 37)
+            let plaintext = rng.bytes(length)
             let ours = seal(key, nonce, plaintext, aad)
             let theirs = try CryptoKit.AES.GCM.seal(plaintext, using: SymmetricKey(data: key), nonce: CryptoKit.AES.GCM.Nonce(data: nonce), authenticating: aad)
             #expect(ours.ciphertext == Array(theirs.ciphertext), "\(length) bytes")
@@ -98,8 +98,8 @@ import Testing
 
     @Test func rejectsForgeries() {
         var rng = SplitMix64(seed: 3)
-        let key = randomBytes(16, using: &rng), nonce = randomBytes(12, using: &rng)
-        let aad = randomBytes(13, using: &rng), plaintext = randomBytes(200, using: &rng)
+        let key = rng.bytes(16), nonce = rng.bytes(12)
+        let aad = rng.bytes(13), plaintext = rng.bytes(200)
         let sealed = seal(key, nonce, plaintext, aad)
         let aead = AESGCM(key: key.span.bytes)
         func open(_ ciphertext: [UInt8], _ aad: [UInt8], _ tag: [UInt8]) -> (Result<Void, BytesError>, [UInt8]) {

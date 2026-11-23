@@ -35,40 +35,15 @@ func zlibDecompress(_ data: [UInt8], format: DeflateFormat = .raw) -> Outcome {
     Zlib.decompress(data, windowBits: format.zlibWindowBits).map { .decoded($0) } ?? .failed
 }
 
-/// Inputs that exercise every block type and match shape: empty, one byte, text (200 KB), random (100 KB), runs,
-/// periodic, and large (3 MB, last).
-func samples() -> [(name: String, bytes: [UInt8])] { sampleSet }
+/// Inputs that exercise every block type and match shape: BytesTestSupport's `SampleBytes.deflateSamples` (empty,
+/// one byte, text, random, runs, periodic, and large, last).
+func samples() -> [(name: String, bytes: [UInt8])] { SampleBytes.deflateSamples }
 
 /// ``samples()`` without the large one: what the fast tests loop over (bulk tests take the large one).
-func smallSamples() -> [(name: String, bytes: [UInt8])] { sampleSet.dropLast() }
+func smallSamples() -> [(name: String, bytes: [UInt8])] { SampleBytes.deflateSamples.dropLast() }
 
 /// The large sample: several megabytes, so output spans windows and back-references reach across them.
-func largeSample() -> [UInt8] { sampleSet.last!.bytes }
-
-/// Made once: in a debug build, generating the 3 MB sample took longer than many of the tests using it.
-private let sampleSet: [(name: String, bytes: [UInt8])] = makeSamples()
-
-private func makeSamples() -> [(name: String, bytes: [UInt8])] {
-    var rng = SplitMix64(seed: 7)
-    let words = ["swift", "byte", "span", "inflate", "huffman", "window", " ", "\n", "the", "a"]
-    var text: [UInt8] = []
-    while text.count < 200_000 {
-        text += Array(words.randomElement(using: &rng)!.utf8)
-    }
-    let random = (0..<100_000).map { _ in UInt8.random(in: 0...255, using: &rng) }
-    let runs = (0..<100_000).map { UInt8(($0 / 1000) % 3) } // Long runs: distance-1 matches.
-    let periodic = (0..<100_000).map { UInt8(truncatingIfNeeded: $0 % 7) } // Short distances.
-    // Several megabytes, so output spans windows and back-references reach across them.
-    var large: [UInt8] = []
-    while large.count < 3 << 20 {
-        large += text.prefix(Int.random(in: 1_000...50_000, using: &rng))
-        large += random.prefix(500)
-    }
-    return [
-        ("empty", []), ("one byte", [0x41]), ("text", text), ("random", random), ("runs", runs),
-        ("periodic", periodic), ("large", large),
-    ]
-}
+func largeSample() -> [UInt8] { SampleBytes.deflateSamples.last!.bytes }
 
 /// Decodes a whole stream with `decompressAll`, into exactly `capacity` bytes (by default, plenty).
 func decodeAll(_ data: [UInt8], format: DeflateFormat, capacity: Int? = nil) -> Outcome {

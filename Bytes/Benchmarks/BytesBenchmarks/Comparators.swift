@@ -88,33 +88,30 @@ struct BitBufferReader: ~Escapable {
 /// extra field, and no comment.
 func makeCentralDirectory(count: Int) -> [UInt8] {
     var bytes: [UInt8] = []
-    func append<T: FixedWidthInteger>(_ value: T) {
-        withUnsafeBytes(of: value.littleEndian) { bytes.append(contentsOf: $0) }
-    }
     for index in 0..<count {
         let name = Array("Sources/Module\(index % 37)/File\(index).swift".utf8)
-        append(UInt32(0x0201_4B50))
-        append(UInt16(0x031E)) // made by: Unix
-        append(UInt16(20)) // version needed
-        append(UInt16(0x0808)) // flags
-        append(UInt16(8)) // deflated
-        append(UInt16(index & 0xFFFF)) // time
-        append(UInt16(0x5A21)) // date
-        append(UInt32(truncatingIfNeeded: index &* 2_654_435_761)) // CRC
-        append(UInt32(index * 100)) // compressed
-        append(UInt32(index * 300)) // uncompressed
-        append(UInt16(name.count))
-        append(UInt16(9)) // extra length
-        append(UInt16(0)) // comment length
-        append(UInt16(0)) // disk
-        append(UInt16(0)) // internal attributes
-        append(UInt32(0o100644) << 16) // external attributes
-        append(UInt32(index * 400)) // local header offset
+        bytes.append(UInt32(0x0201_4B50), as: Byte4.self, .littleEndian)
+        bytes.append(UInt16(0x031E), as: Byte2.self, .littleEndian) // made by: Unix
+        bytes.append(UInt16(20), as: Byte2.self, .littleEndian) // version needed
+        bytes.append(UInt16(0x0808), as: Byte2.self, .littleEndian) // flags
+        bytes.append(UInt16(8), as: Byte2.self, .littleEndian) // deflated
+        bytes.append(UInt16(index & 0xFFFF), as: Byte2.self, .littleEndian) // time
+        bytes.append(UInt16(0x5A21), as: Byte2.self, .littleEndian) // date
+        bytes.append(UInt32(truncatingIfNeeded: index &* 2_654_435_761), as: Byte4.self, .littleEndian) // CRC
+        bytes.append(UInt32(index * 100), as: Byte4.self, .littleEndian) // compressed
+        bytes.append(UInt32(index * 300), as: Byte4.self, .littleEndian) // uncompressed
+        bytes.append(UInt16(name.count), as: Byte2.self, .littleEndian)
+        bytes.append(UInt16(9), as: Byte2.self, .littleEndian) // extra length
+        bytes.append(UInt16(0), as: Byte2.self, .littleEndian) // comment length
+        bytes.append(UInt16(0), as: Byte2.self, .littleEndian) // disk
+        bytes.append(UInt16(0), as: Byte2.self, .littleEndian) // internal attributes
+        bytes.append(UInt32(0o100644) << 16, as: Byte4.self, .littleEndian) // external attributes
+        bytes.append(UInt32(index * 400), as: Byte4.self, .littleEndian) // local header offset
         bytes += name
-        append(UInt16(0x5455))
-        append(UInt16(5))
+        bytes.append(UInt16(0x5455), as: Byte2.self, .littleEndian)
+        bytes.append(UInt16(5), as: Byte2.self, .littleEndian)
         bytes.append(1)
-        append(Int32(1_700_000_000 + index))
+        bytes.append(UInt32(bitPattern: Int32(1_700_000_000 + index)), as: Byte4.self, .littleEndian)
     }
     return bytes
 }

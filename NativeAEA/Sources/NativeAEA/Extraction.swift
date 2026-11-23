@@ -1,4 +1,5 @@
 import Bytes
+import BytesAsync
 import Darwin
 public import Disk
 import Foundation
@@ -56,8 +57,10 @@ public struct AEAExtractionOptions: Sendable {
     /// from the destination (Disk's `DirectoryResolution.descriptors`). Off by default: it measured 3% slower on Xcode
     /// (an `open` per directory on the walker's critical path).
     public var relativeToParents = false
-    /// Copy the archive file's quarantine attribute onto everything extracted, as Apple's `aa extract` does (the
-    /// destination directory too, for an `.aar`). A `.xip` copies none, as `xip --expand`.
+    /// For the `FilePath` forms of `extract`: copy the archive file's quarantine attribute onto everything extracted, as
+    /// Apple's `aa extract` does (the destination directory too, for an `.aar`). A `.xip` copies none, as `xip --expand`.
+    /// The forms that take a `Destination` ignore it: the destination's options say what everything gets (Disk's
+    /// `DestinationOptions.quarantine`).
     public var copyQuarantine = true
     /// Where the extraction counts entries and bytes as they're written, for an app to poll (a timer reading
     /// `fractionCompleted`): relaxed per-writer counters, nothing published. Measured: no cost in instructions
@@ -133,9 +136,21 @@ extension AEAArchive {
         let source = try payload(options.read, heldBeyondDecoding: options.writerThreads)
         // `aa extract` quarantines what's in the destination, not the destination itself, for an `.aea` (Xcode's,
         // compared item by item); for a plain `.aar` it quarantines the destination too.
-        return try await Extractor.extract(
-            source, to: destination, options: options, archivePath: path, quarantineDestination: false, expectedBytes: rootHeader.rawSize
-        )
+        let target = try Extractor.open(destination, options: options, archivePath: path, quarantinesDestination: false)
+        return try await Extractor.extract(source, into: target, options: options, expectedBytes: rootHeader.rawSize)
+    }
+
+    /// Extracts the archive into `destination`, a directory the caller opened (a staging directory an app publishes
+    /// when it's done): as ``extract(to:options:)``, with the archive's policies (``AEAExtractionOptions``) on a
+    /// duplicate of the destination's descriptor (`Destination.reopened(with:)`). Nothing is looked up by path.
+    ///
+    /// Everything extracted gets the destination's quarantine (its options'), whatever
+    /// ``AEAExtractionOptions/copyQuarantine`` says; the destination directory itself is left as its caller opened it.
+    @concurrent @discardableResult
+    public func extract(into destination: Destination, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
+        let source = try payload(options.read, heldBeyondDecoding: options.writerThreads)
+        let target = try Extractor.reopen(destination, options: options)
+        return try await Extractor.extract(source, into: target, options: options, expectedBytes: rootHeader.rawSize)
     }
 }
 
@@ -158,29 +173,47 @@ extension StreamFormat {
 }
 
 enum Extractor {
-    /// Extracts the archive stream `source` decodes (not yet running) beneath `destination`.
+    /// The destination for the `FilePath` forms: `path` made if needed and opened with the options' policies, and the
+    /// archive's quarantine when ``AEAExtractionOptions/copyQuarantine`` asks.
+    ///
+    /// - Parameters:
+    ///   - archivePath: The archive file, whose quarantine attribute is copied.
+    ///   - quarantinesDestination: Whether the destination directory gets it too.
+    static func open(_ path: FilePath, options: AEAExtractionOptions, archivePath: FilePath, quarantinesDestination: Bool) throws(AEAError) -> Destination {
+        let quarantine = options.copyQuarantine ? Quarantine(copyingFrom: archivePath) : nil
+        do throws(DiskError) {
+            return try Destination(path, options: options.destination(quarantine: quarantine, quarantinesDestination: quarantinesDestination))
+        } catch {
+            throw AEAError(error)
+        }
+    }
+
+    /// The destination for the forms that take one: the caller's directory with the options' policies and the
+    /// caller's quarantine.
+    static func reopen(_ destination: Destination, options: AEAExtractionOptions) throws(AEAError) -> Destination {
+        do throws(DiskError) {
+            return try destination.reopened(with: options.destination(quarantine: destination.options.quarantine, quarantinesDestination: false))
+        } catch {
+            throw AEAError(error)
+        }
+    }
+
+    /// Extracts the archive stream `source` decodes (not yet running) into `target`.
     ///
     /// The source's decoders run as child tasks while Disk's extraction runs: its writers, and the walk on this task as
     /// its plan, then the passes after the writers (links, deferred metadata, directories).
     ///
     /// - Parameters:
     ///   - format: What the stream holds.
-    ///   - archivePath: The archive file, whose quarantine attribute is copied.
-    ///   - quarantineDestination: Whether the destination directory gets it too.
+    ///   - target: The destination, opened with ``AEAExtractionOptions``' policies (``open(_:options:archivePath:quarantinesDestination:)``
+    ///     or ``reopen(_:options:)``).
     ///   - expectedBytes: The estimate of the files' bytes ``AEAExtractionOptions/progress`` starts with.
     nonisolated(nonsending) static func extract(
-        _ source: some ChunkSource, format: StreamFormat = .appleArchive, to destination: FilePath, options: AEAExtractionOptions,
-        archivePath: FilePath, quarantineDestination: Bool, expectedBytes: Int = 0
+        _ source: some ChunkSource, format: StreamFormat = .appleArchive, into target: Destination, options: AEAExtractionOptions,
+        expectedBytes: Int = 0
     ) async throws(AEAError) -> AEAStatistics {
-        let started = DispatchTime.now().uptimeNanoseconds
+        let started = MonotonicClock.now
         options.progress?.setExpected(entries: 0, bytes: max(0, expectedBytes))
-        let quarantine = options.copyQuarantine ? Quarantine(copyingFrom: archivePath) : nil
-        let target: Destination
-        do throws(DiskError) {
-            target = try Destination(destination, options: options.destination(quarantine: quarantine, quarantinesDestination: quarantineDestination))
-        } catch {
-            throw AEAError(error)
-        }
         let outcome: Result<AEAStatistics, AEAError> = await source.withDecoding { _ in
             do throws(AEAError) {
                 return .success(try await extract(source, format: format, into: target, options: options))
@@ -189,7 +222,7 @@ enum Extractor {
             }
         }
         var statistics = try outcome.get()
-        statistics.seconds = Double(DispatchTime.now().uptimeNanoseconds - started) / 1e9
+        statistics.seconds = MonotonicClock.seconds(since: started)
         statistics.unreleasedBuffers = source.pools.reduce(0) { $0 + $1.buffersInUse }
         return statistics
     }
@@ -585,22 +618,6 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
             if !accessControlList.isEmpty { try planner.addAccessControlList(blobs.span.bytes.extracting(accessControlList), to: token) }
         } catch {
             throw AEAError(error)
-        }
-    }
-}
-
-extension AEAError {
-    /// Disk's failure as the archive's: paths, file system calls, and cancellation as before Disk.
-    init(_ error: DiskError) {
-        switch error {
-        case .unsafePath(let path), .escapesDestination(let path): self = .unsafePath(path)
-        case .exists(let path): self = .fileSystem("open \(path)", .fileExists)
-        case .notADirectory(let path): self = .fileSystem("mkdir \(path)", .notDirectory)
-        case .refused(let what): self = .invalidArchive("refused: \(what)")
-        case .invalidMetadata(let what): self = .invalidArchive(what)
-        case .system(let operation, let path, let errno): self = .fileSystem("\(operation) \(path)", errno)
-        case .source(let error): self = error as? AEAError ?? .invalidArchive("\(error)")
-        case .cancelled: self = .cancelled
         }
     }
 }

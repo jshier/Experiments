@@ -1,3 +1,4 @@
+import BytesAsync
 import BytesTestSupport
 import Foundation
 @testable import NativeAEA
@@ -109,7 +110,8 @@ import Testing
         let cancelling = CancellingSource(inner, cancelAt: cancelAt)
         let destination = FilePath(directory.path("out").path)
         let error = await Self.inChildTask { () throws(AEAError) in
-            _ = try await Extractor.extract(cancelling, to: destination, options: settings, archivePath: FilePath(url.path), quarantineDestination: false)
+            let target = try Extractor.open(destination, options: settings, archivePath: FilePath(url.path), quarantinesDestination: false)
+            _ = try await Extractor.extract(cancelling, into: target, options: settings)
         }
         #expect(error == .cancelled)
         #expect(Self.buffersInUse(inner) == 0)
@@ -125,15 +127,15 @@ import Testing
         options.decodeThreads = 4
         let (inner, owner) = try source(layout, url, keys, options, held: 0)
         defer { withExtendedLifetime(owner) {} }
-        let listed = AtomicCounter()
+        let listed = RelaxedCounter()
         let error = await Self.inChildTask { () throws(AEAError) in
             // The callback cancels its own task (the listing's) at the 50th entry.
             _ = try await Lister.list(inner) { _ in
-                if listed.value.add(1, ordering: .relaxed).newValue == 50 { withUnsafeCurrentTask { $0?.cancel() } }
+                if listed.add() == 50 { withUnsafeCurrentTask { $0?.cancel() } }
             }
         }
         #expect(error == .cancelled)
-        #expect(listed.value.load(ordering: .relaxed) < files)
+        #expect(listed.value < files)
         #expect(Self.buffersInUse(inner) == 0)
     }
 
@@ -193,7 +195,8 @@ import Testing
         let settings = options
         let destination = FilePath(directory.path("out").path)
         let error = await Self.inChildTask { () throws(AEAError) in
-            _ = try await Extractor.extract(inner, to: destination, options: settings, archivePath: FilePath(tampered.path), quarantineDestination: false)
+            let target = try Extractor.open(destination, options: settings, archivePath: FilePath(tampered.path), quarantinesDestination: false)
+            _ = try await Extractor.extract(inner, into: target, options: settings)
         }
         #expect(error == .authenticationFailed("segment 5"))
         #expect(Self.buffersInUse(inner) == 0)

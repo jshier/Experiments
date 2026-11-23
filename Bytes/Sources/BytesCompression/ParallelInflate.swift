@@ -173,7 +173,7 @@ public struct ParallelDeflateDecoder: ~Copyable {
         }
         let format = format
         let next = Atomic(0)
-        let delivery = Mutex(InflateDelivery(checksum: format == .zlib ? 1 : 0))
+        let delivery = Mutex(InflateDelivery(checksum: format.initialChecksum))
         // Unsafe: lanes, segments, and the target shared between threads. Safe: lane `w` is only worker `w`'s;
         // each segment is decoded by one worker (the counter hands each index out once), and read by others only
         // after it's published under the lock; the target is written only by the one delivering worker, each
@@ -223,7 +223,7 @@ public struct ParallelDeflateDecoder: ~Copyable {
                     (total, outcome) = try Self.repair(
                         input, segment: j, from: segments[j].start, points: points, stream: &lanes[0].stream, into: &span, at: total
                     )
-                    segmentChecksum = InflateSegment.checksum(span.bytes.extracting(start..<total), format: format)
+                    segmentChecksum = format.checksum(span.bytes.extracting(start..<total))
                     repairs &+= 1
                 } else {
                     let length = segments[j].produced
@@ -234,11 +234,7 @@ public struct ParallelDeflateDecoder: ~Copyable {
                     segmentChecksum = segments[j].checksum
                     accepted &+= 1
                 }
-                switch format {
-                case .raw: break
-                case .zlib: checksum = Adler32.combine(checksum, segmentChecksum, secondLength: total &- start)
-                case .gzip: checksum = CRC32.combine(checksum, segmentChecksum, secondLength: total &- start)
-                }
+                checksum = format.combine(checksum, segmentChecksum, secondLength: total &- start)
                 switch outcome {
                 case let .boundary(next):
                     j = next
@@ -253,15 +249,8 @@ public struct ParallelDeflateDecoder: ~Copyable {
         }
         // The last segment was decoded as raw DEFLATE: the trailer follows its final block.
         var reader = try AlignedBytesReader(input, atByteOffset: trailer)
-        switch format {
-        case .raw:
-            break
-        case .zlib:
-            guard try reader.read(Byte4.self, .bigEndian) == checksum else { throw .mismatch }
-        case .gzip:
-            guard try reader.read(Byte4.self, .littleEndian) == checksum,
-                  try reader.read(Byte4.self, .littleEndian) == UInt32(truncatingIfNeeded: total) else { throw .mismatch }
-        }
+        let bytes = try reader.read(byteCount: format.trailerSize)
+        guard format.trailerMatches(bytes, checksum: checksum, length: UInt32(truncatingIfNeeded: total)) else { throw .mismatch }
         return (reader.byteOffset, total, max(accepted, 1), repairs)
     }
 
@@ -441,11 +430,7 @@ struct InflateDelivery {
                 state.delivering = false
                 state.produced &+= length
                 state.accepted &+= 1
-                switch format {
-                case .raw: break
-                case .zlib: state.checksum = Adler32.combine(state.checksum, segmentChecksum, secondLength: length)
-                case .gzip: state.checksum = CRC32.combine(state.checksum, segmentChecksum, secondLength: length)
-                }
+                state.checksum = format.combine(state.checksum, segmentChecksum, secondLength: length)
                 switch outcome {
                 case let .boundary(k): state.next = k
                 case let .finished(end): state.trailer = end
@@ -543,16 +528,7 @@ struct InflateSegment: ~Copyable {
             }
             break
         }
-        checksum = Self.checksum(buffer.span.bytes.extracting(0..<produced), format: format)
-    }
-
-    /// The container's checksum of `bytes`: Adler-32 for zlib, CRC-32 for gzip, 0 for raw DEFLATE.
-    static func checksum(_ bytes: RawSpan, format: DeflateFormat) -> UInt32 {
-        switch format {
-        case .raw: 0
-        case .zlib: Adler32.checksum(bytes)
-        case .gzip: CRC32.checksum(bytes)
-        }
+        checksum = format.checksum(buffer.span.bytes.extracting(0..<produced))
     }
 
     /// Copies the segment's bytes into `output` at `offset`.

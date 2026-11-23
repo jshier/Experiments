@@ -10,12 +10,12 @@ Independent experiments, each its own SwiftPM package (no root package). The per
 
 | Project | What | Record |
 |---|---|---|
-| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work, `RawStorage` (memory made once, pages given back between uses); `BytesBase64` (vectorized Base64 encoding and decoding: NEON `tbl`/`tbx` block kernels, auto-vectorized `ld3`/`st4` group kernels; whitespace-skipping decoding for PEM; was the `Base64` package, record `RESULTS-base64.md`); `BytesAsync` (async buffers, pipelines, parallel codecs; the waiting primitives Disk, NativeAEA, and NativeZip share: `Continuation`/`withContinuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, `AsyncHandoff`); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions, and Deflate64 decoding (`DeflateDecoder(variant:)`, and decoding into a caller's buffer after its history); Zstandard decoding, XXH64; LZMA, LZMA2, and `.xz` decoding, whole or streaming (`LZMADecoder`, `XZDecoder`), CRC-64; bzip2 decoding, whole or streaming; Apple's LZFSE, LZVN, LZ4, LZBITMAP, and LZRAVEN decoding, and LZFSE, LZVN, and LZBITMAP encoding (all three byte for byte as Compression's; the open references' parse as an option)); `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR on ARM's AES/PMULL instructions via the `CBytesCrypto` C target, SHA-1/256/384/512, HMAC, PBKDF2, HKDF, scrypt, TLS 1.3's key schedule and record layer, sealing in parallel; P-256 and P-384 ECDSA verification and ECDH (keys and signatures in DER and PEM, both ways), HPKE; RSA PKCS #1 v1.5 verification (1024–4096-bit keys, SHA-1/256/384/512); DER, PEM, and X.509 parsing, and certificate signatures (`isSigned(by:)`, RSA and ECDSA)) | `Benchmarks/RESULTS.md` (and its `RESULTS-*.md`) |
+| `Bytes` | Span-based binary reading/writing (`BytesReader`/`BytesWriter` at bit granularity, `AlignedBytesReader`/`AlignedBytesWriter` for whole bytes, `BigEndianBytesReader`/`LittleEndianBytesReader` and writers for integers by type, named bit fields (`BitFlag`, `BitField`, `BitPattern`), records (`BinaryParsable`), `BitBuffer`/`BitWriter` for entropy coding, `ByteBuffer`, `ByteLanes` SIMD scanning and NEON shuffles via the `CBytesNEON` C target), CRC-32 and Adler-32 (`RunningChecksum`), byte pipelines (`ByteTransform`), `LentBytes` for parallel work, `RawStorage` (memory made once, pages given back between uses); `BytesBase64` (vectorized Base64 encoding and decoding: NEON `tbl`/`tbx` block kernels, auto-vectorized `ld3`/`st4` group kernels; whitespace-skipping decoding for PEM; was the `Base64` package, record `RESULTS-base64.md`); `BytesAsync` (async buffers, pipelines, parallel codecs; the waiting primitives Disk, NativeAEA, and NativeZip share: `Continuation`/`withContinuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, `AsyncHandoff`; and `RelaxedCounter`, `MonotonicClock`, `withPriority`); `BytesMacros` (`@BitFields`, `@BinaryRecord`); `BytesFoundation` (`Data` with spans); `BytesCompression` (DEFLATE/zlib/gzip and Brotli, both directions, and Deflate64 decoding (`DeflateDecoder(variant:)`, and decoding into a caller's buffer after its history); Zstandard decoding, XXH64; LZMA, LZMA2, and `.xz` decoding, whole or streaming (`LZMADecoder`, `XZDecoder`; one `Decompressor` over every format, `DecompressionFormat`, for clients that choose at run time), CRC-64; bzip2 decoding, whole or streaming; Apple's LZFSE, LZVN, LZ4, LZBITMAP, and LZRAVEN decoding, and LZFSE, LZVN, and LZBITMAP encoding (all three byte for byte as Compression's; the open references' parse as an option)); `BytesCrypto` (ChaCha20-Poly1305, AES-GCM and AES-CTR on ARM's AES/PMULL instructions via the `CBytesCrypto` C target, SHA-1/256/384/512, HMAC, PBKDF2, HKDF, scrypt, TLS 1.3's key schedule and record layer, sealing in parallel; P-256 and P-384 ECDSA verification and ECDH (keys and signatures in DER and PEM, both ways), HPKE; RSA PKCS #1 v1.5 verification (1024–4096-bit keys, SHA-1/256/384/512); DER, PEM, and X.509 parsing, and certificate signatures (`isSigned(by:)`, RSA and ECDSA)) | `Benchmarks/RESULTS.md` (and its `RESULTS-*.md`) |
 | `MQTT` | MQTT 5 packets on Bytes: `MQTTFrame` (zero-copy header + body), per-type `init(parsing:)`/`write(to:)` | `Benchmarks/RESULTS.md` |
 | `SocketStream` (was `MQTTSocketStream`) | MQTT over sockets with a PR toolchain's I/O interfaces, optionally compressed and TLS-encrypted through Bytes pipelines; concurrency hops | `RESULTS.md` |
 | `NativeZipArchive` | ZIP: stored, DEFLATE, Deflate64, bzip2, LZMA, xz, Zstandard, every one decoded by BytesCompression's streaming decoders (no zlib, Compression, or libbz2 in the library or `nunzip`; tests and benchmarks use them as references); ZipCrypto and WinZip AES (on BytesCrypto, decrypted as streamed); `ZipExtractor` (many archives, one worker pool, an optional quarantine for everything extracted); `nunzip` (Info-ZIP unzip's options) | `Benchmarks/RESULTS.md` |
-| `NativeAEA` | Apple Encrypted Archives (`.aea`: Xcode's, iOS IPSWs' disk images) and Apple Archives (`.aar`, plain or `pbz`): all six AEA profiles (signatures and certificate chains, symmetric, ECDH, and scrypt keys, IPSWs' WKMS keys by HPKE), all on BytesCrypto; segments and blocks decoded in parallel with BytesCompression; the Apple Archive stream walked with no copies; files written as `aa extract` writes them, byte for byte (APFS `decmpfs` compression with BytesCompression's encoders, extended attributes, ACLs, hard links, FIFOs, quarantine) by writers outside a file system semaphore; decryption to a file, with ranges; Xcode's `.xip` too (XAR TOC, RSA signature and chain to Apple Root CA on BytesCrypto, pbzx blocks of xz, the cpio stream walked into the same extractor, files stored as `xip --expand` stores them); `nunarchiver` (was `unaea`); FORMAT.md documents the formats, ARCHITECTURE.md the pipeline and its threads | `RESULTS.md`, `XIP-REPORT.md` |
-| `Disk` | Writing extracted trees, shared by NativeAEA and NativeZip: `EntryPath` (validated relative paths), `Destination` (contained creation with `O_NOFOLLOW_ANY`/`O_RESOLVE_BENEATH`, staging then `publish`/`publishUnwrapped` (Archive Utility's naming)/`discard`), `FileWriter` (one thread, no allocations), `Extraction.run` with a `Planner` and `ContentSource`/`PieceSource` (writers outside a file-system limiter, large files in pieces), APFS `decmpfs` storage as `aa extract` and `xip --expand` store it, metadata in one `fsetattrlist`, quarantine, hard and symbolic links; `ExtractionProgress` (relaxed per-writer counters, polled); `MappedFile` (the archive being read) and `OutputFile` (one file at the caller's path); a `SyscallCounting` trait for the benchmarks | `RESULTS.md`, `ARCHITECTURE.md` |
+| `NativeAEA` | Apple Encrypted Archives (`.aea`: Xcode's, iOS IPSWs' disk images) and Apple Archives (`.aar`, plain or `pbz`): all six AEA profiles (signatures and certificate chains, symmetric, ECDH, and scrypt keys, IPSWs' WKMS keys by HPKE), all on BytesCrypto; segments and blocks decoded in parallel with BytesCompression (no Compression framework or Foundation parser anywhere: WKMS's JSON has its own reader on Bytes; every file read through Disk's `InputFile`); the Apple Archive stream walked with no copies; files written as `aa extract` writes them, byte for byte (APFS `decmpfs` compression with BytesCompression's encoders, extended attributes, ACLs, hard links, FIFOs, quarantine) by writers outside a file system semaphore; decryption to a file, with ranges; Xcode's `.xip` too (XAR TOC, RSA signature and chain to Apple Root CA on BytesCrypto, pbzx blocks of xz, the cpio stream walked into the same extractor, files stored as `xip --expand` stores them); `nunarchiver` (was `unaea`); FORMAT.md documents the formats, ARCHITECTURE.md the pipeline and its threads | `RESULTS.md`, `XIP-REPORT.md` |
+| `Disk` | Writing extracted trees, shared by NativeAEA and NativeZip: `EntryPath` (validated relative paths), `Destination` (contained creation with `O_NOFOLLOW_ANY`/`O_RESOLVE_BENEATH`, staging then `publish`/`publishUnwrapped` (Archive Utility's naming)/`discard`), `FileWriter` (one thread, no allocations), `Extraction.run` with a `Planner` and `ContentSource`/`PieceSource` (writers outside a file-system limiter, large files in pieces), APFS `decmpfs` storage as `aa extract` and `xip --expand` store it, metadata in one `fsetattrlist`, quarantine, hard and symbolic links; `ExtractionProgress` (relaxed per-writer counters, polled; `read()` gives the entry-weighted fraction that never goes back); `Destination.reopened(with:)` (clients extract into the caller's `Destination`); `DiskError(wrapping:)`/`isCancellation`; `MappedFile` (the archive being read), `InputFile` (reads at offsets, small whole files such as keys), and `OutputFile` (one file at the caller's path); a `SyscallCounting` trait for the benchmarks | `RESULTS.md`, `ARCHITECTURE.md` |
 | `Nunarchiver` | macOS app (TCA26, Xcode project) replacing Archive Utility for `.zip`, `.aea`, `.aar`, `.xip`: expands next to the archive through Disk's staging as Archive Utility does (compared item by item), progress window polling `ExtractionProgress` (throughput in GB/s from the polled bytes), passwords and keys asked for in the row. Build with its `build.sh` (shared scheme, coverage off) | — |
 | `BinaryParsingComparison` | Bytes vs swift-binary-parsing | `RESULTS.md` |
 | `NativeISO8601`, `*Benchmark` | Smaller benchmarks | READMEs |
@@ -207,6 +207,13 @@ with change, units normalized (counts unscaled, times in µs).
 value and end at its largest, with every bin keeping its bounds. Run it after every `baseline update`.
 
 **`Tools/debuggable PROGRAM`** — prints `PROGRAM-debuggable`, signed with `get-task-allow`.
+
+**`Tools/untracked [--timeout S] [--keep DIR] -- COMMAND ARGS`** — runs COMMAND as a launchd job (`launchctl submit`,
+a unique label, removed after), outside this provenance-tracked process tree: in a tracked process (anything started
+from a downloaded terminal) the kernel owns `com.apple.provenance` on what it creates, so a restored value never reads
+back. Same directory and environment, stdout and stderr streamed back through files, the command's exit status.
+`Tools/untracked -- swift test --package-path NativeZipArchive --filter restoresALinksAttributes` checks the read-back
+that `SystemAttributes.isProvenanceTracked` skips (the test prints which branch ran).
 
 **`Tools/socket-ceiling [--pairs N] [--bytes SIZE] [--write SIZE] [--buffer SIZE] [--unix] [--runs N]`** — the
 kernel's local-socket throughput with blocking C sockets on plain threads (loopback TCP or a Unix socketpair):
@@ -963,9 +970,59 @@ Every zip method in Swift (2026-11-22, M1 Max; NativeZipArchive's RESULTS.md ste
 - **Instructions aren't the cost for range coders**: Bytes' xz runs 7.6% more instructions than Compression's liblzma
   and finishes 29% sooner. The trade was memory: a window of the dictionary plus as much room (16 MiB for 8 MiB),
   against a circular one.
+- **A quarantined terminal app makes every file this session creates carry `com.apple.provenance`** (iTerm installed
+  by Homebrew Cask: its descendants are provenance-tracked, and the kernel owns the attribute, so `xattr -d` and
+  `setxattr` silently do nothing). Tests comparing extended attributes must ignore it; `ditto -c` then writes a `._NAME`
+  for every symbolic link, and `aa extract` run from such a session writes a fresh `com.apple.quarantine` instead of the
+  archive's. A `launchctl submit` job runs untracked when a clean reference is needed.
+- **Checked helpers in a loop whose bounds are proven per round cost 12–20 instructions a match.** DEFLATE's fast loop
+  on locals with unchecked refills, stores, and its own match copy (libdeflate's design, the round's proof in comments):
+  −36 to −39% instructions, below libdeflate's, but only −4 to −7% cycles (the loop is latency- and
+  misprediction-bound). Weigh instruction wins against `Tools/counters`.
+- **Codegen traps met there:** an `@inline(__always)` throwing helper taking an `inout MutableRawSpan` stayed a call in
+  a large loop (`@inline(always)` inlined it: −10% → −35%); an `inout` span's base address is reloaded before every
+  store (rebind it to a local); constants the loop keeps in registers are rematerialized after every call in it (a
+  division's magic number: use shifts, keep rare cases' constants off the loop); table entries with flags beat a kind
+  field (one `tbnz` per decision); a failed vector check should skip to the failing lane, not step a byte.
+- **Fewer instructions can be slower for range coders:** LZMA's branchless matched-literal coder runs 1.14x liblzma's
+  instructions on x-ray (mostly matched literals) and 20% fewer cycles. A cheaper index formula: −1.7% instructions,
+  +0.8% cycles; not kept.
+- **Bytes' `Pipeline` didn't fit decrypt-then-decode** (ZipDecoder's encrypted entries): +2–3% instructions, because the
+  second stage is driven only through `transform` (DEFLATE loses its decode-into-the-output-buffers path), an encrypted
+  LZMA header must be decrypted before the format is known, and an in-place stage can only follow another stage. The
+  hand-written pump stays.
+- **Read-ahead (`F_RDADVISE`) cut cold-cache read stalls ~60% and changed no wall time** (decoding dominates). For a cold
+  cache per run, read an APFS clone (`cp -c`): its page cache is its own.
+- **`#expect` can't read a `~Copyable` value's property**: bind it to a `let` first. `URL.resolvingSymlinksInPath()`
+  drops `/private` from `/private/var/…`: use `realpath`. Nunarchiver's `project.xcproj` has trailing commas (jq can't
+  parse it): edit it by hand. Without the team's certificate, `./build.sh … CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual
+  DEVELOPMENT_TEAM=` builds and tests ad hoc.
 - **Baseline names are shared with the repository**: `ab-old-*`/`ab-new-*` are tracked in several packages, and
   `baseline update` overwrites them silently. Name a session's baselines after the work (`zipnative-old-1`), and check
   `git status` for modified `results.json` files after a run.
+- **Attribute every allocation with LLDB when Instruments' callers are truncated.** Breakpoints on `swift_slowAlloc`,
+  `malloc`, `malloc_type_malloc`, `calloc`, `realloc` with `bt 14; continue`, on the `-debuggable` release binary, then
+  group stops by the first frame in your own code (drop a `malloc` stop whose frame #1 is `swift_slowAlloc`: the same
+  allocation). 7,000 stops took 40 s. A condition (`-c '$x0 > 1000000'`) lists the large ones. NativeAEA/RESULTS.md,
+  2026-11-22 evening. Why Instruments wasn't enough: its stacks are full (4–85 frames), but the `<Call stack limit
+  reached>` rows are allocations made before it attached (all at time 0, one placeholder frame), and the only
+  per-allocation table `xctrace export` gives (`Allocations List`) holds live allocations only: anything freed, such as a
+  per-segment box, never appears there, only in the Statistics counts. `discardEventsForFreedMemory` is already false.
+- **Malloc stack logging is a run-time switch, and its full mode changes what it measures.** `MallocStackLogging=1` is
+  lite mode now (live allocations only, like `leaks --atExit`). `MallocStackLoggingNoCompact=1` (full) records every
+  event with its stack, and `malloc_history PID -allEvents` prints them while the process lives (stop it at `exit`
+  under LLDB, then run `malloc_history` from LLDB's `script`): every allocation of a 6 s extraction in 8 s. But in full
+  mode libobjc gives every autorelease pool push a fresh 4 KiB page, and Swift Concurrency pushes one per job run on
+  Darwin: 42,148 page allocations that a normal run doesn't make (LLDB without stack logging: 44,695 pushes, 31 pages,
+  no `malloc_zone_memalign`; Instruments: 2). Use full mode for stacks; count with breakpoints or Instruments.
+- **A local `var` pointer assigned in branches and borrowed by spans was heap-boxed**: `var stored:
+  UnsafeRawBufferPointer` in `SegmentStream.decode`, one 32-byte `swift_allocObject` per segment (find the size and the
+  call with `disassemble`). Constants, each set once on every path (`let x: T; if … { x = … } else { x = … }`), need no
+  box. `Tools/calls … --callee swift_allocObject` on hot functions catches it statically.
+- **A nearly full volume inflates kernel-heavy rows.** At 98% full, every 32 MB extraction read +5% instructions (kernel
+  allocation) and a parallel row ran 3–5x slower, which looked like a regression of the change under test; an
+  interleaved control showed it in both trees, and freeing 20 GB removed it. Check `df` before believing a file-system
+  row, and remove scratch trees (copies of the repository with `.build`s are 2–5 GB each) when they're merged.
 
 ## Tests
 
@@ -973,12 +1030,15 @@ Every zip method in Swift (2026-11-22, M1 Max; NativeZipArchive's RESULTS.md ste
   adds the bulk sweeps (`--filter BulkTests` for only those). Default runs (2026-11-19): Bytes ~40 s (was 429),
   NativeZipArchive ~14 s (71), NativeAEA ~13 s (23), SocketStream ~2.5 s (9).
 - **Where a new expensive test goes:** large inputs, corpora, every capacity/size/vector, thousands of mutations go in a
-  `@Suite(.bulk) struct XxxBulkTests` (the trait is Bytes' `BytesTesting` product; packages not yet moved to it
-  define it in their test target's `Bulk.swift`) sharing a static helper with the fast test.
+  `@Suite(.bulk) struct XxxBulkTests` (the trait is Bytes' `BytesTesting` product, which every package uses) sharing
+  a static helper with the fast test.
 - **Shared helpers are Bytes' support products**, not copies: `BytesTestSupport` (no Swift Testing, so benchmarks and
   sources can use it: `SplitMix64(seed:)`, `SampleBytes`, `Lazy`, `TestData.file(set:name:)`, `Corpus.root`,
   `TemporaryDirectory`, `ExternalTool.run`, `hex`), `BytesTesting` (`.bulk`, `runsBulkTests`), and
-  `BytesReferenceCodecs` (zlib's and Compression's buffer APIs as references: `Zlib`, `AppleCompression`). The fast form keeps every edge case: boundary sizes, block remainders, one vector of each Wycheproof
+  `BytesReferenceCodecs` (zlib's and Compression's buffer APIs as references: `Zlib`, `AppleCompression`); for extracted
+  trees, Disk's `DiskTestSupport` (`readTree` with `readdir`, so `._` files show; `TreeParts` to choose what's read;
+  extended attributes, ACL text, `decmpfs` helpers; `SystemAttributes.ignoredByDefault`, `com.apple.provenance`, left
+  out of comparisons unless asked for). The fast form keeps every edge case: boundary sizes, block remainders, one vector of each Wycheproof
   (result, flags) class. Fast plus bulk must check everything.
 - **No `.serialized`, no `@MainActor` or other global actor in tests**: per-test temporary directories, port 0,
   immutable `static let` fixtures. Never set process-wide state (umask, working directory, environment), not even to

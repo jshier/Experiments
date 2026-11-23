@@ -63,6 +63,28 @@ import Testing
         #expect(whole == Self.reference(data))
     }
 
+    /// A byte at a time through the register: every byte value from every kind of register, and a whole buffer's
+    /// checksum (the register's complement).
+    @Test func updateRegister() {
+        var rng = SplitMix64(seed: Self.splitSeed)
+        for register: UInt32 in [0, 0xFFFF_FFFF, 0x1234_5678, UInt32.random(in: 0...UInt32.max, using: &rng)] {
+            for byte in UInt8.min...UInt8.max {
+                // Bitwise: the reflected polynomial, one bit at a time.
+                var expected = register ^ UInt32(byte)
+                for _ in 0..<8 {
+                    expected = expected & 1 != 0 ? expected >> 1 ^ 0xEDB8_8320 : expected >> 1
+                }
+                #expect(CRC32.updateRegister(register, byte: byte) == expected, "register \(register), byte \(byte)")
+            }
+        }
+        let data = Self.random(10_000)
+        var register: UInt32 = 0xFFFF_FFFF
+        for byte in data {
+            register = CRC32.updateRegister(register, byte: byte)
+        }
+        #expect(~register == CRC32.checksum(data.span.bytes))
+    }
+
     #if arch(arm64) && HardwareCRC && !Portable
     /// The folding constants: x^(n ± 32) mod P, bit-reflected, shifted left one.
     @Test func foldingConstants() {

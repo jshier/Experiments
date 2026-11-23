@@ -53,6 +53,10 @@ let package = Package(
             name: "nunzip",
             dependencies: [
                 "NativeZip",
+                // `DiskError`, for an archive that can't be opened.
+                .product(name: "Disk", package: "Disk"),
+                // `withPriority`.
+                .product(name: "BytesAsync", package: "Bytes"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             swiftSettings: strictSettings
@@ -62,6 +66,8 @@ let package = Package(
             dependencies: [
                 "NativeZip",
                 .product(name: "Disk", package: "Disk"),
+                // Reading extracted trees: items, extended attributes, ACLs.
+                .product(name: "DiskTestSupport", package: "Disk"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
                 .product(name: "BytesReferenceCodecs", package: "Bytes"),

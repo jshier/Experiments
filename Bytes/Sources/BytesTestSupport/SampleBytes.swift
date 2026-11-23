@@ -29,9 +29,9 @@ public enum SampleBytes {
     ///
     /// - Parameters:
     ///   - count: How many bytes.
-    ///   - seed: The generator's seed.
+    ///   - seed: The generator's seed; by default, the golden ratio's 64 bits.
     /// - Returns: The bytes.
-    public static func random(_ count: Int, seed: UInt64) -> [UInt8] {
+    public static func random(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] {
         var generator = SplitMix64(seed: seed)
         return generator.bytes(count)
     }
@@ -68,4 +68,32 @@ public enum SampleBytes {
         }
         return Array(bytes.prefix(count))
     }
+
+    /// Inputs for DEFLATE (and other LZ) codec tests that exercise every block type and match shape, in order: empty, one
+    /// byte, text (200 KB of words), random (100 KB), runs (100 KB of long runs: distance-1 matches), periodic (100 KB
+    /// with a period of 7: short distances), and large (3 MB of text and random pieces, so output spans windows and
+    /// chunks and back-references reach across them), always last.
+    ///
+    /// Made once, on first use: in a debug build, generating the 3 MB sample took longer than many of the tests
+    /// using it.
+    public static let deflateSamples: [(name: String, bytes: [UInt8])] = {
+        var rng = SplitMix64(seed: 7)
+        let words = ["swift", "byte", "span", "inflate", "huffman", "window", " ", "\n", "the", "a"]
+        var text: [UInt8] = []
+        while text.count < 200_000 {
+            text += Array(words.randomElement(using: &rng)!.utf8)
+        }
+        let random = (0..<100_000).map { _ in UInt8.random(in: 0...255, using: &rng) }
+        let runs = (0..<100_000).map { UInt8(($0 / 1000) % 3) }
+        let periodic = (0..<100_000).map { UInt8(truncatingIfNeeded: $0 % 7) }
+        var large: [UInt8] = []
+        while large.count < 3 << 20 {
+            large += text.prefix(Int.random(in: 1_000...50_000, using: &rng))
+            large += random.prefix(500)
+        }
+        return [
+            ("empty", []), ("one byte", [0x41]), ("text", text), ("random", random), ("runs", runs),
+            ("periodic", periodic), ("large", large),
+        ]
+    }()
 }

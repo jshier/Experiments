@@ -40,8 +40,8 @@ public struct ZstdDecoder: ~Copyable {
     private var blocks = ZstdBlockDecoder()
 
     // Streaming state.
-    private var window = ZstdBuffer()
-    private var stash = ZstdBuffer()
+    private var window = GrowableWorkspace()
+    private var stash = GrowableWorkspace()
     /// Bytes of the current unit (header, block, checksum) kept from earlier calls.
     private var stashCount = 0
     private var stage = Stage.frameHeader
@@ -337,7 +337,7 @@ public struct ZstdDecoder: ~Copyable {
     /// becomes the older history: it ended more than `windowSize + 32` bytes in, so matches (at most
     /// `windowSize` back) read it ahead of anything rewritten, wild copies' overrun included.
     private mutating func decodeBlock(type: Int, size: Int, _ bytes: UnsafeRawPointer) throws(BytesError) {
-        let capacity = window.capacity
+        let capacity = window.byteCount
         if windowEnd &+ frame.blockSizeMaximum &+ Zstd.wildCopyOverrun > capacity {
             history.dictionaryStart = history.prefixStart
             history.dictionaryEnd = windowEnd

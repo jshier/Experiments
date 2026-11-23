@@ -145,7 +145,7 @@ enum AEAKeys {
         _ prologue: AEAPrologue, input: RawSpan, salt: RawSpan, sender: [UInt8] = [], recipient: [UInt8] = [], signing: [UInt8] = []
     ) -> Key32 {
         var info = Array("AEA_AMK".utf8)
-        withUnsafeBytes(of: prologue.profileWord.littleEndian) { unsafe info.append(contentsOf: $0) } // Copies 4 bytes: safe.
+        info.append(prologue.profileWord, as: Byte4.self, .littleEndian)
         info += sender
         info += recipient
         info += signing
@@ -162,8 +162,7 @@ enum AEAKeys {
         hmac.update(second)
         let associatedCount = first.byteCount + second.byteCount
         hmac.update(data)
-        let count = UInt64(associatedCount).littleEndian
-        withUnsafeBytes(of: count) { unsafe hmac.update(RawSpan(_unsafeBytes: $0)) } // A local's 8 bytes, used in the closure: safe.
+        Byte8(UInt64(associatedCount), .littleEndian).withBytes { hmac.update($0) }
         return finalize(&hmac)
     }
 

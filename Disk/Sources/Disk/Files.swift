@@ -26,6 +26,8 @@ public final class MappedFile: Sendable {
     @usableFromInline nonisolated(unsafe) let base: UnsafeRawPointer?
     /// The mapping's size in bytes.
     public let count: Int
+    /// Bytes mapped before `base`: a range's start rounded down to a page (`mmap` maps from page boundaries).
+    private let lead: Int
 
     /// How the mapping will be read: advice for the kernel's read-ahead.
     public enum Access: Sendable {
@@ -35,45 +37,74 @@ public final class MappedFile: Sendable {
         case sequential
     }
 
-    /// Maps the whole file at `path`.
+    /// Maps the whole file at `path` (Disk's ``InputFile``, then ``InputFile/map(access:)``).
     ///
-    /// - Throws: The `Errno` of `open`, `fstat`, or `mmap`.
-    public convenience init(path: FilePath, access: Access = .random) throws(Errno) {
-        // Unsafe: `withPlatformString`'s C string passed to `open`. Safe: valid for the call.
-        let descriptor = unsafe path.withPlatformString { unsafe open($0, O_RDONLY | O_CLOEXEC) }
-        guard descriptor >= 0 else { throw Errno(rawValue: errno) }
-        defer { close(descriptor) }
-        var info = stat()
-        // Unsafe: `fstat` writes the structure. Safe: a local of its type.
-        guard unsafe fstat(descriptor, &info) == 0 else { throw Errno(rawValue: errno) }
-        try self.init(FileDescriptor(rawValue: descriptor), count: Int(info.st_size), access: access)
+    /// - Throws: ``DiskError/system(_:path:_:)`` with `open`'s, `fstat`'s, or `mmap`'s error.
+    public convenience init(path: FilePath, access: Access = .random) throws(DiskError) {
+        let file = try InputFile(path)
+        let (base, lead): (UnsafeRawPointer?, Int)
+        do throws(Errno) {
+            // Unsafe: the mapping's address. Safe: handed straight to `self.init`, which owns it.
+            unsafe (base, lead) = try Self.map(file.descriptorForMapping, range: 0..<file.count, access: access)
+        } catch {
+            throw .system("mmap", path: path.string, error)
+        }
+        // Unsafe: the mapping just made, `file.count` bytes after `lead`. Safe: owned from here by `self`.
+        unsafe self.init(base: base, count: file.count, lead: lead)
     }
 
     /// Maps the first `count` bytes of an open file. The descriptor isn't kept: the caller may close it.
     ///
     /// - Throws: `mmap`'s `Errno`.
-    public init(_ descriptor: FileDescriptor, count: Int, access: Access = .random) throws(Errno) {
-        guard count > 0 else {
-            // Unsafe: an optional pointer's assignment. Safe: `nil`, for an empty file (nothing to map).
-            unsafe base = nil
-            self.count = 0
-            return
-        }
-        // Unsafe: `mmap` returns a raw pointer. Safe: a private read-only mapping of `count` bytes, owned by this
-        // object and unmapped in `deinit`.
-        let mapping = unsafe mmap(nil, count, PROT_READ, MAP_PRIVATE, descriptor.rawValue, 0)
+    public convenience init(_ descriptor: FileDescriptor, count: Int, access: Access = .random) throws(Errno) {
+        try self.init(descriptor, range: 0..<count, access: access)
+    }
+
+    /// Maps the bytes in `range` of an open file: ``bytes`` and ``buffer(_:)`` count from `range.lowerBound`. The
+    /// descriptor isn't kept.
+    ///
+    /// - Throws: `mmap`'s `Errno`.
+    /// - Precondition: `range` doesn't start below 0.
+    public convenience init(_ descriptor: FileDescriptor, range: Range<Int>, access: Access = .random) throws(Errno) {
+        // Unsafe: the mapping's address. Safe: handed straight to `self.init`, which owns it.
+        let (base, lead) = try unsafe Self.map(descriptor.rawValue, range: range, access: access)
+        // Unsafe: the mapping just made, `range.count` bytes after `lead`. Safe: owned from here by `self`.
+        unsafe self.init(base: base, count: range.count, lead: lead)
+    }
+
+    /// Takes ownership of a mapping: `count` bytes at `base`, mapped from `lead` bytes before it.
+    @unsafe
+    private init(base: UnsafeRawPointer?, count: Int, lead: Int) {
+        // Unsafe: stores the pointer. Safe: the caller's mapping, valid until `deinit` unmaps it.
+        unsafe self.base = base
+        self.count = unsafe base == nil ? 0 : count
+        self.lead = lead
+    }
+
+    /// Maps `range` of `descriptor` read-only, from the page that holds its start: the address of its first byte and
+    /// how far past the mapping's start that is. `nil` for an empty range (nothing to map).
+    @unsafe
+    private static func map(_ descriptor: Int32, range: Range<Int>, access: Access) throws(Errno) -> (UnsafeRawPointer?, lead: Int) {
+        precondition(range.lowerBound >= 0, "a negative file offset")
+        guard !range.isEmpty else { return (nil, 0) }
+        let page = Int(getpagesize())
+        let start = range.lowerBound & ~(page - 1)
+        let lead = range.lowerBound - start
+        Sys.countOther()
+        // Unsafe: `mmap` returns a raw pointer. Safe: a private read-only mapping of `lead + range.count` bytes from a
+        // page boundary, which the caller's `MappedFile` owns and unmaps in `deinit`.
+        let mapping = unsafe mmap(nil, lead + range.count, PROT_READ, MAP_PRIVATE, descriptor, off_t(start))
         guard unsafe mapping != MAP_FAILED, let mapping = unsafe mapping else { throw Errno(rawValue: errno) }
         // Unsafe: advice on the mapping. Safe: exactly the range just mapped; advice changes no contents.
-        if access == .sequential { _ = unsafe madvise(mapping, count, MADV_SEQUENTIAL) }
-        // Unsafe: stores the pointer. Safe: valid until `deinit`.
-        unsafe base = UnsafeRawPointer(mapping)
-        self.count = count
+        if access == .sequential { _ = unsafe madvise(mapping, lead + range.count, MADV_SEQUENTIAL) }
+        // Unsafe: an address in the mapping. Safe: `lead` is less than a page, within the mapping.
+        return unsafe (UnsafeRawPointer(mapping + lead), lead)
     }
 
     deinit {
-        // Unsafe: unmaps. Safe: the range `init` mapped, once; spans and buffers of it don't outlive `self` (theirs
-        // borrow it, and `buffer(_:)`'s callers promise).
-        if let base = unsafe base { _ = unsafe munmap(UnsafeMutableRawPointer(mutating: base), count) }
+        // Unsafe: unmaps. Safe: the range `init` mapped (from `lead` bytes before `base`), once; spans and buffers of
+        // it don't outlive `self` (theirs borrow it, and `buffer(_:)`'s callers promise).
+        if let base = unsafe base { _ = unsafe munmap(UnsafeMutableRawPointer(mutating: base - lead), count + lead) }
     }
 
     /// The whole file. The span borrows `self`, which keeps the mapping alive.

@@ -1,5 +1,6 @@
 import Bytes
 @testable import BytesCrypto
+import BytesTesting
 import BytesTestSupport
 import Foundation
 import Testing
@@ -37,40 +38,11 @@ func referenceScrypt(_ cases: [(password: [UInt8], salt: [UInt8], n: Int, r: Int
         print(hashlib.scrypt(base64.b64decode(pw), salt=base64.b64decode(salt), n=int(n), r=int(r), p=int(p),
                              maxmem=2**31 - 1, dklen=int(length)).hex())
     """
-    guard let output = run("/usr/bin/env", ["python3", "-I", "-c", script], input: Data(lines.joined(separator: "\n").utf8)) else { return nil }
+    guard let output = try? ExternalTool.output("/usr/bin/env", ["python3", "-I", "-c", script], input: Array(lines.joined(separator: "\n").utf8)) else {
+        return nil
+    }
     let keys = String(decoding: output, as: UTF8.self).split(separator: "\n").map { hex(String($0)) }
     return keys.count == cases.count ? keys : nil
-}
-
-/// Whether the tests were compiled with optimization (`swift test -c release`), for tests too slow otherwise.
-#if DEBUG
-let isOptimizedBuild = false
-#else
-let isOptimizedBuild = true
-#endif
-
-/// Runs a program, returning its standard output, or nil if it couldn't run or failed.
-func run(_ path: String, _ arguments: [String], input: Data? = nil, directory: URL? = nil) -> Data? {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: path)
-    process.arguments = arguments
-    if let directory { process.currentDirectoryURL = directory }
-    let output = Pipe(), errors = Pipe(), stdin = Pipe()
-    process.standardOutput = output
-    process.standardError = errors
-    process.standardInput = stdin
-    do { try process.run() } catch { return nil }
-    if let input { stdin.fileHandleForWriting.write(input) }
-    try? stdin.fileHandleForWriting.close()
-    // Read both pipes to the end before waiting, so neither fills and blocks the child (standard error is drained
-    // and dropped: nothing is shared between the threads).
-    let group = DispatchGroup()
-    group.enter()
-    DispatchQueue.global().async { _ = errors.fileHandleForReading.readDataToEndOfFile(); group.leave() }
-    let data = output.fileHandleForReading.readDataToEndOfFile()
-    group.wait()
-    process.waitUntilExit()
-    return process.terminationStatus == 0 ? data : nil
 }
 
 @Suite struct ScryptTests {
@@ -87,7 +59,7 @@ func run(_ path: String, _ arguments: [String], input: Data? = nil, directory: U
 
     /// RFC 7914's last vector: N = 2²⁰, a 1 GiB table. Optimized builds only (`swift test -c release`): 30 seconds
     /// in a debug build.
-    @Test(.enabled(if: isOptimizedBuild)) func rfc7914LargeVector() throws {
+    @Test(.optimizedOnly) func rfc7914LargeVector() throws {
         #expect(try scrypt(Array("pleaseletmein".utf8), Array("SodiumChloride".utf8), n: 1 << 20, r: 8, p: 1, length: 64, allocating: true) == hex(
             "2101cb9b6a511aaeaddbbe09cf70f881ec568d574a2ffd4dabe5ee9820adaa478e56fd8f4ba5d09ffa1c6d927c40f4c337304049e8a952fbcbf45c6fa77a41a4"))
     }
@@ -99,7 +71,7 @@ func run(_ path: String, _ arguments: [String], input: Data? = nil, directory: U
             let n = 1 << Int.random(in: 1...12, using: &rng)
             let r = Int.random(in: 1...9, using: &rng)
             let p = Int.random(in: 1...4, using: &rng)
-            cases.append((randomBytes(Int.random(in: 0...80, using: &rng), using: &rng), randomBytes(Int.random(in: 0...40, using: &rng), using: &rng),
+            cases.append((rng.bytes(Int.random(in: 0...80, using: &rng)), rng.bytes(Int.random(in: 0...40, using: &rng)),
                           n, r, p, Int.random(in: 1...100, using: &rng)))
         }
         let expected = try #require(referenceScrypt(cases), "python3 with hashlib.scrypt is needed for this test")

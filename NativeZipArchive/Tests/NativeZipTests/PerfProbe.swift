@@ -1,12 +1,13 @@
 import BytesReferenceCodecs
 import BytesTestSupport
+import BytesTesting
 import Foundation
 @_spi(Benchmarking) import NativeZip
 import Testing
 
 /// Not a test: times NativeZip's DEFLATE decoding and zlib's on streams of different shapes, to see where each spends its time.
 /// Run with `swift test -c release --filter PerfProbe`.
-@Suite(.disabled(if: ProcessInfo.isDebugBuild)) struct PerfProbe {
+@Suite(.optimizedOnly) struct PerfProbe {
     @Test func compareShapes() throws {
         var rng = SplitMix64(seed: 3)
         let words = ["swift", "byte", "span", "inflate", "huffman", "window", " ", "\n", "the", "a", "decoder", "table"]
@@ -40,15 +41,5 @@ import Testing
             let zlib = best { _ = Zlib.decompress(stream) }
             print("PROBE \(name): NativeZip: \(native), zlib: \(zlib)")
         }
-    }
-}
-
-extension ProcessInfo {
-    static var isDebugBuild: Bool {
-        #if DEBUG
-        true
-        #else
-        false
-        #endif
     }
 }

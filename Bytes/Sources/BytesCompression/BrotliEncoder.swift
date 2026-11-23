@@ -413,17 +413,6 @@ struct BrotliEngine: ~Copyable {
         matcher.distanceCache = [unknown, unknown, unknown, unknown]
     }
 
-    @inline(__always)
-    static func load32(_ buffer: RawSpan, _ offset: Int) -> UInt32 {
-        // Unsafe: an unchecked load. Safe: callers keep 4 bytes inside the buffer.
-        UInt32(littleEndian: unsafe buffer.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt32.self))
-    }
-
-    @inline(__always)
-    static func hash(_ value: UInt32, bits: Int) -> Int {
-        Int(truncatingIfNeeded: (value &* 0x1E35_A7BD) &>> UInt32(32 &- bits))
-    }
-
     // Google's scores: a literal byte saved is worth 135, a bit of distance costs 30.
     static var scoreBase: Int { 1920 }
 
@@ -470,8 +459,9 @@ struct BrotliMatcher {
     }
 
     // The engine's helpers, by their short names.
-    @inline(__always) static func load32(_ buffer: RawSpan, _ offset: Int) -> UInt32 { BrotliEngine.load32(buffer, offset) }
-    @inline(__always) static func hash(_ value: UInt32, bits: Int) -> Int { BrotliEngine.hash(value, bits: bits) }
+    // An unchecked load (`LZHash.load32`): callers keep 4 bytes inside the buffer.
+    @inline(__always) static func load32(_ buffer: RawSpan, _ offset: Int) -> UInt32 { LZHash.load32(buffer, offset) }
+    @inline(__always) static func hash(_ value: UInt32, bits: Int) -> Int { LZHash.hash(value, bits: bits) }
     @inline(__always) static func score(length: Int, distance: Int) -> Int { BrotliEngine.score(length: length, distance: distance) }
     @inline(__always) static func lastDistanceScore(length: Int, cacheIndex: Int) -> Int {
         BrotliEngine.lastDistanceScore(length: length, cacheIndex: cacheIndex)

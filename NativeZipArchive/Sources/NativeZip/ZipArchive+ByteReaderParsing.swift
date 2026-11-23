@@ -9,7 +9,7 @@ public extension ZipArchive {
     ///
     /// - Parameter url: The archive's file URL.
     /// - Returns: The entries, as ``ZipArchive/init(url:)`` would index them.
-    /// - Throws: `Errno` if the file can't be opened or mapped; ``ZipError`` if the central directory is
+    /// - Throws: `DiskError` if the file can't be opened or mapped; ``ZipError`` if the central directory is
     ///   missing, truncated, or invalid.
     @_spi(Benchmarking)
     static func entriesUsingByteReader(of url: URL) throws -> [ZipEntry] {

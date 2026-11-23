@@ -28,24 +28,25 @@ struct TraditionalCipher {
     static var headerSize: Int { 12 }
 
     init(password: RawSpan) {
-        let table = Self.crcTable.span
         for offset in 0..<password.byteCount {
-            update(password.load(fromByteOffset: offset, as: UInt8.self), table)
+            update(password.load(fromByteOffset: offset, as: UInt8.self))
         }
     }
 
+    /// The key schedule: `crc32(key, byte)` is one step of CRC-32's register (polynomial 0xEDB88320, no
+    /// complements), one `crc32b` on ARM64 (`CRC32.updateRegister`).
     @inline(__always)
-    private mutating func update(_ byte: UInt8, _ table: Span<UInt32>) {
-        key0 = table[Int(UInt8(truncatingIfNeeded: key0) ^ byte)] ^ (key0 >> 8)
+    private mutating func update(_ byte: UInt8) {
+        key0 = CRC32.updateRegister(key0, byte: byte)
         key1 = (key1 &+ (key0 & 0xFF)) &* 134_775_813 &+ 1
-        key2 = table[Int(UInt8(truncatingIfNeeded: key2) ^ UInt8(truncatingIfNeeded: key1 >> 24))] ^ (key2 >> 8)
+        key2 = CRC32.updateRegister(key2, byte: UInt8(truncatingIfNeeded: key1 >> 24))
     }
 
     @inline(__always)
-    private mutating func decrypt(_ byte: UInt8, _ table: Span<UInt32>) -> UInt8 {
+    private mutating func decrypt(_ byte: UInt8) -> UInt8 {
         let temp = (key2 & 0xFFFF) | 2
         let plain = byte ^ UInt8(truncatingIfNeeded: (temp &* (temp ^ 1)) >> 8)
-        update(plain, table)
+        update(plain)
         return plain
     }
 
@@ -54,10 +55,9 @@ struct TraditionalCipher {
     /// - Parameter header: The first 12 bytes of the payload.
     /// - Returns: The decrypted check byte.
     mutating func checkByte(_ header: RawSpan) -> UInt8 {
-        let table = Self.crcTable.span
         var last: UInt8 = 0
         for offset in 0..<header.byteCount {
-            last = decrypt(header.load(fromByteOffset: offset, as: UInt8.self), table)
+            last = decrypt(header.load(fromByteOffset: offset, as: UInt8.self))
         }
         return last
     }
@@ -66,19 +66,9 @@ struct TraditionalCipher {
     /// carries over, so a payload can be decrypted in pieces.
     mutating func decrypt(_ input: RawSpan, into output: inout MutableRawSpan) {
         precondition(output.byteCount >= input.byteCount)
-        let table = Self.crcTable.span
         for offset in 0..<input.byteCount {
-            output.storeBytes(of: decrypt(input.load(fromByteOffset: offset, as: UInt8.self), table), toByteOffset: offset, as: UInt8.self)
+            output.storeBytes(of: decrypt(input.load(fromByteOffset: offset, as: UInt8.self)), toByteOffset: offset, as: UInt8.self)
         }
-    }
-
-    /// CRC-32's byte table (polynomial 0xEDB88320), which the key schedule uses.
-    private static let crcTable: [UInt32] = (0..<256).map { byte in
-        var crc = UInt32(byte)
-        for _ in 0..<8 {
-            crc = crc & 1 != 0 ? 0xEDB8_8320 ^ (crc >> 1) : crc >> 1
-        }
-        return crc
     }
 }
 

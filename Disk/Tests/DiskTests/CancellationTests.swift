@@ -1,6 +1,8 @@
+import BytesAsync
 import BytesTestSupport
 import Darwin
 @testable import Disk
+import DiskTestSupport
 import Foundation
 import System
 import Testing
@@ -29,7 +31,7 @@ import Testing
         let files = (0..<2_000).map { testBytes(2_000 + $0 % 7_000, seed: UInt64($0), compressible: $0 % 2 == 0) }
         let source = ArraySource(files, delay: .microseconds(200))
         let destination = try Destination(directory.filePath("out"))
-        let planned = Counter()
+        let planned = RelaxedCounter()
         let task = Task {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 for index in files.indices {
@@ -50,7 +52,7 @@ import Testing
         #expect(Self.openDescriptors(under: directory.url) == 1)
         withExtendedLifetime(destination) {}
         // Every file there is complete.
-        for (path, item) in try readTree(directory.path("out")) where item.type == "file" {
+        for (path, item) in try readTree(directory.path("out")) where item.kind == .file {
             let index = Int(path.split(separator: "/").last!.dropFirst())!
             #expect(item.contents == files[index], "\(path)")
         }
@@ -66,7 +68,7 @@ import Testing
         let pieces = stride(from: 0, to: size, by: 100_000).map { Array(bytes[$0..<min(size, $0 + 100_000)]) }
         let source = ArraySource([], pieces: pieces)
         let destination = try Destination(directory.filePath("out"))
-        let queued = Counter()
+        let queued = RelaxedCounter()
         let task = Task {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 let file = try await withPathAsync("big") { (path) async throws(DiskError) in

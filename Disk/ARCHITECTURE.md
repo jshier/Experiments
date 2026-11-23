@@ -191,6 +191,10 @@ The planner opens the file, and each piece is a job; plain pieces are `pwrite`s 
 in parallel, in place over their own consumed input, and write the fork in order (each waits its turn, a `Mutex` plus
 continuations). A piece in which no chunk ends is held (`retain`) by the job of the piece that completes its chunk (a
 bridge, up to 8 pieces); the job carries the bridged pieces' byte count, so the progress counts them when it's written.
+The bridge's first piece is held in the job itself (`Bridge`: 72 bytes more per queued job), so a bridge of one piece,
+the only kind pieces of at least a chunk make (NativeAEA's segments), allocates nothing; only pieces smaller than a chunk
+make longer bridges, whose further pieces go in an array. The writer reads the bridge once, gathering the head chunk's
+start from the bridged pieces' tails into its chunk buffer before any wait.
 The last job's completion finishes the file (the whole-file storage decision, the header, the attributes, `close`); 128
 slots, since a slot is held until its last piece is written, behind the queue. A slot is made the first time the planner
 takes it (`LargeFileTable`): an extraction without large files makes none. `LargeFileToken.entry` and `isCompressed`

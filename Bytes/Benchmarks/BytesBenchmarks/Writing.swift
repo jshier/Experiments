@@ -93,7 +93,8 @@ let perValueWriteWorkloads: [WriteWorkload] = [
     WriteWorkload(name: "per-value write(_:as:_:) Byte3", unit: 3, allCores: false) { buffer in
         var writer = BytesWriter(MutableRawSpan(_unsafeBytes: buffer))
         for index in 0..<buffer.count / 3 {
-            try! writer.write(hashed(index), as: Byte3.self, .bigEndian)
+            // Masked to the field: a value that doesn't fit traps.
+            try! writer.write(hashed(index) & 0xFF_FFFF, as: Byte3.self, .bigEndian)
         }
         return writer.byteCount
     },

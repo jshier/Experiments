@@ -1,7 +1,9 @@
 import Bytes
 import BytesBase64
 import BytesCrypto
+import Disk
 import Foundation
+public import System
 
 /// What decrypts an encrypted archive (profiles 1–5).
 public enum AEADecryptionKey: Sendable {
@@ -24,27 +26,35 @@ public enum AEADecryptionKey: Sendable {
         }
         let hex = trimmed.hasPrefix("hex:") ? String(trimmed.dropFirst(4)) : trimmed
         guard hex.utf8.count.isMultiple(of: 2) else { throw .missingKey("a hex key of whole bytes") }
-        var bytes: [UInt8] = []
-        var index = hex.startIndex
-        while index < hex.endIndex {
-            let next = hex.index(index, offsetBy: 2, limitedBy: hex.endIndex) ?? hex.endIndex
-            guard let byte = UInt8(hex[index..<next], radix: 16) else { throw .missingKey("a hex or base64 key") }
-            bytes.append(byte)
-            index = next
-        }
+        // Digits only: `UInt8(_:radix:)`, used before, also took a sign ("+f").
+        guard let bytes = try? [UInt8](hexadecimal: hex) else { throw .missingKey("a hex or base64 key") }
         return .symmetric(bytes)
     }
 
     /// A recipient private key from a PEM file (SEC1 `EC PRIVATE KEY` or PKCS #8 `PRIVATE KEY`), as `aea
     /// -recipient-priv` takes it, or a raw 32-byte scalar.
     public static func recipientPrivateKey(contentsOf url: URL) throws(AEAError) -> AEADecryptionKey {
-        guard let data = try? Data(contentsOf: url) else { throw .missingKey("a readable key file: \(url.path)") }
-        if data.count == 32 { return .recipientPrivateKey(Array(data)) }
-        guard let text = String(data: data, encoding: .utf8), let key = try? P256.PrivateKey(pemRepresentation: text) else {
-            throw .missingKey("a P-256 private key in \(url.path)")
+        try recipientPrivateKey(contentsOf: FilePath(url.path(percentEncoded: false)))
+    }
+
+    /// A recipient private key from a PEM file (SEC1 `EC PRIVATE KEY` or PKCS #8 `PRIVATE KEY`), as `aea
+    /// -recipient-priv` takes it, or a raw 32-byte scalar.
+    public static func recipientPrivateKey(contentsOf path: FilePath) throws(AEAError) -> AEADecryptionKey {
+        // Read with Disk's `InputFile`, at most 64 KiB (a PEM private key is about 250 bytes).
+        guard let data = try? InputFile.contents(of: path, maximumCount: AEAKeys.keyFileLimit) else {
+            throw .missingKey("a readable key file: \(path)")
+        }
+        if data.count == 32 { return .recipientPrivateKey(data) }
+        guard let text = String(validating: data, as: UTF8.self), let key = try? P256.PrivateKey(pemRepresentation: text) else {
+            throw .missingKey("a P-256 private key in \(path)")
         }
         return .recipientPrivateKey(key.rawRepresentation)
     }
+}
+
+extension AEAKeys {
+    /// The most bytes a key file (a PEM or raw key) is read for.
+    static let keyFileLimit = 64 << 10
 }
 
 extension AEAKeys {

@@ -647,7 +647,9 @@ enum LZRAVENRate {
 struct LZRAVENWorkspace: ~Copyable {
     /// The states (64 bytes), the working model, then the model as decoding starts. The working model starts
     /// 16 bytes into a cache line, so its distributions (from byte 0x70) start on 64-byte boundaries.
-    private let base: UnsafeMutableRawPointer
+    private let memory = CodecWorkspace(byteCount: size, zeroed: false)
+    // Unsafe: the allocation's address. Safe: valid while the workspace (which owns it) lives.
+    private var base: UnsafeMutableRawPointer { unsafe memory.base }
     private static var modelBytes: Int { LZRAVENModel.count &* 2 }
     private static var modelOffset: Int { 80 }
     private static var initialOffset: Int { modelOffset &+ modelBytes }
@@ -658,7 +660,6 @@ struct LZRAVENWorkspace: ~Copyable {
     private static var size: Int { patternsOffset &+ 256 &+ 16 }
 
     init() {
-        unsafe base = UnsafeMutableRawPointer.allocate(byteCount: Self.size, alignment: 64)
         // Unsafe: initializing fresh memory. Safe: the allocation holds the states and both models.
         unsafe base.initializeMemory(as: UInt8.self, repeating: 0, count: Self.initialOffset)
         let initial = unsafe (base + Self.initialOffset).initializeMemory(
@@ -713,10 +714,5 @@ struct LZRAVENWorkspace: ~Copyable {
     func reset() {
         // Unsafe: a copy within the allocation. Safe: both models are `modelBytes` long and don't overlap.
         unsafe (base + Self.modelOffset).copyMemory(from: base + Self.initialOffset, byteCount: Self.modelBytes)
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` frees it.
-        unsafe base.deallocate()
     }
 }

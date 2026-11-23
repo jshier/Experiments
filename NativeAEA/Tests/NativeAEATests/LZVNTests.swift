@@ -3,6 +3,7 @@
 import AppleArchive
 import BytesTestSupport
 import CryptoKit
+import DiskTestSupport
 import Foundation
 @testable import NativeAEA
 import System
@@ -78,12 +79,12 @@ import Testing
         #expect(archiveFile.compression == .lzvn)
         let destination = directory.path("out")
         try await archiveFile.extract(to: FilePath(destination.path))
-        #expect(try readTree(destination) == readTree(source))
+        #expect(try readTree(destination, including: .entries) == readTree(source, including: .entries))
 
         let url = directory.path("pbzf.aea")
         let key = try makeLZVNArchive(pbz, url, blockSize: 65_536)
         let nested = directory.path("nested")
         try await AEAArchive(url: url, signingKey: .publicKey(key)).extract(to: FilePath(nested.path))
-        #expect(try readTree(nested) == readTree(source))
+        #expect(try readTree(nested, including: .entries) == readTree(source, including: .entries))
     }
 }

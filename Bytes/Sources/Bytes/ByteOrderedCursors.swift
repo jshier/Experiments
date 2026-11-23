@@ -105,14 +105,16 @@ public extension GenericBytesReader where Mode: ByteOrderedCursorMode {
 
     /// Reads a section whose byte count comes first, as a `L`, in the cursor's byte order.
     ///
-    /// - Parameter lengthType: The byte group the length is stored as, such as `Byte2.self`.
+    /// - Parameters:
+    ///   - lengthType: The byte group the length is stored as, such as `Byte2.self`.
+    ///   - includingPrefix: Whether the length counts its own `L.byteCount` bytes as well as the section's.
     /// - Returns: A cursor over the section, borrowing the same memory.
-    /// - Throws: As ``GenericBytesReader/read(sectionPrefixedBy:_:)``.
+    /// - Throws: As ``GenericBytesReader/read(sectionPrefixedBy:_:includingPrefix:)``.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    mutating func read<L: ByteGroup>(sectionPrefixedBy lengthType: L.Type) throws(BytesError) -> Self {
-        try read(sectionPrefixedBy: L.self, Mode.byteOrder)
+    mutating func read<L: ByteGroup>(sectionPrefixedBy lengthType: L.Type, includingPrefix: Bool = false) throws(BytesError) -> Self {
+        try read(sectionPrefixedBy: L.self, Mode.byteOrder, includingPrefix: includingPrefix)
     }
 }
 
@@ -183,16 +185,18 @@ public extension GenericBytesWriter where Mode: ByteOrderedCursorMode {
 
 public extension GenericBytesReader where Mode: ByteOrderedCursorMode {
     /// Reads bytes whose count comes first, as a `L` in the cursor's byte order, as
-    /// ``GenericBytesReader/read(bytesPrefixedBy:_:)``.
+    /// ``GenericBytesReader/read(bytesPrefixedBy:_:includingPrefix:)``.
     ///
-    /// - Parameter lengthType: The byte group the count is stored as, such as `Byte2.self`.
+    /// - Parameters:
+    ///   - lengthType: The byte group the count is stored as, such as `Byte2.self`.
+    ///   - includingPrefix: Whether the count includes its own `L.byteCount` bytes as well as the bytes after it.
     /// - Returns: A span of the counted bytes, not including the count.
-    /// - Throws: As ``GenericBytesReader/read(bytesPrefixedBy:_:)``.
+    /// - Throws: As ``GenericBytesReader/read(bytesPrefixedBy:_:includingPrefix:)``.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    mutating func read<L: ByteGroup>(bytesPrefixedBy lengthType: L.Type) throws(BytesError) -> RawSpan {
-        try read(bytesPrefixedBy: L.self, Mode.byteOrder)
+    mutating func read<L: ByteGroup>(bytesPrefixedBy lengthType: L.Type, includingPrefix: Bool = false) throws(BytesError) -> RawSpan {
+        try read(bytesPrefixedBy: L.self, Mode.byteOrder, includingPrefix: includingPrefix)
     }
 
     /// Reads UTF-8 text whose byte count comes first, as a `L` in the cursor's byte order, as

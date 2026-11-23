@@ -1,3 +1,4 @@
+import Bytes
 import BytesTestSupport
 import Foundation
 @testable import NativeAEA
@@ -23,7 +24,7 @@ import Testing
             // As for signing keys: `aea` rejects a scalar whose DER shortens.
             for _ in 0..<20 {
                 try ExternalTool.run("/usr/bin/openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", recipientPrivate.path])
-                let text = try ExternalTool.run("/usr/bin/openssl", ["ec", "-in", recipientPrivate.path, "-text", "-noout"])
+                let text = String(decoding: try ExternalTool.output("/usr/bin/openssl", ["ec", "-in", recipientPrivate.path, "-text", "-noout"]), as: UTF8.self)
                 if !text.contains("priv:\n    00:") { break }
             }
             try ExternalTool.run("/usr/bin/openssl", ["ec", "-in", recipientPrivate.path, "-pubout", "-out", recipientPublic.path])
@@ -82,8 +83,10 @@ import Testing
             #expect(archive.prologue.profile.rawValue == profile)
             #expect((archive.signer != nil) == [2, 4].contains(profile))
             // The identifier is what `aea id` prints.
-            let id = try ExternalTool.run("/usr/bin/aea", ["id", "-i", url.path]).trimmingCharacters(in: .whitespacesAndNewlines)
-            #expect(archive.identifier.map { String(format: "%02x", $0) }.joined() == id)
+            let id = String(decoding: try ExternalTool.output("/usr/bin/aea", ["id", "-i", url.path]), as: UTF8.self)
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let identifier = archive.identifier
+            #expect(String(hexadecimal: identifier.span.bytes) == id)
 
             let output = directory.path("out-p\(profile)-\(compression).bin")
             for threads in [1, 4] {

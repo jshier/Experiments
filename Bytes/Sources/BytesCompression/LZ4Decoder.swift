@@ -171,7 +171,7 @@ public struct LZ4Decoder: Sendable {
             unsafe ip += 1
             // (Chaining shortcut sequences without the end check above cost 2–3% more instructions: LLVM laid
             // the loop out worse.)
-            if zstdLikely(unsafe ip < inputShortcut && op < outputShortcut && token & 0xF0 != 0xF0 && token & 0x0F != 0x0F) {
+            if likely(unsafe ip < inputShortcut && op < outputShortcut && token & 0xF0 != 0xF0 && token & 0x0F != 0x0F) {
                 let literalLength = token &>> 4
                 unsafe LZCopy.copy16(op, ip)
                 unsafe ip += literalLength
@@ -180,7 +180,7 @@ public struct LZ4Decoder: Sendable {
                 unsafe ip += 2
                 guard unsafe UInt(bitPattern: offset &- 1) < UInt(bitPattern: op - base) else { throw .invalidValue }
                 let matchLength = token & 0x0F &+ 4
-                if zstdLikely(offset >= 16) {
+                if likely(offset >= 16) {
                     unsafe LZCopy.copy16(op, op - offset)
                     unsafe LZCopy.copy16(op + 16, op + (16 &- offset))
                 } else {
@@ -192,10 +192,10 @@ public struct LZ4Decoder: Sendable {
 
             // Literals.
             var literalLength = token &>> 4
-            if zstdUnlikely(literalLength == 15) {
+            if unlikely(literalLength == 15) {
                 try unsafe readLength(&literalLength, &ip, inputEnd)
             }
-            if zstdLikely(unsafe literalLength < inputFast - ip && literalLength < outputFast - op) {
+            if likely(unsafe literalLength < inputFast - ip && literalLength < outputFast - op) {
                 unsafe LZCopy.wild(op, ip, literalLength)
             } else {
                 guard unsafe literalLength <= inputEnd - ip else { throw .insufficientData }
@@ -207,20 +207,20 @@ public struct LZ4Decoder: Sendable {
 
             // The match: an offset, unless the block ends here.
             let left = unsafe inputEnd - ip
-            if zstdUnlikely(left < 2) {
+            if unlikely(left < 2) {
                 if left == 0 { return unsafe op }
                 throw .insufficientData
             }
             let offset = Int(UInt16(littleEndian: unsafe ip.loadUnaligned(as: UInt16.self)))
             unsafe ip += 2
             var matchLength = token & 15
-            if zstdUnlikely(matchLength == 15) {
+            if unlikely(matchLength == 15) {
                 try unsafe readLength(&matchLength, &ip, inputEnd)
             }
             matchLength &+= 4
             // 1 through the bytes written: one unsigned comparison.
             guard unsafe UInt(bitPattern: offset &- 1) < UInt(bitPattern: op - base) else { throw .invalidValue }
-            if zstdLikely(unsafe matchLength < outputFast - op) {
+            if likely(unsafe matchLength < outputFast - op) {
                 unsafe LZCopy.match(op, offset: offset, count: matchLength)
             } else {
                 guard unsafe matchLength <= outputEnd - op else { throw .insufficientCapacity }

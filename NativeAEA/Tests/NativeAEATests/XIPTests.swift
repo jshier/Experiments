@@ -1,10 +1,12 @@
 // The test archives are made here: a cpio (odc) stream written below, in pbzx blocks (xz from libcompression, or
 // stored), in a XAR written below, as Xcode's `.xip`s are, signed with a test chain or not (this macOS's `xar` no
 // longer signs).
+import Bytes
 import BytesTestSupport
 import Compression
 import CryptoKit
 import Disk
+import DiskTestSupport
 import Foundation
 @testable import NativeAEA
 import System
@@ -48,15 +50,17 @@ struct CpioBuilder {
 
 /// `contents` in pbzx blocks of `blockSize`: xz from libcompression, or stored when that's no smaller (or `store`).
 func pbzx(_ contents: [UInt8], blockSize: Int, store: Bool = false) -> [UInt8] {
-    func be(_ value: Int) -> [UInt8] { (0..<8).reversed().map { UInt8(truncatingIfNeeded: value >> ($0 * 8)) } }
-    var output = Array("pbzx".utf8) + be(blockSize)
+    var output = Array("pbzx".utf8)
+    output.append(UInt64(blockSize), as: Byte8.self, .bigEndian)
     var offset = 0
     while offset < contents.count {
         let block = Array(contents[offset..<min(offset + blockSize, contents.count)])
         var encoded = [UInt8](repeating: 0, count: block.count + 4096)
         let count = store ? 0 : compression_encode_buffer(&encoded, encoded.count, block, block.count, nil, COMPRESSION_LZMA)
         let stored = count > 0 && count < block.count ? Array(encoded[0..<count]) : block
-        output += be(block.count) + be(stored.count) + stored
+        output.append(UInt64(block.count), as: Byte8.self, .bigEndian)
+        output.append(UInt64(stored.count), as: Byte8.self, .bigEndian)
+        output += stored
         offset += block.count
     }
     return output
@@ -204,8 +208,13 @@ func makeXIP(
     """.utf8)
     let toc = zlib(xml)
     let checksum = Array(Insecure.SHA1.hash(data: toc))
-    func be<T: FixedWidthInteger>(_ value: T) -> [UInt8] { withUnsafeBytes(of: value.bigEndian) { Array($0) } }
-    var file = Array("xar!".utf8) + be(UInt16(28)) + be(UInt16(1)) + be(UInt64(toc.count)) + be(UInt64(xml.count)) + be(UInt32(1))
+    // The XAR header: magic, header size, version, the TOC's compressed and uncompressed sizes, checksum (SHA-1).
+    var file = Array("xar!".utf8)
+    file.append(28, as: Byte2.self, .bigEndian)
+    file.append(1, as: Byte2.self, .bigEndian)
+    file.append(UInt64(toc.count), as: Byte8.self, .bigEndian)
+    file.append(UInt64(xml.count), as: Byte8.self, .bigEndian)
+    file.append(1, as: Byte4.self, .bigEndian)
     file += toc + checksum
     if let chain { file += try chain.sign(sha1: checksum, in: directory) }
     file += content + metadata
@@ -216,20 +225,23 @@ func makeXIP(
 
 @Suite struct XIPTests {
     /// The tree the tests archive, and what `xip --expand` makes of it.
-    static func tree() -> (cpio: [UInt8], expected: [String: DiskEntry], compressed: Set<String>) {
+    /// What `tree()` expects of an item, read with `TreeParts.entries`: flags only `UF_COMPRESSED`, when compressed.
+    static func flags(compressed: Bool) -> UInt32 { compressed ? UInt32(UF_COMPRESSED) : 0 }
+
+    static func tree() -> (cpio: [UInt8], expected: [String: TreeItem], compressed: Set<String>) {
         var cpio = CpioBuilder()
-        var expected: [String: DiskEntry] = [:]
+        var expected: [String: TreeItem] = [:]
         var compressed: Set<String> = []
         func file(_ path: String, _ data: [UInt8], mode: UInt16 = 0o644, compresses: Bool) {
             cpio.file("./" + path, data, mode: Int(mode))
-            expected[path] = DiskEntry(type: "file", mode: mode, contents: data, compressed: compresses)
+            expected[path] = TreeItem(kind: .file, mode: mode, flags: flags(compressed: compresses), contents: data)
             if compresses { compressed.insert(path) }
         }
         cpio.directory(".")
         cpio.directory("./Xcode.app")
         cpio.directory("./Xcode.app/Contents", mode: 0o750)
-        expected["Xcode.app"] = DiskEntry(type: "directory", mode: 0o755, compressed: false)
-        expected["Xcode.app/Contents"] = DiskEntry(type: "directory", mode: 0o750, compressed: false)
+        expected["Xcode.app"] = TreeItem(kind: .directory, mode: 0o755, flags: 0)
+        expected["Xcode.app/Contents"] = TreeItem(kind: .directory, mode: 0o750, flags: 0)
         file("Xcode.app/Contents/small", testBytes(100, seed: 1, compressible: true), compresses: false)
         // 16 KiB and under stay plain however well they'd compress.
         file("Xcode.app/Contents/at-threshold", testBytes(16_384, seed: 2, compressible: true), compresses: false)
@@ -241,11 +253,11 @@ func makeXIP(
         file("Xcode.app/Contents/image.png", png, compresses: false)
         file("Xcode.app/Contents/large", testBytes(3_000_000, seed: 7, compressible: true), compresses: true)
         cpio.link("./Xcode.app/Contents/link", to: "compressible")
-        expected["Xcode.app/Contents/link"] = DiskEntry(type: "link", mode: 0o755, linkTarget: "compressible", compressed: false)
+        expected["Xcode.app/Contents/link"] = TreeItem(kind: .symbolicLink, mode: 0o755, flags: 0, linkTarget: "compressible")
         let shared = testBytes(40_000, seed: 8, compressible: true)
         cpio.hardLinks(["./Xcode.app/Contents/first", "./Xcode.app/second"], shared)
         for path in ["Xcode.app/Contents/first", "Xcode.app/second"] {
-            expected[path] = DiskEntry(type: "file", mode: 0o644, contents: shared, compressed: true)
+            expected[path] = TreeItem(kind: .file, mode: 0o644, flags: flags(compressed: true), contents: shared)
             compressed.insert(path)
         }
         cpio.end()
@@ -281,15 +293,15 @@ func makeXIP(
             let bytes = statistics.fileBytes - expected["Xcode.app/second"]!.contents!.count
             if blockSize >= 1 << 20 { #expect(progress.expectedBytes == bytes) } else { #expect(progress.expectedBytes <= bytes) }
             #expect(progress.expectedEntries == statistics.entries - 1)
-            let tree = try readTree(output)
+            let tree = try readTree(output, including: .entries)
             #expect(tree == expected)
             for path in compressed { #expect(decmpfsType(output.appending(path: path)) == 8, "\(path)") }
             // Files keep their times; both names of a hard link are one file.
-            let metadata = try readMetadata(output)
-            #expect(metadata["Xcode.app/Contents/compressible"]?.modification.tv_sec == 1_700_000_123)
-            #expect(metadata["Xcode.app/Contents/small"]?.modification.tv_sec == 1_700_000_123)
+            let metadata = try readTree(output, including: [.modification, .hardLinks])
+            #expect(metadata["Xcode.app/Contents/compressible"]?.modification?.seconds == 1_700_000_123)
+            #expect(metadata["Xcode.app/Contents/small"]?.modification?.seconds == 1_700_000_123)
             #expect(metadata["Xcode.app/second"]?.hardLinks == ["Xcode.app/Contents/first", "Xcode.app/second"])
-            #expect(metadata["Xcode.app/second"]?.modification.tv_sec == 1_700_000_456)
+            #expect(metadata["Xcode.app/second"]?.modification?.seconds == 1_700_000_456)
         }
         // Stored as Apple's `xip --expand` stores it: an LZVN resource fork.
         let stored = decmpfsStoredBytes(directory.path("out-1/Xcode.app/Contents/compressible"))
@@ -298,7 +310,7 @@ func makeXIP(
         var plain = AEAExtractionOptions()
         plain.diskCompression = .none
         try await archive.extract(to: FilePath(directory.path("plain").path), options: plain)
-        #expect(try readTree(directory.path("plain")) == expected.mapValues { var entry = $0; entry.compressed = false; return entry })
+        #expect(try readTree(directory.path("plain"), including: .entries) == expected.mapValues { var entry = $0; entry.flags = 0; return entry })
     }
 
     @Test func listsEntries() async throws {
@@ -314,7 +326,7 @@ func makeXIP(
         nonisolated(unsafe) var paths: [String] = []
         let statistics = try await archive.forEachEntry { paths.append($0.path) }
         #expect(Set(paths) == Set(expected.keys).union([""]))
-        #expect(statistics.files == expected.values.count { $0.type == "file" })
+        #expect(statistics.files == expected.values.count { $0.kind == .file })
         #expect(statistics.symbolicLinks == 1)
         #expect(statistics.filesByDiskCompression[8] == 7) // Flagged by size; PNGs and data that doesn't pay are decided when written.
     }

@@ -160,8 +160,8 @@ public struct ZipArchive: Sendable {
     /// Memory-maps the file and parses the central directory; entry contents aren't read until requested.
     ///
     /// - Parameter url: The archive's file URL.
-    /// - Throws: `Errno` (such as `.noSuchFileOrDirectory`) if the file can't be opened or mapped;
-    ///   ``ZipError/notAZipArchive`` if there's no end of central directory record;
+    /// - Throws: Disk's `DiskError` (`.system("open", path: PATH, .noSuchFileOrDirectory)`, say) if the file can't be
+    ///   opened or mapped; ``ZipError/notAZipArchive`` if there's no end of central directory record;
     ///   ``ZipError/multiDiskUnsupported`` for a spanned archive; ``ZipError/truncated(_:)``,
     ///   ``ZipError/badSignature(_:)``, or ``ZipError/corruptData(_:)`` if the central directory is damaged.
     public init(url: URL) throws {
@@ -636,7 +636,7 @@ public extension ZipArchive {
     func contents(of entry: ZipEntry, password: String? = nil) throws -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
         try contents(of: entry, password: password) { chunk in
-            result.append(chunk)
+            result.append(copying: chunk)
         }
         return result
     }

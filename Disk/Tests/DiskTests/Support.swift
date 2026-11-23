@@ -7,7 +7,8 @@ import System
 import Testing
 
 // Temporary directories (`TemporaryDirectory`, removed with read-only files and ACLs) and `ExternalTool.run` are Bytes'
-// `BytesTestSupport`; the bulk trait is `BytesTesting`'s.
+// `BytesTestSupport`; the bulk trait is `BytesTesting`'s. Reading what an extraction wrote (`readTree`, `readItem`,
+// extended attributes, ACLs, `decmpfs`) is `DiskTestSupport`.
 
 extension TemporaryDirectory {
     convenience init() throws {
@@ -16,10 +17,6 @@ extension TemporaryDirectory {
 
     /// `name` in the directory, as a `FilePath`.
     func filePath(_ name: String) -> FilePath { FilePath(path(name).path(percentEncoded: false)) }
-}
-
-struct TestFailure: Error, CustomStringConvertible {
-    var description: String
 }
 
 /// An `EntryPath` from a string literal (tests only: traps on an invalid one). The string is copied into a buffer the
@@ -39,84 +36,10 @@ func testBytes(_ count: Int, seed: UInt64, compressible: Bool) -> [UInt8] {
     return generator.bytes(count)
 }
 
-/// What an item looks like on disk.
-struct DiskItem: Equatable, CustomStringConvertible {
-    var type: String
-    var mode: UInt16
-    var contents: [UInt8]?
-    var linkTarget: String?
-    var flags: UInt32
-    var modification: Int
-
-    var description: String {
-        "\(type) \(String(mode, radix: 8)) \(contents.map { "\($0.count) bytes" } ?? "") \(linkTarget ?? "") flags \(String(flags, radix: 16)) mtime \(modification)"
-    }
-}
-
-/// Every item under `root` (not following links), by relative path.
-func readTree(_ root: URL) throws -> [String: DiskItem] {
-    var result: [String: DiskItem] = [:]
-    let enumerator = FileManager.default.enumerator(atPath: root.path)!
-    while let relative = enumerator.nextObject() as? String {
-        result[relative] = try item(root.appending(path: relative))
-    }
-    return result
-}
-
-func item(_ url: URL) throws -> DiskItem {
-    var info = stat()
-    guard lstat(url.path, &info) == 0 else { throw TestFailure(description: "lstat \(url.path): \(errno)") }
-    let mode = UInt16(info.st_mode & 0o7777)
-    switch info.st_mode & S_IFMT {
-    case S_IFDIR:
-        return DiskItem(type: "directory", mode: mode, flags: info.st_flags, modification: info.st_mtimespec.tv_sec)
-    case S_IFLNK:
-        let target = try FileManager.default.destinationOfSymbolicLink(atPath: url.path)
-        return DiskItem(type: "link", mode: mode, linkTarget: target, flags: info.st_flags, modification: info.st_mtimespec.tv_sec)
-    case S_IFIFO:
-        return DiskItem(type: "fifo", mode: mode, flags: info.st_flags, modification: info.st_mtimespec.tv_sec)
-    default:
-        return DiskItem(
-            type: "file", mode: mode, contents: Array(try Data(contentsOf: url)), flags: info.st_flags,
-            modification: info.st_mtimespec.tv_sec
-        )
-    }
-}
-
+/// An item's `lstat`, or `nil` if it isn't there.
 func stat(_ url: URL) -> stat? {
     var info = stat()
     return lstat(url.path, &info) == 0 ? info : nil
-}
-
-/// The `decmpfs` type of a compressed file, or `nil`.
-func decmpfsType(_ url: URL) -> UInt32? {
-    var header = [UInt8](repeating: 0, count: 4096)
-    let count = getxattr(url.path, "com.apple.decmpfs", &header, header.count, 0, XATTR_SHOWCOMPRESSION | XATTR_NOFOLLOW)
-    guard count >= 16 else { return nil }
-    return UInt32(header[4]) | UInt32(header[5]) << 8 | UInt32(header[6]) << 16 | UInt32(header[7]) << 24
-}
-
-/// A file's stored APFS compression: its `com.apple.decmpfs` attribute, then its resource fork.
-func decmpfsStoredBytes(_ url: URL) -> [UInt8] {
-    var stored: [UInt8] = []
-    for name in ["com.apple.decmpfs", "com.apple.ResourceFork"] {
-        let options = XATTR_SHOWCOMPRESSION | XATTR_NOFOLLOW
-        let size = getxattr(url.path, name, nil, 0, 0, options)
-        guard size > 0 else { continue }
-        var bytes = [UInt8](repeating: 0, count: size)
-        let got = getxattr(url.path, name, &bytes, size, 0, options)
-        stored += bytes.prefix(max(0, got))
-    }
-    return stored
-}
-
-/// An extended attribute's value, or `nil`.
-func extendedAttribute(_ url: URL, _ name: String) -> [UInt8]? {
-    let size = getxattr(url.path, name, nil, 0, 0, XATTR_NOFOLLOW)
-    guard size >= 0 else { return nil }
-    var value = [UInt8](repeating: 0, count: size)
-    _ = getxattr(url.path, name, &value, size, 0, XATTR_NOFOLLOW)
-    return value
 }
 
 /// A source's own error (``ArraySource``'s failing file), which Disk carries back in ``DiskError/source(_:)``.

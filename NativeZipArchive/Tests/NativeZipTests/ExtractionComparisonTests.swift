@@ -2,6 +2,7 @@ import BytesTestSupport
 // Only what's needed: Disk has an `ExtractionOptions` of its own.
 import class Disk.ExtractionProgress
 import enum Disk.DiskError
+import DiskTestSupport
 import Foundation
 import NativeZip
 import System
@@ -47,40 +48,14 @@ import Testing
         return archive
     }
 
-    struct Item: Equatable, CustomStringConvertible {
-        var kind: String
-        var mode: UInt16
-        var size: Int64
-        var modification: Int
-        var contents: Data?
-        var target: String?
-
-        var description: String {
-            "\(kind) \(String(mode, radix: 8)) \(size) bytes mtime \(modification)\(target.map { " -> \($0)" } ?? "")"
+    /// Every item under `root` by relative path, not following links: type, mode, size, contents, modification time
+    /// (to the second), link target. Links' times aren't compared (neither tool sets them).
+    private static func tree(_ root: URL) throws -> [String: TreeItem] {
+        try readTree(root, including: [.contents, .size, .modification]).mapValues { item in
+            var item = item
+            item.modification = item.kind == .symbolicLink ? nil : item.modification.map { TreeItem.Time(seconds: $0.seconds) }
+            return item
         }
-    }
-
-    /// Every item under `root` by relative path, not following links. Links' times aren't compared (neither tool sets
-    /// them).
-    private static func tree(_ root: URL) throws -> [String: Item] {
-        var result: [String: Item] = [:]
-        let enumerator = FileManager.default.enumerator(atPath: root.path)!
-        while let relative = enumerator.nextObject() as? String {
-            let path = root.appending(path: relative).path
-            var info = stat()
-            guard lstat(path, &info) == 0 else { throw Errno(rawValue: errno) }
-            let mode = UInt16(info.st_mode & 0o7777)
-            let time = info.st_mtimespec.tv_sec
-            switch info.st_mode & S_IFMT {
-            case S_IFDIR: result[relative] = Item(kind: "directory", mode: mode, size: 0, modification: time)
-            case S_IFLNK:
-                let target = try FileManager.default.destinationOfSymbolicLink(atPath: path)
-                result[relative] = Item(kind: "link", mode: mode, size: 0, modification: 0, target: target)
-            default:
-                result[relative] = Item(kind: "file", mode: mode, size: info.st_size, modification: time, contents: try Data(contentsOf: URL(filePath: path)))
-            }
-        }
-        return result
     }
 
     @Test(arguments: [[String](), ["-K"], ["-LL"], ["-X"]])

@@ -30,11 +30,14 @@ enum Cpio {
     ///
     /// - Throws: ``AEAError/invalidArchive(_:)`` for another magic or a field that isn't octal.
     static func parseHeader(_ bytes: UnsafeRawPointer) throws(AEAError) -> Header {
-        // The magic, "070707", as one comparison of 6 bytes (in a u64 with its next two bytes masked off).
-        let magic = UInt64(littleEndian: unsafe bytes.loadUnaligned(as: UInt64.self)) & 0xFFFF_FFFF_FFFF
-        guard magic == 0x3730_3730_3730 else { throw .invalidArchive("no cpio (odc) magic") }
         // Unsafe: a span over the header's bytes. Safe: the caller checked all 76 are in its buffer.
-        var reader = AlignedBytesReader(unsafe RawSpan(_unsafeStart: bytes + 6, byteCount: headerSize - 6))
+        var reader = AlignedBytesReader(unsafe RawSpan(_unsafeStart: bytes, byteCount: headerSize))
+        // The magic, "070707", as one comparison of 6 bytes.
+        do throws(BytesError) {
+            try reader.expect(Byte6(ascii: "070707"))
+        } catch {
+            throw .invalidArchive("no cpio (odc) magic")
+        }
         var header = Header()
         // Each field is one or two 8-byte loads, checked and combined a word at a time (`asciiOctalDigits`).
         do throws(BytesError) {
@@ -141,7 +144,10 @@ enum CpioWalker {
                         throw .invalidArchive("a cpio name without its NUL")
                     }
                     let nameCount = header.nameSize - 1
-                    if nameCount == 10, unsafe memcmp(headerPointer + Cpio.headerSize, "TRAILER!!!", 10) == 0 {
+                    // Unsafe: a span over the name. Safe: its `nameCount` bytes follow the header, within `count`,
+                    // which is in the buffer (checked above).
+                    if nameCount == 10,
+                       unsafe RawSpan(_unsafeStart: headerPointer + Cpio.headerSize, byteCount: nameCount).hasPrefix(Byte10(ascii: "TRAILER!!!")) {
                         position += count
                         ended = true
                         break

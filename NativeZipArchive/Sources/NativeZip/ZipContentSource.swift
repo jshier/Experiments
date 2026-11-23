@@ -61,12 +61,9 @@ struct ZipContentSource: ContentSource {
         if contents.replaces >= 0 { await state.waitUntilWritten(Int(contents.replaces)) }
         do {
             try await Self.write(entry, of: job, to: &output, state: state)
-        } catch let error as DiskError {
-            throw error
-        } catch is CancellationError {
-            throw .cancelled
         } catch {
-            throw .source(error)
+            // Disk's errors as they are, cancellation as Disk's, the archive's (`ZipError`) as the source's.
+            throw DiskError(wrapping: error)
         }
     }
 

@@ -49,7 +49,7 @@ func hashed<H: HashFunction>(_ type: H.Type, _ bytes: [UInt8], splits: [Int]) ->
     @Test(arguments: [0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 129, 1000, 4097])
     func matchesCryptoKit(length: Int) {
         var rng = SplitMix64(seed: UInt64(length))
-        let bytes = randomBytes(length, using: &rng)
+        let bytes = rng.bytes(length)
         let sha1 = Array(Insecure.SHA1.hash(data: bytes))
         let sha256 = Array(CryptoKit.SHA256.hash(data: bytes))
         let sha384 = Array(CryptoKit.SHA384.hash(data: bytes))
@@ -64,7 +64,7 @@ func hashed<H: HashFunction>(_ type: H.Type, _ bytes: [UInt8], splits: [Int]) ->
 
     @Test func portableBlockFunctionsMatch() {
         var rng = SplitMix64(seed: 9)
-        let blocks = randomBytes(64 * 33, using: &rng)
+        let blocks = rng.bytes(64 * 33)
         var hardware1 = SHA1().state, portable1 = SHA1().state
         SHA1.compress(&hardware1, blocks: blocks.span.bytes)
         SHA1.compressPortably(&portable1, blocks: blocks.span.bytes)
@@ -84,8 +84,8 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
     @Test(arguments: [0, 1, 20, 63, 64, 65, 200])
     func hmacMatchesCryptoKit(keyLength: Int) {
         var rng = SplitMix64(seed: UInt64(keyLength) &+ 100)
-        let key = randomBytes(keyLength, using: &rng)
-        let message = randomBytes(300, using: &rng)
+        let key = rng.bytes(keyLength)
+        let message = rng.bytes(300)
         var sha1 = HMAC<SHA1>(key: key.span.bytes)
         sha1.update(message.span.bytes.extracting(0..<100))
         sha1.update(message.span.bytes.extracting(100...))
@@ -114,7 +114,7 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
 
         var rng = SplitMix64(seed: 7)
         for (keyBits, password) in [(128, "secret"), (192, "a longer pass phrase"), (256, "")] {
-            let salt = randomBytes(keyBits / 16, using: &rng)
+            let salt = rng.bytes(keyBits / 16)
             let count = 2 * keyBits / 8 + 2
             var expected = [UInt8](repeating: 0, count: count)
             let utf8 = Array(password.utf8)
@@ -183,8 +183,8 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
     @Test(arguments: [16, 24, 32])
     func counterModeInPieces(keyLength: Int) {
         var rng = SplitMix64(seed: UInt64(keyLength))
-        let key = randomBytes(keyLength, using: &rng)
-        let message = randomBytes(1000, using: &rng)
+        let key = rng.bytes(keyLength)
+        let message = rng.bytes(1000)
         let aes = AES(key: key.span.bytes)
         let blockCount = (message.count + 15) / 16
 
@@ -194,7 +194,7 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
         }
         let wideStream = Self.referenceKeystream(key: key, counterBlocks: wide)
         // GCM: twelve fixed bytes, then a 32-bit big-endian counter from 2 (crossing a carry into byte 14).
-        let start = randomBytes(12, using: &rng) + [0, 0, 0xFF, 0xFE]
+        let start = rng.bytes(12) + [0, 0, 0xFF, 0xFE]
         let narrow = (0..<blockCount).map { index -> [UInt8] in
             let value = UInt32(0xFFFE) &+ UInt32(index)
             return Array(start.prefix(12)) + [UInt8(value >> 24), UInt8(truncatingIfNeeded: value >> 16), UInt8(truncatingIfNeeded: value >> 8), UInt8(truncatingIfNeeded: value)]
@@ -225,12 +225,12 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
     @Test(arguments: [16, 32])
     func bigEndianLowWordCounterMatchesCommonCrypto(keyLength: Int) {
         var rng = SplitMix64(seed: UInt64(keyLength) &+ 77)
-        let key = randomBytes(keyLength, using: &rng)
-        let message = randomBytes(5_000, using: &rng)
+        let key = rng.bytes(keyLength)
+        let message = rng.bytes(5_000)
         let aes = AES(key: key.span.bytes)
-        let prefix = randomBytes(8, using: &rng)
+        let prefix = rng.bytes(8)
         for iv in [
-            randomBytes(16, using: &rng),
+            rng.bytes(16),
             prefix + [0x01, 0x02, 0x03, 0x04, 0xFF, 0xFF, 0xFF, 0xFD], // The low 32 bits wrap after 3 blocks.
             prefix + [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xF9], // The low 64 bits wrap mid-batch.
             [UInt8](repeating: 0xFF, count: 15) + [0xF0], // The whole block wraps to zero.

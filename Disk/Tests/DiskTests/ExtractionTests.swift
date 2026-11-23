@@ -1,7 +1,9 @@
+import BytesAsync
 import BytesTestSupport
 import BytesTesting
 import Darwin
 @testable import Disk
+import DiskTestSupport
 import Foundation
 import System
 import Testing
@@ -24,7 +26,7 @@ import Testing
         var options = ExtractionSettings()
         options.writers = writers
         options.fileSystemWidth = width
-        let progress = ExtractionProgress(expectedEntries: 12, expectedBytes: files.reduce(0) { $0 + $1.count })
+        let progress = ExtractionProgress(expectedEntries: 11, expectedBytes: files.reduce(0) { $0 + $1.count })
         options.progress = progress
         let time = EntryTimes(modification: Timestamp(seconds: 1_500_000_000))
         var attributes = ExtendedAttributeBlob()
@@ -52,17 +54,18 @@ import Testing
         #expect(progress.bytes == files.reduce(0) { $0 + $1.count })
         #expect(progress.fractionCompleted == 1)
         let out = directory.path("out")
-        let tree = try readTree(out)
-        #expect(tree["top/a.txt"]?.contents == files[0] && tree["top/a.txt"]?.mode == 0o600 && tree["top/a.txt"]?.modification == 1_500_000_000)
+        let tree = try readTree(out, including: [.contents, .modification])
+        let restored = TreeItem.Time(seconds: 1_500_000_000)
+        #expect(tree["top/a.txt"]?.contents == files[0] && tree["top/a.txt"]?.mode == 0o600 && tree["top/a.txt"]?.modification == restored)
         #expect(tree["top/locked/b.bin"]?.contents == files[1])
-        #expect(tree["top/locked"]?.mode == 0o555 && tree["top/locked"]?.modification == 1_500_000_000)
-        #expect(tree["top"]?.modification == 1_500_000_000)
+        #expect(tree["top/locked"]?.mode == 0o555 && tree["top/locked"]?.modification == restored)
+        #expect(tree["top"]?.modification == restored)
         #expect(tree["implicit/parents/empty"]?.contents == [])
-        #expect(tree["top/large"]?.contents == files[4] && tree["top/large"]?.modification == 1_500_000_000)
+        #expect(tree["top/large"]?.contents == files[4] && tree["top/large"]?.modification == restored)
         #expect(tree["top/ro"]?.mode == 0o444)
-        #expect(extendedAttribute(out.appending(path: "top/ro"), "com.example.a") == [1, 2])
-        #expect(tree["top/link"]?.linkTarget == "a.txt" && tree["top/link"]?.modification == 1_500_000_000)
-        #expect(tree["top/pipe"]?.type == "fifo")
+        #expect(extendedAttribute("com.example.a", of: out.appending(path: "top/ro")) == [1, 2])
+        #expect(tree["top/link"]?.linkTarget == "a.txt" && tree["top/link"]?.modification == restored)
+        #expect(tree["top/pipe"]?.kind == .fifo)
         #expect(stat(out.appending(path: "other-name"))!.st_ino == stat(out.appending(path: "top/a.txt"))!.st_ino)
         #expect(decmpfsType(out.appending(path: "top/locked/b.bin")) == 14)
         #expect(decmpfsType(out.appending(path: "top/random")) == nil)
@@ -79,7 +82,7 @@ import Testing
         let destination = try Destination(directory.filePath("out"))
         let (report, source) = try await extract(entries, into: destination, options: options, storage: .compressed(.appleArchive), writesPerFile: writes)
         #expect(report.files == entries.count && source.releaseCount == entries.count)
-        for (path, bytes) in entries { #expect(try item(directory.path("out/\(path)")).contents == bytes, "\(path)") }
+        for (path, bytes) in entries { #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes, "\(path)") }
     }
 
     /// A file in pieces, compressed in parallel and in place, across bridges (pieces smaller than a chunk), and one
@@ -116,7 +119,7 @@ import Testing
         #expect(progress.bytes == size && progress.entries == 1)
         #expect(progress.fractionCompleted == 1)
         let url = directory.path("out/big")
-        #expect(try item(url).contents == bytes)
+        #expect(try readItem(at: url).contents == bytes)
         #expect(decmpfsType(url) == (compressible ? 14 : nil))
         // The same file written whole is stored the same.
         var writer = FileWriter(try Destination(directory.filePath("whole")))
@@ -149,7 +152,7 @@ import Testing
         #expect(decoding?.sourceError as? DecodingFailure == DecodingFailure(file: 7))
         #expect(report.files == 18)
         #expect(!FileManager.default.fileExists(atPath: directory.path("out/f7").path))
-        #expect(try item(directory.path("out/f3")).contents == [9])
+        #expect(try readItem(at: directory.path("out/f3")).contents == [9])
     }
 
     /// A source can fail a file after writing all of it (a checksum it computes as it goes): whole, gathered, streamed,
@@ -182,7 +185,7 @@ import Testing
                 let exists = FileManager.default.fileExists(atPath: directory.path("\(out)/f\(index)").path)
                 #expect(exists == !source.failingAfterWriting.contains(index), "\(index)")
             }
-            #expect(try item(directory.path("\(out)/f5")).contents == files[5])
+            #expect(try readItem(at: directory.path("\(out)/f5")).contents == files[5])
         }
     }
 
@@ -193,7 +196,7 @@ import Testing
         let files = (0..<200).map { testBytes(500, seed: UInt64($0), compressible: true) }
         let source = ArraySource(files, failing: 3)
         let destination = try Destination(directory.filePath("out"))
-        let calls = Counter()
+        let calls = RelaxedCounter()
         do {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 for index in files.indices {
@@ -273,6 +276,73 @@ func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError
         let destination = try Destination(directory.filePath("out"))
         let (report, source) = try await extract(entries, into: destination, options: options, storage: .compressed(.appleArchive), writesPerFile: Int(generator.next() % 3) + 1)
         #expect(report.files == entries.count && source.releaseCount == entries.count)
-        for (path, bytes) in entries { #expect(try item(directory.path("out/\(path)")).contents == bytes) }
+        for (path, bytes) in entries { #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes) }
+    }
+}
+
+/// Progress as a bar reads it: bytes and entries together, never going back.
+@Suite struct ProgressTests {
+    /// Each entry weighs 64 KiB against bytes; counts past a total count as the total.
+    @Test func weighsEntriesAgainstBytes() {
+        let weight = ExtractionProgress.defaultEntryWeight
+        func fraction(_ entries: Int, of expectedEntries: Int, _ bytes: Int, of expectedBytes: Int) -> Double? {
+            ExtractionProgress.fraction(entries: entries, of: expectedEntries, bytes: bytes, of: expectedBytes)
+        }
+        #expect(fraction(50, of: 0, 500, of: 0) == nil)
+        #expect(fraction(50, of: 0, 500, of: 1_000) == 0.5)
+        #expect(fraction(50, of: 200, 500, of: 0) == 0.25)
+        #expect(fraction(50, of: 100, 0, of: 100 * weight) == 0.25)
+        #expect(fraction(50, of: 100, 100 * weight, of: 100 * weight) == 0.75)
+        #expect(fraction(100, of: 100, 100 * weight, of: 100 * weight) == 1)
+        // A `.xip`'s hard links: every byte written, a fifth of the entries still to make.
+        let bytes = 4_000_000_000
+        #expect(fraction(80_000, of: 100_000, bytes, of: bytes)! < 0.96)
+        #expect(fraction(300, of: 200, 2_000, of: 1_000) == 1)
+        #expect(fraction(-5, of: 10, -5, of: 10) == 0)
+        #expect(ExtractionProgress.fraction(entries: 1, of: 2, bytes: 0, of: 0, entryWeight: 1) == 0.5)
+    }
+
+    /// A reading's fraction never goes below an earlier one's, when the totals grow under it.
+    @Test func readingsNeverGoBack() {
+        let progress = ExtractionProgress(expectedEntries: 10, expectedBytes: 0)
+        #expect(progress.read().fraction == 0)
+        progress.slot(0).add(entries: 5, bytes: 1_000)
+        let half = progress.read()
+        #expect(half == ExtractionProgress.Reading(entries: 5, bytes: 1_000, expectedEntries: 10, expectedBytes: 0, fraction: 0.5))
+        // The walk finds twice as many entries: the bar stays where it was.
+        progress.addExpected(entries: 10, bytes: 0)
+        #expect(progress.read().fraction == 0.5 && progress.fractionCompleted == 0.5)
+        progress.slot(1).add(entries: 11, bytes: 0)
+        #expect(progress.read().fraction == 0.8)
+        #expect(ExtractionProgress().read().fraction == nil)
+    }
+}
+
+/// Disk's errors and others' cancellations.
+@Suite struct ErrorTests {
+    struct Other: Error, Equatable {}
+    enum Client: Error, CancellationReporting {
+        case cancelled, failed
+        var isCancellation: Bool { self == .cancelled }
+    }
+
+    @Test func wrapsAndUnwraps() {
+        #expect(DiskError(wrapping: DiskError.exists("a")) == .exists("a"))
+        #expect(DiskError(wrapping: CancellationError()) == .cancelled)
+        #expect(DiskError(wrapping: Other()) == .source(Other()))
+        #expect(DiskError.source(Other()).unwrapped as? Other == Other())
+        #expect(DiskError.cancelled.unwrapped is CancellationError)
+        #expect(DiskError.exists("a").unwrapped as? DiskError == .exists("a"))
+    }
+
+    @Test func recognizesCancellation() {
+        #expect(DiskError.isCancellation(CancellationError()))
+        #expect(DiskError.isCancellation(DiskError.cancelled))
+        #expect(DiskError.isCancellation(DiskError.source(CancellationError())))
+        #expect(DiskError.isCancellation(DiskError.source(Client.cancelled)))
+        #expect(DiskError.isCancellation(Client.cancelled))
+        #expect(!DiskError.isCancellation(Client.failed))
+        #expect(!DiskError.isCancellation(DiskError.exists("a")))
+        #expect(!DiskError.isCancellation(Other()))
     }
 }

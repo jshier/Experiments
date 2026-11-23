@@ -87,7 +87,7 @@ public struct FileOutput: ~Copyable {
     @inline(__always)
     private func enter() async {
         guard let limiter else { return }
-        let started = timings != nil ? DispatchClock.now : 0
+        let started = timings != nil ? MonotonicClock.now : 0
         await limiter.acquire()
         timings?.add(.wait, since: started)
     }
@@ -220,7 +220,7 @@ public struct FileOutput: ~Copyable {
     private mutating func writeWhole(_ data: UnsafeRawPointer?, count: Int) async throws(DiskError) {
         // The caller's contract: `data` is `count` bytes (the source's span, or the staging buffer; `nil` for none) that
         // stay valid and unchanged until this returns, across its waits.
-        let started = timings != nil ? DispatchClock.now : 0
+        let started = timings != nil ? MonotonicClock.now : 0
         // Unsafe: `data` to `prepare`. Safe: the caller's `count` bytes, as above; `prepare` only reads them.
         let form = unsafe core.prepare(data, count: count, storage: storage)
         timings?.add(.compress, since: started)
@@ -286,7 +286,7 @@ public struct FileOutput: ~Copyable {
         var chunk = 0
         while chunk < chunkCount {
             let end = min(chunkCount, chunk + Decmpfs.batchChunks)
-            let started = timings != nil ? DispatchClock.now : 0
+            let started = timings != nil ? MonotonicClock.now : 0
             // Unsafe: `data` to `compressBatch`. Safe: the whole file's `count` bytes; `chunk..<end` are at most 16 of
             // its `chunkCount` chunks, and the table was reserved for all of them above.
             let written = unsafe core.compressBatch(data, count: count, chunks: chunk..<end, forkOffset: forkOffset, policy: policy)
@@ -348,7 +348,7 @@ public struct FileOutput: ~Copyable {
         guard let policy else {
             await enter()
             defer { leave() }
-            let started = timings != nil ? DispatchClock.now : 0
+            let started = timings != nil ? MonotonicClock.now : 0
             // Unsafe: `data` to `writeFully`. Safe: the caller's `count` bytes, as above; read during the call.
             try unsafe FileIO.writeFully(descriptor, data, count: count, at: bytesWritten, path: core.pathRef)
             timings?.add(.data, since: started)
@@ -384,7 +384,7 @@ public struct FileOutput: ~Copyable {
     }
 
     private mutating func compressChunk(_ data: UnsafeRawPointer, count: Int, policy: StoragePolicy) {
-        let started = timings != nil ? DispatchClock.now : 0
+        let started = timings != nil ? MonotonicClock.now : 0
         // Unsafe: stores chunk `chunkIndex`'s entry in the table. Safe: `openStream` reserved an entry for every chunk
         // of the expected size and one more, and `write` refuses bytes past that size, so `chunkIndex` is one of them.
         unsafe core.table.base.storeBytes(of: UInt32(forkOffset + batchBytes).littleEndian, toByteOffset: chunkIndex * 4, as: UInt32.self)
@@ -518,7 +518,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
             writerIndex: index
         )
         do throws(DiskError) {
-            let started = timings != nil ? DispatchClock.now : 0
+            let started = timings != nil ? MonotonicClock.now : 0
             try await context.source.write(job.contents, to: &output)
             timings?.add(.produce, since: started)
             try await output.complete()
@@ -613,18 +613,6 @@ struct Writer<Source: ContentSource>: ~Copyable {
         var head = 0 // Compressed bytes in `output`, before the in-place ones.
         var sizes = 0 // Chunk sizes recorded in `table`.
         var chunk = firstChunk
-        // Bases of the bridge's pieces.
-        // Unsafe: an array of pointers. Safe: empty here; filled below with addresses the job holds.
-        var bridgeBases: [UnsafeMutableRawPointer] = unsafe []
-        if !job.bridge.isEmpty {
-            // Unsafe: reserves room in the array of pointers. Safe: no pointer is read or written.
-            unsafe bridgeBases.reserveCapacity(job.bridge.count)
-            for index in 0..<job.bridge.count {
-                // Unsafe: the address of a bridged piece's bytes, kept in the array. Safe: its `count` bytes
-                // (`pieceBase` checked), which the job holds a reference to until `run` releases it after this returns.
-                unsafe bridgeBases.append(try Self.pieceBase(context.source, job.bridge[index].contents, count: job.bridge[index].count))
-            }
-        }
         core.reserveTable(endChunk - firstChunk + 1)
 
         func record(_ core: inout WriterCore, _ count: Int) {
@@ -633,42 +621,44 @@ struct Writer<Source: ContentSource>: ~Copyable {
             unsafe core.table.base.storeBytes(of: UInt32(count), toByteOffset: sizes * 4, as: UInt32.self)
             sizes += 1
         }
-        /// Compresses chunk `index` into `destination`.
+        /// Compresses chunk `index`, which starts in this piece, into `destination`.
         func compress(_ core: inout WriterCore, _ index: Int, into destination: UnsafeMutableRawPointer) -> Int {
             let start = index * chunkSize
             let end = min(start + chunkSize, size)
-            if start < pieceStart {
-                // The bridge: the chunk's start from earlier pieces (their tails, never overwritten), the rest here.
-                for part in 0..<job.bridge.count {
-                    let bridged = job.bridge[part]
-                    let low = max(start, bridged.fileOffset), high = min(pieceStart, bridged.fileOffset + bridged.count)
-                    guard low < high else { continue }
-                    // Unsafe: copies file bytes `low..<high` from a bridged piece into the chunk buffer. Safe: the
-                    // range is within the piece's (`fileOffset..<fileOffset + count`, by `low` and `high`), whose
-                    // bytes `bridgeBases[part]` addresses; in the buffer it's `low - start..<high - start`, within
-                    // a chunk, since `start <= low` and `high <= pieceStart < start + chunkSize`.
-                    unsafe (core.chunk.base + (low - start)).copyMemory(from: bridgeBases[part] + (low - bridged.fileOffset), byteCount: high - low)
-                }
-                // Unsafe: copies the chunk's rest, from this piece's start, into the chunk buffer. Safe: `end -
-                // pieceStart` bytes, within the piece (`end <= pieceEnd`); they end at `end - start`, at most a chunk.
-                unsafe (core.chunk.base + (pieceStart - start)).copyMemory(from: data, byteCount: end - pieceStart)
-                // Unsafe: the chunk buffer and `destination` to `compress`. Safe: the chunk's `end - start` bytes
-                // gathered above (the bridge's pieces cover `start..<pieceStart`: the planner's rule); `destination`
-                // has a chunk and one byte of room (each call below says where).
-                return unsafe core.encoders.compress(core.chunk.base, count: end - start, into: destination, policy: policy)
-            }
-            // Unsafe: the chunk within the piece and `destination` to `compress`. Safe: `pieceStart <= start` and
-            // `end <= pieceEnd`, so its `end - start` bytes (a chunk at most) are within `data`; `destination` has
-            // a chunk and one byte of room (each call below says where), in the core's output, apart from `data`.
+            // Unsafe: the chunk within the piece and `destination` to `compress`. Safe: `pieceStart <= start` (only the
+            // head chunk, compressed below, starts before) and `end <= pieceEnd`, so its `end - start` bytes (a chunk at
+            // most) are within `data`; `destination` has a chunk and one byte of room (each call below says where), in
+            // the core's output, apart from `data`.
             return unsafe core.encoders.compress(data + (start - pieceStart), count: end - start, into: destination, policy: policy)
         }
 
-        let compressStarted = timings != nil ? DispatchClock.now : 0
-        // A chunk that starts in an earlier piece goes into `output`: its input isn't all in this piece.
+        let compressStarted = timings != nil ? MonotonicClock.now : 0
+        // A chunk that starts in an earlier piece (the bridge's) goes into `output`: its input isn't all in this piece.
+        // It's gathered into the chunk buffer first: the bridged pieces' tails (never overwritten), then this piece's
+        // start. The bridge is read here only, before any wait, so each piece's address is used as it's found.
         if chunk < endChunk, chunk * chunkSize < pieceStart {
-            // Unsafe: the output's start to `compress`. Safe: `head` is 0, and the output has far more than the chunk
-            // and one byte `compress` may write.
-            let count = unsafe compress(&core, chunk, into: out + head)
+            let start = chunk * chunkSize
+            let end = min(start + chunkSize, size)
+            for part in 0..<job.bridge.count {
+                let bridged = job.bridge[part]
+                let low = max(start, bridged.fileOffset), high = min(pieceStart, bridged.fileOffset + bridged.count)
+                guard low < high else { continue }
+                // Unsafe: the bridged piece's address. Safe: its `count` bytes (`pieceBase` checks), which the job holds
+                // a reference to until `run` releases it after this returns.
+                let base = try unsafe Self.pieceBase(context.source, bridged.contents, count: bridged.count)
+                // Unsafe: copies file bytes `low..<high` from the bridged piece into the chunk buffer. Safe: the range
+                // is within the piece's (`fileOffset..<fileOffset + count`, by `low` and `high`), whose bytes `base`
+                // addresses; in the buffer it's `low - start..<high - start`, within a chunk, since `start <= low` and
+                // `high <= pieceStart < start + chunkSize`.
+                unsafe (core.chunk.base + (low - start)).copyMemory(from: base + (low - bridged.fileOffset), byteCount: high - low)
+            }
+            // Unsafe: copies the chunk's rest, from this piece's start, into the chunk buffer. Safe: `end - pieceStart`
+            // bytes, within the piece (`end <= pieceEnd`); they end at `end - start`, at most a chunk.
+            unsafe (core.chunk.base + (pieceStart - start)).copyMemory(from: data, byteCount: end - pieceStart)
+            // Unsafe: the chunk buffer and the output's start to `compress`. Safe: the chunk's `end - start` bytes
+            // gathered above (the bridge's pieces cover `start..<pieceStart`: the planner's rule); `head` is 0, and the
+            // output has far more than the chunk and one byte `compress` may write.
+            let count = unsafe core.encoders.compress(core.chunk.base, count: end - start, into: out + head, policy: policy)
             record(&core, count)
             head += count
             chunk += 1
@@ -695,7 +685,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
         }
         timings?.add(.compress, since: compressStarted)
 
-        let turnStarted = timings != nil ? DispatchClock.now : 0
+        let turnStarted = timings != nil ? MonotonicClock.now : 0
         guard let pieceForkStart = await state.waitForTurn(job.piece) else {
             throw .invalidMetadata("an earlier piece of the file failed, \(state.pathRef.string)")
         }
@@ -778,7 +768,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
     /// The last piece is written (or the file failed): finish it, close it, and free its slot.
     nonisolated(nonsending) private mutating func finishLargeFile(_ index: Int) async {
         let state = context.largeFiles[index]
-        let started = timings != nil ? DispatchClock.now : 0
+        let started = timings != nil ? MonotonicClock.now : 0
         await context.fileSystem.acquire()
         let (failed, forkOffset) = state.progress
         var ok = !failed && !context.isStopped

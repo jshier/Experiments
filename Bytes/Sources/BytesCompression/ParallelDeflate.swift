@@ -211,7 +211,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
         /// Whether the last chunk ends the stream (otherwise every chunk ends with a sync flush).
         let finishing: Bool
 
-        var initialChecksum: UInt32 { format == .zlib ? 1 : 0 }
+        var initialChecksum: UInt32 { format.initialChecksum }
 
         /// Chunk `index`'s range of the buffer.
         @inline(__always)
@@ -264,57 +264,15 @@ public struct ParallelDeflateEncoder: ~Copyable {
         output.append(copying: bytes)
     }
 
-    /// The container's header: nothing for raw DEFLATE.
-    static func header(_ format: DeflateFormat, level: Int) -> (bytes: InlineArray<16, UInt8>, count: Int) {
-        var bytes = InlineArray<16, UInt8>(repeating: 0)
-        switch format {
-        case .raw:
-            return (bytes, 0)
-        case .zlib:
-            let header = ZlibHeader.header(level: level)
-            bytes[0] = UInt8(header >> 8)
-            bytes[1] = UInt8(header & 0xFF)
-            return (bytes, 2)
-        case .gzip:
-            // Magic, DEFLATE, no flags, no time, extra flags (2 slowest, 4 fastest), unknown OS.
-            let header: InlineArray<10, UInt8> = [0x1F, 0x8B, 8, 0, 0, 0, 0, 0, level >= 8 ? 2 : level <= 1 ? 4 : 0, 255]
-            for index in 0..<10 {
-                bytes[index] = header[index]
-            }
-            return (bytes, 10)
-        }
-    }
-
-    /// The container's trailer: the checksum (and for gzip, the length modulo 2^32).
-    static func trailer(_ format: DeflateFormat, checksum: UInt32, length: Int) -> (bytes: InlineArray<16, UInt8>, count: Int) {
-        var bytes = InlineArray<16, UInt8>(repeating: 0)
-        switch format {
-        case .raw:
-            return (bytes, 0)
-        case .zlib:
-            for index in 0..<4 {
-                bytes[index] = UInt8(truncatingIfNeeded: checksum &>> (24 &- 8 &* index))
-            }
-            return (bytes, 4)
-        case .gzip:
-            let length = UInt32(truncatingIfNeeded: length)
-            for index in 0..<4 {
-                bytes[index] = UInt8(truncatingIfNeeded: checksum &>> (8 &* index))
-                bytes[4 &+ index] = UInt8(truncatingIfNeeded: length &>> (8 &* index))
-            }
-            return (bytes, 8)
-        }
-    }
-
-    /// Writes the container's header.
+    /// Writes the container's header (``DeflateFormat/header(level:)``).
     static func write(header format: DeflateFormat, level: Int, into output: inout OutputRawSpan) throws(BytesError) {
-        let header = header(format, level: level)
+        let header = format.header(level: level)
         try append(header.bytes.span.bytes.extracting(0..<header.count), to: &output)
     }
 
-    /// Writes the container's trailer.
+    /// Writes the container's trailer (``DeflateFormat/trailer(checksum:length:)``), the length modulo 2^32.
     static func write(trailer format: DeflateFormat, checksum: UInt32, length: Int, into output: inout OutputRawSpan) throws(BytesError) {
-        let trailer = trailer(format, checksum: checksum, length: length)
+        let trailer = format.trailer(checksum: checksum, length: UInt32(truncatingIfNeeded: length))
         try append(trailer.bytes.span.bytes.extracting(0..<trailer.count), to: &output)
     }
 
@@ -337,8 +295,8 @@ public struct ParallelDeflateEncoder: ~Copyable {
         }
         if !started {
             started = true
-            streamChecksum = format == .zlib ? 1 : 0
-            (small, smallEnd) = Self.header(format, level: level)
+            streamChecksum = format.initialChecksum
+            (small, smallEnd) = format.header(level: level)
             smallStart = 0
         }
         var consumed = 0
@@ -412,12 +370,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
         for j in 0..<job.chunkCount {
             // Unsafe: reads lane `j`. Safe: the round is over.
             let laneChecksum = unsafe lanes.buffer[j].checksum
-            let length = job.chunk(j).count
-            switch format {
-            case .raw: break
-            case .zlib: streamChecksum = Adler32.combine(streamChecksum, laneChecksum, secondLength: length)
-            case .gzip: streamChecksum = CRC32.combine(streamChecksum, laneChecksum, secondLength: length)
-            }
+            streamChecksum = format.combine(streamChecksum, laneChecksum, secondLength: job.chunk(j).count)
         }
         streamLength &+= pending
         deliveryLane = 0
@@ -452,7 +405,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
             if trailerQueued {
                 trailerQueued = false
                 trailerStaged = true
-                (small, smallEnd) = Self.trailer(format, checksum: streamChecksum, length: streamLength)
+                (small, smallEnd) = format.trailer(checksum: streamChecksum, length: UInt32(truncatingIfNeeded: streamLength))
                 smallStart = 0
                 continue
             }
@@ -538,12 +491,7 @@ struct DeflateLane: ~Copyable, ChunkLane {
         } else {
             compressor.writeSyncMarker()
         }
-        let bytes = input.extracting(chunk)
-        switch job.format {
-        case .raw: checksum = 0
-        case .zlib: checksum = Adler32.checksum(bytes)
-        case .gzip: checksum = CRC32.checksum(bytes)
-        }
+        checksum = job.format.checksum(input.extracting(chunk))
     }
 }
 

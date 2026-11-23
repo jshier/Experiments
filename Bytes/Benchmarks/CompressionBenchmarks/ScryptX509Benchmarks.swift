@@ -98,15 +98,7 @@ func registerScryptBenchmarks() {
 
 /// A system root certificate as PEM, from `security`.
 func systemRootCertificatePEM(named name: String) -> [UInt8] {
-    let process = Process()
-    process.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-    process.arguments = ["find-certificate", "-c", name, "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"]
-    let pipe = Pipe()
-    process.standardOutput = pipe
-    try! process.run()
-    let pem = pipe.fileHandleForReading.readDataToEndOfFile()
-    process.waitUntilExit()
-    return [UInt8](pem)
+    try! ExternalTool.output("/usr/bin/security", ["find-certificate", "-c", name, "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"])
 }
 
 /// A system root certificate's DER, from `security`.

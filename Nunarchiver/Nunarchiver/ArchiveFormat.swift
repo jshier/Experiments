@@ -89,18 +89,17 @@ enum OpenedArchive: Sendable {
     case appleArchive(AppleArchiveFile)
     case xip(XIPArchive)
 
-    /// Extracts into the staging directory with the format's adapter. `quarantine` is the archive's, for the formats
-    /// whose entries get it (not a `.xip`'s).
-    func extract(into staging: Destination, quarantine: Quarantine?, progress: ExtractionProgress) async throws {
+    /// Extracts into the staging directory: everything gets the staging directory's quarantine (its options').
+    func extract(into staging: Destination, progress: ExtractionProgress) async throws {
         switch self {
         case let .zip(zip, password):
-            try await ZipAdapter.extract(zip, password: password, into: staging, quarantine: quarantine, progress: progress)
+            try await ZipAdapter.extract(zip, password: password, into: staging, progress: progress)
         case .appleEncryptedArchive(let archive):
-            try await AppleArchiveAdapter.extract(archive, into: staging, progress: progress)
+            try await archive.extract(into: staging, options: AppleArchiveAdapter.options(progress: progress))
         case .appleArchive(let archive):
-            try await AppleArchiveAdapter.extract(archive, into: staging, progress: progress)
+            try await archive.extract(into: staging, options: AppleArchiveAdapter.options(progress: progress))
         case .xip(let archive):
-            try await AppleArchiveAdapter.extract(archive, into: staging, progress: progress)
+            try await archive.extract(into: staging, options: AppleArchiveAdapter.options(progress: progress))
         }
     }
 }

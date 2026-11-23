@@ -73,39 +73,15 @@ enum AppleArchiveAdapter {
         }
     }
 
-    static func extract(_ archive: AEAArchive, into staging: Destination, progress: ExtractionProgress) async throws {
-        try await archive.extract(to: staging.path, options: options(progress: progress))
-    }
-
-    static func extract(_ archive: AppleArchiveFile, into staging: Destination, progress: ExtractionProgress) async throws {
-        try await archive.extract(to: staging.path, options: options(progress: progress))
-    }
-
-    static func extract(_ archive: XIPArchive, into staging: Destination, progress: ExtractionProgress) async throws {
-        try await archive.extract(to: staging.path, options: options(progress: progress))
-    }
-
-    /// The options every Apple format is extracted with.
-    private static func options(progress: ExtractionProgress) -> AEAExtractionOptions {
+    /// The options every Apple format is extracted with. What everything extracted is quarantined with is the staging
+    /// directory's (its options', which NativeAEA's `extract(into:)` takes).
+    static func options(progress: ExtractionProgress) -> AEAExtractionOptions {
         var options = AEAExtractionOptions()
-        // `aa extract`'s quarantine: the archive's attribute on everything extracted (NativeAEA copies none for a
-        // `.xip`, as `xip --expand`).
-        options.copyQuarantine = true
         options.progress = progress
         // Archive Utility's: the folder it makes has the archive's root entry's mode and times, and a `.xip`'s
         // directories the times recorded for them.
         options.restoresDestinationMetadata = true
         options.restoresXIPDirectoryTimes = true
         return options
-    }
-
-    static func isCancellation(_ error: any Error) -> Bool {
-        (error as? AEAError) == .cancelled
-    }
-
-    static func message(_ error: any Error) -> String? {
-        guard let error = error as? AEAError else { return nil }
-        let description = error.description
-        return description.prefix(1).uppercased() + description.dropFirst() + "."
     }
 }

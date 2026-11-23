@@ -41,7 +41,7 @@ import Testing
     /// one more) and partial block is hashed.
     @Test func matchesCryptoKitAtEveryLength() {
         var rng = SplitMix64(seed: 512)
-        let bytes = randomBytes(300, using: &rng)
+        let bytes = rng.bytes(300)
         for length in 0...300 {
             let message = Array(bytes.prefix(length))
             #expect(digest(BytesCrypto.SHA512.self, message) == Array(CryptoKit.SHA512.hash(data: message)), "SHA-512, \(length) bytes")
@@ -51,7 +51,7 @@ import Testing
 
     @Test func matchesCryptoKitOnALargeMessageInPieces() {
         var rng = SplitMix64(seed: 513)
-        let bytes = randomBytes((1 << 20) + 77, using: &rng)
+        let bytes = rng.bytes((1 << 20) + 77)
         let sha512 = Array(CryptoKit.SHA512.hash(data: bytes))
         let sha384 = Array(CryptoKit.SHA384.hash(data: bytes))
         for splits in [[], [1], [127, 128 * 1000 + 3], [bytes.count / 2], [bytes.count - 1]] {
@@ -64,7 +64,7 @@ import Testing
     /// blocks at once and one at a time.
     @Test func blockFunctionsMatch() {
         var rng = SplitMix64(seed: 514)
-        let blocks = randomBytes(128 * 33, using: &rng)
+        let blocks = rng.bytes(128 * 33)
         var used = BytesCrypto.SHA512().core.state, portable = used
         SHA512Core.compress(&used, blocks: blocks.span.bytes)
         SHA512Core.compressPortably(&portable, blocks: blocks.span.bytes)
@@ -81,8 +81,8 @@ import Testing
     @Test(arguments: [0, 1, 64, 127, 128, 129, 300])
     func hmacSHA512MatchesCryptoKit(keyLength: Int) {
         var rng = SplitMix64(seed: UInt64(keyLength) &+ 515)
-        let key = randomBytes(keyLength, using: &rng)
-        let message = randomBytes(1000, using: &rng)
+        let key = rng.bytes(keyLength)
+        let message = rng.bytes(1000)
         var mac = BytesCrypto.HMAC<BytesCrypto.SHA512>(key: key.span.bytes)
         mac.update(message.span.bytes)
         #expect(mac.finalize() == Array(CryptoKit.HMAC<CryptoKit.SHA512>.authenticationCode(for: message, using: SymmetricKey(data: key))))

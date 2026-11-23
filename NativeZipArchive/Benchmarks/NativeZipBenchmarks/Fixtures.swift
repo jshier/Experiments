@@ -1,3 +1,4 @@
+import Bytes
 import BytesTestSupport
 import Foundation
 @_spi(Benchmarking) import NativeZip
@@ -32,6 +33,53 @@ enum Fixtures {
 
     /// The 32 MB text compressed with `method` (made by ``prepareMethod(_:)``, on first use).
     static func methodArchive(_ method: Method) -> URL { root.appending(path: "text-\(method.rawValue).zip") }
+
+    /// The 32 MB text encrypted with the password ``password``, each way in an archive of its own
+    /// (``encryptedArchive(_:)``).
+    enum Encryption: String, CaseIterable, Sendable {
+        /// ZipCrypto (the traditional cipher), deflated: Info-ZIP's `zip -P`.
+        case zipCrypto
+        /// ZipCrypto, stored (`zip -0 -P`): decryption and the CRC-32 alone.
+        case zipCryptoStored
+        /// WinZip AES-256, deflated: `bsdtar`'s.
+        case aes256
+
+        /// The row's name.
+        var label: String {
+            switch self {
+            case .zipCrypto: "Inflate + CRC 32 MB text: ZipCrypto"
+            case .zipCryptoStored: "Decrypt + CRC 32 MB text: ZipCrypto, stored"
+            case .aes256: "Inflate + CRC 32 MB text: AES-256"
+            }
+        }
+    }
+
+    /// The encrypted archives' password.
+    static let password = "benchmark-secret"
+
+    /// The 32 MB text encrypted as `encryption` says (made by ``prepareEncrypted(_:)``, on first use).
+    static func encryptedArchive(_ encryption: Encryption) -> URL { root.appending(path: "text-\(encryption.rawValue).zip") }
+
+    /// Makes `encryption`'s archive of the 32 MB text if it isn't there yet (about a second; then cached), from the text
+    /// ``prepare()`` left in `source/text`: macOS's `zip` for ZipCrypto, its `bsdtar` for AES.
+    static func prepareEncrypted(_ encryption: Encryption) throws {
+        try prepare()
+        let archive = encryptedArchive(encryption)
+        if FileManager.default.fileExists(atPath: archive.path) { return }
+        let partial = root.appending(path: "partial-\(encryption.rawValue).zip")
+        try? FileManager.default.removeItem(at: partial)
+        let directory = root.appending(path: "source/text")
+        switch encryption {
+        case .zipCrypto:
+            try ExternalTool.run("/usr/bin/zip", ["-q", "-P", password, partial.path, "big.txt"], in: directory)
+        case .zipCryptoStored:
+            try ExternalTool.run("/usr/bin/zip", ["-q", "-0", "-P", password, partial.path, "big.txt"], in: directory)
+        case .aes256:
+            try ExternalTool.run("/usr/bin/bsdtar", ["--format", "zip", "--options", "zip:encryption=aes256", "--passphrase", password,
+                                                    "-cf", partial.path, "big.txt"], in: directory)
+        }
+        try FileManager.default.moveItem(at: partial, to: archive)
+    }
 
     /// 20,000 text files of 1–8 KB in 200 directories: RESULTS.md's step15 small-file job.
     static var smallFiles20k: URL { root.appending(path: "small-20k.zip") }
@@ -176,18 +224,21 @@ enum Fixtures {
     private static func patchHeaders(of archive: URL, method: UInt16, flags: UInt16 = 0, crc: UInt32? = nil, size: UInt32? = nil) throws {
         var raw = try [UInt8](Data(contentsOf: archive))
         func load16(_ offset: Int) -> UInt16 { UInt16(raw[offset]) | UInt16(raw[offset + 1]) << 8 }
-        func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
-            withUnsafeBytes(of: value.littleEndian) { raw.replaceSubrange(offset..<(offset + $0.count), with: $0) }
+        func store<T: ByteGroup>(_ value: T.Integer, as _: T.Type, at offset: Int) {
+            T(value, .littleEndian).withBytes { bytes in
+                var span = raw.mutableSpan
+                span.copyBytes(from: bytes, toByteOffset: offset)
+            }
         }
         let central = (0..<(raw.count - 4)).last { raw[$0] == 0x50 && raw[$0 + 1] == 0x4B && raw[$0 + 2] == 1 && raw[$0 + 3] == 2 }!
         let local = Int(raw[central + 42]) | Int(raw[central + 43]) << 8 | Int(raw[central + 44]) << 16 | Int(raw[central + 45]) << 24
         precondition(raw[local] == 0x50 && raw[local + 1] == 0x4B && raw[local + 2] == 3 && raw[local + 3] == 4)
         // Local header: flags at 6, method at 8, CRC at 14, uncompressed size at 22. Central header: 8, 10, 16, 24.
         for (base, flagsOffset, methodOffset, crcOffset, sizeOffset) in [(local, 6, 8, 14, 22), (central, 8, 10, 16, 24)] {
-            store(load16(base + flagsOffset) | flags, at: base + flagsOffset)
-            store(method, at: base + methodOffset)
-            if let crc { store(crc, at: base + crcOffset) }
-            if let size { store(size, at: base + sizeOffset) }
+            store(load16(base + flagsOffset) | flags, as: Byte2.self, at: base + flagsOffset)
+            store(method, as: Byte2.self, at: base + methodOffset)
+            if let crc { store(crc, as: Byte4.self, at: base + crcOffset) }
+            if let size { store(size, as: Byte4.self, at: base + sizeOffset) }
         }
         try Data(raw).write(to: archive)
     }
@@ -315,15 +366,18 @@ enum Fixtures {
         try ExternalTool.run("/usr/bin/zip", ["-q0r", archive.path, directory], in: work)
         var raw = try [UInt8](Data(contentsOf: archive))
         let crc = original.withUnsafeBytes { UInt32(crc32(0, $0.baseAddress!.assumingMemoryBound(to: Bytef.self), uInt($0.count))) }
-        func store<T: FixedWidthInteger>(_ value: T, at offset: Int) {
-            withUnsafeBytes(of: value.littleEndian) { raw.replaceSubrange(offset..<(offset + $0.count), with: $0) }
+        func store<T: ByteGroup>(_ value: T.Integer, as _: T.Type, at offset: Int) {
+            T(value, .littleEndian).withBytes { bytes in
+                var span = raw.mutableSpan
+                span.copyBytes(from: bytes, toByteOffset: offset)
+            }
         }
         // Local header: method at 8, CRC at 14, uncompressed size at 22. Central header: 10, 16, 24.
         let central = (0..<(raw.count - 4)).last { raw[$0] == 0x50 && raw[$0 + 1] == 0x4B && raw[$0 + 2] == 1 && raw[$0 + 3] == 2 }!
         for (base, method, crcOffset, size) in [(0, 8, 14, 22), (central, 10, 16, 24)] {
-            store(UInt16(93), at: base + method)
-            store(crc, at: base + crcOffset)
-            store(UInt32(original.count), at: base + size)
+            store(93, as: Byte2.self, at: base + method)
+            store(crc, as: Byte4.self, at: base + crcOffset)
+            store(UInt32(original.count), as: Byte4.self, at: base + size)
         }
         try Data(raw).write(to: archive)
     }

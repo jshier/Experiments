@@ -56,6 +56,37 @@ import Testing
         #expect(lebOffset == 3)
     }
 
+    /// Lengths that count their own prefix: the prefix's bytes come off; a length shorter than the prefix is
+    /// `invalidValue`, and one past the end `insufficientData`, both consuming nothing.
+    @Test func prefixedLengthsIncludingThePrefix() throws {
+        // Entries as in an Apple Archive's extended attributes: a little-endian 32-bit size counting itself.
+        let data: [UInt8] = [7, 0, 0, 0, 0xAA, 0xBB, 0xCC, 4, 0, 0, 0, 3, 0, 0, 0, 0xFF]
+        var reader = AlignedBytesReader(data.span)
+        let first = try reader.read(bytesPrefixedBy: Byte4.self, .littleEndian, includingPrefix: true)
+        #expect([UInt8](copying: first) == [0xAA, 0xBB, 0xCC])
+        let empty = try reader.read(sectionPrefixedBy: Byte4.self, .littleEndian, includingPrefix: true)
+        let emptyIsAtEnd = empty.isAtEnd
+        #expect(emptyIsAtEnd)
+        #expect(throws: BytesError.invalidValue) {
+            _ = try reader.read(bytesPrefixedBy: Byte4.self, .littleEndian, includingPrefix: true)
+        }
+        #expect(throws: BytesError.invalidValue) {
+            _ = try reader.read(sectionPrefixedBy: Byte4.self, .littleEndian, includingPrefix: true)
+        }
+        let offset = reader.byteOffset
+        #expect(offset == 11)
+        // Without the option, the same length (3) asks for more than remains.
+        #expect(throws: BytesError.insufficientData) { _ = try reader.read(bytesPrefixedBy: Byte4.self, .littleEndian) }
+        // Exactly the prefix and the bytes it counts, to the end; then a count one past the end.
+        let exact: [UInt8] = [0x00, 0x04, 0x61, 0x62, 0x00, 0x05, 0x63, 0x64]
+        var big = BigEndianBytesReader(exact.span)
+        var section = try big.read(sectionPrefixedBy: Byte2.self, includingPrefix: true)
+        #expect(try section.read(Byte2.self) == 0x61_62)
+        #expect(throws: BytesError.insufficientData) { _ = try big.read(bytesPrefixedBy: Byte2.self, includingPrefix: true) }
+        let bigOffset = big.byteOffset
+        #expect(bigOffset == 4)
+    }
+
     @Test func sectionsIfComplete() throws {
         // A zip-like extra field block: id, size, data; the last one truncated.
         let data: [UInt8] = [0x55, 0x54, 0x02, 0x00, 0x07, 0x08, 0x01, 0x00, 0x09, 0x00, 0xFF]

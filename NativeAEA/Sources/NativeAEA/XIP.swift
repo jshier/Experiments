@@ -1,6 +1,7 @@
 import Bytes
 import BytesCompression
 import BytesCrypto
+import Disk
 import Foundation
 import System
 
@@ -67,7 +68,8 @@ public final class XIPArchive: Sendable {
     public let signatureStyle: String?
     /// The content stream's size (stored, which for `Content` is also its size: pbzx compresses within).
     public let contentSize: Int
-    let descriptor: FileDescriptor
+    /// The archive file, open for reading (Disk's `InputFile`).
+    let file: InputFile
     let contentStart: Int
     /// SHA-1 of the content stream as stored, from the TOC, if it gives one.
     let contentChecksum: [UInt8]?
@@ -77,19 +79,13 @@ public final class XIPArchive: Sendable {
     let tocCompressed: [UInt8]
 
     public init(path: FilePath, signature check: XIPSignatureCheck = .certificateChain) throws(AEAError) {
-        let descriptor: FileDescriptor
-        do {
-            descriptor = try FileDescriptor.open(path, .readOnly, options: [.closeOnExec])
-        } catch {
-            throw .fileSystem("open \(path)", error as? Errno ?? .ioError)
-        }
-        self.descriptor = descriptor
+        let file = try AEAArchive.open(path)
+        self.file = file
         self.path = path
-        do throws(AEAError) {
-            let fileSize = try AEAArchive.fileSize(descriptor)
+        do {
+            let fileSize = file.count
             guard fileSize >= XAR.fixedHeaderSize else { throw AEAError.invalidArchive("not a XAR archive (too short)") }
-            var head = [UInt8](repeating: 0, count: XAR.fixedHeaderSize)
-            try AEAArchive.read(descriptor, at: 0, into: &head)
+            let head = try AEAArchive.read(file, at: 0, count: XAR.fixedHeaderSize)
             var reader = AlignedBytesReader(head.span.bytes)
             let header: XARHeaderRecord
             do throws(BytesError) {
@@ -105,8 +101,7 @@ public final class XIPArchive: Sendable {
                   header.tocSize > 0, header.tocSize <= 64 << 20 else {
                 throw AEAError.invalidArchive("XAR TOC sizes \(header.tocCompressedSize)/\(header.tocSize)")
             }
-            var compressed = [UInt8](repeating: 0, count: header.tocCompressedSize)
-            try AEAArchive.read(descriptor, at: header.headerSize, into: &compressed)
+            let compressed = try AEAArchive.read(file, at: header.headerSize, count: header.tocCompressedSize)
             tocCompressed = compressed
             var xml = [UInt8](repeating: 0, count: header.tocSize)
             do throws(BytesError) {
@@ -125,11 +120,10 @@ public final class XIPArchive: Sendable {
 
             // The TOC's checksum, in the heap, over the compressed TOC.
             guard let checksum = toc.checksum else { throw AEAError.invalidArchive("the XAR TOC has no checksum") }
-            var stored = [UInt8](repeating: 0, count: checksum.size)
-            guard checksum.offset >= 0, checksum.size <= 64, heapStart + checksum.offset + checksum.size <= fileSize else {
+            guard checksum.offset >= 0, checksum.size >= 0, checksum.size <= 64, heapStart + checksum.offset + checksum.size <= fileSize else {
                 throw AEAError.invalidArchive("the XAR TOC checksum's place")
             }
-            try AEAArchive.read(descriptor, at: heapStart + checksum.offset, into: &stored)
+            let stored = try AEAArchive.read(file, at: heapStart + checksum.offset, count: checksum.size)
             guard let computed = Self.digest(checksum.style, compressed.span.bytes), computed.count == stored.count,
                   constantTimeEquals(computed.span.bytes, stored.span.bytes) else {
                 throw AEAError.authenticationFailed("the XAR TOC checksum (\(checksum.style))")
@@ -137,7 +131,7 @@ public final class XIPArchive: Sendable {
             certificates = toc.signature?.certificates ?? []
             signatureStyle = toc.signature?.style
             (signer, isSignatureTrusted) = try Self.verifySignature(
-                toc, check, checksum: stored, checksumStyle: checksum.style, descriptor: descriptor, heapStart: heapStart, fileSize: fileSize
+                toc, check, checksum: stored, checksumStyle: checksum.style, file: file, heapStart: heapStart, fileSize: fileSize
             )
 
             // The content: an unencoded member file holding a pbzx stream.
@@ -153,25 +147,17 @@ public final class XIPArchive: Sendable {
                 throw AEAError.invalidArchive("the xip's Content is outside the file")
             }
             contentChecksum = content.archivedChecksum.flatMap { $0.style == "sha1" ? (try? [UInt8](hexadecimal: $0.hex)) : nil }
-            var pbz = [UInt8](repeating: 0, count: PBZ.headerSize)
-            try AEAArchive.read(descriptor, at: contentStart, into: &pbz)
+            let pbz = try AEAArchive.read(file, at: contentStart, count: PBZ.headerSize)
             guard pbz.withUnsafeBytes({ unsafe PBZ.compression($0) }) == .lzma else { // "pbzx": the bytes are local: safe.
                 throw AEAError.invalidArchive("the xip's Content isn't a pbzx stream")
             }
             blockSize = try PBZ.blockSize(pbz.span.bytes)
             if let member = toc.files.first(where: { $0.name == "Metadata" }) {
-                metadata = try Self.readMetadata(member, descriptor: descriptor, heapStart: header.headerSize + header.tocCompressedSize, fileSize: fileSize)
+                metadata = try Self.readMetadata(member, file: file, heapStart: header.headerSize + header.tocCompressedSize, fileSize: fileSize)
             } else {
                 metadata = nil
             }
-        } catch {
-            try? descriptor.close()
-            throw error
         }
-    }
-
-    deinit {
-        try? descriptor.close()
     }
 
     /// Checks the signature (in the heap) over the TOC's checksum as `check` asks; returns the signer's name and whether
@@ -181,7 +167,7 @@ public final class XIPArchive: Sendable {
     /// TOC isn't hashed again.
     private static func verifySignature(
         _ toc: XARTableOfContents, _ check: XIPSignatureCheck, checksum: [UInt8], checksumStyle: String,
-        descriptor: FileDescriptor, heapStart: Int, fileSize: Int
+        file: InputFile, heapStart: Int, fileSize: Int
     ) throws(AEAError) -> (String?, Bool) {
         let anchors: [[UInt8]]?
         switch check {
@@ -197,8 +183,7 @@ public final class XIPArchive: Sendable {
         guard signature.offset >= 0, signature.size > 0, signature.size <= 512, heapStart + signature.offset + signature.size <= fileSize else {
             throw .invalidArchive("the XAR signature's place")
         }
-        var bytes = [UInt8](repeating: 0, count: signature.size)
-        try AEAArchive.read(descriptor, at: heapStart + signature.offset, into: &bytes)
+        let bytes = try AEAArchive.read(file, at: heapStart + signature.offset, count: signature.size)
         let algorithm: RSA.DigestAlgorithm
         switch checksumStyle {
         case "sha1": algorithm = .sha1
@@ -227,13 +212,12 @@ public final class XIPArchive: Sendable {
 
     /// Reads `Metadata` (at most 1 MiB, stored or decoded): checks its stored bytes' checksum, decodes it (bzip2, or
     /// stored as is), and checks the decoded bytes' checksum.
-    private static func readMetadata(_ member: XARFile, descriptor: FileDescriptor, heapStart: Int, fileSize: Int) throws(AEAError) -> XIPMetadata {
+    private static func readMetadata(_ member: XARFile, file: InputFile, heapStart: Int, fileSize: Int) throws(AEAError) -> XIPMetadata {
         guard member.offset >= 0, member.length > 0, member.length <= 1 << 20, member.size > 0, member.size <= 1 << 20,
               heapStart + member.offset + member.length <= fileSize else {
             throw .invalidArchive("the xip's Metadata place or size")
         }
-        var stored = [UInt8](repeating: 0, count: member.length)
-        try AEAArchive.read(descriptor, at: heapStart + member.offset, into: &stored)
+        let stored = try AEAArchive.read(file, at: heapStart + member.offset, count: member.length)
         try checkMember(stored, member.archivedChecksum, "the xip's Metadata as stored")
         let decoded: [UInt8]
         switch member.encoding {
@@ -271,8 +255,8 @@ public final class XIPArchive: Sendable {
     /// The digest `style` names of `bytes`, or `nil` for one this doesn't compute.
     static func digest(_ style: String, _ bytes: RawSpan) -> [UInt8]? {
         switch style {
-        case "sha1": SHA1.hash(bytes).span.withUnsafeBytes { unsafe Array($0) } // A local digest, copied: safe.
-        case "sha256": SHA256.hash(bytes).span.withUnsafeBytes { unsafe Array($0) } // Same.
+        case "sha1": [UInt8](copying: SHA1.hash(bytes).span.bytes)
+        case "sha256": [UInt8](copying: SHA256.hash(bytes).span.bytes)
         default: nil
         }
     }
@@ -281,8 +265,8 @@ public final class XIPArchive: Sendable {
     /// file.
     private func source(_ options: AEAReadOptions, heldBeyondDecoding held: Int) -> BlockStream {
         BlockStream(
-            .file(descriptor, start: contentStart, end: contentStart + contentSize), layout: .pbz(.lzma, blockSize: blockSize),
-            decoders: options.decodeThreads, extraBuffers: options.extraBuffers + held, backend: options.decoder
+            .file(file, start: contentStart, end: contentStart + contentSize), layout: .pbz(.lzma, blockSize: blockSize),
+            decoders: options.decodeThreads, extraBuffers: options.extraBuffers + held
         )
     }
 
@@ -297,12 +281,25 @@ public final class XIPArchive: Sendable {
     public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
         var options = options
         options.copyQuarantine = false
+        return try await extract(opened: Extractor.open(destination, options: options, archivePath: path, quarantinesDestination: false), options: options)
+    }
+
+    /// Extracts the archive into `destination`, a directory the caller opened; see ``AEAArchive/extract(into:options:)``.
+    /// What's extracted gets the destination's quarantine, if its options give one (`xip --expand` and Archive Utility
+    /// give a `.xip`'s contents none: leave it out).
+    @concurrent @discardableResult
+    public func extract(into destination: Destination, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
+        try await extract(opened: Extractor.reopen(destination, options: options), options: options)
+    }
+
+    /// The extraction into a destination opened with the options' policies, with the content's check beside it.
+    nonisolated(nonsending) private func extract(opened target: Destination, options: AEAExtractionOptions) async throws(AEAError) -> AEAStatistics {
         let check = options.read.verifyChecksums ? contentCheck() : nil
         // If the extraction throws, leaving the scope cancels the check (and waits for it).
         async let mismatch = check?.run()
         let statistics = try await Extractor.extract(
-            source(options.read, heldBeyondDecoding: options.writerThreads), format: .cpio, to: destination, options: options,
-            archivePath: path, quarantineDestination: false, expectedBytes: metadata?.uncompressedSize ?? contentSize
+            source(options.read, heldBeyondDecoding: options.writerThreads), format: .cpio, into: target, options: options,
+            expectedBytes: metadata?.uncompressedSize ?? contentSize
         )
         if let failure = await mismatch { throw failure }
         return statistics
@@ -333,14 +330,14 @@ public final class XIPArchive: Sendable {
     /// The check of the content as stored, if the TOC gives its SHA-1.
     private func contentCheck() -> ContentCheck? {
         guard let expected = contentChecksum else { return nil }
-        return ContentCheck(descriptor: descriptor, start: contentStart, count: contentSize, expected: expected)
+        return ContentCheck(file: file, start: contentStart, count: contentSize, expected: expected)
     }
 }
 
 /// SHA-1 of a range of a file: positioned reads of 4 MiB into one buffer, made once, run as a child task beside the
 /// decoding.
 struct ContentCheck: Sendable {
-    let descriptor: FileDescriptor
+    let file: InputFile
     let start: Int
     let count: Int
     let expected: [UInt8]
@@ -359,14 +356,15 @@ struct ContentCheck: Sendable {
             let piece = min(4 << 20, count - offset)
             // This task's buffer, `piece` bytes of it: safe.
             let bytes = unsafe UnsafeMutableRawBufferPointer(start: buffer.base, count: piece)
-            if case .failure(let error) = unsafe AEAArchive.readFully(descriptor, at: start + offset, into: bytes) { return error }
+            do throws(AEAError) {
+                try unsafe AEAArchive.readFully(file, at: start + offset, into: bytes)
+            } catch {
+                return error
+            }
             unsafe hash.update(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(bytes))) // Same buffer: safe.
             offset += piece
         }
         let digest = hash.finalize()
-        let matches = digest.span.withUnsafeBytes { computed in
-            expected.withUnsafeBytes { unsafe computed.count == $0.count && memcmp(computed.baseAddress!, $0.baseAddress!, computed.count) == 0 }
-        }
-        return matches ? nil : .authenticationFailed("the xip's Content SHA-1")
+        return digest.span.bytes.bytesEqual(expected.span.bytes) ? nil : .authenticationFailed("the xip's Content SHA-1")
     }
 }

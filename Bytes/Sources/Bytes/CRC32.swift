@@ -1,6 +1,8 @@
 #if HardwareCRC
 internal import CBytesCRC
 #endif
+// Internal, though `updateRegister` (inlinable) uses it: `Builtin` uses don't count toward an import's access.
+internal import Builtin
 
 /// The CRC-32 used by zip, gzip, PNG, and Ethernet (ISO-HDLC: polynomial 0x04C11DB7, reflected, initial
 /// and final value all ones), computed incrementally.
@@ -106,6 +108,29 @@ public struct CRC32: Hashable, Sendable {
             square = multiply(square, square)
         }
         return multiply(power, first) ^ second
+    }
+
+    /// The unconditioned register (a running CRC before its final complement, as zlib's byte-at-a-time
+    /// `crc_table[(c ^ b) & 0xFF] ^ (c >> 8)` and the CRC32 instructions keep it) after one more byte: one `crc32b`
+    /// on Apple silicon, a table lookup elsewhere. For code that runs a CRC a byte at a time inside other work, such
+    /// as ZipCrypto's key schedule; checksums of whole buffers are `update(_:)`'s.
+    ///
+    /// ```swift
+    /// key0 = CRC32.updateRegister(key0, byte: plain)   // ZipCrypto: crc32(key0, plain)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - register: The register so far: the complement of a checksum, or a cipher's key word.
+    ///   - byte: The next byte.
+    /// - Returns: The register after `byte`.
+    @inlinable @inline(__always)
+    public static func updateRegister(_ register: UInt32, byte: UInt8) -> UInt32 {
+        #if HardwareCRC && arch(arm64) && !Portable
+        UInt32(Builtin.int_aarch64_crc32b(register._value, UInt32(byte)._value))
+        #else
+        // Table 7 of the first set is the byte-at-a-time table (CRC32Tables.swift).
+        tables[7 &* 256 &+ Int(truncatingIfNeeded: (register ^ UInt32(byte)) & 0xFF)] ^ register &>> 8
+        #endif
     }
 
     /// `a·b` modulo the CRC polynomial, both bit-reflected (zlib's `multmodp`).

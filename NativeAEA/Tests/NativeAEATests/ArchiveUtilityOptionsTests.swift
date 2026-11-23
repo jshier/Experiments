@@ -1,4 +1,5 @@
 import BytesTestSupport
+import DiskTestSupport
 import Foundation
 @testable import NativeAEA
 import System
@@ -44,14 +45,14 @@ import Testing
         options.restoresXIPDirectoryTimes = restores
         let output = directory.path("out")
         try await XIPArchive(path: FilePath(url.path), signature: .none).extract(to: FilePath(output.path), options: options)
-        let metadata = try readMetadata(output)
+        let metadata = try readTree(output, including: .modification)
         // Directories holding files, a link, and hard links (made after the directory's contents): all of them.
         for path in ["Xcode.app", "Xcode.app/Contents"] {
-            #expect((metadata[path]?.modification.tv_sec == 1_700_000_000) == restores, "\(path)")
+            #expect((metadata[path]?.modification?.seconds == 1_700_000_000) == restores, "\(path)")
         }
         // Files' times either way; links never (as `xip --expand`, and Archive Utility).
-        #expect(metadata["Xcode.app/Contents/small"]?.modification.tv_sec == 1_700_000_123)
-        #expect(metadata["Xcode.app/Contents/link"]?.modification.tv_sec != 1_700_000_000)
+        #expect(metadata["Xcode.app/Contents/small"]?.modification?.seconds == 1_700_000_123)
+        #expect(metadata["Xcode.app/Contents/link"]?.modification?.seconds != 1_700_000_000)
     }
 
     @Test func readsTheProfileWithoutAKey() throws {

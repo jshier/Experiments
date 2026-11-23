@@ -5,10 +5,6 @@ import CryptoKit
 import Foundation
 import Testing
 
-func randomBytes(_ count: Int, using rng: inout SplitMix64) -> [UInt8] {
-    rng.bytes(count)
-}
-
 /// Seals with Bytes, in place: ciphertext and tag.
 func bytesSeal(_ plaintext: [UInt8], key: [UInt8], nonce: [UInt8], aad: [UInt8]) -> (ciphertext: [UInt8], tag: [UInt8]) {
     let aead = ChaCha20Poly1305(key: key.span.bytes)
@@ -24,10 +20,10 @@ func bytesSeal(_ plaintext: [UInt8], key: [UInt8], nonce: [UInt8], aad: [UInt8])
     @Test func matchesCryptoKit() throws {
         var rng = SplitMix64(seed: 11)
         for length in Array(0...600) + [1023, 1024, 1025, 4096, 65_537, 1 << 20] {
-            let key = randomBytes(32, using: &rng)
-            let nonce = randomBytes(12, using: &rng)
-            let aad = randomBytes(Int.random(in: 0...40, using: &rng), using: &rng)
-            let plaintext = randomBytes(length, using: &rng)
+            let key = rng.bytes(32)
+            let nonce = rng.bytes(12)
+            let aad = rng.bytes(Int.random(in: 0...40, using: &rng))
+            let plaintext = rng.bytes(length)
             let reference = try ChaChaPoly.seal(
                 Data(plaintext), using: SymmetricKey(data: key), nonce: ChaChaPoly.Nonce(data: nonce), authenticating: Data(aad)
             )
@@ -56,9 +52,9 @@ func bytesSeal(_ plaintext: [UInt8], key: [UInt8], nonce: [UInt8], aad: [UInt8])
     /// forged tags rejected.
     @Test func emptyPlaintextAndAAD() throws {
         var rng = SplitMix64(seed: 0xE0)
-        let key = randomBytes(32, using: &rng), nonce = randomBytes(12, using: &rng)
+        let key = rng.bytes(32), nonce = rng.bytes(12)
         let aead = ChaCha20Poly1305(key: key.span.bytes)
-        for (plaintext, aad) in [([UInt8](), [UInt8]()), ([], randomBytes(13, using: &rng)), (randomBytes(17, using: &rng), [])] {
+        for (plaintext, aad) in [([UInt8](), [UInt8]()), ([], rng.bytes(13)), (rng.bytes(17), [])] {
             let reference = try ChaChaPoly.seal(
                 Data(plaintext), using: SymmetricKey(data: key), nonce: ChaChaPoly.Nonce(data: nonce), authenticating: Data(aad)
             )

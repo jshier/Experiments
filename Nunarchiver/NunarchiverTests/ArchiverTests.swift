@@ -1,6 +1,7 @@
 import Clocks
 import ComposableArchitecture
 import ComposableArchitectureTestSupport
+import Disk
 import Foundation
 import Synchronization
 import Testing
@@ -797,11 +798,12 @@ struct CredentialTests {
         #expect(!ExpansionProgress(entries: 100, bytes: 1_000, fraction: nil).isFinishing)
     }
 
-    /// The fraction counts entries beside bytes (each entry as 64 KiB), so work that writes no bytes moves the bar.
+    /// The fraction counts entries beside bytes (each entry as 64 KiB), so work that writes no bytes moves the bar: Disk's
+    /// `ExtractionProgress.read()`, which the live expander reports.
     @Test func `the fraction weighs bytes and entries together`() {
-        let weight = ExpansionProgress.entryWeight
+        let weight = ExtractionProgress.defaultEntryWeight
         func fraction(_ entries: Int, of expectedEntries: Int, _ bytes: Int, of expectedBytes: Int) -> Double? {
-            ExpansionProgress.fraction(entries: entries, of: expectedEntries, bytes: bytes, of: expectedBytes)
+            ExtractionProgress.fraction(entries: entries, of: expectedEntries, bytes: bytes, of: expectedBytes)
         }
         // Neither total known: no fraction. One known: by that one.
         #expect(fraction(50, of: 0, 500, of: 0) == nil)

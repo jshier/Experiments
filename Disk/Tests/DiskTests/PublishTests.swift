@@ -1,6 +1,7 @@
 import BytesTestSupport
 import Darwin
 @testable import Disk
+import DiskTestSupport
 import Foundation
 import System
 import Testing
@@ -32,9 +33,9 @@ import Testing
         #expect(published == ["hello.txt", "hello 2.txt", "hello 3.txt"])
         // Nothing else is left: no folder, no staging directory.
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.url.path).sorted() == ["hello 2.txt", "hello 3.txt", "hello.txt"])
-        #expect(try item(directory.path("hello 3.txt")).contents == [2])
-        #expect(try item(directory.path("hello 3.txt")).mode == 0o640 & ~UInt16(getumask()))
-        #expect(extendedAttribute(directory.path("hello.txt"), "com.apple.quarantine") == Self.quarantine.value)
+        #expect(try readItem(at: directory.path("hello 3.txt")).contents == [2])
+        #expect(try readItem(at: directory.path("hello 3.txt")).mode == 0o640 & ~UInt16(getumask()))
+        #expect(extendedAttribute("com.apple.quarantine", of: directory.path("hello.txt")) == Self.quarantine.value)
     }
 
     /// A read-only directory can't be renamed into another parent (its `..` changes): it's lent the owner's write bit
@@ -68,10 +69,39 @@ import Testing
             let published = try staging.publishUnwrapped(as: directory.filePath("Archive"))
             #expect(published == directory.filePath(expected))
             #expect(stat(directory.path(expected)).map { $0.st_mode & 0o7777 } == 0o700)
-            #expect(extendedAttribute(directory.path(expected), "com.apple.quarantine") == Self.quarantine.value)
+            #expect(extendedAttribute("com.apple.quarantine", of: directory.path(expected)) == Self.quarantine.value)
             #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path(expected).path).sorted() == ["a.txt", "b.txt"])
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.url.path).sorted() == ["Archive", "Archive 2"])
+    }
+
+    /// A client's reopened destination writes into the staging directory with its own options, keeps its caller's
+    /// quarantine, and owns no staging: the caller publishes (or discards) what it wrote.
+    @Test func reopenedDestinationsWriteIntoTheStagingDirectory() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let staging = try staging(for: directory.filePath("Archive"))
+        var options = DestinationOptions()
+        options.existingItems = .replace
+        options.permissions = .exact
+        options.quarantine = staging.options.quarantine
+        let reopened = try staging.reopened(with: options)
+        #expect(reopened.path == staging.path && reopened.options == options)
+        var writer = FileWriter(reopened)
+        for round in 0..<2 {
+            // `.replace`: the second write replaces the first.
+            try withPath("a.txt") { try writer.writeFile($0, contents: ([UInt8(round)] as [UInt8]).span.bytes, metadata: EntryMetadata(mode: 0o604)) }
+        }
+        try withPath("b.txt") { try writer.writeFile($0, contents: ([2] as [UInt8]).span.bytes) }
+        // Not a staging destination: nothing to publish or discard.
+        #expect(throws: DiskError.refused("publish: not a staging destination")) { _ = try reopened.publish(as: directory.filePath("Other")) }
+        reopened.discard()
+        let published = try staging.publishUnwrapped(as: directory.filePath("Archive"))
+        #expect(published == directory.filePath("Archive"))
+        let item = try readItem(at: directory.path("Archive/a.txt"))
+        #expect(item.contents == [1] && item.mode == 0o604)
+        #expect(extendedAttribute("com.apple.quarantine", of: directory.path("Archive/b.txt")) == Self.quarantine.value)
+        #expect(extendedAttribute("com.apple.quarantine", of: directory.path("Archive")) == Self.quarantine.value)
     }
 
     /// An archive with nothing in it still makes its (empty) folder, and a plain destination can't be published.
@@ -126,17 +156,9 @@ import Testing
             try planner.addAccessControlList(blob.bytes.span.bytes, to: file)
         }
         for name in ["out/f", "out/d"] {
-            let read = try #require(aclText(directory.path(name)), "\(name)")
+            let read = try #require(accessControlListText(of: directory.path(name)), "\(name)")
             #expect(read.contains("everyone:12:deny:delete"), "\(name): \(read)")
             #expect(read.contains("root:0:allow,file_inherit:read,write"), "\(name): \(read)")
         }
-    }
-
-    private func aclText(_ url: URL) -> String? {
-        guard let acl = acl_get_link_np(url.path, ACL_TYPE_EXTENDED) else { return nil }
-        defer { acl_free(UnsafeMutableRawPointer(acl)) }
-        guard let text = acl_to_text(acl, nil) else { return nil }
-        defer { acl_free(text) }
-        return String(cString: text)
     }
 }

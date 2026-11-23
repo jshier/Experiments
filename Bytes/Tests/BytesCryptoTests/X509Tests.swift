@@ -12,11 +12,10 @@ import Testing
 // short or with bytes flipped, which must throw or parse, never trap.
 
 /// Homebrew's OpenSSL, else the system's LibreSSL.
-let opensslPath: String? = ["/opt/homebrew/bin/openssl", "/usr/local/bin/openssl", "/usr/bin/openssl"]
-    .first { FileManager.default.isExecutableFile(atPath: $0) }
+let opensslPath: String? = ExternalTool.locate("openssl")
 
 /// The system's root certificates as PEM, from `security`; nil if it isn't available.
-let systemRootsPEM: String? = run("/usr/bin/security", ["find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"])
+let systemRootsPEM: String? = (try? ExternalTool.output("/usr/bin/security", ["find-certificate", "-a", "-p", "/System/Library/Keychains/SystemRootCertificates.keychain"]))
     .map { String(decoding: $0, as: UTF8.self) }
 
 /// The certificate chain in an Apple Encrypted Archive's authentication data: Xcode's beta archive, when it's here.
@@ -98,7 +97,7 @@ struct GeneratedCertificates {
              "-extensions", "rsa", "-out", "rsa-root.pem"],
         ]
         for step in steps {
-            guard run(openssl, step, directory: directory) != nil else { return nil }
+            guard (try? ExternalTool.output(openssl, step, in: directory)) != nil else { return nil }
         }
         for name in ["root", "intermediate", "leaf", "rsa-leaf", "rsa-root"] {
             files[name] = directory.appendingPathComponent("\(name).pem")
@@ -130,9 +129,9 @@ struct OpenSSLFields {
         let file = scratch.appendingPathComponent("certificate-\(UUID().uuidString).pem")
         defer { try? FileManager.default.removeItem(at: file) }
         guard (try? pem.write(to: file, atomically: true, encoding: .utf8)) != nil,
-              let output = run(openssl, ["x509", "-in", file.path, "-noout", "-serial", "-startdate", "-enddate", "-subject", "-nameopt", "RFC2253,-esc_msb,utf8",
+              let output = try? ExternalTool.output(openssl, ["x509", "-in", file.path, "-noout", "-serial", "-startdate", "-enddate", "-subject", "-nameopt", "RFC2253,-esc_msb,utf8",
                                          "-text", "-certopt", "no_header,no_version,no_serial,no_issuer,no_validity,no_subject,no_sigdump,no_aux"]),
-              let key = run(openssl, ["x509", "-in", file.path, "-noout", "-pubkey"]) else { return nil }
+              let key = try? ExternalTool.output(openssl, ["x509", "-in", file.path, "-noout", "-pubkey"]) else { return nil }
         let text = String(decoding: output, as: UTF8.self)
         let lines = text.components(separatedBy: "\n")
         let formatter = DateFormatter()

@@ -1,21 +1,5 @@
+internal import BytesAsync
 import Foundation
-import Synchronization
-
-/// A lock-free work queue: workers claim the next index with an atomic increment.
-final class WorkQueue: Sendable {
-    private let next = Atomic<Int>(0)
-    let count: Int
-
-    init(count: Int) { self.count = count }
-
-    /// Claims the next unclaimed index.
-    ///
-    /// - Returns: The index, or `nil` once all `count` indexes are claimed.
-    func claim() -> Int? {
-        let index = next.wrappingAdd(1, ordering: .relaxed).oldValue
-        return index < count ? index : nil
-    }
-}
 
 extension ZipArchive {
     /// Runs `body` for every item using up to `maxConcurrency` child tasks, each with its own decoder.
@@ -52,12 +36,12 @@ extension ZipArchive {
         }
 
         let ordered = items.sorted { weight($0) > weight($1) }
-        let queue = WorkQueue(count: ordered.count)
+        let next = RelaxedCounter()
         try await withThrowingDiscardingTaskGroup { group in
             for _ in 0..<width {
                 group.addTask {
                     var decoder = ZipDecoder()
-                    while !Task.isCancelled, let index = queue.claim() {
+                    while !Task.isCancelled, let index = next.claim(below: ordered.count) {
                         try await body(ordered[index], &decoder)
                     }
                 }

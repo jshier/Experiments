@@ -1,4 +1,6 @@
 import ArgumentParser
+import Bytes
+import BytesAsync
 import Disk
 import Foundation
 import NativeAEA
@@ -71,9 +73,6 @@ struct NUnarchiver: AsyncParsableCommand {
     @Option(name: .long, help: "Decoded segments held beyond one per decoder and writer.")
     var extraBuffers = 8
 
-    @Option(name: .long, help: "Segment decoder.")
-    var decoder = SegmentDecoderBackend.bytes
-
     @Option(name: .long, help: "How segments are read: positioned reads or a mapping.")
     var input = SegmentInput.read
 
@@ -112,25 +111,25 @@ struct NUnarchiver: AsyncParsableCommand {
         // The main task runs at the default priority; the work runs in a child at `.userInitiated` (the user waits for
         // it), which its child tasks (decoders, writers) inherit: the QoS the pipeline's threads had.
         let command = self
-        try await withThrowingTaskGroup { group in
-            group.addTask(priority: .userInitiated) { try await command.work() }
-            try await group.waitForAll()
-        }
+        try await withPriority(.userInitiated) { try await command.work() }
     }
 
     private func work() async throws {
         // An Apple Archive file (`aa archive`'s output, plain or `pbz`), not in an AEA container.
-        let magic = (try? FileHandle(forReadingFrom: URL(fileURLWithPath: archive)).read(upToCount: 4)) ?? nil
-        if magic == Data("xar!".utf8) {
+        // Its first bytes (up to 4; none for an empty or unreadable file, which the AEA reader then reports).
+        let magic: [UInt8]? = (try? InputFile(FilePath(archive))).flatMap { file in
+            (try? file.read(at: 0, count: min(4, file.count))).flatMap { $0.isEmpty ? nil : $0 }
+        }
+        if magic == Array("xar!".utf8) {
             try await runXIP()
             return
         }
-        if let magic, magic != Data("AEA1".utf8) {
+        if let magic, magic != Array("AEA1".utf8) {
             try await runAppleArchive()
             return
         }
         let key: AEASigningKey = if let signPub {
-            try AEASigningKey.publicKey(contentsOf: URL(fileURLWithPath: signPub))
+            try AEASigningKey.publicKey(contentsOf: FilePath(signPub))
         } else {
             untrustedChain ? .untrustedCertificateChain : .certificateChain
         }
@@ -138,10 +137,11 @@ struct NUnarchiver: AsyncParsableCommand {
         let root = archive.rootHeader
         if info || verbose {
             let signer = archive.signer.map { "\($0.subject ?? "given key")\($0.isTrusted ? " (trusted)" : " (not evaluated)")" } ?? "none"
+            let identifier = archive.identifier
             print("""
             profile: \(archive.prologue.profile.name)
             signer: \(signer)
-            identifier: \(archive.identifier.map { ($0 < 16 ? "0" : "") + String($0, radix: 16) }.joined())
+            identifier: \(String(hexadecimal: identifier.span.bytes))
             raw size: \(root.rawSize), container size: \(root.containerSize)
             segments: \(archive.segments.count) of \(root.segmentSize) bytes, \(root.segmentsPerCluster) per cluster, \
             compression '\(Character(Unicode.Scalar(root.compression.rawValue)))', checksum \(root.checksum)
@@ -150,7 +150,6 @@ struct NUnarchiver: AsyncParsableCommand {
         if info { return }
         var read = AEAReadOptions()
         read.decodeThreads = decodeThreads
-        read.decoder = decoder
         read.input = input
         read.extraBuffers = extraBuffers
         read.verifyMACs = !noVerify
@@ -177,7 +176,6 @@ struct NUnarchiver: AsyncParsableCommand {
     private var readOptions: AEAReadOptions {
         var read = AEAReadOptions()
         read.decodeThreads = decodeThreads
-        read.decoder = decoder
         read.input = input
         read.extraBuffers = extraBuffers
         read.verifyChecksums = !noVerify
@@ -246,11 +244,14 @@ struct NUnarchiver: AsyncParsableCommand {
         options.progress = counters
         let reporter = Task {
             func show(_ end: String) {
-                let percent = counters.fractionCompleted.map { fraction in
+                // Bytes and entries together (each entry as 64 KiB), never going back: the fraction moves through a
+                // `.xip`'s hard links, which write no bytes.
+                let reading = counters.read()
+                let percent = reading.fraction.map { fraction in
                     let tenths = Int(fraction * 1_000)
                     return "\(tenths / 10).\(tenths % 10)%"
                 } ?? "?"
-                let line = "\r\(percent)  \(counters.entries) of \(counters.expectedEntries) entries, \(counters.bytes >> 20) of \(counters.expectedBytes >> 20) MiB\(end)"
+                let line = "\r\(percent)  \(reading.entries) of \(reading.expectedEntries) entries, \(reading.bytes >> 20) of \(reading.expectedBytes >> 20) MiB\(end)"
                 FileHandle.standardError.write(Data(line.utf8))
             }
             while !Task.isCancelled {
@@ -266,14 +267,18 @@ struct NUnarchiver: AsyncParsableCommand {
         return statistics
     }
 
+    /// The most bytes a key or password file is read for (Disk's `InputFile.contents(of:maximumCount:)`): keys and
+    /// PEMs are a few hundred bytes.
+    private static let keyFileLimit = 64 << 10
+
     /// The key an encrypted archive needs, from the options given.
     private func decryptionKey() async throws -> AEADecryptionKey? {
         if let key { return try AEADecryptionKey.symmetric(text: key) }
-        if let keyFile { return .symmetric(Array(try Data(contentsOf: URL(fileURLWithPath: keyFile)))) }
-        if let recipientPriv { return try AEADecryptionKey.recipientPrivateKey(contentsOf: URL(fileURLWithPath: recipientPriv)) }
+        if let keyFile { return .symmetric(try InputFile.contents(of: FilePath(keyFile), maximumCount: Self.keyFileLimit)) }
+        if let recipientPriv { return try AEADecryptionKey.recipientPrivateKey(contentsOf: FilePath(recipientPriv)) }
         if let password { return .password(Array(password.utf8)) }
         if let passwordFile {
-            var bytes = Array(try Data(contentsOf: URL(fileURLWithPath: passwordFile)))
+            var bytes = try InputFile.contents(of: FilePath(passwordFile), maximumCount: Self.keyFileLimit)
             while let last = bytes.last, last == 0x0A || last == 0x0D { bytes.removeLast() }
             return .password(bytes)
         }
@@ -283,7 +288,11 @@ struct NUnarchiver: AsyncParsableCommand {
             }
             let pem: String
             if let fcsKey {
-                pem = try String(contentsOf: URL(fileURLWithPath: fcsKey), encoding: .utf8)
+                let bytes = try InputFile.contents(of: FilePath(fcsKey), maximumCount: Self.keyFileLimit)
+                guard let text = String(validating: bytes, as: UTF8.self) else {
+                    throw ValidationError("\(fcsKey) isn't UTF-8 text.")
+                }
+                pem = text
             } else {
                 guard let url = request.keyURL, url.scheme == "https" else {
                     throw ValidationError("The archive's key URL is missing or not HTTPS.")
@@ -312,6 +321,5 @@ struct NUnarchiver: AsyncParsableCommand {
     }
 }
 
-extension SegmentDecoderBackend: ExpressibleByArgument {}
 extension SegmentInput: ExpressibleByArgument {}
 extension DiskCompressionMode: ExpressibleByArgument {}

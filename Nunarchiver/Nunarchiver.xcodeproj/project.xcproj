@@ -13,6 +13,9 @@
   "packages": [
     {
       "kind": "local",
+      "path": "../Bytes",
+    }, {
+      "kind": "local",
       "path": "../Disk",
     }, {
       "kind": "local",
@@ -63,6 +66,10 @@
       ],
       "package-product-members": [
         {
+          "package": "Bytes",
+          "product-name": "BytesAsync",
+          "build-phase": { "build-phase": "frameworks" },
+        }, {
           "package": "Disk",
           "product-name": "Disk",
           "build-phase": { "build-phase": "frameworks" },
@@ -130,6 +137,14 @@
         {
           "package": "TCA26",
           "product-name": "ComposableArchitectureTestSupport",
+          "build-phase": { "build-phase": "frameworks" },
+        }, {
+          "package": "Disk",
+          "product-name": "DiskTestSupport",
+          "build-phase": { "build-phase": "frameworks" },
+        }, {
+          "package": "Bytes",
+          "product-name": "BytesTestSupport",
           "build-phase": { "build-phase": "frameworks" },
         },
       ],

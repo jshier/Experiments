@@ -1,7 +1,3 @@
-#if HardwareCRC && arch(arm64) && !Portable
-internal import CBytesCRC
-#endif
-
 /// The CRC-64 that `.xz` files use (CRC-64/XZ: ECMA-182's polynomial 0x42F0E1EBA9EA3693, reflected, initial and
 /// final value all ones), computed incrementally.
 ///
@@ -128,32 +124,14 @@ extension CRC64 {
     ///
     /// - Returns: The folded block, whose CRC from zero continued with the bytes after `count` (rounded down
     ///   to 16) is the CRC of all of them; and that rounded count.
+    // Not inlined, as before the body was shared: inlined into `checksum`, it cost short inputs an instruction a call.
+    @inline(never)
     private static func fold(_ crc: UInt64, _ input: UnsafeRawPointer, _ count: Int) -> (state: SIMD16<UInt8>, count: Int) {
-        // Unsafe: 16-byte loads. Safe: each is below `count` (checked by the loops), which the caller's buffer
-        // holds.
-        @inline(always) func load(_ offset: Int) -> SIMD16<UInt8> {
-            unsafe input.loadUnaligned(fromByteOffset: offset, as: SIMD16<UInt8>.self)
-        }
-        var x0 = load(0) ^ bitCast(SIMD2<UInt64>(crc, 0), to: SIMD16<UInt8>.self)
-        var x1 = load(16), x2 = load(32), x3 = load(48)
-        var index = 64
-        let fold512 = Self.fold512
-        while count &- index >= 64 {
-            x0 = bytes_crc_fold(x0, load(index), fold512)
-            x1 = bytes_crc_fold(x1, load(index &+ 16), fold512)
-            x2 = bytes_crc_fold(x2, load(index &+ 32), fold512)
-            x3 = bytes_crc_fold(x3, load(index &+ 48), fold512)
-            index &+= 64
-        }
-        let fold128 = Self.fold128
-        var x = bytes_crc_fold(x0, x1, fold128)
-        x = bytes_crc_fold(x, x2, fold128)
-        x = bytes_crc_fold(x, x3, fold128)
-        while count &- index >= 16 {
-            x = bytes_crc_fold(x, load(index), fold128)
-            index &+= 16
-        }
-        return (x, index)
+        // Unsafe and safe as `CRCFold.fold`: `count` bytes at `input`, at least 128 (the caller checks).
+        unsafe CRCFold.fold(
+            bitCast(SIMD2<UInt64>(crc, 0), to: SIMD16<UInt8>.self), input, count, reversed: false, fold512: fold512,
+            fold128: fold128
+        )
     }
 }
 #endif

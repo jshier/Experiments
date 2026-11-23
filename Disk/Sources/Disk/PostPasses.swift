@@ -1,3 +1,4 @@
+import BytesAsync
 import Darwin
 import Synchronization
 
@@ -45,9 +46,9 @@ struct SharedArena: @unchecked Sendable {
 extension Planner {
     /// The passes after the writers: hard links, special files, symbolic links, deferred metadata, directories.
     mutating func finish() async throws(DiskError) {
-        var phaseStarted = DispatchClock.now
+        var phaseStarted = MonotonicClock.now
         func phase(_ name: String, _ phases: inout [String: Double]) {
-            let now = DispatchClock.now
+            let now = MonotonicClock.now
             phases[name] = Double(now - phaseStarted) / 1e9
             phaseStarted = now
         }
@@ -125,7 +126,7 @@ extension Planner {
     private mutating func hardLinkPass(_ arena: SharedArena, width: Int, progress: ExtractionProgress.Slot?) async throws(DiskError) {
         let links = hardLinks, destination = self.destination
         let context = self.context
-        let counter = Counter(), skipped = Counter()
+        let counter = RelaxedCounter(), skipped = RelaxedCounter()
         try await inLanes(links.count, width: width) { index throws(DiskError) in
             let link = links[index]
             do throws(DiskError) {
@@ -174,7 +175,7 @@ extension Planner {
     private mutating func linkPass(_ arena: SharedArena, width: Int, progress: ExtractionProgress.Slot?) async throws(DiskError) {
         let links = self.links, deferred = self.deferred, destination = self.destination
         let context = self.context
-        let counter = Counter(), skipped = Counter()
+        let counter = RelaxedCounter(), skipped = RelaxedCounter()
         try await inLanes(links.count, width: width) { index throws(DiskError) in
             let link = links[index]
             let blob = link.deferred >= 0 && !deferred[link.deferred].extendedAttributes.isEmpty ? arena.span(deferred[link.deferred].extendedAttributes) : nil

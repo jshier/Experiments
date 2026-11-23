@@ -31,14 +31,14 @@ func expanded<H: BytesCrypto.HashFunction>(_ expander: BytesCrypto.HKDF<H>.Expan
     /// One expander, many outputs: each the same as a fresh `HKDF.expand` and as CryptoKit's.
     func checkReuse<H: BytesCrypto.HashFunction, C: CryptoKit.HashFunction>(_ hash: H.Type, _ reference: C.Type) {
         var rng = SplitMix64(seed: UInt64(H.digestByteCount))
-        let ikm = randomBytes(40, using: &rng), salt = randomBytes(H.digestByteCount, using: &rng)
+        let ikm = rng.bytes(40), salt = rng.bytes(H.digestByteCount)
         let expander = HKDF<H>.Expander(salt: salt.span.bytes, inputKeyMaterial: ikm.span.bytes)
         var prk = [UInt8](repeating: 0, count: H.digestByteCount)
         var prkSpan = prk.mutableSpan
         var prkRaw = MutableRawSpan(mutating: &prkSpan)
         HKDF<H>.extract(salt: salt.span.bytes, inputKeyMaterial: ikm.span.bytes, into: &prkRaw)
         for (index, count) in [0, 1, 12, 16, 32, 33, 48, 64, 65, 100, 255 * H.digestByteCount].enumerated() {
-            let info = randomBytes(index * 7, using: &rng)
+            let info = rng.bytes(index * 7)
             let output = expanded(expander, info: info, count: count)
             var fresh = [UInt8](repeating: 0, count: count)
             var freshSpan = fresh.mutableSpan
@@ -88,8 +88,8 @@ func expanded<H: BytesCrypto.HashFunction>(_ expander: BytesCrypto.HKDF<H>.Expan
     func longestLabelAndContext(suite: TLSCipherSuite) {
         #expect(Self.longestLabel.utf8CodeUnitCount == 249)
         var rng = SplitMix64(seed: 249)
-        let secretBytes = randomBytes(suite.hashByteCount, using: &rng)
-        let context = randomBytes(255, using: &rng)
+        let secretBytes = rng.bytes(suite.hashByteCount)
+        let context = rng.bytes(255)
         let secret = TLSSecret(secretBytes.span.bytes, suite: suite)
         for count in [12, 32, 100] {
             var output = [UInt8](repeating: 0, count: count)
@@ -117,7 +117,7 @@ func expanded<H: BytesCrypto.HashFunction>(_ expander: BytesCrypto.HKDF<H>.Expan
     @Test(arguments: TLSCipherSuite.allCases)
     func trafficKeysMatchTheirLabels(suite: TLSCipherSuite) {
         var rng = SplitMix64(seed: UInt64(suite.rawValue))
-        let secret = TLSSecret(randomBytes(suite.hashByteCount, using: &rng).span.bytes, suite: suite)
+        let secret = TLSSecret(rng.bytes(suite.hashByteCount).span.bytes, suite: suite)
         let keys = TLSTrafficKeys(secret: secret)
         var key = [UInt8](repeating: 0, count: suite.keyByteCount)
         var keySpan = key.mutableSpan

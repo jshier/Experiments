@@ -18,6 +18,7 @@ let benchmarks: @Sendable () -> Void = {
     registerLZMABenchmarks()
     registerLZMAAllocationBenchmarks()
     registerLZMAStreamingBenchmarks()
+    registerDecompressorBenchmarks()
     registerDeflate64Benchmarks()
     registerLZRAVENBenchmarks()
     registerLZRAVENAllocationBenchmarks()

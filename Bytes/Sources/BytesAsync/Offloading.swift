@@ -38,3 +38,40 @@ nonisolated(nonsending) func perform<T: Sendable>(on queue: DispatchQueue, _ wor
         queue.async { unsafe continuation.resume(returning: work()) }
     }
 }
+
+/// Runs `operation` in a child task at `priority` and returns its result: for work that must run at a priority of its
+/// own whatever the caller's, such as a command-line tool's main task (which runs at the default priority, not
+/// user-initiated) or a GUI app that may be in the background (where its work would run at background QoS, on the
+/// efficiency cores).
+///
+/// ```swift
+/// func run() async throws {
+///     try await withPriority(.userInitiated) { try await command.work() }
+/// }
+/// ```
+///
+/// Child tasks `operation` starts inherit the priority. Being a child task, it keeps the caller's cancellation and
+/// task-locals; its error type passes through.
+///
+/// - Parameters:
+///   - priority: The child task's priority.
+///   - operation: The work.
+/// - Returns: What `operation` returns.
+/// - Throws: What `operation` throws.
+@inlinable
+public nonisolated(nonsending) func withPriority<T: Sendable, E: Error>(
+    _ priority: TaskPriority, operation: sending @escaping () async throws(E) -> T
+) async throws(E) -> T {
+    // Unchecked: the region checker can't see that `operation`, sent here, goes on to the child task through the group's
+    // body closure. Safe: the child is its only user, and the caller gave it up (`sending`).
+    nonisolated(unsafe) let operation = operation
+    // A `Result` through a non-throwing group: `withThrowingTaskGroup` would turn `E` into `any Error`.
+    let result = await withTaskGroup(of: Result<T, E>.self) { group in
+        group.addTask(priority: priority) {
+            do throws(E) { return .success(try await unsafe operation()) } catch { return .failure(error) }
+        }
+        // One child: `next()` returns its result.
+        return await group.next()!
+    }
+    return try result.get()
+}

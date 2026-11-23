@@ -1,6 +1,7 @@
 import BytesTestSupport
 import BytesTesting
 import Disk
+import DiskTestSupport
 import Foundation
 @testable import NativeAEA
 import System
@@ -45,7 +46,7 @@ import Testing
         let keys = try SharedFixtures.keys.get()
         let (source, stream) = try Self.tree.get()
         let url = try makeAEA(stream, keys: keys, in: directory, compression: "copy", blockSize: "64k")
-        let expected = try readTree(source)
+        let expected = try readTree(source, including: .entries)
         let before = getumask()
         for round in 0..<3 {
             let destinations = (0..<8).map { directory.path("out-\(round)-\($0)") }
@@ -61,7 +62,7 @@ import Testing
             }
             #expect(getumask() == before, "round \(round)")
             for destination in destinations {
-                #expect(try readTree(destination) == expected, "\(destination.lastPathComponent)")
+                #expect(try readTree(destination, including: .entries) == expected, "\(destination.lastPathComponent)")
             }
         }
     }
@@ -85,7 +86,7 @@ import Testing
             let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey)
                 .extract(to: FilePath(destination.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
-            #expect(try readTree(destination) == readTree(source))
+            #expect(try readTree(destination, including: .entries) == readTree(source, including: .entries))
             // Times, as `aa` archived them.
             for path in ["a/file9", "a/b/c", "a/link"] {
                 var extracted = stat(), original = stat()
@@ -182,24 +183,24 @@ import Testing
         options.fileSystemWidth = 3
         let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path), options: options)
         #expect(statistics.unreleasedBuffers == 0)
-        let tree = try readTree(destination)
+        let tree = try readTree(destination, including: .entries)
         for (path, bytes) in files {
             let entry = try #require(tree[path], "\(path)")
             #expect(entry.contents == bytes, "\(path)")
             let type = decmpfsType(destination.appending(path: path))
             switch mode {
             case .none:
-                #expect(!entry.compressed && type == nil, "\(path)")
+                #expect(entry.isCompressed == false && type == nil, "\(path)")
             case .archived, .lzfse:
                 // The same decisions; `.lzfse` makes LZFSE (11, 12) of what the archive makes LZBITMAP (13, 14).
                 let (inline, fork): (UInt32, UInt32) = mode == .archived ? (13, 14) : (11, 12)
                 if bytes.isEmpty {
-                    #expect(!entry.compressed, "\(path)")
+                    #expect(entry.isCompressed == false, "\(path)")
                 } else if bytes.count <= 3_000 || path.contains("filler") && bytes.count <= 3_000 {
                     #expect(type == inline, "\(path) inline")
                 } else if path.contains("random"), bytes.count > 3_600 {
                     // Doesn't compress: plain, as Apple's extractor leaves such files.
-                    #expect(!entry.compressed, "\(path) plain")
+                    #expect(entry.isCompressed == false, "\(path) plain")
                 } else if path.contains("text"), bytes.count > 65_536 {
                     // Compressed into the resource fork, in one piece or several (with 16 KiB segments, the
                     // smallest `aea` makes for "1k", a chunk spans up to five).
@@ -360,7 +361,14 @@ import Testing
         let destination = FilePath(directory.path("out").path)
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
         try await archive.extract(to: destination)
-        await #expect(throws: AEAError.self) { try await archive.extract(to: destination) }
+        // Disk's error as it threw it: the first entry that's there.
+        let error = await #expect(throws: AEAError.self) { try await archive.extract(to: destination) }
+        guard case .disk(.exists(let path))? = error else {
+            Issue.record("expected an existing entry, got \(String(describing: error))")
+            return
+        }
+        #expect(!path.isEmpty)
+        #expect(error?.description == "already exists: \(path)")
         var options = AEAExtractionOptions()
         options.overwrite = true
         let statistics = try await archive.extract(to: destination, options: options)

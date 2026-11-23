@@ -80,29 +80,11 @@ struct DeflateCodes {
         codes.distanceLengths = InlineArray(repeating: 5)
         var lengths = codes.literalLengthLengths.span
         var codewords = codes.literalLengthCodewords.mutableSpan
-        canonicalCodewords(lengths, &codewords)
+        HuffmanCodeBuilder.canonicalCodewords(lengths, &codewords)
         lengths = codes.distanceLengths.span
         codewords = codes.distanceCodewords.mutableSpan
-        canonicalCodewords(lengths, &codewords)
+        HuffmanCodeBuilder.canonicalCodewords(lengths, &codewords)
         return codes
-    }
-
-    /// Assigns canonical codewords, bit-reversed, for code lengths.
-    static func canonicalCodewords(_ lengths: Span<UInt8>, _ codewords: inout MutableSpan<UInt32>) {
-        var counts = InlineArray<16, UInt32>(repeating: 0)
-        for index in lengths.indices {
-            counts[Int(lengths[index])] &+= 1
-        }
-        counts[0] = 0
-        var next = InlineArray<16, UInt32>(repeating: 0)
-        for length in 1..<16 {
-            next[length] = (next[length &- 1] &+ counts[length &- 1]) &<< 1
-        }
-        for symbol in lengths.indices {
-            let length = Int(lengths[symbol])
-            codewords[symbol] = HuffmanCodeBuilder.reversed(next[length], length: length)
-            next[length] &+= 1
-        }
     }
 }
 
@@ -522,17 +504,10 @@ struct DeflateCompressor: ~Copyable {
 
     // MARK: - Matchfinding helpers
 
-    /// libdeflate's hash: the top bits of a multiply.
-    @inline(__always)
-    static func hash(_ value: UInt32, bits: Int) -> Int {
-        Int(truncatingIfNeeded: (value &* 0x1E35_A7BD) &>> UInt32(32 &- bits))
-    }
-
-    @inline(__always)
-    static func load32(_ buffer: RawSpan, _ offset: Int) -> UInt32 {
-        // Unsafe: an unchecked load. Safe: every caller loads within the buffer (see the file's comment).
-        UInt32(littleEndian: unsafe buffer.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt32.self))
-    }
+    // `LZHash`'s, by their short names. `load32` is unchecked: every caller loads within the buffer (see the
+    // file's comment).
+    @inline(__always) static func hash(_ value: UInt32, bits: Int) -> Int { LZHash.hash(value, bits: bits) }
+    @inline(__always) static func load32(_ buffer: RawSpan, _ offset: Int) -> UInt32 { LZHash.load32(buffer, offset) }
 
     @inline(__always)
     static func load64(_ buffer: RawSpan, _ offset: Int) -> UInt64 {

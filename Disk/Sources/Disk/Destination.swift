@@ -142,6 +142,39 @@ public final class Destination: Sendable {
         }
     }
 
+    /// A copy of `original` on a descriptor of its own, with other options; see ``reopened(with:)``.
+    private init(reopening original: Destination, root: Int32, options: DestinationOptions) {
+        self.root = root
+        path = original.path
+        self.options = options
+        staging = nil
+        umask = original.umask
+        isRoot = original.isRoot
+        resolvedPath = original.resolvedPath
+        openBeneath = options.resolvesBeneath ? O_RESOLVE_BENEATH : 0
+        atBeneath = options.resolvesBeneath ? AT_RESOLVE_BENEATH : 0
+    }
+
+    /// The same directory with other options: what a client that writes a format's entries (NativeAEA, NativeZip)
+    /// makes of the destination its caller opened, to apply its format's policies (existing items, permissions,
+    /// owners) to the directory the caller chose, a staging directory included.
+    ///
+    /// The directory isn't looked up again: the result has a duplicate of this destination's descriptor (one `fcntl`),
+    /// so a rename or a link along its path since it was opened changes nothing. It doesn't own a staging directory
+    /// (``publish(as:uniquing:)``, ``publishUnwrapped(as:)``, and ``discard()`` stay this one's), and it doesn't apply
+    /// ``DestinationOptions/quarantinesDestination`` (the directory was this one's to quarantine when it was opened).
+    ///
+    /// Clients keep their caller's ``DestinationOptions/quarantine``: the caller's options say what everything
+    /// extracted gets.
+    ///
+    /// - Throws: ``DiskError/system(_:path:_:)`` if the descriptor can't be duplicated (the process is out of them).
+    public func reopened(with options: DestinationOptions) throws(DiskError) -> Destination {
+        Sys.countOther()
+        let duplicate = fcntl(root, F_DUPFD_CLOEXEC, 0)
+        guard duplicate >= 0 else { throw .system("dup", path: path.string, code: errno) }
+        return Destination(reopening: self, root: duplicate, options: options)
+    }
+
     deinit {
         Sys.close(root)
         if let staging { Sys.close(staging.parent) }

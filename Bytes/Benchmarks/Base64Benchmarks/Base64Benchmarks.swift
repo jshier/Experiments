@@ -1,6 +1,7 @@
 import BytesBase64
 import Benchmark
 import Bytes
+import BytesTestSupport
 import Foundation
 
 // MARK: - Fixtures
@@ -59,25 +60,12 @@ struct Fixture: @unchecked Sendable {
     var decodedBytes: [UInt8] { Array(decoded) }
 }
 
-/// One size's fixture, made on first use: the benchmark tool starts this executable once to list the
-/// benchmarks and again for each benchmark, so each process makes only the fixture its benchmark runs
-/// (a 64 MB one took about a second, in every process).
-final class LazyFixture: @unchecked Sendable {
-    let count: Int
-    private var made: Fixture?
-    init(count: Int) { self.count = count }
-
-    /// The fixture, made by the first call: from a benchmark's setup, before anything is measured, and only
-    /// ever from the one thread running that benchmark.
-    var fixture: Fixture {
-        if let made { return made }
-        let fixture = Fixture(count: count)
-        made = fixture
-        return fixture
-    }
-}
-
-let fixtures: [Int: LazyFixture] = Dictionary(uniqueKeysWithValues: sizes.map { ($0.count, LazyFixture(count: $0.count)) })
+/// Each size's fixture, made on first use (BytesTestSupport's `Lazy`): the benchmark tool starts this executable once
+/// to list the benchmarks and again for each benchmark, so each process makes only the fixture its benchmark runs (a
+/// 64 MB one took about a second, in every process), from the benchmark's setup, before anything is measured.
+let fixtures: [Int: Lazy<Fixture>] = Dictionary(uniqueKeysWithValues: sizes.map { size in
+    (size.count, Lazy { Fixture(count: size.count) })
+})
 
 // MARK: - Encoders
 
@@ -291,12 +279,12 @@ func registerBenchmarks() {
             for (name, run, check) in codecs {
                 let benchmarkName = "\(direction) \(label): \(name)"
                 Benchmark(benchmarkName, configuration: configuration, closure: { (benchmark: Benchmark) in
-                    let fixture = lazyFixture.fixture
+                    let fixture = lazyFixture.value
                     for _ in benchmark.scaledIterations {
                         run(fixture)
                     }
                 }, setup: {
-                    let fixture = lazyFixture.fixture
+                    let fixture = lazyFixture.value
                     if let check, count < 64 << 20 {
                         precondition(check(fixture), "\(benchmarkName): the output differs")
                     }
@@ -307,34 +295,34 @@ func registerBenchmarks() {
 
     // 16 KB as MIME and PEM hold it: lines of 76 characters, CRLF after each (a line break inside the first 16
     // characters of most blocks), decoded skipping the whitespace; and encoded with the URL-safe alphabet, unpadded.
-    let lined = LazyLinedText(fixtures[16 << 10]!)
+    let lined = Lazy { LinedText(fixtures[16 << 10]!.value) }
     Benchmark("Decode 16 KB, 76-column lines: Bytes ignoringWhitespace", closure: { (benchmark: Benchmark) in
-        let fixture = lined.fixture
+        let fixture = lined.value
         for _ in benchmark.scaledIterations {
             decodeLinesWithBytes(fixture)
         }
     }, setup: {
-        let fixture = lined.fixture
+        let fixture = lined.value
         decodeLinesWithBytes(fixture)
         precondition(fixture.base.decodedBytes == fixture.base.input, "Decode 16 KB, 76-column lines: the output differs")
     })
     Benchmark("Decode 16 KB, 76-column lines: Foundation Data(base64Encoded:options: .ignoreUnknownCharacters)", closure: { (benchmark: Benchmark) in
-        let fixture = lined.fixture
+        let fixture = lined.value
         for _ in benchmark.scaledIterations {
             decodeLinesWithFoundation(fixture)
         }
     }, setup: {
-        let fixture = lined.fixture
+        let fixture = lined.value
         precondition(Data(base64Encoded: fixture.linesData, options: .ignoreUnknownCharacters).map(Array.init) == fixture.base.input)
     })
     let urlSafe = fixtures[16 << 10]!
     Benchmark("Encode 16 KB: Bytes, URL-safe unpadded", closure: { (benchmark: Benchmark) in
-        let fixture = urlSafe.fixture
+        let fixture = urlSafe.value
         for _ in benchmark.scaledIterations {
             encodeURLSafeWithBytes(fixture)
         }
     }, setup: {
-        let fixture = urlSafe.fixture
+        let fixture = urlSafe.value
         encodeURLSafeWithBytes(fixture)
         // The standard text with `-` and `_` for `+` and `/`, and no `=`.
         let expected = fixture.text.filter { $0 != UInt8(ascii: "=") }.map { $0 == UInt8(ascii: "+") ? UInt8(ascii: "-") : $0 == UInt8(ascii: "/") ? UInt8(ascii: "_") : $0 }
@@ -363,20 +351,20 @@ func registerBenchmarks() {
                 encodeWithBytes(fixture)
             }
         }
-    }, setup: { all = lazyFixtures.map(\.fixture) })
+    }, setup: { all = lazyFixtures.map(\.value) })
     Benchmark("Allocations:Decode_all_sizes", configuration: zeroAllocations, closure: { (benchmark: Benchmark) in
         for _ in benchmark.scaledIterations {
             for fixture in all {
                 decodeWithBytes(fixture)
             }
         }
-    }, setup: { all = lazyFixtures.map(\.fixture) })
+    }, setup: { all = lazyFixtures.map(\.value) })
     Benchmark("Allocations:Decode_16KB_lines", configuration: zeroAllocations, closure: { (benchmark: Benchmark) in
-        let fixture = lined.fixture
+        let fixture = lined.value
         for _ in benchmark.scaledIterations {
             decodeLinesWithBytes(fixture)
         }
-    }, setup: { _ = lined.fixture })
+    }, setup: { _ = lined.value })
 }
 
 // MARK: - Lines and URL-safe
@@ -397,20 +385,6 @@ struct LinedText: @unchecked Sendable {
         }
         self.lines = lines
         linesData = Data(lines)
-    }
-}
-
-/// The lined fixture, made on first use (from a benchmark's setup), as `LazyFixture`.
-final class LazyLinedText: @unchecked Sendable {
-    private let base: LazyFixture
-    private var made: LinedText?
-    init(_ base: LazyFixture) { self.base = base }
-
-    var fixture: LinedText {
-        if let made { return made }
-        let fixture = LinedText(base.fixture)
-        made = fixture
-        return fixture
     }
 }
 

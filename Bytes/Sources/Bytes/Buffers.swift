@@ -231,7 +231,62 @@ public extension MutableSpan where Element == UInt8 {
     }
 }
 
+// MARK: - Arrays
+
 public extension [UInt8] {
+    /// Creates an array with a copy of `bytes`: the byte counterpart of `String(copying:)`, for keeping
+    /// what a span read from ``BytesReader`` borrows.
+    ///
+    /// - Parameter bytes: The bytes to copy.
+    @inlinable
+    init(copying bytes: RawSpan) {
+        // Unsafe: the span's memory as a buffer pointer. Safe: it's only read, within the closure, by the
+        // standard library's `Array` initializer (a `memcpy`). Not `init(unsafeUninitializedCapacity:)`
+        // with a `memcpy`: that called an unspecialized allocator, `ContiguousArray._allocateBufferUninitialized`,
+        // and copying an MQTT packet's payload took about 590 instructions more per packet.
+        self = bytes.withUnsafeBytes { buffer in unsafe Array(buffer) }
+    }
+
+    /// Appends a copy of `bytes`: the appending counterpart of ``init(copying:)``.
+    ///
+    /// - Parameter bytes: The bytes to copy.
+    @inlinable
+    mutating func append(copying bytes: RawSpan) {
+        // Unsafe: the span's memory as a buffer pointer. Safe: it's only read, within the closure, by the
+        // standard library's bulk append (a `memcpy`). Through a `BytesWriter` instead, it measured 37
+        // instructions against 13, with a trap path for an error that can't happen.
+        bytes.withUnsafeBytes { buffer in unsafe append(contentsOf: buffer) }
+    }
+
+    /// Appends the low `T.byteCount` bytes of `value` in `byteOrder`: for building small headers and test
+    /// data in an array, where a ``BytesWriter`` would need its capacity up front.
+    ///
+    /// ```swift
+    /// var header: [UInt8] = []
+    /// header.append(UInt32(size), as: Byte4.self, .littleEndian)
+    /// header.append(length, as: Byte3.self, .bigEndian)
+    /// ```
+    ///
+    /// The same code as `withUnsafeBytes(of: value.littleEndian) { append(contentsOf: $0) }`, written out.
+    ///
+    /// - Parameters:
+    ///   - value: The integer to append.
+    ///   - type: The ``ByteGroup`` type, which sets the width.
+    ///   - byteOrder: The order to append the bytes in.
+    /// - Precondition: `value` fits in `T.byteCount` bytes (no check for the groups whose integer is exactly
+    ///   their width).
+    @inlinable @inline(__always)
+    mutating func append<T: ByteGroup>(_ value: T.Integer, as type: T.Type, _ byteOrder: ByteOrder) {
+        precondition(value <= T._mask, "\(value) doesn't fit in \(T.byteCount) bytes")
+        // The integer's little-endian representation is the group's bytes in memory order on any host.
+        Swift.withUnsafeBytes(of: T(value, byteOrder).littleEndian.littleEndian) { buffer in
+            // Unsafe: appends the closure's raw buffer. Safe: its first `T.byteCount` bytes are the local's
+            // (an `Integer` holds at least that many), valid inside the closure; the array copies them before it
+            // returns.
+            unsafe append(contentsOf: UnsafeRawBufferPointer(rebasing: buffer[..<T.byteCount]))
+        }
+    }
+
     /// Runs `body` with an empty output span over the array's bytes from `offset`: what it appends overwrites
     /// them, and the array's count doesn't change. For streaming into a reused buffer.
     ///

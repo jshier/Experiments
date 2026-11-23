@@ -1,6 +1,8 @@
+import Bytes
 import BytesTestSupport
 import Darwin
 @testable import Disk
+import DiskTestSupport
 import Foundation
 import System
 import Testing
@@ -17,22 +19,36 @@ import Testing
             Array(key.utf8) + [UInt8(ascii: subtype.unicodeScalars.first!)]
         }
 
-        private static func le<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
-            withUnsafeBytes(of: value.littleEndian) { Array($0) }
+        /// `TYP`, then `PAT` with the path, then `MOD`.
+        private static func fields(type: Character, path: String, mode: UInt16) -> [UInt8] {
+            var fields = field("TYP", "1") + [UInt8(ascii: type.unicodeScalars.first!)] + field("PAT", "P")
+            fields.append(UInt16(path.utf8.count), as: Byte2.self, .littleEndian)
+            fields += Array(path.utf8) + field("MOD", "2")
+            fields.append(mode, as: Byte2.self, .littleEndian)
+            return fields
+        }
+
+        private mutating func append(_ fields: [UInt8], _ data: [UInt8] = []) {
+            bytes += Array("AA01".utf8)
+            bytes.append(UInt16(6 + fields.count), as: Byte2.self, .littleEndian)
+            bytes += fields + data
         }
 
         mutating func directory(_ path: String) {
-            let fields = Self.field("TYP", "1") + [UInt8(ascii: "D")] + Self.field("PAT", "P") + Self.le(UInt16(path.utf8.count)) + Array(path.utf8)
-                + Self.field("MOD", "2") + Self.le(UInt16(0o755))
-            bytes += Array("AA01".utf8) + Self.le(UInt16(6 + fields.count)) + fields
+            append(Self.fields(type: "D", path: path, mode: 0o755))
         }
 
         mutating func file(_ path: String, _ data: [UInt8], diskCompression: UInt8) {
-            var fields = Self.field("TYP", "1") + [UInt8(ascii: "F")] + Self.field("PAT", "P") + Self.le(UInt16(path.utf8.count)) + Array(path.utf8)
-                + Self.field("MOD", "2") + Self.le(UInt16(0o644))
-            fields += data.count < 65_536 ? Self.field("DAT", "A") + Self.le(UInt16(data.count)) : Self.field("DAT", "B") + Self.le(UInt32(data.count))
+            var fields = Self.fields(type: "F", path: path, mode: 0o644)
+            if data.count < 65_536 {
+                fields += Self.field("DAT", "A")
+                fields.append(UInt16(data.count), as: Byte2.self, .littleEndian)
+            } else {
+                fields += Self.field("DAT", "B")
+                fields.append(UInt32(data.count), as: Byte4.self, .littleEndian)
+            }
             fields += Self.field("FLG", "1") + [0x20] + Self.field("AFT", "1") + [diskCompression]
-            bytes += Array("AA01".utf8) + Self.le(UInt16(6 + fields.count)) + fields + data
+            append(fields, data)
         }
     }
 
@@ -69,7 +85,7 @@ import Testing
         var compressed = 0
         for (path, bytes) in files {
             let mine = directory.path("out/\(path)"), theirs = reference.appending(path: path)
-            #expect(try item(mine).contents == bytes, "\(path)")
+            #expect(try readItem(at: mine).contents == bytes, "\(path)")
             let theirType = decmpfsType(theirs)
             #expect(decmpfsType(mine) == theirType, "\(path): Apple's \(theirType.map(String.init) ?? "plain")")
             if type == 14 { #expect(decmpfsStoredBytes(mine) == decmpfsStoredBytes(theirs), "\(path): stored bytes") }
@@ -107,7 +123,7 @@ import Testing
         #expect(decmpfsType(out.appending(path: "image.png")) == nil)
         #expect(decmpfsType(out.appending(path: "mostly-random")) == nil)
         #expect(decmpfsType(out.appending(path: "half-random")) == 8)
-        for (path, bytes) in files { #expect(try item(out.appending(path: path)).contents == bytes, "\(path)") }
+        for (path, bytes) in files { #expect(try readItem(at: out.appending(path: path)).contents == bytes, "\(path)") }
         // The short last chunk (30 bytes, under LZVN's room): stored raw behind 0x06.
         let stored = decmpfsStoredBytes(out.appending(path: "short-tail"))
         let fork = Array(stored.dropFirst(16))
@@ -130,8 +146,8 @@ import Testing
         #expect(try withPath("small") { try writer.writeFile($0, contents: small.span.bytes, storage: .compressed(.zlibInline)) } == .inline)
         #expect(try withPath("large") { try writer.writeFile($0, contents: large.span.bytes, storage: .compressed(.zlibInline)) } == .plain)
         #expect(decmpfsType(directory.path("out/small")) == 3)
-        #expect(try item(directory.path("out/small")).contents == small)
-        #expect(try item(directory.path("out/large")).contents == large)
+        #expect(try readItem(at: directory.path("out/small")).contents == small)
+        #expect(try readItem(at: directory.path("out/large")).contents == large)
     }
 
     /// A streamed file (written in several writes, bigger than the staging buffer) is stored as the same file written
@@ -155,7 +171,7 @@ import Testing
         for (path, bytes) in files {
             try withPath(path) { try writer.writeFile($0, contents: bytes.span.bytes, storage: .compressed(.appleArchive)) }
             let mine = directory.path("streamed-\(writes)/\(path)")
-            #expect(try item(mine).contents == bytes)
+            #expect(try readItem(at: mine).contents == bytes)
             #expect(decmpfsStoredBytes(mine) == decmpfsStoredBytes(directory.path("whole/\(path)")), "\(path)")
         }
     }

@@ -1,4 +1,6 @@
 import BytesTestSupport
+import Disk
+import DiskTestSupport
 import Foundation
 @testable import NativeAEA
 import System
@@ -70,32 +72,59 @@ import Testing
         #expect(statistics.hardLinks == 3)
         #expect(statistics.withAccessControlLists == 2)
 
-        #expect(try readTree(destination) == readTree(reference))
-        let extracted = try readMetadata(destination), expected = try readMetadata(reference)
+        // Item for item against `aa`'s tree, without the quarantine: in a process macOS tracks for provenance (this
+        // session's: every item it makes gets `com.apple.provenance`), `aa extract` writes a fresh `0081;<now>;;`
+        // instead of copying the archive's. (Provenance is left out by default: both trees have the kernel's.) The
+        // quarantine is checked against the archive's own value after.
+        let parts = TreeParts.entries.union(.metadata)
+        let ignored: Set<String> = ["com.apple.quarantine", SystemAttributes.provenance]
+        let extracted = try readTree(destination, including: parts, ignoringAttributes: ignored)
+        let expected = try readTree(reference, including: parts, ignoringAttributes: ignored)
         #expect(extracted.keys.sorted() == expected.keys.sorted())
-        for (path, metadata) in expected.sorted(by: { $0.key < $1.key }) {
-            #expect(extracted[path] == metadata, "\(path)")
+        for (path, item) in expected.sorted(by: { $0.key < $1.key }) {
+            #expect(extracted[path] == item, "\(path)")
         }
         // The source's own attributes came through (not only what both extractors add).
-        #expect(extracted["attributes"]?.attributes["com.example.large"]?.count == 50_000)
-        #expect(extracted["link"]?.attributes["com.example.on-link"]?.count == 12)
+        #expect(extracted["attributes"]?.attributes?["com.example.large"]?.count == 50_000)
+        #expect(extracted["link"]?.attributes?["com.example.on-link"]?.count == 12)
         #expect(extracted["third-name"]?.hardLinks == ["dir/inner/original", "dir/second-name", "third-name"])
         #expect(extracted["acl-file"]?.accessControlList != nil)
+        // The archive's quarantine, copied onto everything: its bytes, not a fresh one.
+        for path in extracted.keys.sorted() {
+            #expect(extendedAttribute("com.apple.quarantine", of: destination.appending(path: path)) == quarantine, "\(path)")
+        }
         // The destination itself: not for an `.aea` (as `aa extract` does with Xcode's), yes for a plain `.aar`.
-        #expect(getxattr(destination.path, "com.apple.quarantine", nil, 0, 0, 0) < 0)
+        #expect(extendedAttribute("com.apple.quarantine", of: destination) == nil)
         let fromStream = directory.path("from-stream")
         try await AppleArchiveFile(path: FilePath(stream.path)).extract(to: FilePath(fromStream.path), options: options)
-        #expect(getxattr(fromStream.path, "com.apple.quarantine", nil, 0, 0, 0) == quarantine.count)
-        #expect(getxattr(reference.path, "com.apple.quarantine", nil, 0, 0, 0) == quarantine.count)
-        #expect(try readMetadata(fromStream) == readMetadata(reference))
+        #expect(extendedAttribute("com.apple.quarantine", of: fromStream) == quarantine)
+        #expect(extendedAttribute("com.apple.quarantine", of: reference) != nil)
+        #expect(try readTree(fromStream, including: parts, ignoringAttributes: ignored) == expected)
+        #expect(try readTree(fromStream, including: .attributes).values.allSatisfy { $0.attributes?["com.apple.quarantine"] == quarantine })
 
         // Without quarantine copying.
         let bare = directory.path("bare")
         options.copyQuarantine = false
         try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(bare.path), options: options)
-        let bareMetadata = try readMetadata(bare)
-        #expect(bareMetadata.values.allSatisfy { $0.attributes["com.apple.quarantine"] == nil })
-        #expect(bareMetadata == (try readMetadata(destination, ignoring: ["com.apple.quarantine"])))
+        let bareMetadata = try readTree(bare, including: parts)
+        #expect(bareMetadata.values.allSatisfy { $0.attributes?["com.apple.quarantine"] == nil })
+        #expect(bareMetadata == extracted)
+
+        // Into a destination the caller opened (an app's staging directory): everything gets the destination's
+        // quarantine, not the archive's, whatever `copyQuarantine` says; the directory itself is as its caller made it.
+        let own = Quarantine(value: Array("0083;673e3000;Nunarchiver;".utf8))
+        var stagingOptions = DestinationOptions()
+        stagingOptions.quarantine = own
+        let final = FilePath(directory.path("Staged").path)
+        let staging = try Destination.staging(for: final, options: stagingOptions)
+        options.copyQuarantine = true
+        try await AEAArchive(url: url, signingKey: keys.signingKey).extract(into: staging, options: options)
+        let published = URL(filePath: try staging.publish(as: final).string)
+        #expect(try readTree(published, including: parts, ignoringAttributes: ignored) == extracted)
+        for path in extracted.keys.sorted() {
+            #expect(extendedAttribute("com.apple.quarantine", of: published.appending(path: path)) == own.value, "\(path)")
+        }
+        #expect(extendedAttribute("com.apple.quarantine", of: published) == nil)
     }
 
     @Test func makesFIFOsAndSkipsWhatItCannot() async throws {

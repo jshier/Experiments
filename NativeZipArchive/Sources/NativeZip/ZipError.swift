@@ -1,7 +1,7 @@
 /// An error from reading, verifying, or extracting a zip archive.
 ///
-/// The `String` payloads name the entry or the structure being read. Errors from the file system (for example
-/// `Errno` from `System`) are thrown as themselves, not wrapped.
+/// The `String` payloads name the entry or the structure being read. Errors from the file system (Disk's
+/// `DiskError`) are thrown as themselves, not wrapped.
 public enum ZipError: Error, CustomStringConvertible {
     /// No end of central directory record was found: the file isn't a zip archive, or is truncated.
     case notAZipArchive

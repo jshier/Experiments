@@ -1,8 +1,8 @@
 import Bytes
 import BytesAsync
+import Disk
 import Foundation
 import Synchronization
-import System
 
 // Apple Archive streams compressed by `aa archive -a ALGORITHM` (its default, LZFSE):
 //
@@ -57,8 +57,8 @@ enum PBZ {
 /// decode them, and publish the buffer.
 final class BlockStream: ChunkSource, @unchecked Sendable {
     enum Input {
-        /// A file, from `start` to `end`.
-        case file(FileDescriptor, start: Int, end: Int)
+        /// A file (Disk's `InputFile`, kept open while the stream runs), from `start` to `end`.
+        case file(InputFile, start: Int, end: Int)
         /// The decoded chunks of another source (an AEA archive's segments), run by whoever made this one
         /// (``AEAPayload``).
         case upstream(any ChunkSource)
@@ -93,7 +93,6 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
     private let input: Input
     private let layout: Layout
     private let decoderCount: Int
-    private let backend: SegmentDecoderBackend
     /// Copies of blocks' stored bytes from upstream buffers (their blocks cross them freely).
     private let staging: SegmentBufferPool?
     /// Blocks to decode, from the producer to the decoders (BytesAsync's bounded queue).
@@ -122,10 +121,9 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
 
     /// - Parameters:
     ///   - extraBuffers: Decoded blocks held at once beyond one per decoder (the consumer's and writers' too).
-    init(_ input: Input, layout: Layout, decoders: Int, extraBuffers: Int, backend: SegmentDecoderBackend) {
+    init(_ input: Input, layout: Layout, decoders: Int, extraBuffers: Int) {
         self.input = input
         self.layout = layout
-        self.backend = backend
         decoderCount = max(1, decoders)
         let capacity = switch layout {
         case .pbz(_, let blockSize): blockSize
@@ -161,8 +159,8 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
     }
 
     nonisolated(nonsending) func nextChunk() async throws(AEAError) -> DecodedChunk? {
-        let start = DispatchTime.now().uptimeNanoseconds
-        defer { counters.wait.add(Int(DispatchTime.now().uptimeNanoseconds - start), ordering: .relaxed) }
+        let start = MonotonicClock.now
+        defer { counters.wait.add(MonotonicClock.nanoseconds(since: start), ordering: .relaxed) }
         let index = consumed
         while true {
             switch state.withLock({ Self.take(index, &$0) }) {
@@ -249,8 +247,8 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
     nonisolated(nonsending) private func produce() async {
         do throws(AEAError) {
             switch input {
-            case .file(let descriptor, let start, let end):
-                try await produce(from: descriptor, start: start, end: end)
+            case .file(let file, let start, let end):
+                try await produce(from: file, start: start, end: end)
             case .upstream(let upstream):
                 try await produce(from: upstream)
             }
@@ -260,7 +258,7 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
     }
 
     /// Reads block headers from the file; decoders read the blocks themselves.
-    nonisolated(nonsending) private func produce(from descriptor: FileDescriptor, start: Int, end: Int) async throws(AEAError) {
+    nonisolated(nonsending) private func produce(from file: InputFile, start: Int, end: Int) async throws(AEAError) {
         var index = 0, rawOffset = 0
         switch layout {
         case .plain(let sliceSize):
@@ -277,7 +275,7 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
             var header = [UInt8](repeating: 0, count: PBZ.blockHeaderSize)
             while offset < end, !cancelled.load(ordering: .relaxed) {
                 guard end - offset >= PBZ.blockHeaderSize else { throw .invalidArchive("a pbz block header is cut short") }
-                try AEAArchive.read(descriptor, at: offset, into: &header)
+                try AEAArchive.read(file, at: offset, into: &header)
                 let (raw, stored) = try PBZ.blockSizes(header.span.bytes, index: index)
                 offset += PBZ.blockHeaderSize
                 guard raw > 0, raw <= blockSize, stored > 0, stored <= raw, stored <= end - offset else {
@@ -333,7 +331,7 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
 
     nonisolated(nonsending) private func decodeTask() async {
         let compression: AEACompression = if case .pbz(let compression, _) = layout { compression } else { .none }
-        var codec = SegmentCodec(compression: compression, backend: backend, framedLZ4: true)
+        var codec = SegmentCodec(compression: compression, framedLZ4: true)
         let readBuffer: RawStorage? = if case .file = input, case .pbz = layout { RawStorage(byteCount: pool.segmentCapacity + 64) } else { nil }
         while !cancelled.load(ordering: .relaxed), !Task.isCancelled {
             guard let buffer = await pool.acquire() else { return }
@@ -346,7 +344,7 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
                 if job.staging >= 0 { staging?.release(job.staging) }
                 return
             }
-            let started = DispatchTime.now().uptimeNanoseconds
+            let started = MonotonicClock.now
             do throws(AEAError) {
                 try decode(job, into: buffer, codec: &codec, readBuffer: readBuffer)
             } catch {
@@ -356,7 +354,7 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
                 return
             }
             if job.staging >= 0 { staging?.release(job.staging) }
-            counters.busy.add(Int(DispatchTime.now().uptimeNanoseconds - started), ordering: .relaxed)
+            counters.busy.add(MonotonicClock.nanoseconds(since: started), ordering: .relaxed)
             let consumer: Continuation<Void>? = state.withLock { state in
                 state.slots[job.index % state.slots.count] = Slot(index: job.index, buffer: buffer, rawOffset: job.rawOffset, rawSize: job.rawSize)
                 guard state.waitingFor == job.index else { return nil }
@@ -372,17 +370,17 @@ final class BlockStream: ChunkSource, @unchecked Sendable {
         let stored: UnsafeRawBufferPointer
         if job.staging >= 0, let staging {
             unsafe stored = UnsafeRawBufferPointer(start: staging.segmentBase(job.staging), count: job.storedSize)
-        } else if case .file(let descriptor, _, _) = input {
-            let readStart = DispatchTime.now().uptimeNanoseconds
-            defer { counters.read.add(Int(DispatchTime.now().uptimeNanoseconds - readStart), ordering: .relaxed) }
+        } else if case .file(let file, _, _) = input {
+            let readStart = MonotonicClock.now
+            defer { counters.read.add(MonotonicClock.nanoseconds(since: readStart), ordering: .relaxed) }
             if job.storedSize == job.rawSize {
                 // Stored (or a plain slice): straight into the output.
-                try unsafe AEAArchive.readFully(descriptor, at: job.fileOffset, into: output).get()
+                try unsafe AEAArchive.readFully(file, at: job.fileOffset, into: output)
                 return
             }
             readBuffer!.reuse(job.storedSize)
             let destination = unsafe UnsafeMutableRawBufferPointer(start: readBuffer!.base, count: job.storedSize) // Stored ≤ raw ≤ its size.
-            try unsafe AEAArchive.readFully(descriptor, at: job.fileOffset, into: destination).get()
+            try unsafe AEAArchive.readFully(file, at: job.fileOffset, into: destination)
             unsafe stored = UnsafeRawBufferPointer(destination)
         } else {
             return

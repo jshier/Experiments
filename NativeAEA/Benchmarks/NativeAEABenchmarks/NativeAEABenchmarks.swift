@@ -85,6 +85,7 @@ final class ArchiveFixture: @unchecked Sendable {
     /// Segment 0, stored and decoded, and the headers that start in it.
     struct FirstSegment {
         var stored: [UInt8]
+        /// Decoded by Compression (BytesReferenceCodecs), the reference both decoders' outputs are checked against.
         var decoded: [UInt8]
         /// The headers that end in the segment (their blobs may not).
         var headerCount = 0
@@ -92,8 +93,9 @@ final class ArchiveFixture: @unchecked Sendable {
 
     lazy var firstSegment: FirstSegment = {
         let stored = try! archive.storedBytes(of: 0)
-        var segment = FirstSegment(stored: stored, decoded: [UInt8](repeating: 0, count: archive.segments[0].rawSize))
-        try! SegmentDecoding(archive, backend: .system).decode(stored, into: &segment.decoded)
+        let decoded = SegmentDecoder.reference(stored, rawSize: archive.segments[0].rawSize, compression: archive.rootHeader.compression)
+        precondition(decoded.count == archive.segments[0].rawSize, "Compression decoded \(decoded.count) bytes of segment 0")
+        var segment = FirstSegment(stored: stored, decoded: decoded)
         var position = 0
         segment.decoded.span.bytes.withUnsafeBytes { bytes in
             while position + 6 <= bytes.count {
@@ -122,7 +124,7 @@ final class ArchiveFixture: @unchecked Sendable {
 ///
 /// `@unchecked Sendable`: used by one benchmark's setup and iterations, one after another.
 final class DecodeState: @unchecked Sendable {
-    var decoder: SegmentDecoding?
+    var decoder: SegmentDecoder?
     var output: [UInt8] = []
 }
 
@@ -159,11 +161,13 @@ let benchmarks: @Sendable () -> Void = {
 
         // MARK: Segments and headers
 
-        for backend in SegmentDecoderBackend.allCases {
+        // "bytes": BytesCompression's decoder, as NativeAEA runs it. "system": Apple's Compression, the reference (until
+        // 2026-11-22 NativeAEA's other backend; since then called here, through the same buffer API and scratch memory).
+        for kind in SegmentDecoderKind.allCases {
             // One 16 MiB segment, decoded: throughput is 16 MiB per iteration.
             let state = DecodeState()
             Benchmark(
-                "Decode segment 0: \(name): \(backend)",
+                "Decode segment 0: \(name): \(kind)",
                 configuration: .init(
                     metrics: [.wallClock, .cpuTotal, .instructions, .mallocCountTotal, .throughput],
                     warmupIterations: 1,
@@ -171,7 +175,7 @@ let benchmarks: @Sendable () -> Void = {
                     maxIterations: 10,
                     setup: {
                         let segment = fixture.firstSegment
-                        let decoder = SegmentDecoding(fixture.archive, backend: backend)
+                        let decoder = SegmentDecoder(fixture.archive, kind: kind)
                         var output = [UInt8](repeating: 0, count: segment.decoded.count)
                         try decoder.decode(segment.stored, into: &output)
                         precondition(output == segment.decoded)
@@ -189,16 +193,16 @@ let benchmarks: @Sendable () -> Void = {
             }
         }
 
-        // A decoder's state, made once per decoding task.
-        for backend in SegmentDecoderBackend.allCases {
+        // A decoder's state, made once per decoding task (Compression's: its scratch memory).
+        for kind in SegmentDecoderKind.allCases {
             Benchmark(
-                "Make segment decoder: \(name): \(backend)",
+                "Make segment decoder: \(name): \(kind)",
                 configuration: .init(setup: { _ = fixture.archive })
             ) { benchmark in
                 let archive = fixture.archive
                 benchmark.startMeasurement()
                 for _ in benchmark.scaledIterations {
-                    blackHole(SegmentDecoding(archive, backend: backend))
+                    blackHole(SegmentDecoder(archive, kind: kind))
                 }
             }
         }
@@ -233,24 +237,22 @@ let benchmarks: @Sendable () -> Void = {
         // MARK: Whole archives
 
         // Listing decodes on every core and writes nothing: its iterations spread 2–4% within a run, so 3 iterations'
-        // p50 (their median).
-        for backend in SegmentDecoderBackend.allCases {
-            Benchmark(
-                "List (decode, verify, parse): \(name): \(backend)",
-                configuration: .init(
-                    metrics: threadedMetrics,
-                    warmupIterations: 0,
-                    maxDuration: .seconds(10),
-                    maxIterations: fixture.isReal ? 1 : 3,
-                    setup: { fixture.warmPageCache() }
-                )
-            ) { (benchmark: Benchmark) async throws in
-                var options = AEAReadOptions()
-                options.decoder = backend
-                let archive = fixture.archive
-                for _ in benchmark.scaledIterations {
-                    blackHole(try await archive.forEachEntry(options: options) { _ in })
-                }
+        // p50 (their median). Its decoders are BytesCompression's ("bytes"; the "system" row went with NativeAEA's
+        // Compression backend, 2026-11-22: the segment rows above keep Compression as the reference).
+        Benchmark(
+            "List (decode, verify, parse): \(name): bytes",
+            configuration: .init(
+                metrics: threadedMetrics,
+                warmupIterations: 0,
+                maxDuration: .seconds(10),
+                maxIterations: fixture.isReal ? 1 : 3,
+                setup: { fixture.warmPageCache() }
+            )
+        ) { (benchmark: Benchmark) async throws in
+            let options = AEAReadOptions()
+            let archive = fixture.archive
+            for _ in benchmark.scaledIterations {
+                blackHole(try await archive.forEachEntry(options: options) { _ in })
             }
         }
 

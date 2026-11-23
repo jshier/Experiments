@@ -17,9 +17,10 @@ public import Bytes
 /// decoded once all of it is in the input; until then, ``decompress(_:into:)`` consumes nothing more and asks
 /// for input. The largest unit is an LZMA2 chunk, 65,542 bytes (``maximumUnitByteCount``), so a caller that
 /// passes back what wasn't consumed, followed by more, needs that much room; passing the whole rest of the
-/// file every time works as well. Chunks decode into a dictionary window the decoder owns, allocated as output
-/// needs it, up to the block's dictionary (or its size, when its header states that and it's smaller) plus a few
-/// MiB of room, and kept across ``reset()``s.
+/// file every time works as well. Chunks decode into a dictionary window the decoder owns, allocated when a block
+/// starts at the block's dictionary (or its size, when its header states that, or the file's size hint from
+/// ``reset(sizeHint:)``, whichever is smallest) plus room (as large as the dictionary up to `windowRoomLimit`,
+/// and at least a chunk's 2 MiB), and kept across resets; only the pages the output reaches become resident.
 ///
 /// The decode loops are ``LZMA2Decoder``'s, unchanged; decoding streams costs under 1% more instructions than
 /// ``LZMA2Decoder/decompressXZ(_:into:)``, which decodes into the caller's whole output.
@@ -29,11 +30,18 @@ public struct XZDecoder: ~Copyable {
     public static var defaultMaximumDictionarySize: Int { LZMADecoder.defaultMaximumDictionarySize }
 
     /// The most dictionary the window keeps. A block whose dictionary is larger decodes until its output
-    /// outgrows this plus the window's room (4 MiB or more), then throws ``BytesError/insufficientCapacity``.
+    /// outgrows this plus the window's room (2 MiB or more), then throws ``BytesError/insufficientCapacity``.
     public let maximumDictionarySize: Int
 
+    /// As `LZMADecoder.windowRoomLimit`: the most room the window keeps beyond the dictionary (it keeps at least
+    /// a chunk's 2 MiB whatever this is).
+    package var windowRoomLimit = LZMAWindow.defaultRoomLimit
+
+    /// The file's decompressed size, if known: no window is larger.
+    private var sizeHint: Int?
+
     private var workspace = LZMAWorkspace(count: LZMAProbabilities.count(lc: 4, lp: 0))
-    private var window = LZMAWindow()
+    var window = LZMAWindow()
     private var registers = LZMARegisters()
     private var model = LZMAModel(lc: 0, literalPositionMask: 0, positionMask: 0, dictionarySize: 0)
     private var stage = Stage.streamHeader
@@ -88,12 +96,24 @@ public struct XZDecoder: ~Copyable {
         self.maximumDictionarySize = maximumDictionarySize
     }
 
-    /// Prepares to decode a new file, discarding output not yet delivered. Keeps the allocations.
+    /// Prepares to decode a new file, discarding output not yet delivered. Keeps the allocations, and the last
+    /// ``reset(sizeHint:)``'s hint.
     public mutating func reset() {
         stage = .streamHeader
         failure = nil
         registers.position = 0
         window.restart()
+    }
+
+    /// Prepares to decode a new file whose decompressed size the container records (zip does), discarding output
+    /// not yet delivered.
+    ///
+    /// - Parameter sizeHint: The file's decompressed size, or `nil` if unknown. No block's window is made larger (one
+    ///   an earlier file made larger stays), so a small file with a large dictionary costs only its size. A file that
+    ///   outgrows a window smaller than its dictionary throws ``BytesError/insufficientCapacity``.
+    public mutating func reset(sizeHint: Int?) {
+        self.sizeHint = sizeHint.map { max($0, 0) }
+        reset()
     }
 
     /// Whether the decoder is after a stream's end, with all its output delivered: the file may end here, or
@@ -185,10 +205,15 @@ public struct XZDecoder: ~Copyable {
                     dictionarySize: header.dictionarySize
                 )
                 registers.position = 0
+                let knownSize = switch (header.uncompressedSize, sizeHint) {
+                case let (size?, hint?): min(size, hint)
+                case let (size, hint): size ?? hint
+                }
                 window.start(
-                    dictionarySize: max(header.dictionarySize, LZMAModel.minimumDictionarySize), knownSize: header.uncompressedSize,
-                    // Room for the largest chunk (2 MiB), which decodes whole.
-                    maximumDictionarySize: maximumDictionarySize, minimumRoom: 4 << 20
+                    dictionarySize: max(header.dictionarySize, LZMAModel.minimumDictionarySize), knownSize: knownSize,
+                    // Room for the largest chunk (2 MiB), which decodes whole, after a slide (which keeps up to 63
+                    // bytes more than the dictionary).
+                    maximumDictionarySize: maximumDictionarySize, minimumRoom: (2 << 20) &+ 64, roomLimit: windowRoomLimit
                 )
                 stage = .chunk
 

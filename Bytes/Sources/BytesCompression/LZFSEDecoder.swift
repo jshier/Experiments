@@ -244,7 +244,7 @@ public struct LZFSEDecoder: ~Copyable {
             guard unsafe UInt(bitPattern: distance &- 1) < UInt(bitPattern: op + literalLength - base) else {
                 throw .invalidValue
             }
-            if zstdLikely(unsafe literalLength &+ matchLength <= outputFast &- (op - output)) {
+            if likely(unsafe literalLength &+ matchLength <= outputFast &- (op - output)) {
                 unsafe LZCopy.wild(op, literal, literalLength)
                 unsafe op += literalLength
                 unsafe LZCopy.match(op, offset: distance, count: matchLength)
@@ -459,7 +459,7 @@ struct LZFSEReverseBits {
         // Unsafe: an 8-byte load. Safe: at or above `floor`, and at or below the previous position, so within
         // the stream or the 8 readable bytes before it.
         let next = unsafe position - (consumed &>> 3)
-        guard zstdLikely(unsafe next >= floor) else { throw .invalidValue }
+        guard likely(unsafe next >= floor) else { throw .invalidValue }
         unsafe position = next
         consumed &= 7
         container = UInt64(littleEndian: unsafe next.loadUnaligned(as: UInt64.self))
@@ -483,19 +483,11 @@ struct LZFSEWorkspace: ~Copyable {
     static var literals: Int { 7936 } // 40,000 literals and copies' slack
     static var size: Int { 7936 + 40_000 + 64 }
 
-    let base: UnsafeMutableRawPointer
+    /// Zeroed: zeros keep the literal buffer's slack defined for the wild copies that read it.
+    let memory = CodecWorkspace(byteCount: size)
 
-    init() {
-        unsafe base = UnsafeMutableRawPointer.allocate(byteCount: Self.size, alignment: 64)
-        // Unsafe: initializing fresh memory. Safe: `size` bytes were just allocated. (Zeros keep the literal
-        // buffer's slack defined for the wild copies that read it.)
-        unsafe base.initializeMemory(as: UInt8.self, repeating: 0, count: Self.size)
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` frees it, once.
-        unsafe base.deallocate()
-    }
+    // Unsafe: the allocation's address. Safe: valid while the workspace (which owns it) lives.
+    var base: UnsafeMutableRawPointer { unsafe memory.base }
 }
 
 /// LZFSE's FSE decoding tables and the L, M, and D symbols' extra bits and base values.

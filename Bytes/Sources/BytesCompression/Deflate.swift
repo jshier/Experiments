@@ -12,6 +12,108 @@ public enum DeflateFormat: Hashable, Sendable {
     case gzip
 }
 
+// The containers' checksums, headers, and trailers, for every DEFLATE encoder and decoder here (sequential and
+// parallel). Reading a gzip header's optional fields stays in `InflateStream`, which reads them as they arrive.
+extension DeflateFormat {
+    /// The checksum of no data: Adler-32's 1 for zlib, 0 otherwise.
+    var initialChecksum: UInt32 { self == .zlib ? 1 : 0 }
+
+    /// The container's checksum of `bytes`, continuing `value`: Adler-32 for zlib, CRC-32 for gzip, `value`
+    /// unchanged for raw DEFLATE.
+    @inline(__always)
+    func checksum(_ bytes: RawSpan, continuing value: UInt32) -> UInt32 {
+        switch self {
+        case .raw: value
+        case .zlib: Adler32.checksum(bytes, continuing: value)
+        case .gzip: CRC32.checksum(bytes, continuing: value)
+        }
+    }
+
+    /// The container's checksum of `bytes` alone.
+    func checksum(_ bytes: RawSpan) -> UInt32 {
+        checksum(bytes, continuing: initialChecksum)
+    }
+
+    /// The checksum of two pieces end to end, from each piece's and the second's length.
+    func combine(_ first: UInt32, _ second: UInt32, secondLength: Int) -> UInt32 {
+        switch self {
+        case .raw: 0
+        case .zlib: Adler32.combine(first, second, secondLength: secondLength)
+        case .gzip: CRC32.combine(first, second, secondLength: secondLength)
+        }
+    }
+
+    /// The header an encoder writes: nothing for raw DEFLATE; zlib's 2 bytes (DEFLATE, a 32 KB window, `level`'s
+    /// class); gzip's 10 (no flags, no time, the extra flags for the slowest and fastest levels, unknown OS).
+    ///
+    /// - Parameter level: The compression level, 0 through 12.
+    /// - Returns: The bytes, and how many there are.
+    func header(level: Int) -> (bytes: InlineArray<16, UInt8>, count: Int) {
+        var bytes = InlineArray<16, UInt8>(repeating: 0)
+        switch self {
+        case .raw:
+            return (bytes, 0)
+        case .zlib:
+            let header = ZlibHeader.header(level: level)
+            bytes[0] = UInt8(header >> 8)
+            bytes[1] = UInt8(header & 0xFF)
+            return (bytes, 2)
+        case .gzip:
+            // Magic, DEFLATE, no flags, no time, extra flags (2 slowest, 4 fastest), unknown OS.
+            let header: InlineArray<10, UInt8> = [0x1F, 0x8B, 8, 0, 0, 0, 0, 0, level >= 8 ? 2 : level <= 1 ? 4 : 0, 255]
+            for index in 0..<10 {
+                bytes[index] = header[index]
+            }
+            return (bytes, 10)
+        }
+    }
+
+    /// The trailer's size: 0, 4 (zlib's Adler-32), or 8 (gzip's CRC-32 and length).
+    var trailerSize: Int {
+        switch self {
+        case .raw: 0
+        case .zlib: 4
+        case .gzip: 8
+        }
+    }
+
+    /// The trailer: the checksum (big-endian for zlib), and for gzip the length modulo 2^32 (both little-endian).
+    ///
+    /// - Returns: The bytes, and how many there are (``trailerSize``).
+    func trailer(checksum: UInt32, length: UInt32) -> (bytes: InlineArray<16, UInt8>, count: Int) {
+        var bytes = InlineArray<16, UInt8>(repeating: 0)
+        switch self {
+        case .raw:
+            break
+        case .zlib:
+            for index in 0..<4 {
+                bytes[index] = UInt8(truncatingIfNeeded: checksum &>> (24 &- 8 &* index))
+            }
+        case .gzip:
+            for index in 0..<4 {
+                bytes[index] = UInt8(truncatingIfNeeded: checksum &>> (8 &* index))
+                bytes[4 &+ index] = UInt8(truncatingIfNeeded: length &>> (8 &* index))
+            }
+        }
+        return (bytes, trailerSize)
+    }
+
+    /// Whether `bytes`, ``trailerSize`` of them, are the trailer of output with `checksum` and `length`.
+    func trailerMatches(_ bytes: RawSpan, checksum: UInt32, length: UInt32) -> Bool {
+        guard bytes.byteCount == trailerSize else { return false }
+        // Unsafe: loads of the trailer's fields. Safe: the span holds `trailerSize` bytes, checked just above.
+        switch self {
+        case .raw:
+            return true
+        case .zlib:
+            return UInt32(bigEndian: unsafe bytes.unsafeLoadUnaligned(as: UInt32.self)) == checksum
+        case .gzip:
+            return UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(as: UInt32.self)) == checksum
+                && UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 4, as: UInt32.self)) == length
+        }
+    }
+}
+
 /// Which code a raw stream uses: DEFLATE (RFC 1951), or PKWARE's Deflate64.
 ///
 /// Deflate64 ("enhanced deflate", zip method 9) is DEFLATE with three changes: a 64 KB window; length symbol 285
@@ -123,9 +225,14 @@ enum DeflateBlockType: UInt8 {
 /// A Huffman decoding table entry, packed into 32 bits, in the style of libdeflate's: everything the
 /// decode loop needs comes from one load.
 ///
-/// - bits 0–7: the bits a match of this code consumes, code plus extra bits (the code alone otherwise);
+/// - bits 0–7: the bits a match of this code consumes, code plus extra bits (the code alone otherwise; 0 for a
+///   subtable link, which the fast loop "consumes" before it knows what it is);
 /// - bits 8–11: the code's length, where its extra bits start (a subtable's index width, for links);
-/// - bits 12–14: the kind;
+/// - bits 12–15: flags, libdeflate's: literal (15); exceptional (14), with subtable link (13) or end of block
+///   (12), or neither for an invalid code (or with bit 7, Deflate64's length symbol 285: see
+///   ``longLength(codeLength:)``); none for a length or distance. So the fast loop tests one bit per
+///   decision, and a length's or distance's bits 8–13 are just its code length: `extra(saved:)` shifts by
+///   `raw >> 8` with no mask (a variable shift uses 6 bits);
 /// - bits 16–31: the value: a literal, a length or distance base, or a subtable's offset.
 struct HuffmanEntry {
     var raw: UInt32
@@ -142,30 +249,74 @@ struct HuffmanEntry {
         case invalid
     }
 
+    static var literalFlag: UInt32 { 0x8000 }
+    static var exceptionalFlag: UInt32 { 0x4000 }
+    static var subtableFlag: UInt32 { 0x2000 }
+    static var endOfBlockFlag: UInt32 { 0x1000 }
+    /// Deflate64's length symbol 285 (with ``exceptionalFlag``): in bit 7, which consuming ignores (the shift uses
+    /// bits 0–5, and the bit count only its low 6 bits).
+    static var longLengthFlag: UInt32 { 0x80 }
+
+    /// The entry for Deflate64's length symbol 285: base 3 and 16 extra bits (31 bits at most, within
+    /// `totalBits`' 6), marked exceptional and long, so the fast loop checks the room for it alone.
+    static func longLength(codeLength: Int) -> Self {
+        var entry = Self(codeLength: codeLength, kind: .lengthOrDistance, value: 3, extraBits: 16)
+        entry.raw |= exceptionalFlag | longLengthFlag
+        return entry
+    }
+
     @inline(__always)
     init(codeLength: Int, kind: Kind, value: Int, extraBits: Int = 0) {
-        raw = UInt32(codeLength &+ extraBits) | UInt32(codeLength) << 8 | kind.rawValue << 12 | UInt32(value) << 16
+        let flags: UInt32 = switch kind {
+        case .literal: Self.literalFlag
+        case .lengthOrDistance: 0
+        case .endOfBlock: Self.exceptionalFlag | Self.endOfBlockFlag
+        case .subtable: Self.exceptionalFlag | Self.subtableFlag
+        case .invalid: Self.exceptionalFlag
+        }
+        let consumed = kind == .subtable ? 0 : codeLength &+ extraBits
+        raw = UInt32(consumed) | UInt32(codeLength) << 8 | flags | UInt32(value) << 16
     }
 
     @inline(__always) init(raw: UInt32) { self.raw = raw }
 
     // The fields are read as named `BitField`s, as NativeZip's decoder read them. Read with the range
-    // subscripts and `Kind(rawBits:)` instead, the decode loop ran 3–5% more instructions (2026-11-22, all four
-    // changed together).
+    // subscripts instead, the decode loop ran 3–5% more instructions (2026-11-22). The fast loop reads the
+    // flags directly.
 
-    /// Bits to consume: the code, plus a length's or distance's extra bits.
-    /// Masked to 6 bits, the width a variable shift uses: so `BitBuffer.consume` can shift by the raw entry
-    /// (ARM's `lsr` ignores the rest), keeping the mask off the decode loop's critical path.
+    /// Bits to consume: the code, plus a length's or distance's extra bits; 0 for a subtable link.
     @inline(__always) var totalBits: Int { raw[Self.totalBitsField] }
     @inline(__always) var codeLength: Int { raw[Self.codeLengthField] }
-    /// Compiles to the same code as comparing the raw field: the optimizer folds the conversion away.
-    @inline(__always) var kind: Kind { raw[Self.kindField] ?? .invalid }
+    @inline(__always) var kind: Kind {
+        if raw & Self.literalFlag != 0 { return .literal }
+        if raw & (Self.exceptionalFlag | Self.longLengthFlag) != Self.exceptionalFlag { return .lengthOrDistance }
+        if raw & Self.subtableFlag != 0 { return .subtable }
+        return raw & Self.endOfBlockFlag != 0 ? .endOfBlock : .invalid
+    }
     @inline(__always) var value: Int { raw[Self.valueField] }
+
+    @inline(__always) var isLiteral: Bool { raw & Self.literalFlag != 0 }
+    /// A subtable link, the end of the block, an invalid code, or Deflate64's length symbol 285.
+    @inline(__always) var isExceptional: Bool { raw & Self.exceptionalFlag != 0 }
+    @inline(__always) var isSubtable: Bool { raw & Self.subtableFlag != 0 }
+    @inline(__always) var isEndOfBlock: Bool { raw & Self.endOfBlockFlag != 0 }
+    @inline(__always) var isLongLength: Bool { raw & Self.longLengthFlag != 0 }
 
     static var totalBitsField: BitField<Int> { BitField(bits: 0...5) }
     static var codeLengthField: BitField<Int> { BitField(bits: 8...11) }
-    static var kindField: BitField<Kind> { BitField(bits: 12...14) }
     static var valueField: BitField<Int> { BitField(bits: 16...31) }
+
+    /// A length's or distance's extra bits, from the bits buffered before the entry was consumed, as
+    /// libdeflate's `EXTRACT_VARBITS8(saved, entry) >> (u8)(entry >> 8)`: the low `totalBits` bits, shifted
+    /// right by the code length. Both shifts take the raw entry (a variable shift uses its low 6 bits).
+    ///
+    /// - Parameter saved: The buffered bits, starting with this entry's code.
+    /// - Returns: The extra bits as an integer.
+    @inline(__always)
+    func extra(saved: UInt64) -> Int {
+        let mask = ~(UInt64.max &<< UInt64(raw))
+        return Int(truncatingIfNeeded: (saved & mask) &>> UInt64(raw &>> 8))
+    }
 
     /// The extra bits' value, from bits whose first is this entry's code's first.
     ///
@@ -201,8 +352,8 @@ enum DeflateAlphabet {
         switch self {
         case .literalLength:
             switch symbol {
-            case 285 where deflate64: // Base 3 and 16 extra bits: 31 bits at most, within `totalBits`' 6.
-                return HuffmanEntry(codeLength: codeLength, kind: .lengthOrDistance, value: 3, extraBits: 16)
+            case 285 where deflate64:
+                return HuffmanEntry.longLength(codeLength: codeLength)
             case 0..<256: return HuffmanEntry(codeLength: codeLength, kind: .literal, value: symbol)
             case 256: return HuffmanEntry(codeLength: codeLength, kind: .endOfBlock, value: 0)
             case 257..<286:

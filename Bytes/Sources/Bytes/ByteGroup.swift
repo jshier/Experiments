@@ -106,6 +106,27 @@ public extension ByteGroup {
         }
     }
 
+    /// Runs `body` with the group's `byteCount` bytes, in memory order, as a span: for passing an integer's
+    /// bytes in a byte order to an API that takes a span, such as a hash or a MAC.
+    ///
+    /// ```swift
+    /// Byte8(UInt64(associatedCount), .littleEndian).withBytes { hmac.update($0) }
+    /// ```
+    ///
+    /// - Parameter body: Receives the bytes. The span is valid only inside it.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws.
+    @inlinable @inline(__always)
+    func withBytes<R: ~Copyable, E: Error>(_ body: (RawSpan) throws(E) -> R) throws(E) -> R {
+        // The integer's little-endian representation is the group's bytes in memory order on any host.
+        try withUnsafeBytes(of: littleEndian.littleEndian) { buffer throws(E) in
+            // Unsafe: a span over the closure's buffer, with no lifetime of its own. Safe: the buffer holds
+            // the local's `Integer.bitWidth / 8 >= byteCount` bytes and is valid for the closure, which the span
+            // doesn't outlive (`body` can't keep a `RawSpan`).
+            try body(unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: buffer[..<Self.byteCount])))
+        }
+    }
+
     /// The byte at `index`, in memory order.
     ///
     /// - Parameter index: The byte's position, 0 through `byteCount - 1`.

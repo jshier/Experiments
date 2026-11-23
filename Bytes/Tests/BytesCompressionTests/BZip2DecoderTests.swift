@@ -225,6 +225,26 @@ struct BZip2DecoderTests {
         }
     }
 
+    /// The CRC's tables (a literal) against their definition: table 0 each byte's CRC bit by bit, table `k` table
+    /// `k - 1`'s entry followed by a zero byte.
+    @Test func crcTables() {
+        var expected = [UInt32](repeating: 0, count: 8 * 256)
+        for byte in 0..<256 {
+            var crc = UInt32(byte) << 24
+            for _ in 0..<8 {
+                crc = crc & 0x8000_0000 != 0 ? crc << 1 ^ 0x04C1_1DB7 : crc << 1
+            }
+            expected[byte] = crc
+        }
+        for table in 1..<8 {
+            for byte in 0..<256 {
+                let previous = expected[(table - 1) * 256 + byte]
+                expected[table * 256 + byte] = previous << 8 ^ expected[Int(previous >> 24)]
+            }
+        }
+        #expect(BZip2CRC.tables == expected)
+    }
+
     @Test func decodesConcatenatedStreams() {
         let text = samples().first { $0.name == "text" }!.bytes
         let first = Array(text.prefix(150_000))

@@ -185,14 +185,10 @@ public struct ExtendedAttributeBlob: Sendable {
     /// Appends one attribute.
     public mutating func append(name: String, value: RawSpan) {
         let size = 4 + name.utf8.count + 1 + value.byteCount
-        // Unsafe: appends the closure's raw buffer to the array. Safe: the 4 bytes of the size, a temporary valid
-        // inside `withUnsafeBytes(of:)`; the array copies them before the closure returns.
-        withUnsafeBytes(of: UInt32(size).littleEndian) { unsafe bytes.append(contentsOf: $0) }
+        bytes.append(UInt32(size), as: Byte4.self, .littleEndian)
         bytes.append(contentsOf: name.utf8)
         bytes.append(0)
-        // Unsafe: appends the closure's raw buffer to the array. Safe: the value span's own bytes, valid inside
-        // `withUnsafeBytes`; the array copies them before the closure returns.
-        value.withUnsafeBytes { unsafe bytes.append(contentsOf: $0) }
+        bytes.append(copying: value)
     }
 }
 
@@ -243,15 +239,10 @@ public struct AccessControlListBlob: Sendable {
                 unsafe uuid_unparse_upper(qualifier.assumingMemoryBound(to: UInt8.self), &uuidText)
                 // Unsafe: frees the qualifier. Safe: `acl_get_qualifier`'s copy, freed once, not used after.
                 unsafe acl_free(qualifier)
-                func append(_ value: some FixedWidthInteger) {
-                    // Unsafe: appends the closure's raw buffer. Safe: the integer's own bytes, a temporary valid
-                    // inside `withUnsafeBytes(of:)`; the array copies them before the closure returns.
-                    withUnsafeBytes(of: value.littleEndian) { unsafe result.append(contentsOf: $0) }
-                }
-                append(UInt32(22 + 36))
+                result.append(UInt32(22 + 36), as: Byte4.self, .littleEndian)
                 result.append(tag == ACL_EXTENDED_ALLOW ? 0x41 : 0x44)
-                append(flags)
-                append(UInt64(mask))
+                result.append(flags, as: Byte8.self, .littleEndian)
+                result.append(UInt64(mask), as: Byte8.self, .littleEndian)
                 result.append(0x49) // "I": a UUID
                 result.append(contentsOf: uuidText.prefix(36).map { UInt8(bitPattern: $0) })
             }
@@ -269,19 +260,23 @@ enum EntryAttributes {
     static func applyExtendedAttributes(_ descriptor: Int32, _ blob: RawSpan, path: PathRef) throws(DiskError) {
         var reader = AlignedBytesReader(blob)
         while !reader.isAtEnd {
-            guard let size = try? Int(reader.read(Byte4.self, .littleEndian)), size >= 5,
-                  let entry = try? reader.read(byteCount: size - 4)
-            else { throw .invalidMetadata("extended attribute size, \(path.string)") }
-            // The entry's bytes, used within the call: the name runs to a NUL inside them, the value is the rest.
+            guard let entry = try? reader.read(bytesPrefixedBy: Byte4.self, .littleEndian, includingPrefix: true) else {
+                throw .invalidMetadata("extended attribute size, \(path.string)")
+            }
+            // The name runs to a NUL inside the entry, the value is the rest.
+            var fields = AlignedBytesReader(entry)
+            let nameCount: Int
+            do throws(BytesError) {
+                nameCount = try fields.read(bytesTerminatedBy: 0).byteCount
+            } catch {
+                throw .invalidMetadata("extended attribute name, \(path.string)")
+            }
+            // The entry's bytes, used within the call.
             let result: Int32 = entry.withUnsafeBytes { bytes in
-                // Unsafe: `memchr` over the entry's bytes, for the name's NUL. Safe: `bytes.count` bytes at `name`, the
-                // entry span's own, valid inside `withUnsafeBytes`.
-                guard let name = bytes.baseAddress, let end = unsafe memchr(name, 0, bytes.count) else { return -2 }
-                // Unsafe: the distance between two pointers. Safe: `end` is the NUL `memchr` found within the same
-                // bytes, at or after `name`: `0 <= nameCount < bytes.count`.
-                let nameCount = unsafe UnsafeRawPointer(end) - name
-                // Unsafe: a pointer past the NUL. Safe: `nameCount + 1 <= bytes.count`, so within the entry or one
-                // past its end (then the value is empty, and nothing is read).
+                // The entry holds at least the name's NUL, so it has an address.
+                guard let name = bytes.baseAddress else { return -2 }
+                // Unsafe: a pointer past the NUL. Safe: the NUL is at `nameCount < bytes.count`, so this is within the
+                // entry or one past its end (then the value is empty, and nothing is read).
                 let value = unsafe name + nameCount + 1
                 // Unsafe: the name as a C string and the value's bytes to `fsetxattr`. Safe: the name ends at the NUL
                 // found above; the value is the `bytes.count - nameCount - 1` bytes after it, the rest of the entry;
@@ -298,134 +293,124 @@ enum EntryAttributes {
     /// (`U` user name, `G` group name, `I` UUID, `S` SID), and the qualifier. The `acl_*` functions allocate: only
     /// entries with an ACL get here.
     static func applyAccessControlList(_ descriptor: Int32, _ blob: RawSpan, path: PathRef) throws(DiskError) {
-        // The blob's bytes are valid inside this closure (the span's own), which every use of them returns within.
-        try blob.withUnsafeBytes { (blob: UnsafeRawBufferPointer) throws(DiskError) in
-            var count = 0
-            var offset = 0
-            while offset < blob.count {
-                guard blob.count - offset >= 22 else { throw .invalidMetadata("ACL, \(path.string)") }
-                // Unsafe: an unaligned 4-byte load at `offset` (unchecked in release). Safe: at least 22 bytes remain
-                // from `offset` (the guard above).
-                let size = Int(UInt32(littleEndian: unsafe blob.loadUnaligned(fromByteOffset: offset, as: UInt32.self)))
-                guard size >= 22, size <= blob.count - offset else { throw .invalidMetadata("ACL entry size, \(path.string)") }
-                count += 1
-                offset += size
+        // The first pass counts the entries, checking each one's size: at least the 22 bytes of its fixed fields.
+        var count = 0
+        var entries = LittleEndianBytesReader(blob)
+        while !entries.isAtEnd {
+            guard let entry = try? entries.read(bytesPrefixedBy: Byte4.self, includingPrefix: true), entry.byteCount >= 18 else {
+                throw .invalidMetadata("ACL entry size, \(path.string)")
             }
-            // Unsafe: `acl_init` returns a pointer to a new ACL. Safe: checked for `nil` next; owned here, and freed
-            // exactly once, by the `defer` below, on every way out.
-            var acl: acl_t? = unsafe acl_init(Int32(count))
-            // Unsafe: reads the pointer. Safe: only its value, compared with `nil`.
-            guard unsafe acl != nil else { throw .system("acl_init", path: path, code: errno) }
-            // Unsafe: frees the ACL. Safe: the one made above (or where `acl_create_entry` moved it: it updates
-            // `acl`), freed once, after the last use of it and of its entries.
-            defer { unsafe acl_free(UnsafeMutableRawPointer(acl)) }
-            offset = 0
-            while offset < blob.count {
-                // Unsafe (the next six): loads of the entry's fixed fields at `offset` to `offset + 21`, and a pointer
-                // to its qualifier at `offset + 22`. Safe: the first pass checked every entry: `offset` is an entry's
-                // start, with its `size >= 22` bytes within the blob (so the base isn't `nil`); the multi-byte loads
-                // are unaligned ones.
-                let size = Int(UInt32(littleEndian: unsafe blob.loadUnaligned(fromByteOffset: offset, as: UInt32.self)))
-                let type = unsafe blob.load(fromByteOffset: offset + 4, as: UInt8.self)
-                let flags = UInt64(littleEndian: unsafe blob.loadUnaligned(fromByteOffset: offset + 5, as: UInt64.self))
-                let permissions = UInt64(littleEndian: unsafe blob.loadUnaligned(fromByteOffset: offset + 13, as: UInt64.self))
-                let qualifierType = unsafe blob.load(fromByteOffset: offset + 21, as: UInt8.self)
-                let qualifier = unsafe blob.baseAddress! + offset + 22
-                let qualifierCount = size - 22
-                offset += size
-
-                var uuid: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
-                // Unsafe: the qualifier's bytes to `CString.with`, which hands the body a pointer. Safe: `size - 22`
-                // bytes after the fixed fields, within the entry (checked in the first pass); `name` is its
-                // NUL-terminated copy, valid inside the body.
-                let resolved = unsafe CString.with(qualifier, count: qualifierCount) { name -> Int32 in
-                    withUnsafeMutableBytes(of: &uuid) { raw in
-                        // Unsafe: the UUID's raw bytes as `UInt8`s. Safe: `uuid_t` is 16 `UInt8`s (so not `nil`),
-                        // exclusively borrowed inside `withUnsafeMutableBytes`, which each call below returns within.
-                        let bytes = unsafe raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
-                        switch qualifierType {
-                        // Unsafe (the next two): `name`, its `strlen`, and the UUID's bytes to
-                        // `mbr_identifier_to_uuid`. Safe: `name` is NUL-terminated (above), read for that length;
-                        // the call writes the 16 bytes of a UUID at `bytes`.
-                        case 0x55: return unsafe mbr_identifier_to_uuid(ID_TYPE_USERNAME, name, strlen(name), bytes) // "U"
-                        case 0x47: return unsafe mbr_identifier_to_uuid(ID_TYPE_GROUPNAME, name, strlen(name), bytes) // "G"
-                        // Unsafe: `name` and the UUID's bytes to `uuid_parse`. Safe: NUL-terminated; it writes 16 bytes.
-                        case 0x49: return unsafe uuid_parse(name, bytes) == 0 ? 0 : EINVAL // "I"
-                        case 0x53: // "S"
-                            var sid = nt_sid_t()
-                            // Unsafe: `name` and a pointer to `sid` to `mbr_string_to_sid`. Safe: NUL-terminated; it
-                            // fills one `nt_sid_t`, a local.
-                            let parsed = unsafe mbr_string_to_sid(name, &sid)
-                            // Unsafe: a pointer to `sid` and the UUID's bytes to `mbr_sid_to_uuid`. Safe: it reads the
-                            // local `nt_sid_t` just filled and writes the 16 bytes of a UUID.
-                            return parsed == 0 ? unsafe mbr_sid_to_uuid(&sid, bytes) : parsed
-                        default: return EINVAL
-                        }
-                    }
-                }
-                guard resolved == 0 else { throw .invalidMetadata("ACL qualifier, \(path.string)") }
-                var entry: acl_entry_t?
-                // Unsafe: `acl_create_entry` with pointers to `acl` and `entry`, then reads `entry`. Safe: `acl` is the
-                // live ACL (the call may move it, and updates `acl`); `entry`, when it succeeds, is an entry of it,
-                // valid while the ACL lives (to the end of this closure), and used only in this iteration.
-                guard unsafe acl_create_entry(&acl, &entry) == 0, let entry = unsafe entry else { throw .system("acl_create_entry", path: path, code: errno) }
-                let tag: acl_tag_t
-                switch type {
-                case 0x41: tag = ACL_EXTENDED_ALLOW // "A"
-                case 0x44: tag = ACL_EXTENDED_DENY // "D"
-                default: throw .invalidMetadata("ACL entry type \(type), \(path.string)")
-                }
-                // Unsafe (both): `entry` to `acl_set_tag_type` and, with a pointer to `uuid`, to `acl_set_qualifier`.
-                // Safe: an entry of the live ACL; the qualifier call copies the 16 bytes of the local `uuid`.
-                guard unsafe acl_set_tag_type(entry, tag) == 0, unsafe acl_set_qualifier(entry, &uuid) == 0 else {
-                    throw .system("acl_set_qualifier", path: path, code: errno)
-                }
-                var permissionSet: acl_permset_t?
-                // Unsafe: `acl_get_permset` with `entry` and a pointer to `permissionSet`, then reads it. Safe: an
-                // entry of the live ACL; the set, when the call succeeds, is part of that entry, valid as long.
-                guard unsafe acl_get_permset(entry, &permissionSet) == 0, let permissionSet = unsafe permissionSet else { throw .system("acl_get_permset", path: path, code: errno) }
-                // Unsafe: `acl_clear_perms` on the set. Safe: the live entry's permission set, just fetched.
-                unsafe acl_clear_perms(permissionSet)
-                var bits = permissions
-                while bits != 0 {
-                    let bit = bits & (~bits &+ 1)
-                    bits &= bits - 1
-                    // Unsafe: `acl_add_perm` on the set. Safe: the live entry's permission set; a bit it doesn't
-                    // know is refused by the call (an error, thrown).
-                    guard unsafe acl_add_perm(permissionSet, acl_perm_t(UInt32(truncatingIfNeeded: bit))) == 0 else {
-                        throw .invalidMetadata("ACL permission \(bit), \(path.string)")
-                    }
-                }
-                // Unsafe: `acl_set_permset` with `entry` and its set. Safe: both the live ACL's, as above.
-                guard unsafe acl_set_permset(entry, permissionSet) == 0 else { throw .system("acl_set_permset", path: path, code: errno) }
-                var flagSet: acl_flagset_t?
-                // Unsafe: `acl_get_flagset_np` with `entry` (as the raw pointer it takes) and a pointer to `flagSet`,
-                // then reads it. Safe: an entry of the live ACL, one of the objects the call accepts; the set, when
-                // it succeeds, is part of that entry, valid as long.
-                guard unsafe acl_get_flagset_np(UnsafeMutableRawPointer(entry), &flagSet) == 0, let flagSet = unsafe flagSet else {
-                    throw .system("acl_get_flagset_np", path: path, code: errno)
-                }
-                // Unsafe: `acl_clear_flags_np` on the set. Safe: the live entry's flag set, just fetched.
-                unsafe acl_clear_flags_np(flagSet)
-                bits = flags
-                while bits != 0 {
-                    let bit = bits & (~bits &+ 1)
-                    bits &= bits - 1
-                    // Unsafe: `acl_add_flag_np` on the set. Safe: the live entry's flag set; a bit it doesn't know is
-                    // refused by the call (an error, thrown).
-                    guard unsafe acl_add_flag_np(flagSet, acl_flag_t(UInt32(truncatingIfNeeded: bit))) == 0 else {
-                        throw .invalidMetadata("ACL flag \(bit), \(path.string)")
-                    }
-                }
-                // Unsafe: `acl_set_flagset_np` with `entry` and its set. Safe: both the live ACL's, as above.
-                guard unsafe acl_set_flagset_np(UnsafeMutableRawPointer(entry), flagSet) == 0 else {
-                    throw .system("acl_set_flagset_np", path: path, code: errno)
-                }
-            }
-            // Unsafe: the ACL to `acl_set_fd_np`. Safe: not `nil` (checked after `acl_init`, and `acl_create_entry`
-            // keeps it so), still live: the `defer` frees it only after this.
-            if unsafe Sys.aclSet(descriptor, acl!) != 0 { throw .system("acl_set_fd", path: path, code: errno) }
+            count += 1
         }
+        // Unsafe: `acl_init` returns a pointer to a new ACL. Safe: checked for `nil` next; owned here, and freed
+        // exactly once, by the `defer` below, on every way out.
+        var acl: acl_t? = unsafe acl_init(Int32(count))
+        // Unsafe: reads the pointer. Safe: only its value, compared with `nil`.
+        guard unsafe acl != nil else { throw .system("acl_init", path: path, code: errno) }
+        // Unsafe: frees the ACL. Safe: the one made above (or where `acl_create_entry` moved it: it updates
+        // `acl`), freed once, after the last use of it and of its entries.
+        defer { unsafe acl_free(UnsafeMutableRawPointer(acl)) }
+        entries = LittleEndianBytesReader(blob)
+        while !entries.isAtEnd {
+            // The first pass checked every entry's size, so these reads don't fail.
+            guard var fields = try? entries.read(sectionPrefixedBy: Byte4.self, includingPrefix: true) else {
+                throw .invalidMetadata("ACL entry size, \(path.string)")
+            }
+            guard let type = try? fields.read(UInt8.self), let flags = try? fields.read(UInt64.self),
+                  let permissions = try? fields.read(UInt64.self), let qualifierType = try? fields.read(UInt8.self)
+            else { throw .invalidMetadata("ACL, \(path.string)") }
+            let qualifier = fields.readRemainingBytes()
+
+            var uuid: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            // Unsafe: `CString.with` hands the body a pointer. Safe: `name` is its NUL-terminated copy of the
+            // qualifier (the rest of the entry), valid inside the body.
+            let resolved = unsafe CString.with(qualifier) { name -> Int32 in
+                withUnsafeMutableBytes(of: &uuid) { raw in
+                    // Unsafe: the UUID's raw bytes as `UInt8`s. Safe: `uuid_t` is 16 `UInt8`s (so not `nil`),
+                    // exclusively borrowed inside `withUnsafeMutableBytes`, which each call below returns within.
+                    let bytes = unsafe raw.baseAddress!.assumingMemoryBound(to: UInt8.self)
+                    switch qualifierType {
+                    // Unsafe (the next two): `name`, its `strlen`, and the UUID's bytes to
+                    // `mbr_identifier_to_uuid`. Safe: `name` is NUL-terminated (above), read for that length;
+                    // the call writes the 16 bytes of a UUID at `bytes`.
+                    case 0x55: return unsafe mbr_identifier_to_uuid(ID_TYPE_USERNAME, name, strlen(name), bytes) // "U"
+                    case 0x47: return unsafe mbr_identifier_to_uuid(ID_TYPE_GROUPNAME, name, strlen(name), bytes) // "G"
+                    // Unsafe: `name` and the UUID's bytes to `uuid_parse`. Safe: NUL-terminated; it writes 16 bytes.
+                    case 0x49: return unsafe uuid_parse(name, bytes) == 0 ? 0 : EINVAL // "I"
+                    case 0x53: // "S"
+                        var sid = nt_sid_t()
+                        // Unsafe: `name` and a pointer to `sid` to `mbr_string_to_sid`. Safe: NUL-terminated; it
+                        // fills one `nt_sid_t`, a local.
+                        let parsed = unsafe mbr_string_to_sid(name, &sid)
+                        // Unsafe: a pointer to `sid` and the UUID's bytes to `mbr_sid_to_uuid`. Safe: it reads the
+                        // local `nt_sid_t` just filled and writes the 16 bytes of a UUID.
+                        return parsed == 0 ? unsafe mbr_sid_to_uuid(&sid, bytes) : parsed
+                    default: return EINVAL
+                    }
+                }
+            }
+            guard resolved == 0 else { throw .invalidMetadata("ACL qualifier, \(path.string)") }
+            var entry: acl_entry_t?
+            // Unsafe: `acl_create_entry` with pointers to `acl` and `entry`, then reads `entry`. Safe: `acl` is the
+            // live ACL (the call may move it, and updates `acl`); `entry`, when it succeeds, is an entry of it,
+            // valid while the ACL lives (to the end of this closure), and used only in this iteration.
+            guard unsafe acl_create_entry(&acl, &entry) == 0, let entry = unsafe entry else { throw .system("acl_create_entry", path: path, code: errno) }
+            let tag: acl_tag_t
+            switch type {
+            case 0x41: tag = ACL_EXTENDED_ALLOW // "A"
+            case 0x44: tag = ACL_EXTENDED_DENY // "D"
+            default: throw .invalidMetadata("ACL entry type \(type), \(path.string)")
+            }
+            // Unsafe (both): `entry` to `acl_set_tag_type` and, with a pointer to `uuid`, to `acl_set_qualifier`.
+            // Safe: an entry of the live ACL; the qualifier call copies the 16 bytes of the local `uuid`.
+            guard unsafe acl_set_tag_type(entry, tag) == 0, unsafe acl_set_qualifier(entry, &uuid) == 0 else {
+                throw .system("acl_set_qualifier", path: path, code: errno)
+            }
+            var permissionSet: acl_permset_t?
+            // Unsafe: `acl_get_permset` with `entry` and a pointer to `permissionSet`, then reads it. Safe: an
+            // entry of the live ACL; the set, when the call succeeds, is part of that entry, valid as long.
+            guard unsafe acl_get_permset(entry, &permissionSet) == 0, let permissionSet = unsafe permissionSet else { throw .system("acl_get_permset", path: path, code: errno) }
+            // Unsafe: `acl_clear_perms` on the set. Safe: the live entry's permission set, just fetched.
+            unsafe acl_clear_perms(permissionSet)
+            var bits = permissions
+            while bits != 0 {
+                let bit = bits & (~bits &+ 1)
+                bits &= bits - 1
+                // Unsafe: `acl_add_perm` on the set. Safe: the live entry's permission set; a bit it doesn't
+                // know is refused by the call (an error, thrown).
+                guard unsafe acl_add_perm(permissionSet, acl_perm_t(UInt32(truncatingIfNeeded: bit))) == 0 else {
+                    throw .invalidMetadata("ACL permission \(bit), \(path.string)")
+                }
+            }
+            // Unsafe: `acl_set_permset` with `entry` and its set. Safe: both the live ACL's, as above.
+            guard unsafe acl_set_permset(entry, permissionSet) == 0 else { throw .system("acl_set_permset", path: path, code: errno) }
+            var flagSet: acl_flagset_t?
+            // Unsafe: `acl_get_flagset_np` with `entry` (as the raw pointer it takes) and a pointer to `flagSet`,
+            // then reads it. Safe: an entry of the live ACL, one of the objects the call accepts; the set, when
+            // it succeeds, is part of that entry, valid as long.
+            guard unsafe acl_get_flagset_np(UnsafeMutableRawPointer(entry), &flagSet) == 0, let flagSet = unsafe flagSet else {
+                throw .system("acl_get_flagset_np", path: path, code: errno)
+            }
+            // Unsafe: `acl_clear_flags_np` on the set. Safe: the live entry's flag set, just fetched.
+            unsafe acl_clear_flags_np(flagSet)
+            bits = flags
+            while bits != 0 {
+                let bit = bits & (~bits &+ 1)
+                bits &= bits - 1
+                // Unsafe: `acl_add_flag_np` on the set. Safe: the live entry's flag set; a bit it doesn't know is
+                // refused by the call (an error, thrown).
+                guard unsafe acl_add_flag_np(flagSet, acl_flag_t(UInt32(truncatingIfNeeded: bit))) == 0 else {
+                    throw .invalidMetadata("ACL flag \(bit), \(path.string)")
+                }
+            }
+            // Unsafe: `acl_set_flagset_np` with `entry` and its set. Safe: both the live ACL's, as above.
+            guard unsafe acl_set_flagset_np(UnsafeMutableRawPointer(entry), flagSet) == 0 else {
+                throw .system("acl_set_flagset_np", path: path, code: errno)
+            }
+        }
+        // Unsafe: the ACL to `acl_set_fd_np`. Safe: not `nil` (checked after `acl_init`, and `acl_create_entry`
+        // keeps it so), still live: the `defer` frees it only after this.
+        if unsafe Sys.aclSet(descriptor, acl!) != 0 { throw .system("acl_set_fd", path: path, code: errno) }
     }
 }
 

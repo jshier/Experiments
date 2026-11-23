@@ -336,9 +336,9 @@ enum RSAFile: String, CaseIterable, Sendable {
         defer { directory.remove() }
         let scratch = directory.url
         let keyPath = scratch.appendingPathComponent("key.pem").path
-        _ = try #require(run(openssl, ["genrsa"] + (exponentThree ? ["-3"] : []) + ["-out", keyPath, "\(bits)"]))
-        let spki = String(decoding: try #require(run(openssl, ["rsa", "-in", keyPath, "-pubout"])), as: UTF8.self)
-        let pkcs1 = String(decoding: try #require(run(openssl, ["rsa", "-in", keyPath, "-RSAPublicKey_out"])), as: UTF8.self)
+        _ = try ExternalTool.output(openssl, ["genrsa"] + (exponentThree ? ["-3"] : []) + ["-out", keyPath, "\(bits)"])
+        let spki = String(decoding: try ExternalTool.output(openssl, ["rsa", "-in", keyPath, "-pubout"]), as: UTF8.self)
+        let pkcs1 = String(decoding: try ExternalTool.output(openssl, ["rsa", "-in", keyPath, "-RSAPublicKey_out"]), as: UTF8.self)
         #expect(spki.hasPrefix("-----BEGIN PUBLIC KEY-----"))
         #expect(pkcs1.hasPrefix("-----BEGIN RSA PUBLIC KEY-----"))
         let key = try RSA.PublicKey(pemRepresentation: spki)
@@ -350,7 +350,7 @@ enum RSAFile: String, CaseIterable, Sendable {
         let message = [UInt8]("A message signed with openssl dgst, \(bits) bits".utf8)
         try Data(message).write(to: URL(fileURLWithPath: messagePath))
         for (algorithm, name) in [(RSA.DigestAlgorithm.sha1, "-sha1"), (.sha256, "-sha256"), (.sha384, "-sha384"), (.sha512, "-sha512")] {
-            let signature = [UInt8](try #require(run(openssl, ["dgst", name, "-sign", keyPath, messagePath])))
+            let signature = try ExternalTool.output(openssl, ["dgst", name, "-sign", keyPath, messagePath])
             #expect(signature.count == key.modulusByteCount)
             #expect(key.verifies(signature, message: message, algorithm), "\(name)")
             #expect(!key.verifies(signature, message: message.dropLast(), algorithm))

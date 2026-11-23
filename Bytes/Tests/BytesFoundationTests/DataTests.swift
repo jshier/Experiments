@@ -2,7 +2,7 @@ import BytesFoundation
 import Foundation
 import Testing
 
-// `Data(copying:)` and `Data.append(_: RawSpan)`: empty spans, slices, appends after existing bytes, and a large
+// `Data(copying:)` and `Data.append(copying:)`: empty spans, slices, appends after existing bytes, and a large
 // copy (several pages, so `Data` stores it out of line).
 
 @Suite struct DataSpanTests {
@@ -42,18 +42,18 @@ import Testing
     @Test func appendEmpty() {
         var data = Data([7, 8])
         let empty: [UInt8] = []
-        data.append(empty.span.bytes)
+        data.append(copying: empty.span.bytes)
         #expect([UInt8](data) == [7, 8])
         var none = Data()
-        none.append(empty.span.bytes)
+        none.append(copying: empty.span.bytes)
         #expect(none.isEmpty)
     }
 
     @Test func appendAfterExisting() {
         var data = Data([1, 2])
         let more: [UInt8] = [3, 4, 5]
-        data.append(more.span.bytes)
-        data.append(more.span.bytes.extracting(1...))
+        data.append(copying: more.span.bytes)
+        data.append(copying: more.span.bytes.extracting(1...))
         #expect([UInt8](data) == [1, 2, 3, 4, 5, 4, 5])
     }
 
@@ -64,7 +64,7 @@ import Testing
         var piece = 1
         while offset < span.byteCount {
             let end = min(offset + piece, span.byteCount)
-            data.append(span.extracting(offset..<end))
+            data.append(copying: span.extracting(offset..<end))
             offset = end
             piece = piece * 3 + 1
         }
@@ -75,7 +75,7 @@ import Testing
         // A `Data` slice whose indices don't start at 0.
         var data = Data([0, 1, 2, 3, 4])[2...]
         let more: [UInt8] = [9]
-        data.append(more.span.bytes)
+        data.append(copying: more.span.bytes)
         #expect(data.startIndex == 2)
         #expect([UInt8](data) == [2, 3, 4, 9])
     }
@@ -83,7 +83,7 @@ import Testing
     @Test func appendFromInlineArray() {
         var data = Data()
         let bytes: InlineArray<4, UInt8> = [0xDE, 0xAD, 0xBE, 0xEF]
-        data.append(bytes.span.bytes)
+        data.append(copying: bytes.span.bytes)
         #expect([UInt8](data) == [0xDE, 0xAD, 0xBE, 0xEF])
     }
 }

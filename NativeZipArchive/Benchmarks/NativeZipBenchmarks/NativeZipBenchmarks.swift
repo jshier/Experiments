@@ -221,6 +221,21 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
+    // Encrypted entries of the same 32 MB text, decrypted as they're decoded (ZipDecoder's staging), CRC-32 included.
+    for encryption in Fixtures.Encryption.allCases {
+        Benchmark(encryption.label, configuration: large) { benchmark in
+            let archive = try ZipArchive(url: Fixtures.encryptedArchive(encryption))
+            let entry = firstFile(archive)
+            var decoder = ZipDecoder()
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                try archive.contents(of: entry, using: &decoder, password: Fixtures.password) { blackHole($0.byteCount) }
+            }
+        } setup: {
+            try Fixtures.prepareEncrypted(encryption)
+        }
+    }
+
     // MARK: Building blocks
 
     // Compression's one-shot raw DEFLATE decoder (`COMPRESSION_ZLIB`) through BytesReferenceCodecs, on the text row's
@@ -360,12 +375,18 @@ let benchmarks: @Sendable () -> Void = {
             let archive = try ZipArchive(url: Fixtures.smallFiles20k)
             var options = NativeZip.ExtractionOptions()
             if progress { options.progress = ExtractionProgress() }
-            if quarantined { options.quarantine = Quarantine(value: Array("0083;673e3000;Safari;".utf8)) }
+            // The quarantine is the destination's (opened here, as `extract(to:)` opens its own).
+            var destinationOptions = DestinationOptions()
+            if quarantined { destinationOptions.quarantine = Quarantine(value: Array("0083;673e3000;Safari;".utf8)) }
             let before = SyscallCounter.total
             let destinations = benchmark.scaledIterations.map { _ in FilePath(Fixtures.outputDirectory().path) }
             benchmark.startMeasurement()
             for index in benchmark.scaledIterations {
-                try await archive.extract(to: destinations[index], options: options)
+                if quarantined {
+                    try await archive.extract(into: Destination(destinations[index], options: destinationOptions), options: options)
+                } else {
+                    try await archive.extract(to: destinations[index], options: options)
+                }
             }
             benchmark.stopMeasurement()
             recordDiskSyscalls(benchmark, since: before)

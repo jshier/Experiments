@@ -1,5 +1,7 @@
+import BytesReferenceCodecs
 import BytesTestSupport
 import BytesTesting
+import Compression
 import Foundation
 @_spi(Testing) import NativeZip
 import Testing
@@ -216,6 +218,42 @@ enum LZMAOutcome: Equatable {
         }
     }
 
+    /// Small unencrypted LZMA and xz entries (at most the decoder's 1 MiB chunk) decode in one call straight into the
+    /// output buffer, with no window: at their recorded size they decode, at any other (one short, one over, half,
+    /// over 1 MiB as recorded for a stream that isn't) they're corrupt.
+    @Test func smallEntriesDecodeWhole() throws {
+        let text = LZMAVector.named("text-marker").expected
+        let xz = AppleCompression.encode(text, COMPRESSION_LZMA)
+        var decoder = ZipDecoder()
+        func decode(_ payload: [UInt8], method: UInt16, size: Int, hasEndMarker: Bool) -> LZMAOutcome {
+            LZMAOutcome {
+                var output: [UInt8] = []
+                try decoder.decodePayload(payload.span.bytes, method: method, uncompressedSize: UInt64(size), hasEndMarker: hasEndMarker) { chunk in
+                    chunk.withUnsafeBytes { output.append(contentsOf: $0) }
+                }
+                return output
+            }
+        }
+        let entries: [(name: String, payload: [UInt8], method: UInt16, expected: [UInt8], hasEndMarker: Bool)] = [
+            ("LZMA, end marker", LZMAVector.named("text-marker").payload, ZipArchive.Method.lzma, text, true),
+            ("LZMA, end marker, flag clear", LZMAVector.named("text-marker").payload, ZipArchive.Method.lzma, text, false),
+            ("LZMA, no marker", LZMAVector.named("text-nomarker").payload, ZipArchive.Method.lzma, LZMAVector.named("text-nomarker").expected, false),
+            ("LZMA, one byte", LZMAVector.named("one-nomarker").payload, ZipArchive.Method.lzma, LZMAVector.named("one-nomarker").expected, false),
+            ("xz", xz, ZipArchive.Method.xz, text, false),
+        ]
+        // Twice, so the second round reuses each method's state.
+        for _ in 0..<2 {
+            for entry in entries {
+                let size = entry.expected.count
+                #expect(decode(entry.payload, method: entry.method, size: size, hasEndMarker: entry.hasEndMarker) == .decoded(entry.expected), "\(entry.name)")
+                for wrong in Set([size - 1, size + 1, size / 2, (1 << 20) + 1]) where wrong >= 0 && wrong != size {
+                    let outcome = decode(entry.payload, method: entry.method, size: wrong, hasEndMarker: entry.hasEndMarker)
+                    #expect(outcome == .corrupt, "\(entry.name), size \(wrong)")
+                }
+            }
+        }
+    }
+
     @Test func rejectsBadHeaders() throws {
         let vector = LZMAVector.named("text-marker")
         let payload = vector.payload
@@ -356,7 +394,7 @@ enum LZMAOutcome: Equatable {
     /// Not a test: decoding throughput, in release builds (`swift test -c release --filter measureLZMAThroughput`).
     /// Set `LZMA_PERF_PAYLOAD` and `LZMA_PERF_ORIGINAL` to time a payload of your own too (made from the
     /// original with `make-lzma-vectors.sh --payload ORIGINAL PAYLOAD`).
-    @Test(.disabled(if: lzmaIsDebugBuild)) func measureLZMAThroughput() throws {
+    @Test(.optimizedOnly) func measureLZMAThroughput() throws {
         var cases = ["text-marker", "sentences-3m-dict64k", "records-lc2-lp2-pb3", "random"].map { name in
             let vector = LZMAVector.named(name)
             return (name, vector.payload, vector.size, vector.hasEndMarker)
@@ -397,14 +435,6 @@ enum LZMAOutcome: Equatable {
         LZMADecoderTests.checkCorruptPayloads(perVector: 200)
     }
 }
-
-let lzmaIsDebugBuild: Bool = {
-    #if DEBUG
-    true
-    #else
-    false
-    #endif
-}()
 
 /// A small LZMA encoder for tests: greedy matches from a hash of 3-byte sequences, repeat distances when
 /// they match as well, short repeats, matched literals, and the end marker. Writes a zip method-14 payload.

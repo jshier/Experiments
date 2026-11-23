@@ -1,5 +1,6 @@
 import Bytes
 import BytesCrypto
+import Disk
 import Foundation
 public import System
 
@@ -27,23 +28,17 @@ public final class AEAArchive: Sendable {
     let segmentKeys: [DataKey]
     /// Whether segments (and headers) are encrypted: every profile but 0.
     public let isEncrypted: Bool
-    let descriptor: FileDescriptor
+    /// The archive file, open for reading (Disk's `InputFile`).
+    let file: InputFile
     /// The largest compressed segment, for sizing read buffers.
     public let largestCompressedSegment: Int
 
     /// The profile of the archive at `path`, read from its first bytes without any key: what it will need to open
     /// (a symmetric key, a password, a recipient's key, a signer), for an app to ask before it opens the archive.
     public static func profile(at path: FilePath) throws(AEAError) -> AEAProfile {
-        let descriptor: FileDescriptor
-        do {
-            descriptor = try FileDescriptor.open(path, .readOnly, options: [.closeOnExec])
-        } catch {
-            throw .fileSystem("open \(path)", error as? Errno ?? .ioError)
-        }
-        defer { try? descriptor.close() }
-        guard try fileSize(descriptor) >= AEAPrologue.fixedByteCount else { throw .notAnAEAFile }
-        var fixed = [UInt8](repeating: 0, count: AEAPrologue.fixedByteCount)
-        try read(descriptor, at: 0, into: &fixed)
+        let file = try open(path)
+        guard file.count >= AEAPrologue.fixedByteCount else { throw .notAnAEAFile }
+        let fixed = try read(file, at: 0, count: AEAPrologue.fixedByteCount)
         return try AEAPrologue.profile(parsing: fixed.span.bytes)
     }
 
@@ -55,27 +50,21 @@ public final class AEAArchive: Sendable {
     ///     evaluated as trusted.
     /// - Throws: ``AEAError``: not an archive, an unsupported profile, a bad signature or MAC, a truncated file.
     public init(path: FilePath, signingKey: AEASigningKey = .certificateChain, decryptionKey: AEADecryptionKey? = nil) throws(AEAError) {
-        let descriptor: FileDescriptor
-        do {
-            descriptor = try FileDescriptor.open(path, .readOnly, options: [.closeOnExec])
-        } catch {
-            throw .fileSystem("open \(path)", error as? Errno ?? .ioError)
-        }
-        self.descriptor = descriptor
+        // Closed when the archive goes (or when `init` throws).
+        let file = try Self.open(path)
+        self.file = file
         self.path = path
-        do throws(AEAError) {
-            let fileSize = try Self.fileSize(descriptor)
+        do {
+            let fileSize = file.count
             guard fileSize >= AEAPrologue.fixedByteCount else { throw AEAError.notAnAEAFile }
-            var fixed = [UInt8](repeating: 0, count: AEAPrologue.fixedByteCount)
-            try Self.read(descriptor, at: 0, into: &fixed)
+            let fixed = try Self.read(file, at: 0, count: AEAPrologue.fixedByteCount)
             let prologueCount = try AEAPrologue.byteCount(parsing: fixed.span.bytes)
             // The auth data's size is a u32 from the file: no allocation past what the file holds.
             guard prologueCount <= fileSize else { throw AEAError.truncated }
-            var prologueBytes = [UInt8](repeating: 0, count: prologueCount)
-            try Self.read(descriptor, at: 0, into: &prologueBytes)
+            let prologueBytes = try Self.read(file, at: 0, count: prologueCount)
             let prologue = try AEAPrologue(parsing: prologueBytes.span.bytes)
             self.prologue = prologue
-            identifier = SHA256.hash(prologueBytes.span.bytes).span.withUnsafeBytes { unsafe Array($0) } // Copies a local digest: safe.
+            identifier = [UInt8](copying: SHA256.hash(prologueBytes.span.bytes).span.bytes)
             let encrypted = prologue.profile != .signed
             isEncrypted = encrypted
 
@@ -139,7 +128,7 @@ public final class AEAArchive: Sendable {
             var header = [UInt8](repeating: 0, count: root.clusterHeaderByteCount)
             while rawOffset < root.rawSize {
                 guard offset + header.count <= fileSize else { throw AEAError.truncated }
-                try Self.read(descriptor, at: offset, into: &header)
+                try Self.read(file, at: offset, into: &header)
                 // The cluster key's HKDF extract and keyed HMAC, once for its header key and every segment's key.
                 let clusterKey = KeyExpander(AEAKeys.derive(mainKey, KeyInfo("AEA_CK", index: UInt32(cluster))))
                 let headerKey = AEAKeys.expandDataKey(clusterKey, KeyInfo("AEA_CHEK"))
@@ -183,8 +172,8 @@ public final class AEAArchive: Sendable {
                         index: segments.count, cluster: cluster, indexInCluster: index, fileOffset: offset,
                         compressedSize: compressed, rawOffset: rawOffset, rawSize: raw
                     ))
-                    checksum.withUnsafeBytes { unsafe checksums.append(contentsOf: $0) } // Copies from a borrowed span: safe.
-                    macs.extracting((index * 32)..<(index * 32 + 32)).withUnsafeBytes { unsafe segmentMACs.append(contentsOf: $0) } // Same.
+                    checksums.append(copying: checksum)
+                    segmentMACs.append(copying: macs.extracting((index * 32)..<(index * 32 + 32)))
                     segmentKeys.append(AEAKeys.expandDataKey(clusterKey, KeyInfo("AEA_SK", index: UInt32(index))))
                     largest = max(largest, compressed)
                     offset += compressed
@@ -197,8 +186,7 @@ public final class AEAArchive: Sendable {
             // What follows the last segment is padding, MACed with the padding key into the last header's
             // next-cluster slot.
             if offset < fileSize {
-                var padding = [UInt8](repeating: 0, count: fileSize - offset)
-                try Self.read(descriptor, at: offset, into: &padding)
+                let padding = try Self.read(file, at: offset, count: fileSize - offset)
                 var hmac = HMAC<SHA256>(key: AEAKeys.derive(mainKey, KeyInfo("AEA_PAK")).span.bytes)
                 hmac.update(padding.span.bytes)
                 let mac = AEAKeys.finalize(&hmac)
@@ -211,14 +199,7 @@ public final class AEAArchive: Sendable {
             self.segmentMACs = segmentMACs
             self.segmentKeys = segmentKeys
             largestCompressedSegment = largest
-        } catch {
-            try? descriptor.close()
-            throw error
         }
-    }
-
-    deinit {
-        try? descriptor.close()
     }
 
     /// Opens and verifies an archive.
@@ -228,42 +209,50 @@ public final class AEAArchive: Sendable {
 
     // MARK: Reading
 
-    static func fileSize(_ descriptor: FileDescriptor) throws(AEAError) -> Int {
-        do {
-            return try Int(descriptor.seek(offset: 0, from: .end))
+    // Every file NativeAEA reads goes through Disk's `InputFile` (positioned reads, EINTR retried); these give its
+    // errors NativeAEA's: `open`/`read` failures as `.disk(.system("open", path: PATH, errno))`, a file that ends early
+    // as `.truncated`.
+
+    /// Opens `path` for reading.
+    static func open(_ path: FilePath) throws(AEAError) -> InputFile {
+        do throws(DiskError) {
+            return try InputFile(path)
         } catch {
-            throw .fileSystem("seek", error as? Errno ?? .ioError)
+            throw AEAError(error)
+        }
+    }
+
+    /// `count` bytes from `offset`, checked against the file's size before anything is allocated.
+    static func read(_ file: InputFile, at offset: Int, count: Int) throws(AEAError) -> [UInt8] {
+        do throws(DiskError) {
+            return try file.read(at: offset, count: count)
+        } catch {
+            throw AEAError(error)
         }
     }
 
     /// Fills `buffer` from `offset`, with as many positioned reads as it takes.
-    static func read(_ descriptor: FileDescriptor, at offset: Int, into buffer: inout [UInt8]) throws(AEAError) {
-        let result: Result<Void, AEAError> = buffer.withUnsafeMutableBytes { bytes in
-            // `bytes` is the array's storage, used only inside the closure: safe.
-            unsafe readFully(descriptor, at: offset, into: bytes)
+    static func read(_ file: InputFile, at offset: Int, into buffer: inout [UInt8]) throws(AEAError) {
+        var span = buffer.mutableSpan
+        var bytes = MutableRawSpan(mutating: &span)
+        do throws(DiskError) {
+            try file.read(at: offset, into: &bytes)
+        } catch {
+            throw AEAError(error)
         }
-        try result.get()
     }
 
-    /// Fills `buffer` from `offset` with positioned reads.
+    /// Fills `buffer` from `offset` with positioned reads: a pool's buffer, read into in place.
     ///
     /// - Precondition: `buffer` is valid for writes for the call's duration.
-    static func readFully(_ descriptor: FileDescriptor, at offset: Int, into buffer: UnsafeMutableRawBufferPointer) -> Result<Void, AEAError> {
-        var done = 0
-        while done < buffer.count {
-            let count: Int
-            do {
-                count = unsafe try descriptor.read(
-                    fromAbsoluteOffset: Int64(offset + done),
-                    into: UnsafeMutableRawBufferPointer(rebasing: buffer[done...]) // Within `buffer`: safe.
-                )
-            } catch {
-                return .failure(.fileSystem("read", error as? Errno ?? .ioError))
-            }
-            guard count > 0 else { return .failure(.truncated) }
-            done += count
+    static func readFully(_ file: InputFile, at offset: Int, into buffer: UnsafeMutableRawBufferPointer) throws(AEAError) {
+        do throws(DiskError) {
+            // Unsafe: the caller's buffer to `InputFile`'s raw read. Safe: valid for writes for this call (the
+            // precondition).
+            try unsafe file.read(at: offset, into: buffer)
+        } catch {
+            throw AEAError(error)
         }
-        return .success(())
     }
 
     // MARK: Segments

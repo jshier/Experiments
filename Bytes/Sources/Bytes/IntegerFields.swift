@@ -175,8 +175,8 @@ public extension BitBuffer {
 
 public extension GenericBytesWriter {
     /// Writes `value`, any integer, as a `T` field in `byteOrder`: the write side of `read(_:as:_:)`.
-    /// A negative value, or one that doesn't fit, is a programming error: debug builds trap, release builds
-    /// write its low `T.byteCount` bytes.
+    /// A negative value, or one that doesn't fit, is a programming error, and traps in every build. (The check
+    /// costs nothing where the compiler can see the value fits, such as a `UInt16` in a ``Byte2``.)
     ///
     /// ```swift
     /// try writer.write(name.utf8.count, as: Byte2.self, .littleEndian)
@@ -187,18 +187,22 @@ public extension GenericBytesWriter {
     ///   - fieldType: The byte group to store the field as, such as `Byte2.self`.
     ///   - byteOrder: The byte order of the field.
     /// - Throws: ``BytesError/insufficientCapacity`` if there isn't room.
+    /// - Precondition: `value` is 0 through the field's maximum.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     // Disfavored: an integer literal (`Int` by default) keeps choosing the group's own integer type.
     @_disfavoredOverload
     mutating func write<I: FixedWidthInteger, T: ByteGroup>(_ value: I, as fieldType: T.Type, _ byteOrder: ByteOrder) throws(BytesError) {
-        assert(T.Integer(exactly: value).map { $0 <= T._mask } ?? false, "\(value) doesn't fit in \(T.byteCount) bytes")
-        try write(T.Integer(truncatingIfNeeded: value) & T._mask, as: T.self, byteOrder)
+        // A precondition, then the value with no mask of its own: the group's initializer masks odd widths,
+        // which the check lets the optimizer drop. (An `assert` and a mask wrote the low bytes of a value that
+        // didn't fit, in release builds.)
+        precondition(value >= 0 && value <= T._mask, "\(value) doesn't fit in \(T.byteCount) bytes")
+        try write(T(T.Integer(truncatingIfNeeded: value), byteOrder))
     }
 
     /// Writes `value` as a `T` field in `byteOrder`, two's complement: the write side of
-    /// ``GenericBytesReader/read(_:asSigned:_:)``. A value outside the field's range is a programming error:
-    /// debug builds trap, release builds write its low `T.byteCount` bytes.
+    /// ``GenericBytesReader/read(_:asSigned:_:)``. A value outside the field's range is a programming error,
+    /// and traps in every build.
     ///
     /// ```swift
     /// try writer.write(seconds, asSigned: Byte4.self, .littleEndian)
@@ -209,22 +213,26 @@ public extension GenericBytesWriter {
     ///   - fieldType: The byte group to store the field as, such as `Byte4.self`.
     ///   - byteOrder: The byte order of the field.
     /// - Throws: ``BytesError/insufficientCapacity`` if there isn't room.
+    /// - Precondition: `value` is -2^(8 × `T.byteCount` - 1) through 2^(8 × `T.byteCount` - 1) - 1.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func write<I: FixedWidthInteger & SignedInteger, T: ByteGroup>(
         _ value: I, asSigned fieldType: T.Type, _ byteOrder: ByteOrder
     ) throws(BytesError) {
-        assert(I.bitWidth <= 8 &* T.byteCount || {
+        // Folds away when `I` is no wider than the field.
+        precondition(I.bitWidth <= 8 &* T.byteCount || {
             let shift = I.bitWidth &- 8 &* T.byteCount
             return (value &<< shift) &>> shift == value
         }(), "\(value) doesn't fit in \(T.byteCount) bytes")
-        try write(T.Integer(truncatingIfNeeded: value) & T._mask, as: T.self, byteOrder)
+        // Sign-extended to `T.Integer`: the group's initializer (little-endian) or its byte swap and shift
+        // (big-endian) drops the bytes beyond the field.
+        try write(T(T.Integer(truncatingIfNeeded: value), byteOrder))
     }
 }
 
 public extension BytesWriter {
     /// Writes `value` as a `width`-bit two's complement field. A value outside the field's range is a
-    /// programming error: debug builds trap, release builds write its low `width` bits.
+    /// programming error, and traps in every build.
     ///
     /// - Parameters:
     ///   - value: The value, -2^(width-1) through 2^(width-1) - 1.
@@ -235,7 +243,8 @@ public extension BytesWriter {
     mutating func write<I: FixedWidthInteger & SignedInteger, let width: Int>(
         _ value: I, asSigned fieldType: Bits<width>.Type
     ) throws(BytesError) {
-        assert(value >= -(1 &<< (width &- 1)) && value < 1 &<< (width &- 1), "\(value) doesn't fit in \(width) bits")
+        precondition(value >= -(1 &<< (width &- 1)) && value < 1 &<< (width &- 1), "\(value) doesn't fit in \(width) bits")
+        // The mask stays: it drops a negative value's sign extension above the field.
         try write(Bits<width>(truncatingIfNeeded: value))
     }
 }

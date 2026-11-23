@@ -139,7 +139,7 @@ public enum Extraction {
         into destination: Destination, source: Source, options: ExtractionSettings = .init(),
         _ plan: (inout Planner<Source>) async throws(PlanFailure) -> Void
     ) async throws(ExtractionError<PlanFailure>) -> ExtractionReport {
-        let started = DispatchClock.now
+        let started = MonotonicClock.now
         if options.writers > 0, destination.options.directoryResolution == .descriptors { DiskDefaults.raiseDescriptorLimit() }
         let context = ExtractionContext(destination: destination, source: source, options: options)
         var planner = Planner(context)
@@ -155,7 +155,7 @@ public enum Extraction {
                         writersDone.arrive()
                     }
                 }
-                let planStarted = DispatchClock.now
+                let planStarted = MonotonicClock.now
                 do throws(PlanFailure) {
                     try await plan(&planner)
                 } catch {
@@ -168,7 +168,7 @@ public enum Extraction {
                 }
                 await planner.abandonOpenFile()
                 context.queue.close()
-                planner.phases["planning"] = Double(DispatchClock.now - planStarted) / 1e9
+                planner.phases["planning"] = MonotonicClock.seconds(since: planStarted)
                 await writersDone.wait()
             }
         } onCancel: {
@@ -185,7 +185,7 @@ public enum Extraction {
         var report = planner.report
         context.counters.add(to: &report)
         report.failures = context.failures.withLock { $0 }
-        report.seconds = Double(DispatchClock.now - started) / 1e9
+        report.seconds = MonotonicClock.seconds(since: started)
         report.phaseSeconds = planner.phases
         report.writerSeconds = context.timings.seconds
         report.plannerWaitSeconds = Double(context.queue.pushWaitNanoseconds.load(ordering: .relaxed)) / 1e9
@@ -234,11 +234,11 @@ final class WorkTimings: Sendable {
         case wait, compress, produce, open, data, fork, finish, close, piece, turn, largeFileFinish
     }
 
-    private let counters = (0..<Kind.allCases.count).map { _ in Counter() }
+    private let counters = (0..<Kind.allCases.count).map { _ in RelaxedCounter() }
 
     @inline(__always)
     func add(_ kind: Kind, since start: Int) {
-        counters[kind.rawValue].add(DispatchClock.now - start)
+        counters[kind.rawValue].add(MonotonicClock.nanoseconds(since: start))
     }
 
     var seconds: [String: Double] {
@@ -279,20 +279,30 @@ struct WriteJob<Contents: Sendable>: Sendable {
 }
 
 /// Pieces whose bytes begin a chunk that a later piece completes: each piece's contents and where its bytes go.
+///
+/// The first part is held inline: a bridge is usually one piece (the previous piece's tail, wherever a chunk crosses
+/// pieces of at least a chunk: every bridge of NativeAEA's segment-sized pieces), so those cost no allocation, at 72
+/// bytes more in each queued job. Only pieces smaller than a chunk make longer bridges, and only those allocate.
 struct Bridge<Contents: Sendable>: Sendable {
+    typealias Part = (contents: Contents, fileOffset: Int, count: Int)
     /// The most pieces a chunk may span: a 64 KiB chunk over pieces of at least a seventh of it spans 8.
     static var capacity: Int { 8 }
-    private(set) var parts: [(contents: Contents, fileOffset: Int, count: Int)] = []
+    private var first: Part?
+    private var rest: [Part] = []
 
-    var count: Int { parts.count }
-    var isEmpty: Bool { parts.isEmpty }
+    var count: Int { first == nil ? 0 : 1 + rest.count }
+    var isEmpty: Bool { first == nil }
 
     mutating func append(_ contents: Contents, fileOffset: Int, count: Int) {
-        if parts.capacity == 0 { parts.reserveCapacity(Self.capacity) }
-        parts.append((contents, fileOffset, count))
+        guard first != nil else {
+            first = (contents, fileOffset, count)
+            return
+        }
+        if rest.capacity == 0 { rest.reserveCapacity(Self.capacity - 1) }
+        rest.append((contents, fileOffset, count))
     }
 
-    subscript(index: Int) -> (contents: Contents, fileOffset: Int, count: Int) { parts[index] }
+    subscript(index: Int) -> Part { index == 0 ? first! : rest[index - 1] }
 }
 
 /// What the planner and the writers share.

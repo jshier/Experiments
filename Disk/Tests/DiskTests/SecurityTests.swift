@@ -1,6 +1,7 @@
 import BytesTestSupport
 import Darwin
 @testable import Disk
+import DiskTestSupport
 import Foundation
 import System
 import Testing
@@ -51,7 +52,7 @@ import Testing
         }
         try setup.checkOutside()
         // The link wasn't made: a directory is in its place.
-        #expect(try item(setup.directory.path("out/a")).type == "directory")
+        #expect(try readItem(at: setup.directory.path("out/a")).kind == .directory)
         #expect(report.symbolicLinks == 0)
     }
 
@@ -96,12 +97,12 @@ import Testing
         options.existingItems = .replace
         let replacing = try Destination(FilePath(out.path), options: options)
         try withPath("evil/dir") { try replacing.makeDirectory($0) }
-        #expect(try item(out.appending(path: "evil")).type == "directory")
+        #expect(try readItem(at: out.appending(path: "evil")).kind == .directory)
         try setup.checkOutside()
         try FileManager.default.createSymbolicLink(atPath: out.appending(path: "evil2").path, withDestinationPath: setup.outside.path)
         var writer = FileWriter(replacing)
         try withPath("evil2") { try writer.writeFile($0, contents: Array("replaced".utf8).span.bytes) }
-        #expect(try item(out.appending(path: "evil2")).type == "file")
+        #expect(try readItem(at: out.appending(path: "evil2")).kind == .file)
         try setup.checkOutside()
     }
 
@@ -192,6 +193,6 @@ import Testing
             try await group.waitForAll()
         }
         #expect(getumask() == mask)
-        #expect(try item(directory.path("out3/f7")).mode == 0o666 & ~UInt16(mask))
+        #expect(try readItem(at: directory.path("out3/f7")).mode == 0o666 & ~UInt16(mask))
     }
 }

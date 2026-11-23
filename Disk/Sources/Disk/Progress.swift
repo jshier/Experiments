@@ -61,13 +61,79 @@ public final class ExtractionProgress: Sendable {
     public var expectedEntries: Int { expected.withLock { $0.entries } }
     public var expectedBytes: Int { expected.withLock { $0.bytes } }
 
-    /// The fraction done, by bytes when their total is known, else by entries; `nil` with neither.
-    public var fractionCompleted: Double? {
-        let (entryTotal, byteTotal) = expected.withLock { $0 }
-        if byteTotal > 0 { return min(1, Double(bytes) / Double(byteTotal)) }
-        if entryTotal > 0 { return min(1, Double(entries) / Double(entryTotal)) }
-        return nil
+    /// The furthest fraction any ``read(entryWeight:)`` has returned, as its bit pattern (non-negative doubles order as
+    /// their bit patterns do), so readings never go back.
+    private let furthest = Atomic<UInt64>(0)
+
+    /// One reading of the counters and totals, with the fraction done.
+    public struct Reading: Sendable, Equatable {
+        /// Entries made so far.
+        public var entries: Int
+        /// Bytes of file contents written so far (before compression).
+        public var bytes: Int
+        /// The totals expected (0: not known).
+        public var expectedEntries: Int
+        public var expectedBytes: Int
+        /// Done, from 0 to 1, by bytes and entries together; `nil` when neither total is known. Never less than an
+        /// earlier reading's.
+        public var fraction: Double?
+
+        public init(entries: Int = 0, bytes: Int = 0, expectedEntries: Int = 0, expectedBytes: Int = 0, fraction: Double? = nil) {
+            self.entries = entries
+            self.bytes = bytes
+            self.expectedEntries = expectedEntries
+            self.expectedBytes = expectedBytes
+            self.fraction = fraction
+        }
     }
+
+    /// What an entry weighs against bytes of contents in ``read(entryWeight:)``: 64 KiB. Roughly what making one costs
+    /// (Xcode's archives on an M3 Ultra: about 30,000 entries a second where contents are written at 1.5 to 2.5 GB a
+    /// second); it only has to keep a bar moving at a believable pace through both kinds of work.
+    public static let defaultEntryWeight = 65_536
+
+    /// The counters and totals, and the fraction done by both together.
+    ///
+    /// Bytes alone leave out the work that writes none: a `.xip`'s hard links (a third of Xcode's expansion, during
+    /// which a bar by bytes sat full), symbolic links, and directories. Entries alone would stall on a large file. So
+    /// each entry counts as `entryWeight` bytes on both sides of the ratio (``fraction(entries:of:bytes:of:entryWeight:)``).
+    ///
+    /// The totals change under a running extraction (an estimate of the bytes, then exact counts once an archive has
+    /// been walked; more as archives are added), and the fraction with them: a reading's fraction is never less than
+    /// an earlier one's (kept in an atomic, whatever the weight), so a bar never goes back. Several clients may read.
+    public func read(entryWeight: Int = ExtractionProgress.defaultEntryWeight) -> Reading {
+        let (entryTotal, byteTotal) = expected.withLock { $0 }
+        var reading = Reading(entries: entries, bytes: bytes, expectedEntries: entryTotal, expectedBytes: byteTotal)
+        if let fraction = Self.fraction(entries: reading.entries, of: entryTotal, bytes: reading.bytes, of: byteTotal, entryWeight: entryWeight) {
+            let (_, kept) = furthest.max(fraction.bitPattern, ordering: .relaxed)
+            reading.fraction = Double(bitPattern: kept)
+        }
+        return reading
+    }
+
+    /// How far along an extraction is, from 0 to 1, by its bytes and its entries together: `nil` when neither total is
+    /// known, by whichever is when only one is. Counts past a total (counters run ahead of an estimate) count as the
+    /// total; negative ones as none.
+    ///
+    /// - Parameters:
+    ///   - entries: Entries made so far, of `expectedEntries` (0: not known).
+    ///   - bytes: Bytes of contents written so far, of `expectedBytes` (0: not known).
+    ///   - entryWeight: What an entry counts as, in bytes.
+    public static func fraction(
+        entries: Int, of expectedEntries: Int, bytes: Int, of expectedBytes: Int, entryWeight: Int = defaultEntryWeight
+    ) -> Double? {
+        guard expectedEntries > 0 || expectedBytes > 0 else { return nil }
+        let weight = Double(max(0, entryWeight))
+        let done = (expectedBytes > 0 ? Double(max(0, min(bytes, expectedBytes))) : 0)
+            + (expectedEntries > 0 ? Double(max(0, min(entries, expectedEntries))) * weight : 0)
+        let total = Double(max(0, expectedBytes)) + Double(max(0, expectedEntries)) * weight
+        guard total > 0 else { return nil }
+        return min(1, max(0, done / total))
+    }
+
+    /// The fraction done, as ``read(entryWeight:)`` reads it (bytes and entries, entries weighing 64 KiB; never going
+    /// back); `nil` with no totals.
+    public var fractionCompleted: Double? { read().fraction }
 
     /// Worker `index`'s slot.
     @inline(__always)

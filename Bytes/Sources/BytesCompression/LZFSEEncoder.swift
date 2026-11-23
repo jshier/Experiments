@@ -338,10 +338,10 @@ struct LZFSEBlocks {
         let lLeft = l &- lSplits &* Self.maximumL
         let mSplits = m > Self.maximumM ? (m &- Self.maximumM &- 1) / Self.maximumM &+ 1 : 0
         let triples = lSplits &+ mSplits &+ (lLeft > 0 || m &- mSplits &* Self.maximumM > 0 ? 1 : 0)
-        if zstdUnlikely(matchCount &+ triples &+ 8 > Self.matchesPerBlock || literalCount &+ l &+ 16 > Self.literalsPerBlock) {
+        if unlikely(matchCount &+ triples &+ 8 > Self.matchesPerBlock || literalCount &+ l &+ 16 > Self.literalsPerBlock) {
             try unsafe flush()
         }
-        if zstdLikely(lSplits == 0 && mSplits == 0) {
+        if likely(lSplits == 0 && mSplits == 0) {
             unsafe push(l, UInt32(truncatingIfNeeded: m), distance)
             return
         }
@@ -377,7 +377,7 @@ struct LZFSEBlocks {
         unsafe mValues[matchCount] = m
         unsafe dValues[matchCount] = d
         matchCount &+= 1
-        if zstdLikely(literalStart &+ l &+ 16 <= count) {
+        if likely(literalStart &+ l &+ 16 <= count) {
             unsafe LZCopy.wild(literals + literalCount, src + literalStart, l)
         } else {
             unsafe LZCopy.exact(literals + literalCount, src + literalStart, l)
@@ -792,17 +792,9 @@ struct LZFSEEncoderWorkspace: ~Copyable {
     static var block: Int { 165_120 } // a full block's worst case
     static var size: Int { block &+ LZFSEBlockWriter.maximumSize(literalCount: 40_000, matchCount: 10_000) &+ 64 }
 
-    let base: UnsafeMutableRawPointer
+    /// Zeroed: zeros keep the literal buffer's slack defined for the wild copies that read it.
+    let memory = CodecWorkspace(byteCount: size)
 
-    init() {
-        unsafe base = UnsafeMutableRawPointer.allocate(byteCount: Self.size, alignment: 64)
-        // Unsafe: initializing fresh memory. Safe: `size` bytes were just allocated. (Zeros keep the literal
-        // buffer's slack defined for the wild copies that read it.)
-        unsafe base.initializeMemory(as: UInt8.self, repeating: 0, count: Self.size)
-    }
-
-    deinit {
-        // Unsafe: freeing the allocation. Safe: only `deinit` frees it, once.
-        unsafe base.deallocate()
-    }
+    // Unsafe: the allocation's address. Safe: valid while the workspace (which owns it) lives.
+    var base: UnsafeMutableRawPointer { unsafe memory.base }
 }

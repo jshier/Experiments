@@ -35,12 +35,6 @@ struct ReferenceStream {
     }
 }
 
-/// Deterministic pseudo-random bytes (SplitMix64).
-func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] {
-    var generator = SplitMix64(seed: seed)
-    return generator.bytes(count)
-}
-
 // MARK: - Bits
 
 @Suite struct BitsTests {
@@ -326,7 +320,7 @@ func randomBytes(_ count: Int, seed: UInt64 = 0x9E37_79B9_7F4A_7C15) -> [UInt8] 
     @Test func bitIterationRealigns() throws {
         // Starting 1 bit in, 3-bit values reach a byte boundary after 5 values (1 + 15 = 16 bits) and
         // continue on the block path; results must match single reads.
-        let data = randomBytes(64)
+        let data = SampleBytes.random(64)
         var reader = BytesReader(data.span)
         try reader.skip(bitCount: 1)
         var values: [Bits<3>] = []
@@ -555,7 +549,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
 
     @Test(arguments: [false, true])
     func everyWidth(aligned: Bool) throws {
-        let data = randomBytes(64)
+        let data = SampleBytes.random(64)
         let reference = ReferenceStream(bytes: data, order: .mostSignificantFirst)
         try check(Byte2.self, data, reference, aligned)
         try check(Byte3.self, data, reference, aligned)
@@ -599,7 +593,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
 @Suite struct BitReadingTests {
     @Test(arguments: [BitOrder.mostSignificantFirst, .leastSignificantFirst])
     func mixedFieldsMatchReference(order: BitOrder) throws {
-        let data = randomBytes(257)
+        let data = SampleBytes.random(257)
         let reference = ReferenceStream(bytes: data, order: order)
         var reader = BytesReader(data.span, bitOrder: order)
         var position = 0
@@ -693,7 +687,7 @@ func serialize(_ reading: Reading) throws(BytesError) -> [UInt8] {
     }
 
     @Test func positioning() throws {
-        let data = randomBytes(10)
+        let data = SampleBytes.random(10)
         var reader = BytesReader(data.span)
         try reader.skip(bitCount: 3)
         #expect(reader.remainingByteCount == 9)
@@ -724,7 +718,7 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
 @Suite struct ByteRepresentableTests {
     // Every load path: integer sizes (bitCast), odd sizes from overlapping loads, and the default.
     @Test func everySize() throws {
-        let data = randomBytes(203)
+        let data = SampleBytes.random(203)
         try check(RawBytes<1>.self, data); try check(RawBytes<2>.self, data); try check(RawBytes<3>.self, data)
         try check(RawBytes<4>.self, data); try check(RawBytes<5>.self, data); try check(RawBytes<6>.self, data)
         try check(RawBytes<7>.self, data); try check(RawBytes<8>.self, data); try check(RawBytes<9>.self, data)
@@ -772,7 +766,7 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
 
 @Suite struct ConvertibleFromBytesTests {
     @Test func loads() throws {
-        let data = randomBytes(64)
+        let data = SampleBytes.random(64)
         var reader = BytesReader(data.span)
         try reader.skip(byteCount: 1) // Unaligned for everything below.
         let float = try reader.load(Float.self)
@@ -800,7 +794,7 @@ struct RawBytes<let n: Int>: ByteRepresentable, Equatable {
     }
 
     @Test func zeroCopySpans() throws {
-        let data = randomBytes(101)
+        let data = SampleBytes.random(101)
         var reader = BytesReader(data.span)
         try reader.skip(byteCount: 1)
         // Alignment 1: viewable at any offset.
@@ -975,7 +969,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
         }
         // Bulk bits, every width, both orders, aligned and not, with tails: must match single writes.
         func checkBits<let width: Int>(_: Bits<width>.Type) throws {
-            let values = randomBytes(203).map { Bits<width>(truncatingIfNeeded: $0) }
+            let values = SampleBytes.random(203).map { Bits<width>(truncatingIfNeeded: $0) }
             for order in [BitOrder.mostSignificantFirst, .leastSignificantFirst] {
                 for shift in [0, 3] {
                     func written(bulk: Bool) throws -> [UInt8] {
@@ -1012,7 +1006,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
 @Suite struct BulkOperationTests {
     @Test(arguments: [ByteOrder.littleEndian, .bigEndian])
     func decodeRuns(order: ByteOrder) throws {
-        let data = randomBytes(1_001)
+        let data = SampleBytes.random(1_001)
         try check(Byte2.self, data, order)
         try check(Byte3.self, data, order)
         try check(Byte4.self, data, order)
@@ -1044,7 +1038,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
     }
 
     @Test func forEachGroupsMatchReads() throws {
-        let data = randomBytes(1_000)
+        let data = SampleBytes.random(1_000)
         for shift in [0, 5] {
             try checkForEach(Byte2.self, data, shift); try checkForEach(Byte3.self, data, shift)
             try checkForEach(Byte4.self, data, shift); try checkForEach(Byte5.self, data, shift)
@@ -1083,7 +1077,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
 
     @Test(arguments: [BitOrder.mostSignificantFirst, .leastSignificantFirst])
     func forEachBitsMatchReads(order: BitOrder) throws {
-        let data = randomBytes(203) // Not a multiple of any block size, so the tail path runs too.
+        let data = SampleBytes.random(203) // Not a multiple of any block size, so the tail path runs too.
         for shift in [0, 3] {
             try checkForEach(Bits<1>.self, data, order, shift); try checkForEach(Bits<2>.self, data, order, shift)
             try checkForEach(Bits<3>.self, data, order, shift); try checkForEach(Bits<4>.self, data, order, shift)
@@ -1108,7 +1102,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
     }
 
     @Test func forInBytes() throws {
-        let data = randomBytes(1_000)
+        let data = SampleBytes.random(1_000)
         var reader = BytesReader(data.span)
         try reader.skip(bitCount: 13) // Iteration starts at the next whole byte: offset 2.
         var bytes: [UInt8] = []
@@ -1120,7 +1114,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
     }
 
     @Test func forInValues() throws {
-        let data = randomBytes(1_037)
+        let data = SampleBytes.random(1_037)
         for shift in [0, 5] {
             try checkForIn(Byte2.self, data, shift); try checkForIn(Byte3.self, data, shift)
             try checkForIn(Byte4.self, data, shift); try checkForIn(Byte7.self, data, shift)
@@ -1180,7 +1174,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
     struct Stop: Error {}
 
     @Test func forEachStopsWhereBodyThrows() throws {
-        let data = randomBytes(100)
+        let data = SampleBytes.random(100)
         var groups = BytesReader(data.span)
         var seen = 0
         #expect(throws: Stop.self) {
@@ -1212,7 +1206,7 @@ func randomRoundTrips(count: Int, seed: UInt64) -> [RoundTrip] {
     @Test func search() {
         // Plant the pattern at the start, at 16-byte block edges, and at the very end. The noise around
         // it often matches the pattern's first and last bytes, exercising the full-compare fallback.
-        var data = randomBytes(300).map { $0 % 4 == 0 ? 0x50 : $0 }
+        var data = SampleBytes.random(300).map { $0 % 4 == 0 ? 0x50 : $0 }
         let pattern: Byte4 = [0x50, 0x4B, 0x05, 0x50]
         let bytes = (0..<4).map { pattern[$0] }
         for plant in [0, 15, 16, 31, 133, 296] {

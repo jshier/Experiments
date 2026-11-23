@@ -6,10 +6,12 @@ internal import Builtin
 
 /// Tells the optimizer `condition` is almost always true (branch weight), keeping the slow path out of line.
 ///
+/// `package`: the codecs in `BytesCompression` use it too.
+///
 /// - Parameter condition: The condition to test.
 /// - Returns: `condition`.
 @usableFromInline @_transparent
-func likely(_ condition: Bool) -> Bool {
+package func likely(_ condition: Bool) -> Bool {
     Bool(Builtin.int_expect_Int1(condition._value, true._value))
 }
 
@@ -18,7 +20,7 @@ func likely(_ condition: Bool) -> Bool {
 /// - Parameter condition: The condition to test.
 /// - Returns: `condition`.
 @usableFromInline @_transparent
-func unlikely(_ condition: Bool) -> Bool {
+package func unlikely(_ condition: Bool) -> Bool {
     Bool(Builtin.int_expect_Int1(condition._value, false._value))
 }
 

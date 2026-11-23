@@ -1,0 +1,132 @@
+#!/bin/bash
+# untracked — run a command outside this process tree, as a launchd job, so macOS doesn't provenance-track what it
+# creates. A process started from a quarantined app (a downloaded terminal) and everything it launches is tracked:
+# the kernel puts `com.apple.provenance` on every item they create and owns it, so `setxattr` of that attribute
+# changes nothing, and tests that restore it (NativeZip's `restoresALinksAttributes`) can't read it back. A job
+# launchd starts has no such ancestor.
+#
+# usage: Tools/untracked [--timeout SECONDS] [--keep DIR] -- COMMAND [ARGS...]
+#
+#   --timeout S   give up after S seconds: the job is removed (killing the command) and the exit status is 1
+#   --keep DIR    keep the job's files (stdout, stderr, status, environment) in DIR
+#
+# The command runs in this directory with this environment (every exported variable: PATH, HOME, TMPDIR,
+# TOOLCHAINS, DEVELOPER_DIR, …), standard input from /dev/null. Its standard output and error stream back to this
+# tool's, through files, as it writes them. The tool's exit status is the command's.
+#
+# How: `launchctl submit` with a unique label (in the user's launchd domain), a wrapper that runs the command once
+# and records its exit status, then `launchctl remove`. A submitted job is kept alive (restarted when it exits), so
+# the wrapper sleeps after the command until it's removed, and never runs it twice. Interrupting this tool removes
+# the job too.
+#
+# example:
+#   Tools/untracked -- swift test --package-path NativeZipArchive --filter restoresALinksAttributes
+source "$(dirname "$0")/lib/common.sh"
+
+timeout= keep=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --timeout) timeout="$2"; shift ;;
+        --keep) keep="$2"; shift ;;
+        -h|--help) usage ;;
+        --) shift; break ;;
+        *) die "unknown option $1 (the command goes after --)" ;;
+    esac
+    shift
+done
+[[ $# -gt 0 ]] || usage 2
+[[ -z "$timeout" || "$timeout" =~ ^[0-9]+$ ]] || die "--timeout takes whole seconds"
+have launchctl || die "needs launchctl (macOS)"
+
+if [[ -n "$keep" ]]; then
+    mkdir -p "$keep" || die "can't make $keep"
+    JOB_DIR="$(cd "$keep" && pwd)"
+else
+    scratch_dir
+    JOB_DIR="$SCRATCH"
+fi
+LABEL="local.experiments.untracked.$$.$RANDOM"
+
+# The environment, NUL-separated (values may hold newlines), and the working directory.
+env -0 > "$JOB_DIR/environment"
+pwd > "$JOB_DIR/directory"
+: > "$JOB_DIR/stdout"
+: > "$JOB_DIR/stderr"
+
+# Runs the command once: launchd restarts a submitted job whenever it exits, so a second start only waits to be
+# removed. The variables bash itself sets (or that describe this tool's shell) aren't carried over.
+cat > "$JOB_DIR/run.sh" <<'EOF'
+#!/bin/bash
+dir="$1"; shift
+if [[ -e "$dir/started" ]]; then exec /bin/sleep 86400; fi
+: > "$dir/started"
+while IFS= read -r -d '' entry; do
+    case "${entry%%=*}" in
+        PWD|OLDPWD|SHLVL|_|BASH_*|SHELLOPTS|BASHOPTS) ;;
+        *) export "$entry" ;;
+    esac
+done < "$dir/environment"
+if cd "$(/bin/cat "$dir/directory")"; then
+    "$@" < /dev/null
+    rc=$?
+else
+    rc=126
+fi
+echo "$rc" > "$dir/status.partial" && /bin/mv "$dir/status.partial" "$dir/status"
+exec /bin/sleep 86400
+EOF
+chmod +x "$JOB_DIR/run.sh"
+
+removed=no
+remove_job() {
+    [[ $removed == yes ]] && return 0
+    removed=yes
+    launchctl remove "$LABEL" 2>/dev/null || true
+}
+# Removing the job also ends the command if it's still running (launchd signals the job's process group).
+trap 'remove_job; [[ -n "${SCRATCH:-}" ]] && rm -rf "$SCRATCH"' EXIT
+trap 'note "untracked: interrupted, removing $LABEL"; exit 130' INT TERM HUP
+
+launchctl submit -l "$LABEL" -o "$JOB_DIR/stdout" -e "$JOB_DIR/stderr" -- /bin/bash "$JOB_DIR/run.sh" "$JOB_DIR" "$@" ||
+    die "launchctl submit failed"
+note "untracked: running as launchd job $LABEL"
+
+# Copies what the job wrote since the last call: exactly the bytes up to the size read first, so a write in progress
+# is picked up next time.
+out_offset=0 err_offset=0
+forward() {
+    local size
+    size=$(stat -f %z "$JOB_DIR/stdout")
+    if (( size > out_offset )); then
+        tail -c "+$((out_offset + 1))" "$JOB_DIR/stdout" | head -c "$((size - out_offset))"
+        out_offset=$size
+    fi
+    size=$(stat -f %z "$JOB_DIR/stderr")
+    if (( size > err_offset )); then
+        tail -c "+$((err_offset + 1))" "$JOB_DIR/stderr" | head -c "$((size - err_offset))" >&2
+        err_offset=$size
+    fi
+}
+
+started=$SECONDS
+while [[ ! -e "$JOB_DIR/status" ]]; do
+    forward
+    if [[ -n "$timeout" ]] && (( SECONDS - started >= timeout )); then
+        forward
+        remove_job
+        fail "untracked: no result after ${timeout} s; removed $LABEL"
+    fi
+    # A job that launchd couldn't start (or that died before recording a status) never writes one.
+    if ! launchctl list "$LABEL" > /dev/null 2>&1; then
+        sleep 0.5
+        [[ -e "$JOB_DIR/status" ]] && break
+        forward
+        die "untracked: launchd job $LABEL is gone without a status"
+    fi
+    sleep 0.2
+done
+forward
+remove_job
+rc="$(cat "$JOB_DIR/status")"
+[[ -n "$keep" ]] && note "untracked: job files in $JOB_DIR"
+exit "$rc"

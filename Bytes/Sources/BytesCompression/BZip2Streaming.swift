@@ -142,7 +142,6 @@ extension BZip2Stream {
         // Unsafe: input loads, and the workspace's regions. Safe: loads are checked against `count` (the bit
         // reader adds zeros past it); the regions are within the workspace by their constant offsets; the block
         // passes as `decodeStream` describes, and run-length decoding as `expand` does.
-        let crcTables = unsafe UnsafePointer((workspace + BZip2Workspace.crcTables).assumingMemoryBound(to: UInt32.self))
         let block = unsafe (workspace + BZip2Workspace.runs).assumingMemoryBound(to: UInt8.self)
         var position = state.bitOffset // In bits.
         var produced = 0
@@ -154,7 +153,7 @@ extension BZip2Stream {
                     UnsafePointer(block), count: state.blockLength, from: state.expansion, output: output, at: produced,
                     capacity: capacity
                 )
-                state.crc = unsafe BZip2CRC.extend(state.crc, output + produced, count: end &- produced, tables: crcTables)
+                state.crc = unsafe BZip2CRC.extend(state.crc, output + produced, count: end &- produced)
                 state.expansion = expansion
                 produced = end
                 guard expansion.isDone(count: state.blockLength) else {

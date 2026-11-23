@@ -256,6 +256,7 @@ let package = Package(
             dependencies: [
                 "Bytes",
                 "BytesBase64",
+                "BytesTestSupport",
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/Base64Benchmarks",

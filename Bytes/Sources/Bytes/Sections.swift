@@ -184,21 +184,29 @@ public extension GenericBytesReader {
     ///
     /// ```swift
     /// var record = try reader.read(sectionPrefixedBy: Byte2.self, .bigEndian)
+    /// // A length that counts its own 4 bytes, as in Apple Archive's extended-attribute entries:
+    /// var entry = try reader.read(sectionPrefixedBy: Byte4.self, .littleEndian, includingPrefix: true)
     /// ```
     ///
     /// - Parameters:
     ///   - lengthType: The byte group the length is stored as, such as `Byte2.self`.
     ///   - byteOrder: The byte order of the length.
-    /// - Returns: A cursor over the section, borrowing the same memory.
+    ///   - includingPrefix: Whether the length counts its own `L.byteCount` bytes as well as the section's.
+    /// - Returns: A cursor over the section, borrowing the same memory, not including the length.
     /// - Throws: ``BytesError/insufficientData`` if the length or the section isn't all there;
-    ///   ``BytesError/invalidValue`` if the length doesn't fit in an `Int`. Nothing is consumed, not even the
-    ///   length.
+    ///   ``BytesError/invalidValue`` if the length doesn't fit in an `Int`, or is less than `L.byteCount` when
+    ///   `includingPrefix`. Nothing is consumed, not even the length.
     /// - Precondition: The cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    mutating func read<L: ByteGroup>(sectionPrefixedBy lengthType: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> Self {
-        try Self(read(bytesPrefixedBy: L.self, byteOrder), byteOffset: 0, bitOffset: 0, bitOrder: bitOrder)
+    mutating func read<L: ByteGroup>(
+        sectionPrefixedBy lengthType: L.Type, _ byteOrder: ByteOrder, includingPrefix: Bool = false
+    ) throws(BytesError) -> Self {
+        try Self(
+            read(bytesPrefixedBy: L.self, byteOrder, includingPrefix: includingPrefix),
+            byteOffset: 0, bitOffset: 0, bitOrder: bitOrder
+        )
     }
 
     /// Reads a section whose byte count comes first, as LEB128 of at most `maxByteCount` bytes.
@@ -233,18 +241,27 @@ public extension GenericBytesReader {
     /// - Parameters:
     ///   - lengthType: The byte group the count is stored as, such as `Byte2.self`.
     ///   - byteOrder: The byte order of the count.
+    ///   - includingPrefix: Whether the count includes its own `L.byteCount` bytes as well as the bytes after
+    ///     it. A constant `false` costs nothing.
     /// - Returns: A span of the counted bytes, not including the count.
     /// - Throws: ``BytesError/insufficientData`` if the count or the bytes aren't all there;
-    ///   ``BytesError/invalidValue`` if the count doesn't fit in an `Int`. Nothing is consumed.
+    ///   ``BytesError/invalidValue`` if the count doesn't fit in an `Int`, or is less than `L.byteCount` when
+    ///   `includingPrefix`. Nothing is consumed.
     /// - Precondition: The cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    mutating func read<L: ByteGroup>(bytesPrefixedBy lengthType: L.Type, _ byteOrder: ByteOrder) throws(BytesError) -> RawSpan {
+    mutating func read<L: ByteGroup>(
+        bytesPrefixedBy lengthType: L.Type, _ byteOrder: ByteOrder, includingPrefix: Bool = false
+    ) throws(BytesError) -> RawSpan {
         precondition(_bitOffset == 0, "Reading a section requires byte alignment: call alignToByte() first")
         _assumeInvariant()
         let length = try peek(L.self, byteOrder)
-        guard let count = Int(exactly: length) else { throw .invalidValue }
+        guard var count = Int(exactly: length) else { throw .invalidValue }
+        if includingPrefix {
+            guard count >= L.byteCount else { throw .invalidValue }
+            count &-= L.byteCount
+        }
         let start = _byteOffset &+ L.byteCount
         guard likely(span.byteCount &- start >= count) else { throw .insufficientData }
         _byteOffset = start &+ count
