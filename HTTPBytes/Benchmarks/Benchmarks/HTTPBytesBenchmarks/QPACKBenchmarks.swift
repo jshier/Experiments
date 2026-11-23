@@ -15,7 +15,9 @@ import HTTPBytes
 // characters checked once per literal); ls-qpack copies each field into a buffer; cursed-http hands out views with its
 // characters checked. Every setup checks every section: HTTPBytes' decoder must give every field of every section byte
 // for byte (of its own encoder's output and of each C encoder's), and each C decoder must give every section's field
-// count and the corpus' total bytes.
+// count and the corpus' total bytes. The encode rows "in flight" (`QPACKFlight`) take the peer's decoder stream as a
+// decoder some sections behind wrote it, with blocking allowed or not, and a 16,384-byte table: where draining and
+// Duplicate matter.
 
 // MARK: - Fixtures
 
@@ -172,11 +174,180 @@ func qpackEncodeConnection(sets: [HTTPFieldStore], capacity: Int, acknowledgment
     return (bytes, instructionEnds, sectionEnds)
 }
 
+/// An encode row with the peer's decoder behind: after set i, the decoder has taken everything through section
+/// i - `delay` in order (each section after its encoder stream bytes), and what it wrote (Section Acknowledgments,
+/// Insert Count Increments) reaches the encoder; the peer allows `blocked` blocked streams. `delay` 0 is a decoder that
+/// keeps up. Each encoder's decoder stream is recorded once (HTTPBytes' decoder for HTTPBytes' encoder, ls-qpack's for
+/// ls-qpack's, as each would get it) and replayed as each iteration encodes, so iterations measure the encoder alone.
+final class QPACKFlight: @unchecked Sendable {
+    let fixture: QPACKFixture
+    let blocked: Int
+    let delay: Int
+    /// HTTPBytes' encoder, made once and reset per iteration.
+    var encoder: QPACKEncoder
+    /// HTTPBytes' connection: section i's instructions end at `instructionEnds[i]`, its section at `sectionEnds[i]`.
+    let bytes: [UInt8]
+    let instructionEnds: [Int]
+    let sectionEnds: [Int]
+    /// HTTPBytes' decoder's stream back, set i's ending at `feedbackEnds[i]`.
+    let feedback: [UInt8]
+    let feedbackEnds: [Int]
+    /// ls-qpack's decoder's stream back to ls-qpack's encoder, and its connection's size.
+    var lsFeedback = [UInt8](repeating: 0, count: 1 << 16)
+    var lsFeedbackEnds: [Int]
+    let lsWritten: Int
+
+    init(_ fixture: QPACKFixture, blocked: Int, delay: Int) {
+        self.fixture = fixture
+        self.blocked = blocked
+        self.delay = delay
+        let capacity = fixture.capacity
+        var encoder = QPACKEncoder(maximumTableCapacity: capacity)
+        encoder.setPeerSettings(maximumTableCapacity: UInt64(capacity), blockedStreams: UInt64(blocked))
+        var decoder = QPACKDecoder(maximumTableCapacity: capacity, maximumBlockedStreams: blocked, maximumFieldSectionSize: 1 << 20)
+        var bytes: [UInt8] = [], instructionEnds: [Int] = [], sectionEnds: [Int] = [], feedback: [UInt8] = [], feedbackEnds: [Int] = []
+        var section = [UInt8](repeating: 0, count: 1 << 16), instructions = [UInt8](repeating: 0, count: 1 << 16)
+        var decoded = 0, start = 0
+        for (index, store) in fixture.stores.enumerated() {
+            var instructionCount = 0
+            let sectionCount = try! section.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
+                try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+                    try encoder.encode(store, stream: UInt64(index * 4), into: &sectionSpan, instructions: &instructionSpan)
+                    instructionCount = instructionSpan.byteCount
+                    return sectionSpan.byteCount
+                }
+            }
+            bytes += instructions[0..<instructionCount]
+            instructionEnds.append(bytes.count)
+            bytes += section[0..<sectionCount]
+            sectionEnds.append(bytes.count)
+            var back: [UInt8] = []
+            while index >= delay, decoded <= index - delay {
+                let pending = Array(bytes[start..<instructionEnds[decoded]]), body = Array(bytes[instructionEnds[decoded]..<sectionEnds[decoded]])
+                precondition(try! decoder.processEncoderStream(pending.span.bytes) == pending.count)
+                precondition(try! decoder.begin(body.span.bytes, stream: UInt64(decoded * 4)), "decoded in order, nothing blocks")
+                while try! decoder.next(in: body.span.bytes) != nil {}
+                var written = [UInt8](repeating: 0, count: 256)
+                let n = written.withOutputRawSpan { (span) -> Int in
+                    decoder.writeDecoderInstructions(into: &span)
+                    return span.byteCount
+                }
+                back += written[0..<n]
+                start = sectionEnds[decoded]
+                decoded += 1
+            }
+            if !back.isEmpty { precondition(try! encoder.processDecoderStream(back.span.bytes) == back.count) }
+            feedback += back
+            feedbackEnds.append(feedback.count)
+        }
+        self.encoder = encoder
+        self.bytes = bytes
+        self.instructionEnds = instructionEnds
+        self.sectionEnds = sectionEnds
+        self.feedback = feedback
+        self.feedbackEnds = feedbackEnds
+        lsFeedbackEnds = [Int](repeating: 0, count: fixture.sets.count)
+        lsWritten = qpackEncodeLSQPACKFed(fixture, blocked: blocked, delay: delay, &lsFeedback, &lsFeedbackEnds, record: true)
+    }
+}
+
+/// ls-qpack's encoder, its decoder stream recorded (`record`) or replayed.
+@inline(never)
+func qpackEncodeLSQPACKFed(_ fixture: QPACKFixture, blocked: Int, delay: Int, _ feedback: inout [UInt8], _ feedbackEnds: inout [Int],
+                           record: Bool) -> Int {
+    fixture.flat.withUnsafeBufferPointer { flat in
+        flat.withMemoryRebound(to: CChar.self) { chars in
+            fixture.offsets.withUnsafeBufferPointer { offsets in
+                fixture.setEnds.withUnsafeBufferPointer { setEnds in
+                    qpackCOutput.withUnsafeMutableBufferPointer { out in
+                        qpackCInstructionEnds.withUnsafeMutableBufferPointer { instructionEnds in
+                            qpackCSectionEnds.withUnsafeMutableBufferPointer { sectionEnds in
+                                feedback.withUnsafeMutableBufferPointer { feedback in
+                                    feedbackEnds.withUnsafeMutableBufferPointer { feedbackEnds in
+                                        lsqpack_encode_sets_fed(chars.baseAddress, offsets.baseAddress, setEnds.baseAddress, setEnds.count,
+                                                                UInt32(fixture.capacity), UInt32(blocked), UInt32(delay), out.baseAddress,
+                                                                out.count, instructionEnds.baseAddress, sectionEnds.baseAddress,
+                                                                feedback.baseAddress, feedback.count, feedbackEnds.baseAddress, record ? 1 : 0)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// HTTPBytes: every set encoded, the recorded decoder stream fed back after each; the bytes written.
+@inline(never)
+func qpackEncodeFlight(_ flight: QPACKFlight, _ encoder: inout QPACKEncoder, _ sections: inout [UInt8], _ instructions: inout [UInt8],
+                       instructionEnds: UnsafeMutableBufferPointer<Int>? = nil, sectionEnds: UnsafeMutableBufferPointer<Int>? = nil) -> Int {
+    encoder.reset()
+    let feedback = flight.feedback, feedbackEnds = flight.feedbackEnds, stores = flight.fixture.stores
+    let feedbackBytes = feedback.span.bytes
+    do throws(QPACKError) {
+        return try sections.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
+            try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+                var start = 0
+                for index in 0..<stores.count {
+                    try encoder.encode(stores[index], stream: UInt64(index &* 4), into: &sectionSpan, instructions: &instructionSpan)
+                    let end = feedbackEnds[index]
+                    if end > start { _ = try encoder.processDecoderStream(feedbackBytes.extracting(start..<end)) }
+                    start = end
+                    instructionEnds?[index] = instructionSpan.byteCount
+                    sectionEnds?[index] = sectionSpan.byteCount
+                }
+                return sectionSpan.byteCount &+ instructionSpan.byteCount
+            }
+        }
+    } catch { return -1 }
+}
+
+/// FNV-1a over every field's name, a 0 byte, its value, and a 1 byte: what `lsqpack_decode_digest` computes.
+func qpackDigest(_ sets: [[(name: [UInt8], value: [UInt8])]]) -> UInt64 {
+    var digest: UInt64 = 0xCBF2_9CE4_8422_2325
+    func add(_ bytes: [UInt8]) { for byte in bytes { digest = (digest ^ UInt64(byte)) &* 0x100_0000_01B3 } }
+    for set in sets { for (name, value) in set { add(name); add([0]); add(value); add([1]) } }
+    return digest
+}
+
+/// Whether ls-qpack's decoder decodes a connection to the fixture's fields exactly, each section decoded after the
+/// encoder stream of the sections through `late` after it.
+func qpackLSQPACKDecodes(_ bytes: [UInt8], instructionEnds: [Int], sectionEnds: [Int], to fixture: QPACKFixture, late: Int) -> Bool {
+    let digest = bytes.withUnsafeBufferPointer { bytes in
+        lsqpack_decode_digest(bytes.baseAddress, instructionEnds, sectionEnds, sectionEnds.count, UInt32(fixture.capacity), UInt32(late))
+    }
+    return digest == qpackDigest(fixture.sets)
+}
+
 let qpackRequestsStatic = Lazy { QPACKFixture(qif: "requests.qif", capacity: 0) }
 let qpackResponsesStatic = Lazy { QPACKFixture(qif: "responses.qif", capacity: 0) }
 let qpackRequestsDynamic = Lazy { QPACKFixture(qif: "requests.qif", capacity: 4_096) }
 let qpackResponsesDynamic = Lazy { QPACKFixture(qif: "responses.qif", capacity: 4_096) }
 let qpackInterop = Lazy { QPACKFixture(interop: "qpack-05/nghttp3/fb-resp-hq.out.4096.0.1", qif: "fb-resp-hq", capacity: 4_096) }
+let qpackRequests16K = Lazy { QPACKFixture(qif: "requests.qif", capacity: 16_384) }
+let qpackResponses16K = Lazy { QPACKFixture(qif: "responses.qif", capacity: 16_384) }
+
+/// The encode rows with the decoder behind or a larger table: requests then responses, each 4,096 bytes with 4 sections
+/// in flight and no blocking; 16 in flight, no blocking; 16 in flight, 100 blocked; 16,384 bytes with a decoder that
+/// keeps up (100 blocked); 16,384 bytes, 16 in flight, no blocking.
+let qpackFlights: [(label: String, flight: Lazy<QPACKFlight>)] = {
+    var flights: [(label: String, flight: Lazy<QPACKFlight>)] = []
+    let corpora: [(String, Lazy<QPACKFixture>, Lazy<QPACKFixture>)] = [
+        ("401 requests", qpackRequestsDynamic, qpackRequests16K), ("383 responses", qpackResponsesDynamic, qpackResponses16K),
+    ]
+    for (corpus, small, large) in corpora {
+        flights += [
+            ("\(corpus), 4,096 table, 4 in flight, 0 blocked", Lazy { QPACKFlight(small.value, blocked: 0, delay: 4) }),
+            ("\(corpus), 4,096 table, 16 in flight, 0 blocked", Lazy { QPACKFlight(small.value, blocked: 0, delay: 16) }),
+            ("\(corpus), 4,096 table, 16 in flight, 100 blocked", Lazy { QPACKFlight(small.value, blocked: 100, delay: 16) }),
+            ("\(corpus), 16,384 table, acknowledged at once", Lazy { QPACKFlight(large.value, blocked: 100, delay: 0) }),
+            ("\(corpus), 16,384 table, 16 in flight, 0 blocked", Lazy { QPACKFlight(large.value, blocked: 0, delay: 16) }),
+        ]
+    }
+    return flights
+}()
 
 /// Coders made once, reset per iteration (a new connection's state with no allocation).
 nonisolated(unsafe) var sharedQPACKDecoder = QPACKDecoder(maximumTableCapacity: 4_096)
@@ -408,6 +579,56 @@ func registerQPACKBenchmarks() {
         }
     }
 
+    // Acknowledgments late. Each setup checks the connection decodes to every field exactly: HTTPBytes' encoder's by
+    // HTTPBytes' decoder (in order) and ls-qpack's (in order, and each section after the encoder stream of the `delay`
+    // sections after it: the encoder hears of the section only then, so entries it evicts before must not be ones the
+    // section refers to); ls-qpack's by HTTPBytes' decoder.
+    for (label, flight) in qpackFlights {
+        register("QPACK encode (\(label)): HTTPBytes", setup: {
+            let flight = flight.value, fixture = flight.fixture
+            var instructionEnds = [Int](repeating: 0, count: fixture.sets.count), sectionEnds = instructionEnds
+            let written = instructionEnds.withUnsafeMutableBufferPointer { instructionEnds in
+                sectionEnds.withUnsafeMutableBufferPointer { sectionEnds in
+                    qpackEncodeFlight(flight, &flight.encoder, &qpackSectionOutput, &qpackInstructionOutput,
+                                      instructionEnds: instructionEnds, sectionEnds: sectionEnds)
+                }
+            }
+            reportQPACKSize("HTTPBytes", label, written)
+            // The replay wrote what the recording did, section by section.
+            var instructionStart = 0, sectionStart = 0, bytes: [UInt8] = []
+            for index in 0..<fixture.sets.count {
+                bytes += qpackInstructionOutput[instructionStart..<instructionEnds[index]]
+                bytes += qpackSectionOutput[sectionStart..<sectionEnds[index]]
+                instructionStart = instructionEnds[index]
+                sectionStart = sectionEnds[index]
+            }
+            guard written > 0, bytes == flight.bytes,
+                  qpackConnectionDecodes(bytes, instructionEnds: flight.instructionEnds, sectionEnds: flight.sectionEnds, to: fixture),
+                  qpackLSQPACKDecodes(bytes, instructionEnds: flight.instructionEnds, sectionEnds: flight.sectionEnds, to: fixture, late: 0),
+                  qpackLSQPACKDecodes(bytes, instructionEnds: flight.instructionEnds, sectionEnds: flight.sectionEnds, to: fixture,
+                                      late: flight.delay)
+            else { return 0 }
+            return 1
+        }) {
+            let flight = flight.value
+            return qpackEncodeFlight(flight, &flight.encoder, &qpackSectionOutput, &qpackInstructionOutput)
+        }
+        register("QPACK encode (\(label)): ls-qpack", setup: {
+            let flight = flight.value, fixture = flight.fixture
+            let written = qpackEncodeLSQPACKFed(fixture, blocked: flight.blocked, delay: flight.delay, &flight.lsFeedback,
+                                                &flight.lsFeedbackEnds, record: false)
+            reportQPACKSize("ls-qpack", label, written)
+            let count = fixture.sets.count
+            return written == flight.lsWritten
+                && qpackConnectionDecodes(Array(qpackCOutput[0..<written]), instructionEnds: Array(qpackCInstructionEnds[0..<count]),
+                                          sectionEnds: Array(qpackCSectionEnds[0..<count]), to: fixture) ? 1 : 0
+        }) {
+            let flight = flight.value
+            return qpackEncodeLSQPACKFed(flight.fixture, blocked: flight.blocked, delay: flight.delay, &flight.lsFeedback,
+                                         &flight.lsFeedbackEnds, record: false)
+        }
+    }
+
     // Allocation gates: HTTPBytes' decoding and encoding allocate nothing once the coder and outputs exist.
     let zeroAllocations = Benchmark.Configuration(
         metrics: [.mallocCountTotal],
@@ -428,6 +649,15 @@ func registerQPACKBenchmarks() {
         }),
         ("Allocations:QPACK_encode_responses_dynamic", {
             qpackEncodeShared(qpackResponsesDynamic.value)
+        }),
+        // 16 sections in flight, blocking and not: Duplicates, names inserted alone, acknowledgments late.
+        ("Allocations:QPACK_encode_responses_in_flight", {
+            let flight = qpackFlights[7].flight.value
+            return qpackEncodeFlight(flight, &flight.encoder, &qpackSectionOutput, &qpackInstructionOutput)
+        }),
+        ("Allocations:QPACK_encode_responses_in_flight_unblocked", {
+            let flight = qpackFlights[6].flight.value
+            return qpackEncodeFlight(flight, &flight.encoder, &qpackSectionOutput, &qpackInstructionOutput)
         }),
     ]
     for (name, run) in gates {

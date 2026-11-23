@@ -37,9 +37,12 @@ public enum HTTPList {
 
 /// Tokens and numbers in field values.
 public enum HTTPToken {
-    /// Whether `bytes` spell `token` in any case (ASCII letters only fold).
+    /// Whether `bytes` spell `token` in any case (ASCII letters only fold). `token` must be lowercase: only `bytes` are
+    /// folded (the overload taking two spans folds both).
     @inlinable
     public static func equalsIgnoringCase(_ bytes: RawSpan, _ token: StaticString) -> Bool {
+        // Unsafe: the static string's bytes. Safe: `utf8CodeUnitCount` of them, read within that count.
+        assert((0..<token.utf8CodeUnitCount).allSatisfy { unsafe token.utf8Start[$0] &- 0x41 >= 26 }, "a lowercase literal")
         guard bytes.byteCount == token.utf8CodeUnitCount else { return false }
         // Unsafe: the static string's bytes. Safe: `utf8CodeUnitCount` of them, read within that count.
         let start = unsafe token.utf8Start

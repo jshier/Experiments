@@ -423,4 +423,5 @@ let benchmarks: @Sendable () -> Void = {
     registerQPACKBenchmarks()
     registerStructuredFieldBenchmarks()
     registerPayloadBenchmarks()
+    registerFieldValueBenchmarks()
 }

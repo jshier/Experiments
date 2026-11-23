@@ -1,5 +1,6 @@
 public import Bytes
 public import BytesCompression
+public import HTTP1
 public import HTTPBytes
 
 /// A content coding (RFC 9110 §8.4.1): how a representation's bytes are compressed.
@@ -53,6 +54,10 @@ public enum HTTPPayloadError: Error, Sendable, Hashable {
     case tooLarge
     /// The output had no room.
     case outOfRoom
+    /// The body's chunked transfer coding is malformed (``HTTPBodyDecoder``).
+    case chunked(HTTP1Error)
+    /// The connection closed before the body's framing ended (``HTTPBodyDecoder``).
+    case incompleteBody
 }
 
 /// One decoding stage: a coding's decoder.
@@ -355,17 +360,19 @@ public struct HTTPContentDecoder: ~Copyable {
     }
 }
 
-/// A body coded with one content coding, as it's produced: Bytes' DEFLATE (gzip, zlib) and Brotli encoders.
-/// (Zstandard encoding isn't available: BytesCompression decodes it only.)
+/// A body coded with one content coding, as it's produced: Bytes' DEFLATE (gzip, zlib), Brotli, and Zstandard encoders.
 public struct HTTPContentEncoder: ~Copyable {
     /// The coding.
     public let coding: HTTPContentCoding
     @usableFromInline var deflate: DeflateEncoder?
     @usableFromInline var brotli: BrotliEncoder?
+    @usableFromInline var zstd: ZstdEncoder?
 
-    /// An encoder for `coding` at `level` (DEFLATE 1–9; Brotli quality 0–11).
+    /// An encoder for `coding` at `level` (DEFLATE 1–9; Brotli quality 0–11; Zstandard libzstd's levels 1–4, with a
+    /// 512 KiB window: RFC 9659 limits a `zstd` content coding's window to 8 MB, and a smaller one keeps memory per
+    /// response down, at 0–4% in size).
     ///
-    /// - Throws: ``HTTPPayloadError/unsupportedCoding`` for `zstd`.
+    /// - Throws: Nothing now (every coding encodes); kept for codings a future build may not.
     public init(_ coding: HTTPContentCoding, level: Int? = nil) throws(HTTPPayloadError) {
         self.coding = coding
         switch coding {
@@ -373,7 +380,18 @@ public struct HTTPContentEncoder: ~Copyable {
         case .deflate: deflate = DeflateEncoder(format: .zlib, level: level ?? 6)
         case .brotli: brotli = BrotliEncoder(quality: level ?? 5)
         case .identity: break
-        case .zstd: throw .unsupportedCoding
+        case .zstd: zstd = ZstdEncoder(level: level ?? 3, windowLog: ZstdEncoder.Parameters.httpWindowLog)
+        }
+    }
+
+    /// Starts another body with the same coding and level, keeping the encoder's memory (Zstandard's; DEFLATE and
+    /// Brotli start over).
+    public mutating func reset() {
+        switch coding {
+        case .gzip, .deflate: deflate!.reset()
+        case .brotli: brotli!.reset()
+        case .zstd: zstd!.reset()
+        case .identity: break
         }
     }
 
@@ -384,6 +402,7 @@ public struct HTTPContentEncoder: ~Copyable {
             switch coding {
             case .gzip, .deflate: return try deflate!.compress(input, into: &output, flush: flush)
             case .brotli: return try brotli!.compress(input, into: &output, flush: flush)
+            case .zstd: return try zstd!.compress(input, into: &output, flush: flush)
             default:
                 let take = Swift.min(input.byteCount, output.freeCapacity)
                 output.append(copying: input.extracting(0..<take))

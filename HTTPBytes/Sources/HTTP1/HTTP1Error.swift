@@ -46,6 +46,8 @@ public enum HTTP1Error: Error, Sendable, Hashable {
     case invalidChunkEnd
     /// Chunk extensions longer than the decoder's limit.
     case chunkExtensionsTooLong
+    /// The body's bytes ended before its chunked coding did (``HTTP1Dechunker`` given `.finish` early).
+    case incompleteBody
 
     /// The response status a server sends for the error.
     public var status: HTTPStatus {

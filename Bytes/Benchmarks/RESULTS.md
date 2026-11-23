@@ -12,6 +12,15 @@ Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module h
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
 
+## 2026-11-23, Zstandard encoding: `ZstdEncoder` against libzstd 1.5.7 (baseline `r2-zstd-encode`)
+
+A Zstandard encoder at libzstd's levels 1–4 (its `fast` and `dfast` strategies, block pre-splitter, and entropy
+decisions, ported decision for decision): with the same parameters its frames are libzstd 1.5.7's byte for byte, on the
+whole corpus and on HTTP-sized bodies, so ratios are identical. Cycles −14% to +5.4% of libzstd's on every one-call row
+(small bodies cheaper), −4 to −10% streamed in 64 KB pieces; instructions +7.5 to +11% on large inputs. Zero mallocs
+with a reused encoder, one call or streamed. `Parameters.httpWindowLog` is 19 (RFC 9659's 8 MB cap; 2.1 MB streaming
+memory at level 3). Method, tables, memory, the window's cost, and what moved the cycles: [RESULTS-zstd-encoder.md](RESULTS-zstd-encoder.md).
+
 ## 2026-11-21, the waiting primitives and `RawStorage`, from Disk, NativeAEA, and NativeZip (additive; measured in the clients)
 
 Disk and NativeAEA each had the same `Continuation`/`suspend`, `WaiterQueue`, and `RawStorage` (160 lines, word for

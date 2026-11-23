@@ -15,6 +15,8 @@ let benchmarks: @Sendable () -> Void = {
     registerCodecAllocationBenchmarks()
     registerZstdBenchmarks()
     registerZstdAllocationBenchmarks()
+    registerZstdEncodeBenchmarks()
+    registerZstdEncodeAllocationBenchmarks()
     registerLZMABenchmarks()
     registerLZMAAllocationBenchmarks()
     registerLZMAStreamingBenchmarks()

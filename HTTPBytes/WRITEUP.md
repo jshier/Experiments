@@ -24,6 +24,9 @@ package (`HTTPBytes/Benchmarks`, baseline `final-1`, p50 per iteration) unless a
 | QPACK encode, 401 requests, 4 KB table | **107 µs** | cursed-http 238 | ls-qpack 751 |
 | Structured Fields, 1,000 dictionaries | **196 µs** | | swift-http-structured-headers 22,000 µs |
 | 1 MB gzip body, chunked in 4 KB | **530 µs** (2.0 GB/s out) | | system zlib, whole: 627 µs |
+| 1 MB body encoded, zstd level 3 (round 2) | **1.7 ms, 0 mallocs** | | gzip level 6: 11 ms |
+| 3,375 `Date`/`Last-Modified` values parsed (round 2) | **44 µs** (13 ns each) | | Foundation `Date.HTTPFormatStyle` 1,544 µs |
+| 1,000 IMF-fixdates written (round 2) | **20 µs** | | Foundation 272 µs |
 
 - **HTTP/1:** 2.1–2.6x as fast as picohttpparser and llhttp on every real corpus. Ahead of cursed-http (a C parser built
   on the same idea, and the fastest found) on requests and on long fields. Behind it on responses: 13–16% more cycles, 16–18% more time.
@@ -37,7 +40,8 @@ package (`HTTPBytes/Benchmarks`, baseline `final-1`, p50 per iteration) unless a
 
 ## What's in the package
 
-Six library products, about 13,300 lines, and 207 tests in about 7,000 lines:
+Six library products, about 16,900 lines, and 264 tests in about 8,600 lines (after round 2; round 1 ended at 13,300
+lines and 207 tests):
 
 | Product | Contents |
 |---|---|
@@ -255,6 +259,11 @@ ls-hpack allocates 139–2,933 times per row, NIOHPACK 1,102–2,416 per decodin
 - **Insert on the second sighting.** In HPACK an insertion is free; in QPACK the value goes on the encoder stream as
   well. Inserting one-off response values evicted entries that would have been used. Inserting a field the second time
   it's seen (ls-qpack's idea, a direct-mapped history of field hashes) cut responses 16%, at +4% on requests.
+- **Drain, duplicate, and insert names alone.** Entries a quarter of the capacity from eviction aren't name references,
+  and a field held by one is copied to the front (Duplicate) and the copy used; an unknown name seen twice with
+  different values goes in alone for name references. Responses with a 4,096-byte table: 62,241 → 53,137 B, ls-qpack
+  53,087; with 16 sections in flight and blocking allowed, 53,631 B against ls-qpack's 66,216. Encoding instructions
+  −9% to +3%.
 - **Strict and reliable.** A Required Insert Count larger than the section needs is an error. Acknowledgments go into a
   buffer made with the decoder and can't be dropped: a dropped one would freeze the peer's table. That was a review
   finding; the decoder now reports `decoderStreamFull` before changing anything.
@@ -399,17 +408,74 @@ Every incremental parser now has a test fed a byte at a time with a time limit.
 8. **Strictness has a price in real traffic.** RFC 3986 target validation rejected 13% of real browser requests, so it's
    an option.
 
+## Round 2: the open items, dates, and field values
+
+The second round took this document's open items (all but the connection layer) and the field parsers the plan had
+left out. Its record is in `RESULTS.md` ("round 2" sections) and `PLAN.md` ("Round 2"), reviewed adversarially as round 1
+was: the plan before any code, then each part's code.
+
+**What didn't work, measured.** cursed-http's skip windows ("maybe a control in the next 256 bytes?") cost HTTP/1
+responses 1–3% at every setting: our exact masks are cheap enough that windows wasted on lines of 256–1,023 bytes cost
+more than they skip, and cursed-http's own response parser uses a per-head array of masks instead, a design round 1 had
+measured as too costly for requests here. Tiny heads given only their bytes turned out to be 8–11 cycles behind, not
+21, and not because of the copied partial block: building it from clamped overlapping loads changed nothing and grew
+the parse loop. Both gaps stay open, now with their causes narrowed.
+
+**Bodies as pipeline stages, and why a body is one stage.** The chunked coding and the content codings became Bytes
+`ByteTransform` stages. The review found the trap in composing them: a pipeline finishes when its last stage does, so
+dechunking then gunzipping ended a body where the gzip stream ended, and anything after it inside the chunked body was
+left to be read as the next request. `HTTPBodyDecoder` decodes framing and codings in one stage that ends only where the
+framing ends, requires the coded stream to end exactly there, and passes chunk slices straight to the decoder: the same
+4.9 M instructions per 1 MB body as the hand-written loop, no allocations once reused.
+
+**QPACK compression at ls-qpack's level** (an agent's work): a draining index (entries in the oldest quarter of the
+table aren't referenced, so they can be evicted), Duplicate instructions for fields still wanted from there, and names
+inserted alone when a name recurs with new values. 383 responses: 62,241 → 53,137 bytes, against ls-qpack's 53,087;
+encoding instructions −9% to +3%.
+
+**Dates.** `HTTPDate` parses the three HTTP-date formats and writes IMF-fixdate. The common format is 29 fixed bytes,
+read as four 8-byte words: masks check the fixed characters, one SWAR test the 14 digits, a perfect hash of the three
+letters finds the month (`(letters × 26596) >> 28` into 16 slots), and Hinnant's arithmetic turns the date into days
+without branches; the day name must be the date's. 13 ns a date against Foundation's `Date.HTTPFormatStyle` at 457 ns
+(35x), 20 ns to write one against 272 ns, 1.5 ns for a server's `Date` from the per-second cache. Every day from year 0
+to 9999 round-trips through all three formats, and Foundation agrees on every day from 1970 to 2200.
+
+**Field values.** Views over the value's bytes, as the Structured Fields iterators are: lists, parameters, quoted
+strings (escapes removed only when the text is written or compared), media types and `Accept` negotiation, ranges
+(resolved into the caller's storage, merged, with a limit: RFC 9110 §14.2's abuse cases), entity tags and RFC 9110
+§13.2.2's precondition evaluation, `Cache-Control`, hosts (IPv6 and IPvFuture literals), `Forwarded`, credentials and
+challenge lists, `Content-Disposition` with RFC 8187 file names, cookies, and request-target components with
+percent-decoding. The first version scanned bytes one at a time; moving tokens, quoted strings, entity tags, and hosts to
+the 16-byte tests HTTP/1 already had (Bytes' `firstByteOffset(where:)`, which also covers values shorter than a vector)
+cut instructions 18–76%. Per value from the corpora: an entity tag 150 instructions, a host 378, a content type 608, a
+`Cache-Control` 1,100, negotiating `Accept-Encoding` 1,350 (a generic function left unspecialized had allocated 6 times
+a value). Their tests transcribe Go's, jshttp's, and http-tests' suites, with each deliberate difference stated.
+
+The review of the parsers fuzzed 2.6 million inputs through them without a trap or an allocation, and confirmed six
+defects, each now a regression test. Two are worth knowing beyond this code. Merging byte ranges into bounded storage
+in arrival order can need more slots on the way than the answer has, so the resolver sweeps the set instead (the lowest
+uncovered range, grown while anything touches it), checked against an unbounded reference at every storage size. And
+parsers that throw on one bad list element lose the good ones: a `Cache-Control` with a malformed `max-age` lost its
+`no-store`, which a cache must not; that parser now skips what it can't read.
+
+**Zstandard bodies.** An agent wrote BytesCompression's Zstandard encoder by porting libzstd's levels 1–4 decision for
+decision, so its frames are byte for byte libzstd 1.5.7's, which made libzstd's output the test oracle: every slip
+showed at its first differing byte. Cycles are within −14% and +5% of libzstd's. `HTTPContentEncoder(.zstd)` uses level
+3 with a 512 KiB window (RFC 9659 caps it at 8 MB; the smaller one costs 0–4% in size and saves 1.6 MB a streaming
+encoder): a 1 MB body in 1.7 ms against gzip's 11 ms, with nothing allocated once the encoder is reused.
+
 ## Open items
 
-- **HTTP/1 responses:** 13–16% more cycles than cursed-http, from mispredicts on long lines. Its "any control in the next 256
-  bytes?" skip windows are the next thing to try.
-- **Tiny heads given only their own bytes:** 10–55% behind cursed-http, whose contract lets it read 64 bytes past the
-  input. HTTPBytes copies the partial block instead.
-- **QPACK compression:** ls-qpack compresses responses 15% better, using Duplicate instructions and a draining index.
-- **zstd:** decoding only; BytesCompression has no zstd encoder.
+- **HTTP/1 responses:** 13–16% more cycles than cursed-http, from mispredicts where long lines cross blocks. Skip windows
+  didn't help (round 2); cursed-http's batched per-head mask array is the remaining idea, at a cost to requests.
+- **Tiny heads given only their own bytes:** 8–11 cycles (about 20%) behind cursed-http, whose contract lets it read 64
+  bytes past the input; not the copied partial block. A padded-input API could recover it, for heads under 64 bytes.
+- **QPACK compression:** at most 3.1% larger than ls-qpack in every setting measured (responses 1.001 with
+  acknowledgments at once; requests up to 1.031 with a 16,384-byte table, where ls-qpack inserts `:path`), and up to
+  35% smaller with acknowledgments late.
+- **zstd:** encoding covers libzstd's levels 1–4 (fast and double-fast); the lazy levels would need its row match finder.
+- **Field values:** `Set-Cookie` parsing (a client's), RFC 2231 parameter continuations, a policy layer for `Host` beyond
+  RFC 3986's reg-name (commas, `%00`).
 - **Not built from the plan:**
   - the connection layer (HTTP/2 stream states and flow control, HTTP/3 stream rules, as state machines over the codecs);
-  - `HTTPDate`;
-  - typed parsers for `Range`, `Content-Type`, entity tags, and `Vary`;
-  - `ByteTransform` adapters for bodies;
   - multipart and forms (deferred in the plan).

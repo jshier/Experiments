@@ -163,3 +163,111 @@ measurement before acting; highest performance wins conflicts with taste.
 
 `multipart/form-data` (RFC 7578) and form encoding (WHATWG: application-level); HTTP Datagrams and capsules (RFC 9297);
 h2c upgrade; ORIGIN and ALTSVC frames; Cache-Control (RFC 9111). Any of these can follow on the same primitives.
+
+## Round 2 (2026-11-23, draft 1): the open items, then dates and field parsers
+
+The user's scope: WRITEUP.md's open items except HTTP/2 and HTTP/3 stream states and flow control (phase 7 stays
+deferred, with HTTP/3's stream rules), HTTP-level work first; then `HTTPDate` and the field parsers; multipart and forms
+stay deferred. Same standards as round 1 (0 mallocs per message after setup, `vector128` scans, cycles and mispredicts
+judged, not just instructions, every change measured before and after; adversarial review agents given the code).
+Baselines named `r2-*`, slimmed.
+
+### HTTP level
+
+1. **HTTP/1 responses: skip windows** (cursed-http's `fb_ctany_simd`, fbparse.h). In `farStop` (lines crossing blocks,
+   already out of line), after N exact blocks (cursed-http: 2), test 256- then 512-byte windows for "maybe a control":
+   `(Int8)(x + 1) < 0x21` holds for controls, HT, DEL, and bytes ≥ 0x80 (false positives send the window to exact
+   masks), as add and signed min per vector, two accumulators, one `sminv`. Swift's `pointwiseMin` is a call on 6.4: a
+   CBytesNEON `static inline` helper (with a portable fallback), proposed to Bytes as a `ByteBlock`/`RawSpan` API once
+   it wins. Sweep N, window sizes, and prefetch distance. **Target:** resp and tresp cycles −10% or more; req, tiny, f1,
+   f16 within 1%; differential against round 1's parser (the second-module harness) on the 1.6 M inputs.
+2. **Tiny heads given only their bytes** (73 cycles against 52 when the next bytes are readable): (a) a padded-input
+   entry point on both head parsers, `next(in: RawSpan, byteCount: Int)`: the span may extend past the message (a
+   receive buffer's capacity), the parser may load whole blocks from it and treats bytes past `byteCount` as absent;
+   `next(in:)` is the case `byteCount == bytes.byteCount`. (b) Bytes: a way for a receive buffer to offer that span
+   (`ByteBuffer` storage zeroed once at `init`, so its capacity is always initialized, and an accessor for the unread
+   bytes plus what follows). (c) The copy-free path for a partial block when there aren't 64 bytes: overlapping
+   loads and a one-register `tbl` shift instead of the 16/8/4-byte copy. **Target:** alone ≤ 55 cycles with (a);
+   (c) kept only if it gains without the API.
+3. **QPACK compression** (an agent, `HTTP3` only, in a worktree): Duplicate instructions for referenced entries near
+   the draining end and a draining index (entries past it aren't referenced, so they can be evicted), as ls-qpack does.
+   **Target:** response sections within 5% of ls-qpack's size (now 15% larger); encode cycles +10% at most; 0 mallocs;
+   interop with ls-qpack's and our decoder, blocked streams included.
+4. **zstd encoding** (an agent, `BytesCompression`, in a worktree): a Zstandard frame encoder with libzstd's fast and
+   double-fast strategies (its levels 1–4), lazy if time allows; raw/RLE/compressed literals with Huffman (the
+   `HuffmanCodeBuilder`), FSE sequence tables (predefined, RLE, or built, from LZFSE's FSE encoder where it fits),
+   optional checksum (XXH64), whole-buffer and streaming (`ByteTransform`); every output decoded by libzstd (CZstd) and
+   our decoder. **Target:** ratio within 2% of libzstd at the same level; cycles at or under libzstd's at levels 1 and
+   3; 0 mallocs after setup. Then `HTTPContentEncoder` gets `zstd` (RFC 9659: window ≤ 8 MB).
+5. **`ByteTransform` adapters for bodies:** a dechunking stage (`HTTP1ChunkedDecoder` copying its slices, trailers
+   checked and skipped), a chunking stage (data → chunks, the last chunk on `.finish`), `HTTPContentDecoder` and
+   `HTTPContentEncoder` as stages; a chunked-gzip pipeline against the hand-driven loop: instructions within 3%,
+   0 mallocs.
+
+### Dates and field parsers (core `HTTPBytes`)
+
+6. **`HTTPDate`** (RFC 9110 §5.6.7): parse IMF-fixdate (fixed 29 bytes: 8-byte loads, SWAR digit checks, the month by a
+   3-letter word hash, weekday checked), RFC 850 (two-digit years against a reference year), and asctime; seconds since
+   1970 (`Int64`) and components; days from civil date and back without branches (Hinnant's algorithms); IMF-fixdate
+   written into a writer; a server's date cache (29 bytes reformatted when the second changes). **References:**
+   Foundation's `Date.HTTPFormatStyle` (parse and format), and `strptime`+`timegm` in C. **Target:** parse and format
+   ≤ 10 ns, 0 mallocs.
+7. **Field-value parsers**, views and iterators over the value (no allocations), validated as they go, typed throws:
+   - shared grammar: tokens, quoted strings (view, escapes decoded on demand into a caller's span), parameters, `q`
+     weights in thousandths, comma lists as an iterator (quoted commas respected, as `HTTPList` does now);
+   - `Content-Type` (media type, parameters, `charset`; compare with a known type ignoring case); `Accept`,
+     `Accept-Encoding`, `Accept-Language`, `Accept-Charset` (ranges and weights; choosing among offered codings);
+   - `Range` (`bytes=` sets: first-last, first-, suffix; resolved against a length, with limits on count and overlap),
+     `Content-Range` (parse and write), `If-Range`, `Accept-Ranges`;
+   - entity tags (`ETag`, `If-Match`, `If-None-Match`, `*`; strong and weak comparison);
+   - `Vary` (`*` or field names, as `HTTPFieldName`s), `Connection`, `Upgrade`, `Expect`, `Host` (reg-name, IPv4,
+     IPv6 literal, port);
+   - `Cache-Control` (RFC 9111 §5.2: directives with arguments, known directives by a small hash), `Age`, `Expires`;
+   - request targets: split into components by form (path, query, authority, scheme), path segments, percent-decoding
+     into a caller's span (the `%` found by vector scans), query items as raw views (no `+` decoding: that's forms).
+
+   **Tests:** RFC examples, and other implementations' suites as differential tables (Go's net/http `parseRange` and
+   conditional tests, jshttp's `content-type`, `range-parser`, `negotiator`, `fresh`; Rust's `httpdate`; Python's
+   `email.utils` date cases; curl's date tests), with a table of deliberate differences. **Benchmarks:** values taken from
+   the corpora (http-corpus, top-1k) per parser, ns and cycles per value; 0-malloc gates.
+
+### Order and reviews
+
+Agents start 3 and 4 in worktrees (TestData symlinked in) at once; I do 1, 2, 5, then an adversarial review of the
+HTTP-level code; then 6 and 7, and a second review; the zstd encoder's integration when its agent finishes. Records:
+RESULTS.md per item, AGENTS.md lessons, WRITEUP.md (new sections, open items), the online report updated.
+
+Status (2026-11-23, end of round 2): every item done or measured and closed. 1 and 2 measured, not kept (below); 3
+QPACK at ls-qpack's size (responses 1.001); 4 the zstd encoder (libzstd's frames byte for byte at levels 1–4) and
+`HTTPContentEncoder(.zstd)`; 5 the chunked stages and `HTTPBodyDecoder`; 6 `HTTPDate`; 7 the field parsers. Each part
+reviewed adversarially (plan, body stages, parsers) and every confirmed defect fixed. Records: RESULTS.md ("round 2"),
+WRITEUP.md ("Round 2"), Bytes/Benchmarks/RESULTS-zstd-encoder.md.
+
+### Draft 2: the review's changes, and items 1–2 measured
+
+- **1 and 2 measured, neither kept** (RESULTS.md, round 2): skip windows cost responses 1–3% at every setting (our exact
+  masks are cheap; cursed-http's response parser doesn't use windows either, it batches masks, which round 1 measured
+  at +25% on requests in our design); clamped short blocks left tiny heads alone where they were (the copy isn't their
+  cost) and grew the parse loop. The padded-input API isn't built: at most ~8 cycles on heads under 64 bytes.
+- **3 and 4:** delayed-acknowledgment rows and eviction-safety tests for QPACK; for zstd, the format traps in the
+  agent's brief, libzstd run with explicit parameters, small bodies, memory per encoder, and a 15% cycle target (parity
+  a stretch).
+- **5:** the dechunking stage finishes at the last chunk and leaves the trailer section unconsumed for the caller (no
+  trailers thrown away); `maximumUnitByteCount` covers a size line with its extensions; the chunker writes nothing for
+  a flush with no data (a 0-size chunk ends the body); also a dechunking wrapper that hands slices straight to an inner
+  stage, measured against the pipeline.
+- **6:** RFC 850's two-digit years against a reference date (injectable); HTTP-date is case-sensitive (a deliberate
+  difference from Foundation's and Python's lenience); second 60 and a mismatched weekday decided and tested; asctime's
+  space-padded day; the date cache takes the time as a parameter and is per thread (29 bytes can't be swapped
+  atomically).
+- **7:** list fields combined across lines (iterate a name's lines from `HTTPFieldStore`), duplicated singletons
+  rejected; iterators as `while let x = try it.next()`; entity tags aren't quoted-strings; `q` grammar and `q=0`;
+  `identity` acceptable unless refused; Range: an invalid field is ignored, all-unsatisfiable is 416 with `bytes
+  */len`, `-0` unsatisfiable, last-pos clipped, overflow checked, a count cap and coalescing into caller storage;
+  If-Range strong comparison only; IPv6 zone IDs rejected; Cache-Control's quoted arguments and 2³¹ clamp; Expires
+  ignored under max-age. Added: RFC 9110 §13.2.2 conditional evaluation, Content-Disposition (RFC 6266, RFC 8187
+  `filename*`), Retry-After, Forwarded (RFC 7239), Cookie parsing and Set-Cookie writing, Authorization and
+  WWW-Authenticate (scheme, token68, auth-params). Cut: Accept-Charset. Suites: Go's `net/http` (range, `fs_test`
+  ETag scanning and conditionals, header), `mime/mediatype_test.go`; jshttp's `content-type`, `range-parser`,
+  `negotiator`, `fresh`; Rust's `httpdate` and `hyperium/headers`; mnot's `http-tests/cache-tests` (Cache-Control,
+  Age, Expires parsing); WPT's MIME-type and URL data as tables of differences.

@@ -17,13 +17,20 @@ public import HTTPBytes
 ///
 /// **With the dynamic table**, a field is an index when the static table or the dynamic table has it (a dynamic entry
 /// only if the peer has acknowledged it, or the section may block); otherwise, if the indexing policy wants it (as
-/// HPACK's: ``HTTPFieldIndexingStrategy``; the automatic one also waits until it has seen the field once before, since
-/// unlike HPACK's an insertion costs its bytes again on the encoder stream: 383 responses 74 → 62 KB, 401 requests 53 →
-/// 55 KB) and room can be made by evicting entries that are evictable (acknowledged and
-/// referenced by no unacknowledged section, RFC 9204 §2.1.1), it's inserted on the encoder stream and, if the section may
-/// block, referenced right away with a post-base index (the section's Base is the Insert Count when it began). A section
-/// may block while fewer sections that may block are unacknowledged than the peer's SETTINGS_QPACK_BLOCKED_STREAMS.
-/// Entries are found through the same hash chains as HPACK's encoder (``DynamicFieldIndex``).
+/// HPACK's: ``HTTPFieldIndexingStrategy``; the automatic one also waits until it has seen the field recently, since
+/// unlike HPACK's an insertion costs its bytes again on the encoder stream) and room can be made by evicting entries that
+/// are evictable (acknowledged and referenced by no unacknowledged section, RFC 9204 §2.1.1), it's inserted on the
+/// encoder stream and, if the section may block, referenced right away with a post-base index (the section's Base is the
+/// Insert Count when it began). A name the static table doesn't have, seen recently with other values, is inserted alone
+/// for later fields' name references. A section may block while fewer sections that may block are unacknowledged than
+/// the peer's SETTINGS_QPACK_BLOCKED_STREAMS. Entries are found through the same hash chains as HPACK's encoder
+/// (``DynamicFieldIndex``).
+///
+/// **Draining** (RFC 9204 §2.1.1.1): the entries a quarter of the capacity's insertions would evict aren't name
+/// references; a field one of them holds is duplicated to the table's front (Duplicate, §4.3.4) and the copy referred to
+/// (or the old entry, acknowledged, if the section can't block), so the oldest entries stay free to evict and the
+/// fields in use stay in the table. Against ls-qpack's encoder, which does the same, on http-corpus' 383 responses with
+/// a 4,096-byte table: 53,137 B to its 53,087 (62,241 before).
 ///
 /// **Acknowledgments.** ``processDecoderStream(_:)`` takes the peer's Section Acknowledgments, Stream Cancellations, and
 /// Insert Count Increments. Each section that referred to the dynamic table is tracked until then, in a list made with
@@ -34,9 +41,10 @@ public import HTTPBytes
 /// whatever version a store's fields came from: a known name as ``HTTPFieldName/lowercaseBytes``, any other with its
 /// ASCII letters lowercased, so an HTTP/1 spelling such as `X-Request-Id` goes out (and into the table) as `x-request-id`.
 ///
-/// **Memory** is allocated when the encoder is made: the table (twice its capacity in bytes), the hash chains, the
-/// unacknowledged sections' list, and a scratch buffer for lowercasing names (grown only for a name longer than any
-/// before). Nothing per section or field.
+/// **Memory** is allocated when the encoder is made: the table (twice its capacity in bytes), the hash chains, each
+/// entry's place among the insertions (for draining), the histories of fields and names seen, the unacknowledged
+/// sections' list, and a scratch buffer for lowercasing names (grown only for a name longer than any before). Nothing
+/// per section or field.
 @safe
 public struct QPACKEncoder: ~Copyable {
     @usableFromInline var table: DynamicFieldTable
@@ -60,11 +68,26 @@ public struct QPACKEncoder: ~Copyable {
     @usableFromInline let sectionRequired: UnsafeMutablePointer<Int>
     @usableFromInline let sectionMinimum: UnsafeMutablePointer<Int>
     @usableFromInline var sectionCount = 0
-    /// The automatic policy's memory of fields it has seen: their field hashes, in a direct-mapped table. A field is inserted
-    /// the second time it's seen (ls-qpack's idea): inserting a value that never repeats costs its bytes on the encoder
-    /// stream and evicts entries that would have been used.
+    /// The automatic policy's memory of fields it has seen recently: their field hashes, in a direct-mapped table of about
+    /// one slot per 64 bytes of capacity (as many as the table holds entries). A field is inserted the second time it's
+    /// seen (ls-qpack's idea): inserting a value that never repeats costs its bytes on the encoder stream and evicts
+    /// entries that would have been used.
     @usableFromInline let history: UnsafeMutablePointer<UInt64>
-    @usableFromInline let historyMask: Int
+    /// The slots in use, less one: by the peer's capacity (the memory is for the encoder's).
+    @usableFromInline var historyMask = 63
+    /// Names seen recently in literals with a literal name (their name hashes), the same way: such a name is inserted
+    /// alone (an empty value) the second time, and later fields refer to it.
+    @usableFromInline let nameHistory: UnsafeMutablePointer<UInt64>
+    /// Per table ring slot: the bytes inserted before the entry (its start among all insertions' bytes), which says how
+    /// soon it will be evicted.
+    @usableFromInline let entryStarts: UnsafeMutablePointer<Int>
+    /// The bytes (entry sizes) inserted since the connection began.
+    @usableFromInline var insertedBytes = 0
+    /// How many bytes may be inserted after an entry's start before it's draining: three quarters of the capacity.
+    @usableFromInline var drainingDistance = 0
+    /// Entries numbered below this one are draining (RFC 9204 §2.1.1.1): a quarter of the capacity or less of insertions
+    /// will evict them. New sections refer to a copy of a draining entry (Duplicate) when one can be made.
+    @usableFromInline var drainingBelow = 0
     /// The most sections referring to the dynamic table that can be unacknowledged at once.
     public let maximumUnacknowledgedSections: Int
     /// Whether to Huffman-code strings (when shorter).
@@ -86,12 +109,23 @@ public struct QPACKEncoder: ~Copyable {
         unsafe sectionStreams = UnsafeMutablePointer<UInt64>.allocate(capacity: maximumUnacknowledgedSections)
         unsafe sectionRequired = UnsafeMutablePointer<Int>.allocate(capacity: maximumUnacknowledgedSections)
         unsafe sectionMinimum = UnsafeMutablePointer<Int>.allocate(capacity: maximumUnacknowledgedSections)
-        // Four slots per entry the table can hold.
-        var slots = 64
-        while slots < table.capacity / 8 { slots &<<= 1 }
-        historyMask = slots &- 1
+        let slots = Self.historySlots(capacity: table.capacity)
         unsafe history = UnsafeMutablePointer<UInt64>.allocate(capacity: slots)
         unsafe history.initialize(repeating: 0, count: slots)
+        unsafe nameHistory = UnsafeMutablePointer<UInt64>.allocate(capacity: slots)
+        unsafe nameHistory.initialize(repeating: 0, count: slots)
+        unsafe entryStarts = UnsafeMutablePointer<Int>.allocate(capacity: table.entryMask &+ 1)
+        unsafe entryStarts.initialize(repeating: 0, count: table.entryMask &+ 1)
+    }
+
+    /// The history's slots for a table capacity: one per 64 bytes, a power of two, at least 64. A longer memory inserts
+    /// fields that recur too rarely to be used before they're evicted, a shorter one misses fields that do (383 responses,
+    /// 4,096 bytes: 55,110 B with one slot per 32 bytes, 53,137 with one per 64; 16,384 bytes: 45,506, 46,053, and with
+    /// one per 128, 46,959).
+    static func historySlots(capacity: Int) -> Int {
+        var slots = 64
+        while slots < capacity / 64 { slots &<<= 1 }
+        return slots
     }
 
     deinit {
@@ -100,6 +134,8 @@ public struct QPACKEncoder: ~Copyable {
         unsafe sectionRequired.deallocate()
         unsafe sectionMinimum.deallocate()
         unsafe history.deallocate()
+        unsafe nameHistory.deallocate()
+        unsafe entryStarts.deallocate()
     }
 
     /// Takes the peer's SETTINGS_QPACK_MAX_TABLE_CAPACITY and SETTINGS_QPACK_BLOCKED_STREAMS (once, before the table is
@@ -113,6 +149,8 @@ public struct QPACKEncoder: ~Copyable {
         settledCapacity = capacity
         table.setMaximumSize(capacity)
         pendingCapacity = capacity > 0 ? capacity : -1
+        drainingDistance = capacity &- capacity &>> 2
+        historyMask = Self.historySlots(capacity: capacity) &- 1
     }
 
     /// Returns to a new connection's state with the same peer settings, keeping the memory: an empty table (its capacity
@@ -124,8 +162,11 @@ public struct QPACKEncoder: ~Copyable {
         pendingCapacity = settledCapacity > 0 ? settledCapacity : -1
         knownReceivedCount = 0
         sectionCount = 0
+        insertedBytes = 0
+        drainingBelow = 0
         // Unsafe: writes the history's own `historyMask + 1` slots.
         unsafe history.update(repeating: 0, count: historyMask &+ 1)
+        unsafe nameHistory.update(repeating: 0, count: historyMask &+ 1)
     }
 
     /// The dynamic table's size (RFC 9204 §3.2.1).
@@ -320,11 +361,31 @@ public struct QPACKEncoder: ~Copyable {
             let fieldHash = unsafe DynamicFieldIndex.fieldHash(nameHash, value, valueCount)
             let number = unsafe index.fieldMatch(fieldHash, in: table, name, nameCount, knownName, value, valueCount)
             if number >= 0 {
-                if state.mayUse(number, acknowledged: knownReceivedCount) {
-                    state.refer(to: number)
-                    return number < state.base
-                        ? lines.integer(state.base &- 1 &- number, mask: 0x3F, flags: 0x80)
-                        : lines.integer(number &- state.base, mask: 0x0F, flags: 0x10)
+                let usable = state.mayUse(number, acknowledged: knownReceivedCount)
+                var reference = -1
+                if number >= drainingBelow {
+                    if usable { reference = number }
+                } else if policy == 0 || policy == 3, usable || state.mayBlock {
+                    // Draining (RFC 9204 §2.1.1.1): a copy at the table's front (Duplicate, §4.3.4) keeps the field, and the
+                    // old entry can go. A section that may block refers to the copy; one that can't, to the old entry,
+                    // acknowledged (referred to first, so making room for the copy can't evict it), the copy left for
+                    // later sections.
+                    if state.mayBlock {
+                        reference = duplicate(number, state, &encoderStream)
+                    } else {
+                        state.refer(to: number)
+                        _ = duplicate(number, state, &encoderStream)
+                    }
+                }
+                // A draining entry that couldn't be copied (no room without evicting entries still referred to) is still
+                // referred to if it may be: a literal instead measured larger in every setting (383 responses, 4,096
+                // bytes, 16 sections in flight that may block: 53,631 → 69,736 B).
+                if reference < 0, usable { reference = number }
+                if reference >= 0 {
+                    state.refer(to: reference)
+                    return reference < state.base
+                        ? lines.integer(state.base &- 1 &- reference, mask: 0x3F, flags: 0x80)
+                        : lines.integer(reference &- state.base, mask: 0x0F, flags: 0x10)
                 }
                 // Inserted already but not usable yet: not inserted twice.
                 inTable = true
@@ -346,8 +407,19 @@ public struct QPACKEncoder: ~Copyable {
         }
         var nameEntry = -1
         if staticIndex == none {
+            // A name reference only to an entry that isn't draining (one that is would keep it from being evicted).
             let number = unsafe index.nameMatch(nameHash, in: table, name, nameCount, knownName)
-            if number >= 0, state.mayUse(number, acknowledged: knownReceivedCount) { nameEntry = number }
+            if number >= drainingBelow, state.mayUse(number, acknowledged: knownReceivedCount) {
+                nameEntry = number
+            } else if !neverIndexed, policy == 0 || policy == 3, number < drainingBelow, nameSeenBefore(nameHash),
+                      roomFor(nameCount &+ 32, state) {
+                // A name seen recently whose values vary: inserted alone (ls-qpack's idea), for this field to refer to if
+                // the section may block, and for later ones (383 responses, 4,096 bytes: lines with literal names went
+                // from 157 in 9,960 B to 14 in 485 B).
+                let inserted = unsafe insert(name, nameCount, knownName, nil, 0, staticIndex: none, nameHash: nameHash,
+                                             fieldHash: DynamicFieldIndex.fieldHash(nameHash, nil, 0), &encoderStream)
+                if inserted >= 0, state.mayBlock { nameEntry = inserted }
+            }
         }
         return unsafe literal(name, nameCount, knownName, value, valueCount, staticIndex: staticIndex, nameEntry: nameEntry, neverIndexed: neverIndexed,
                               &lines, &state)
@@ -383,6 +455,16 @@ public struct QPACKEncoder: ~Copyable {
         // Unsafe: unchecked reads and stores of the history. Safe: the slot is masked into it.
         if unsafe history[slot] == fieldHash { return true }
         unsafe history[slot] = fieldHash
+        return false
+    }
+
+    /// Whether a name (its hash) was seen recently in a literal; remembers it if not.
+    @inlinable @inline(__always)
+    func nameSeenBefore(_ nameHash: UInt64) -> Bool {
+        let slot = Int(truncatingIfNeeded: nameHash &>> 40) & historyMask
+        // Unsafe: unchecked reads and stores of the name history. Safe: the slot is masked into it.
+        if unsafe nameHistory[slot] == nameHash { return true }
+        unsafe nameHistory[slot] = nameHash
         return false
     }
 
@@ -434,7 +516,48 @@ public struct QPACKEncoder: ~Copyable {
         }
         let number = unsafe table.insert(name: name, nameCount: nameCount, knownName: knownName, value: value, valueCount: valueCount)
         index.add(number: number, entryMask: table.entryMask, nameHash: nameHash, fieldHash: fieldHash)
+        noteInsertion(number, nameCount &+ valueCount &+ 32)
         return number
+    }
+
+    /// Writes a Duplicate of entry `number` (RFC 9204 §4.3.4) and inserts the copy, if room can be made for it. Returns
+    /// the copy's number, or -1 (nothing written).
+    @usableFromInline
+    mutating func duplicate(_ number: Int, _ state: QPACKSectionState, _ encoderStream: inout FieldEncoderOutput) -> Int {
+        let entry = table.entry(number: number)
+        guard entry.nameCount > 0, roomFor(entry.size, state) else { return -1 }
+        let mark = encoderStream.count
+        guard encoderStream.integer(table.inserted &- 1 &- number, mask: 0x1F, flags: 0) else {
+            encoderStream.count = mark
+            return -1
+        }
+        let slot = number & table.entryMask
+        // Unsafe: unchecked reads of the index's per-slot hashes. Safe: the slot is masked into them.
+        let nameHash = unsafe index.nameHashes[slot], fieldHash = unsafe index.fieldHashes[slot]
+        let name = unsafe table.address(Int(entry.offset))
+        // Unsafe: the entry's own bytes, name then value (adjacent in the table's store), which the table moves together:
+        // this insertion may evict the entry.
+        let copy = unsafe table.insert(name: name, nameCount: Int(entry.nameCount), knownName: entry.knownName,
+                                       value: name + Int(entry.nameCount), valueCount: Int(entry.valueCount))
+        index.add(number: copy, entryMask: table.entryMask, nameHash: nameHash, fieldHash: fieldHash)
+        noteInsertion(copy, entry.size)
+        return copy
+    }
+
+    /// Records an insertion's place among all insertions' bytes, and moves the draining boundary past the entries it
+    /// brought within a quarter of the capacity of eviction. An entry is evicted once the bytes inserted from its start
+    /// on exceed the capacity (the table evicts only to insert, oldest first), so it's draining once they exceed
+    /// `drainingDistance`.
+    @inlinable @inline(__always)
+    mutating func noteInsertion(_ number: Int, _ size: Int) {
+        // Unsafe: an unchecked store. Safe: the slot is masked into the ring's `entryMask + 1` slots.
+        unsafe entryStarts[number & table.entryMask] = insertedBytes
+        insertedBytes &+= size
+        let limit = insertedBytes &- drainingDistance
+        var boundary = Swift.max(drainingBelow, table.oldest)
+        // Unsafe: unchecked reads. Safe: masked slots of live entries (oldest ≤ boundary < inserted).
+        while boundary < table.inserted, unsafe entryStarts[boundary & table.entryMask] < limit { boundary &+= 1 }
+        drainingBelow = boundary
     }
 
     // MARK: - The decoder stream

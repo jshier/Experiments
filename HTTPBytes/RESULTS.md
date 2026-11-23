@@ -406,3 +406,254 @@ both ways, Structured Fields. `Allocations:Body_chunked_gzip` first counted 6 ma
 format's state) and the buffers: a connection's decoder reset per body allocates nothing after the first body of each
 coding (gate 0; `resetForEachBody` checks gzip, br, a stack, gzip again, and identity on one decoder, each after a body
 cut short). A fresh decoder per body costs 5 allocations against 1 MB of output; the timed rows still make one each.
+
+## 2026-11-23: QPACK encoder: draining, Duplicate, names alone (baselines `r2-qpack-before`, `r2-qpack-after`)
+
+ls-qpack compressed http-corpus' responses 15% better (53,087 B against 62,241 with a 4,096-byte table). The encoder
+now does what ls-qpack does (`lsqpack.c`: `qenc_entry_is_draining`, `qenc_duplicable_entry`, `EEA_INS_LIT_NAME`):
+
+- **A draining index** (RFC 9204 §2.1.1.1). Each entry's start among all insertions' bytes is kept per ring slot
+  (encoder memory, made with it); an entry drains once three quarters of the capacity has been inserted from its start
+  on, so a quarter or less of insertions will evict it. A boundary number moves forward as entries are inserted (each
+  entry passed once). Draining entries aren't name references.
+- **Duplicate** (§4.3.4). A field whose newest copy is draining is copied to the front when room can be made without
+  evicting an entry still referred to: a section that may block refers to the copy (the old one can go); one that can't
+  refers to the old entry, acknowledged (referred to first, so making room can't evict it), and later sections use the
+  copy. When no copy can be made the old entry is still referred to if it may be.
+- **Names alone.** A name the static table lacks, seen recently in a literal with another value, is inserted with an
+  empty value and referred to (post-base if the section may block). The responses' lines with literal names went from
+  157 (9,960 B) to 14 (485 B).
+- **A shorter memory.** The history of fields seen (insert on the second sighting) has one slot per 64 bytes of
+  capacity instead of one per 8, sized by the peer's capacity rather than the encoder's.
+
+Step by step (383 responses, 4,096 bytes, acknowledged at once): 62,241 B; draining and Duplicate 58,031; the shorter
+memory 55,386; names alone, and no name references to draining entries, 53,137 (ls-qpack 53,087). Where the bytes went
+(lines: HTTPBytes before, after, ls-qpack): dynamic indexes 2,817, 2,832, 2,784; literals with a literal name 157, 14,
+13; literals with a dynamic name 456, 630, 670; encoder stream 16,071 B, 6,264 B, 2,831 B (154 Duplicates against
+ls-qpack's 202).
+
+Method. A scratch driver (not checked in) runs each corpus as a connection under each setting: after section i the
+peer's decoder has taken everything through section i − k in order, and its decoder stream (Section Acknowledgments,
+Insert Count Increments) reaches the encoder: HTTPBytes' decoder for HTTPBytes' encoder, ls-qpack's for ls-qpack's (its
+default options, Duplicate on). Bytes are sections plus encoder stream. The same model is in the benchmarks as
+`QPACKFlight` (the decoder stream recorded once in setup and replayed per iteration, so iterations time the encoder
+alone); its setups check HTTPBytes' output decodes exactly by HTTPBytes' decoder and by ls-qpack's (an FNV digest of
+every field, `lsqpack_decode_digest`), in order and with each section decoded after the encoder stream of the k sections
+after it, and ls-qpack's by HTTPBytes'. Instructions and cycles below are the driver's (`proc_pid_rusage` around 100
+passes, the least cycles of 3 runs alternating old and new builds; other agents were building).
+
+| Corpus, capacity, sections in flight, blocked | before | after | ls-qpack | after / ls-qpack | instructions | cycles |
+|---|---|---|---|---|---|---|
+| 383 responses, 4,096, at once, 100 | 62,241 | **53,137** | 53,087 | 1.001 | −4.5% | −5.6% |
+| 383 responses, 4,096, at once, 0 | 78,764 | **60,688** | 59,850 | 1.014 | −8.7% | −8.6% |
+| 383 responses, 4,096, 4, 0 | 78,394 | 81,148 | 86,262 | 0.941 | +1.3% | +1.6% |
+| 383 responses, 4,096, 4, 100 | 59,677 | **53,396** | 59,918 | 0.891 | −2.3% | −0.5% |
+| 383 responses, 4,096, 16, 0 | 82,276 | 84,389 | 129,724 | 0.651 | +0.7% | +1.5% |
+| 383 responses, 4,096, 16, 100 | 62,356 | **53,631** | 66,216 | 0.810 | −3.5% | −0.9% |
+| 383 responses, 16,384, at once, 100 | 46,082 | 46,053 | 50,623 | 0.910 | +0.2% | −0.2% |
+| 383 responses, 16,384, 4, 0 | 57,124 | 56,740 | 57,945 | 0.979 | +0.0% | −0.3% |
+| 383 responses, 16,384, 16, 0 | 68,089 | 67,726 | 68,873 | 0.983 | +0.1% | −0.1% |
+| 401 requests, 4,096, at once, 100 | 55,074 | **53,392** | 53,439 | 0.999 | −0.3% | −0.7% |
+| 401 requests, 4,096, at once, 0 | 58,869 | **56,690** | 55,698 | 1.018 | −0.6% | −0.9% |
+| 401 requests, 4,096, 4, 0 | 64,401 | **61,009** | 59,803 | 1.020 | −0.9% | −0.4% |
+| 401 requests, 4,096, 4, 100 | 59,710 | **53,411** | 53,438 | 0.999 | −2.7% | −2.5% |
+| 401 requests, 4,096, 16, 0 | 70,882 | 73,896 | 73,535 | 1.005 | +3.1% | +4.4% |
+| 401 requests, 4,096, 16, 100 | 60,997 | **54,359** | 54,037 | 1.006 | −3.2% | −1.7% |
+| 401 requests, 16,384, at once, 100 | 53,210 | 53,210 | 52,137 | 1.021 | +0.4% | −0.1% |
+| 401 requests, 16,384, 16, 0 | 68,092 | 68,092 | 66,659 | 1.021 | +0.4% | +0.2% |
+
+Bytes went up only with no blocking and acknowledgments 4–16 sections late (+2.6% to +4.3%): the shorter memory inserts
+fewer fields there, and still beats or matches ls-qpack. With the table never full (requests, 16,384) nothing drains;
+ls-qpack is 2% smaller there by inserting `:path` and the other fields HPACK's policy avoids (inserting them too: 47,452
+B there, but +1% to +22% on the 4,096-byte request rows; not kept).
+
+The benchmark rows (`Tools/bench-table HTTPBytes/Benchmarks r2-qpack-before r2-qpack-after`; instructions per corpus,
+wall times under load, where ls-qpack's unchanged rows moved −3% to +3%):
+
+| Row | before | after | ls-qpack |
+|---|---|---|---|
+| encode 383 responses, 4,096 table | 2,593 K, 149 µs | 2,478 K, 138 µs | 14,000 K, 1,192 µs |
+| … 4 in flight, 0 blocked | 2,800 K, 156 µs | 2,836 K, 165 µs | 15,000 K, 1,359 µs |
+| … 16 in flight, 0 blocked | 2,882 K, 151 µs | 2,902 K, 155 µs | 26,000 K, 2,343 µs |
+| … 16 in flight, 100 blocked | 2,595 K, 143 µs | 2,503 K, 137 µs | 14,000 K, 1,177 µs |
+| … 16,384 table, at once | 2,267 K, 125 µs | 2,271 K, 125 µs | 5,394 K, 409 µs |
+| encode 401 requests, 4,096 table | 2,089 K, 112 µs | 2,083 K, 111 µs | 9,273 K, 780 µs |
+| … 16 in flight, 0 blocked | 2,298 K, 120 µs | 2,374 K, 126 µs | 11,000 K, 924 µs |
+| … 16 in flight, 100 blocked | 2,169 K, 114 µs | 2,095 K, 112 µs | 9,322 K, 794 µs |
+
+Every `Allocations:QPACK_encode_*` gate is 0, two new ones included (16 sections in flight, blocking and not). The
+encoder's per-field cost is a compare against the draining boundary; an insertion adds a store and the boundary's
+advance. `insert` has two call sites now and stays a call, as it was with one (`Tools/calls`).
+
+Tried and not kept (383 responses, 4,096 bytes, at once / 16 in flight with 100 blocked, B):
+
+| Variant | at once | 16 in flight |
+|---|---|---|
+| Kept: zone ¼, Duplicate on use, names alone | 53,137 | 53,631 |
+| A literal for a draining entry no copy can be made of (the strict reading of "not referenced") | 53,137 | 69,736 |
+| Second chance: Duplicate, at each section's end, the entries that became draining and were referred to while in the table (ls-qpack's `qenc_dup_draining` keeps recently seen ones) | 54,994 | 69,332 |
+| Draining zone 3⁄16 / 5⁄16 of the capacity | 52,350 / 53,412 | 53,419 / 54,391 |
+| History with one slot per 32 bytes / per 8 (as before) | 55,110 / 56,300 | 55,783 / 57,659 |
+| The draining index without Duplicate | 64,443 | 81,179 |
+
+Second chance cost the 4,096-byte rows 0.5–29% (copies of fields used once crowded out fields used again). Zone 3⁄16
+won the immediate row by 1.5% and lost 7.6% with no blocking (65,333 against 60,688). One slot per 8 bytes was better
+with 4 sections in flight and no blocking (73,451) and worse everywhere else.
+
+Tests (`QPACKDrainingTests`): the exact bytes of a Duplicate referred to post-base (section may block) and of one whose
+old entry is referred to (it can't); draining entries aren't name references; a name seen twice is inserted alone, then
+referred to; a link harness with encoder stream and sections each delivered late (0–16 sections), Stream Cancellations
+(before a section is read and while it's blocked), Insert Count Increments, and the decoder stream fed back whole or a
+byte at a time, checking every section decodes exactly and the decoder never holds more than the blocked-streams
+setting (8 settings on both corpora; the bulk suite 5 capacities × 3 blocked settings × 7 lag pairs × cancellations on
+5 corpora, 4 s in release); and 7,249 bytes of decoder stream for 767 outstanding sections fed a byte at a time
+against the same stream whole (linear: under 500 ms). The harness fails on purpose-broken encoders: ignoring
+unacknowledged sections' references when evicting (`invalidIndex`), and one blocked stream too many
+(`tooManyBlockedStreams`).
+
+## 2026-11-23: round 2, HTTP/1's remaining gaps (measured, not kept)
+
+The cycle harness of round 1 (`proc_pid_rusage` around each parser, the previous `HTTP1` as a second module in the same
+binary), best of 3, cycles per head. Before: req 240, resp 433, treq 662, tresp 1,038, tiny 48, tiny alone 59,
+f1 365, f16 481, f128 785; cursed-http resp 367, tresp 897, tiny alone 47.
+
+**Skip windows for long lines** (cursed-http's `fb_ctany_simd`: "maybe a control in 256, then 512 bytes?", an add and a
+signed min per 16 bytes). The long lines are there: 44% of http-corpus responses' bytes are in 231 lines of 512–1,023
+bytes, 38% of top-1k responses' in 531 lines of 1 KB or more, none with bytes ≥ 0x80. No setting gained:
+
+| Variant | resp | tresp | treq | f128 |
+|---|---|---|---|---|
+| Windows inside `farStop` after 3 exact blocks | 449 | 1,109 | 690 | 908 |
+| Windows in an out-of-line function `farStop` calls | 443 | 1,070 | 674 | 947 |
+| `farStop`'s loop kept in shape (its bound capped at 3 blocks), windows after it | 444 | 1,057 | 664 | 792 |
+| … windows after 1 or 0 exact blocks | 445 | 1,059–1,078 | 669–688 | |
+
+Instructions rose 5–8%: our exact masks are cheap (29 instructions per 64 bytes, against cursed-http's exact path), and
+lines of 256–1,023 bytes waste a window. Two codegen lessons on the way: adding a call to `farStop` left
+`RawSpan.byteCount` an out-of-line call in it, and a loop with a second exit for "3 blocks done" became nested duplicated
+loops (85 instructions with calls against 29). cursed-http's response parser itself doesn't use windows (an adversarial
+review of this round's plan pointed out): it classifies 4 blocks ahead into a per-head array, which round 1 measured in
+our design (a ring of 8 blocks) at +25% on requests and +67% on tiny heads; the response gap stays open.
+
+**Tiny heads given only their bytes:** the gap is now 8–11 cycles (tiny alone 56–59 against 48 with the next head's bytes
+readable), not round 1's 21. Building the last partial block from overlapping 16-byte loads clamped to the bytes' end, with
+the mask put back in place, instead of copying it to the stack: tiny alone 58 against 56, and f128 895 against 787 (the
+inlined block mask grew the parse loop again). The copy isn't the cost; a padded-input API (the caller promising
+readable bytes past the message) could recover at most those 8 cycles, on heads under 64 bytes only. Not built.
+
+## 2026-11-23: round 2, bodies as pipeline stages
+
+`HTTP1Dechunker` and `HTTP1Chunker` (HTTP1) are chunked transfer coding as Bytes `ByteTransform` stages;
+`HTTPContentDecoder` and `HTTPContentEncoder` (HTTPPayload) conform as they are (the decoder `Resettable`, keeping its
+codecs); `HTTPBodyDecoder` (HTTPPayload) decodes a whole HTTP/1 body: its framing (`Content-Length`, chunked, until close)
+and content codings in one stage.
+
+`HTTPBodyDecoder` exists because of the adversarial review of the first version: composing the stages with Bytes'
+`then(_:)` finishes the pipeline when its last stage finishes, so `dechunker.then(gzipDecoder)` ended a body at the gzip
+stream's end. A body missing its last chunk read as finished, and bytes inside the chunked body after the stream (an
+attacker's request) were left to be read as the next message: request smuggling. The body decoder finishes only at the
+framing's end, requires the coded stream to end exactly there (`malformed` for bytes after it or a stream cut short), and
+hands chunk slices straight to the content decoder (no buffer). The review's other findings, all fixed: trailers left for
+the next reader by default (now skipped by default, `.leave` read through `nextTrailer`); a stacked coding's outer stream
+cut short passing `.finish`; options mutable after `init` out of step with an internal flag; a decoder's raised limits
+letting a peer trip `Pipeline`'s unit precondition (limits now clamped to the stage's unit); the chunker losing a byte at
+digit boundaries (20 bytes of room: 14 of 15; now exact, tested for every room 5–300). Writing the tests found one more:
+at the framing's end the content decoder can still hold output (all input taken, output full last time): drained before
+the end is checked.
+
+1 MB of text, gzip, chunked in 4 KB (p50): the hand-written loop (chunk slices to the content decoder) 4,887 K instructions,
+536 µs; `HTTPBodyDecoder` 4,891 K, 535 µs; the first version's pipeline (dechunker, a 16 KiB buffer, decoder) 4,813 K,
+527 µs. `Allocations:Body_decoder_chunked_gzip` (one decoder reset per body): 0.
+
+## 2026-11-23: round 2, dates and field values (baselines `r2-fields-1`, `r2-fields-3`)
+
+`HTTPDate` (RFC 9110 §5.6.7): IMF-fixdate read as four 8-byte words (fixed bytes by mask, 14 digits by one SWAR test,
+the month by a perfect hash of its letters: `(letters × 26596) >> 28`, the day name checked against the date's),
+Hinnant's day arithmetic both ways; RFC 850 (two-digit years at most 50 years past a reference date, the 50th year
+decided by date and time) and asctime byte by byte; writing IMF-fixdate as three words and five bytes; `HTTPDateCache`
+(29 bytes reformatted when the second changes). Tests: RFC and Rust httpdate vectors, 39 refusals, Foundation's
+`Date.HTTPFormatStyle` agreeing on every day 1970–2200 both ways, every day from year 0 to 9999 round-tripping through
+all three formats (bulk, 0.3 s in release). Deliberate differences: case-sensitive (Foundation and Python aren't), a
+mismatched weekday refused, second 60 accepted as the next minute's first (Go refuses it).
+
+Field values (HTTPBytes core, all views or plain values, no allocations): the shared grammar (`HTTPListElements`,
+`HTTPParameters`, `HTTPQuotedString` with escapes removed only when written or compared, `HTTPWeight`), `HTTPMediaType`,
+`HTTPAcceptList` (weights for tokens, media types by specificity, languages by RFC 4647 basic filtering),
+`HTTPContentCoding.negotiated` (HTTPPayload), `HTTPRangeSet` (resolved into the caller's storage, sorted and merged, with
+a count limit; invalid sets ignored, all-unsatisfiable 416), `HTTPContentRange`, `HTTPEntityTag`/`HTTPEntityTagList`,
+`HTTPIfRange`, `HTTPPreconditions` (RFC 9110 §13.2.2's order), `HTTPCacheControl`, `Age`, `Expires`, `HTTPRetryAfter`,
+`HTTPTokenList` (Vary, Connection, …), `HTTPUpgradeList`, `HTTPHost`, `HTTPForwardedElements`, `HTTPCredentials` and
+`HTTPChallenges` (the comma ambiguity of challenge lists resolved by what follows each element), `HTTPContentDisposition`
+with RFC 8187 `filename*` (UTF-8 and ISO-8859-1), `HTTPPercentEncoding`, `HTTPTargetComponents` (path segments, query
+items), `HTTPCookies`, `HTTPSetCookie` (written, validated). Tests transcribe Go's `range_test.go` and
+`mediatype_test.go`, jshttp's negotiator and fresh, and http-tests' cache-tests (`cc-parse`), with the differences stated.
+
+Every value of a field in http-corpus and top-1k (p50 per iteration over all of them; per value in brackets). Under load
+(the zstd agent building): judge by instructions.
+
+| Row (values) | First version | Vector scans | Per value |
+|---|---|---|---|
+| Date, Last-Modified (3,375): parse | 771 K, 44 µs | 771 K, 44 µs | 228 instructions, 13 ns |
+| … Foundation `Date.HTTPFormatStyle` | 27 M, 1,544 µs, 3,807 mallocs | | 8,000, 457 ns |
+| 1,000 dates written | 379 K, 23 µs (the harness's array) | 319 K, 20 µs | 319, 20 ns |
+| … Foundation | 4.4 M, 272 µs, 1,000 mallocs | | 4,400, 272 ns |
+| 1,000 `Date` fields from `HTTPDateCache` | 13 K, 1.5 µs | | 13, 1.5 ns |
+| ETag (591) | 372 K | 89 K, 5 µs | 150, 8 ns |
+| Host (3,935) | 2.1 M | 1.49 M, 105 µs | 378, 27 ns |
+| Content-Type (2,332) | 2.1 M | 1.42 M | 608 |
+| Cache-Control (1,942) | 2.6 M | 2.13 M | 1,100 |
+| Accept (2,600), weight of text/html | 7.5 M | 5.68 M | 2,180 |
+| Accept-Encoding (2,599), br/gzip/identity | 24 M, 16,000 mallocs | 3.51 M, 0 | 1,350 |
+| Accept-Language (344), weight of en-US | 333 K | 313 K | 910 |
+| Cookie (818), every cookie | 1.33 M | | 1,630 |
+| Request targets (3,934), path and query items | 3.4 M | | 866 |
+
+"Vector scans": tokens by `HTTPCharacters.nonToken`'s nibble lookups, quoted strings and entity tags by a search for
+the next quote, backslash, or byte that can't be there, a host's registered name by one test of 16 bytes at a time
+(`HTTPRequestTarget.nonURIByte` and the six delimiters), all through Bytes' `firstByteOffset(where:)` (short values in
+one overlapping block). Accept-Encoding negotiation was generic over `some Sequence` without `@inlinable`: unspecialized,
+it boxed its iterator (6 mallocs a value), and parsed the list once per offered coding; now inlinable and one pass.
+Allocation gates at 0: `FieldValues_dates`, `_cache_control`, `_accept`, `_cookies_targets`.
+
+An adversarial review (2.6 M fuzzed inputs through every parser, `HTTPDate` against Foundation on 200 K dates, IPv6
+against `inet_pton` on 300 K: no traps, no allocations) confirmed six defects, all fixed with regression tests:
+
+1. `HTTPRangeSet.resolve` refused sets whose union fit the storage: it merged a new range only with the one before it,
+   and inserting in arrival order can need more slots on the way than in the end (`3-5, 25-41, 4-`). It now sweeps the
+   set (the lowest uncovered range, grown while anything overlaps or touches it), so the storage holds only the answer;
+   checked against an unbounded sort-and-merge on 20,000 random sets at every storage size 0–4. Sets of more than 256
+   ranges are ignored (RFC 9110 §14.2).
+2. `Retry-After` with a huge delay wrapped to the past: the sum saturates.
+3. One malformed `Cache-Control` element threw the whole field away, `no-store` with it: parsing no longer throws;
+   bad elements are skipped, an unclosed quote ends the field there.
+4. `HTTPTargetComponents` and `HTTPRequestTarget.validate` disagreed on forms (`http:foo`, `example.com:443` without
+   CONNECT): components now take the method and split as `validate` decides.
+5. `Content-Disposition` took the first of two `filename`s (RFC 6266 §4.1: invalid; recipients taking the last see
+   another name): repeated parameter names are refused.
+6. `filename*` decoded to control bytes and invalid UTF-8 (`%00%2F..%2Fx%0D%0A`): decoded names, and plain ones, must be
+   well-formed UTF-8 without C0, DEL, or C1 controls.
+
+Lesser ones fixed: a malformed `If-Match` or token list answered by element order (now the whole list is read);
+`HTTPPreconditions.evaluate`'s `exists` now defaults to whether the representation has a validator; leap seconds only
+at 23:59:60 (and not on 9999-12-31); `components` near the `Int64` extremes clamped as writing is; `HTTPEntityTag.write`
+checks its characters (a quote or CR LF would inject); `Set-Cookie`'s `Path` and `Domain` refuse bytes past ASCII;
+`Negotiate , Basic realm="x"` parses; a media range's parameter count can't overflow its specificity. Not changed:
+`HTTPHost` accepts what RFC 3986's reg-name does (`a,b`, `%00`: a `Host` caller checks its own policy), `Forwarded` pairs
+may repeat, `weight(ofToken:)` doesn't map `x-gzip`, `max-age="\5"` isn't unescaped.
+
+## 2026-11-23: round 2, Zstandard bodies (baseline `r2-payload-1`)
+
+`HTTPContentEncoder(.zstd)` encodes with BytesCompression's new `ZstdEncoder` (Bytes/Benchmarks/RESULTS-zstd-encoder.md:
+libzstd's levels 1–4, frames byte for byte as libzstd 1.5.7's, cycles −14% to +5% of libzstd's), at level 3 with a
+512 KiB window (`ZstdEncoder.Parameters.httpWindowLog`: RFC 9659 caps the window at 8 MB; against level 3's own 2 MB
+window it costs 0–4% in size, and the encoder's memory falls from 3.7 to 2.1 MB streaming). `reset()` starts another
+body keeping the encoder's memory. 1 MB of text with a reused encoder (p50, under load):
+
+| Coding | Instructions | Time | Mallocs |
+|---|---|---|---|
+| gzip, level 6 | 138 M | 11.0 ms | 0 |
+| br, quality 5 | 183 M | 12.0 ms | 0 |
+| zstd, level 3, 512 KiB window | 26 M | 1.7 ms | 0 |
+
+`Allocations:Body_encode_zstd`: 0. Tests: zstd bodies decoded whole and fed 7 and 1,000 bytes at a time, and through the
+coding-then-chunking pipeline and `HTTPBodyDecoder`.

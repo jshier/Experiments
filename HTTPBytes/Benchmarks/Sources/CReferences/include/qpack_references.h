@@ -24,6 +24,22 @@ long lsqpack_decode_sections(const unsigned char *bytes, const size_t *ins_ends,
 long lsqpack_encode_sets(const char *buf, const uint32_t *offsets, const size_t *set_ends, size_t count, unsigned capacity,
                          unsigned char *out, size_t out_capacity, size_t *ins_ends, size_t *sec_ends);
 
+/// ls-qpack's encoder with its decoder stream written by an ls-qpack decoder `delay` sections behind (`blocked`: the
+/// peer's SETTINGS_QPACK_BLOCKED_STREAMS). With `record` set, after set i the decoder takes everything through section
+/// i - delay in order (each section after its encoder stream bytes) and what it writes (Section Acknowledgments, Insert
+/// Count Increments) goes to the encoder and into `feedback`, set i's ending at `feedback_ends[i]`; with `record` 0,
+/// `feedback` is replayed instead (the encoder alone, as the benchmarks measure it).
+long lsqpack_encode_sets_fed(const char *buf, const uint32_t *offsets, const size_t *set_ends, size_t count, unsigned capacity,
+                             unsigned blocked, unsigned delay, unsigned char *out, size_t out_capacity, size_t *ins_ends,
+                             size_t *sec_ends, unsigned char *feedback, size_t feedback_capacity, size_t *feedback_ends,
+                             int record);
+
+/// ls-qpack's decoder over a connection, section i decoded after the encoder stream bytes of every section through
+/// i + `late` (a peer whose request streams lag its encoder stream: entries evicted meanwhile must not be referenced).
+/// Returns the FNV-1a digest of every field's name, a 0 byte, its value, and a 1 byte, or 0 if a section fails.
+uint64_t lsqpack_decode_digest(const unsigned char *bytes, const size_t *ins_ends, const size_t *sec_ends, size_t count,
+                               unsigned capacity, unsigned late);
+
 /// cursed-http's decoder (qpack.h: views of the section, its arena, or the table; every field's characters checked; no
 /// blocked streams).
 long cursed_qpack_decode_sections(const unsigned char *bytes, const size_t *ins_ends, const size_t *sec_ends, const int *fields,

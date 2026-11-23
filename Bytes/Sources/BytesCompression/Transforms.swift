@@ -85,7 +85,26 @@ extension BrotliDecoder: ByteTransform {
     }
 }
 
+extension ZstdEncoder: ByteTransform {
+    /// What compressing throws: ``BytesError/mismatch`` for a frame that ends with another size than promised.
+    public typealias Failure = BytesError
+
+    /// Compresses as much of `input` as it can into `output`: ``compress(_:into:flush:)`` as a pipeline stage.
+    ///
+    /// - Parameters:
+    ///   - input: The next bytes, starting with any not consumed last time.
+    ///   - output: Where to append the frame.
+    ///   - flush: `.flush` ends a block, so everything so far decodes; `.finish` ends the frame.
+    /// - Returns: What was consumed and produced, and why it returned.
+    /// - Throws: ``BytesError`` as ``compress(_:into:flush:)`` does.
+    @inlinable
+    public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
+        try compress(input, into: &output, flush: flush)
+    }
+}
+
 extension DeflateEncoder: ResettableByteTransform {}
+extension ZstdEncoder: ResettableByteTransform {}
 extension DeflateDecoder: ResettableByteTransform {}
 extension BrotliEncoder: ResettableByteTransform {}
 extension BrotliDecoder: ResettableByteTransform {}

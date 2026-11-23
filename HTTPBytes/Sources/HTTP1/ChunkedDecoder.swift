@@ -53,6 +53,9 @@ public struct HTTP1ChunkedDecoder: Sendable {
     @usableFromInline var remaining = 0
     @usableFromInline var phase = Phase.size
     @usableFromInline var trailerCount = 0
+    /// Whether ``next(in:consumed:)`` stops after the last chunk's line, returning ``HTTP1ChunkEvent/needsMore`` with
+    /// the line consumed, before reading the trailer section (``HTTP1Dechunker``'s ``HTTP1Dechunker/Trailers/leave``).
+    @usableFromInline var pausesAtTrailers = false
 
     @frozen @usableFromInline
     enum Phase: Sendable { case size, data, dataEnd, trailers, done }
@@ -92,6 +95,13 @@ public struct HTTP1ChunkedDecoder: Sendable {
                 position = next
                 remaining = size
                 phase = size == 0 ? .trailers : .data
+                if size == 0, pausesAtTrailers {
+                    // `HTTP1Dechunker` leaving the trailer section to its caller: stop before it, once (the caller then
+                    // reads the trailers with this decoder, which goes on normally).
+                    pausesAtTrailers = false
+                    consumed = position
+                    return .needsMore
+                }
             case .data:
                 guard position < count else {
                     // A size line consumed, its data not here yet.
@@ -150,6 +160,14 @@ public struct HTTP1ChunkedDecoder: Sendable {
                 return .end
             }
         }
+    }
+
+    /// Takes back the last `count` bytes of the data event just returned, which the caller didn't use: they come again,
+    /// as data, on the next call (``HTTP1Dechunker`` with a full output, HTTPPayload's body decoder).
+    @inlinable
+    package mutating func giveBack(_ count: Int) {
+        remaining &+= count
+        phase = .data
     }
 
     /// A chunk-size line at `start`: its size and the offset after it, or `nil` if it isn't all there.

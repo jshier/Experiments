@@ -137,7 +137,16 @@ import Testing
         corrupted[corrupted.count / 2] ^= 0xFF
         corrupted[corrupted.count / 2 + 1] ^= 0x5A
         #expect(throws: (any Error).self) { _ = try Self.decode(corrupted, contentEncoding: "gzip", step: 65_536) }
-        #expect(throws: HTTPPayloadError.unsupportedCoding) { _ = try HTTPContentEncoder(.zstd) }
+    }
+
+    /// Zstandard bodies (BytesCompression's encoder, the HTTP window): decoded by the content decoder, whole and in
+    /// pieces, and by a decoder limited to RFC 9659's 8 MB window.
+    @Test func zstdRoundTrips() throws {
+        let coded = try Self.encode(Self.body, .zstd)
+        #expect(coded.count < Self.body.count / 3)
+        for step in [65_536, 1_000, 7] {
+            #expect(try Self.decode(coded, contentEncoding: "zstd", step: step) == Self.body, "step \(step)")
+        }
     }
 }
 
