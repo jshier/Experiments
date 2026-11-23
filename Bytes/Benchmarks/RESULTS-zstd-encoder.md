@@ -1,6 +1,6 @@
 # Zstandard encoding: `ZstdEncoder` against libzstd 1.5.7
 
-2026-11-23, M3 Ultra, macOS 27.2, Xcode's Swift 6.4. Measured while other agents built and benchmarked (load average
+2026-11-23, M1 Max (8 performance and 2 efficiency cores), macOS 27.2, Xcode's Swift 6.4. Measured while other agents built and benchmarked (load average
 8–13): cycles and instructions are the numbers to trust, wall times are under load.
 
 ## What it is

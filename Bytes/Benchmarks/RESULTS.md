@@ -12,7 +12,7 @@ Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module h
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
 
-## 2026-11-23, Zstandard encoding: `ZstdEncoder` against libzstd 1.5.7 (baseline `r2-zstd-encode`)
+## 2026-11-23, M1 Max, Zstandard encoding: `ZstdEncoder` against libzstd 1.5.7 (baseline `r2-zstd-encode`)
 
 A Zstandard encoder at libzstd's levels 1–4 (its `fast` and `dfast` strategies, block pre-splitter, and entropy
 decisions, ported decision for decision): with the same parameters its frames are libzstd 1.5.7's byte for byte, on the

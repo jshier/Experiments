@@ -42,6 +42,10 @@ conversions.
 - The Zstandard decoder is faster than libzstd on every Silesia input and level: 1.13–1.50x for one call, with 8–22%
   fewer instructions.
   <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "Zstd decode L1/L3/L19 {dickens, mozilla, samba, x-ray, xml}: Bytes" against ": libzstd" (time 1.127 x-ray L1 to 1.503 x-ray L19; instructions 0.782 x-ray L1 to 0.918) -->
+- The Zstandard encoder, levels 1 to 4, makes libzstd's frames byte for byte (it was ported decision for decision, and libzstd's
+  output was the test oracle), in −14% to +5.4% of libzstd's cycles on every one-call row, and with no allocations once its
+  tables exist.
+  <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-23, Zstandard encoding" (frames libzstd 1.5.7's byte for byte; cycles −14% to +5.4% of libzstd's on every one-call row; zero mallocs with a reused encoder); Bytes/Benchmarks/RESULTS-zstd-encoder.md "Targets" -->
 - ChaCha20-Poly1305 seals 1 MB at 2.37 GB/s (Poly1305's work interleaved into ChaCha20's rounds, −40% time), 2.80x
   CryptoKit's `ChaChaPoly` in the `m3-final` run. AES-128-GCM seals 1 MB at 9.0 GB/s (CryptoKit, on the same run, 9.6).
   <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): rows "ChaCha20-Poly1305 seal 1 MB (x1): Bytes" 442,623 ns, ": CryptoKit" 1,241,087 ns; "AES-128-GCM seal 1 MB (x1): Bytes" 116,095 ns, ": CryptoKit" 108,991 ns; the −40% is the dated change from 1.52 → 2.50 GB/s (RESULTS.md line 762) -->
@@ -52,9 +56,11 @@ conversions.
   <!-- src: MQTT/Benchmarks/RESULTS.md 2026-11-19 "The views against the conventional code" (M3, d2-final's code: 8.6x one core, 18.6x all cores; supersedes the older 5.5x) -->
 - HTTPBytes (HTTP framing in Swift, on the M1 Max) parses 401 real request heads in 35 µs: 2.6x picohttpparser and llhttp
   (92 and 89 µs) and level with cursed-http, a C parser built on the same design (38 µs). Its HPACK encoder is 16x NIOHPACK's
-  (89 against 1,422 µs) and 2.7x cursed-http's, its QPACK encoder 7x ls-qpack's, and every per-message path allocates
-  nothing.
+  (89 against 1,422 µs) and 2.7x cursed-http's, its QPACK encoder 7x ls-qpack's (and, since round 2, as small as
+  ls-qpack's output: 53,137 bytes against 53,087 for 383 responses), it parses an HTTP date in 13 ns against Foundation's 457, and every per-message path
+  allocates nothing.
   <!-- src: HTTPBytes/Benchmarks baseline final-1, "Time (wall clock)" rows "HTTP/1 request heads (401 requests, 232 KB)" (HTTPBytes 35, picohttpparser 92, llhttp 89, cursed-http 38), "HPACK encode (401 requests)" (HTTPBytes 89, cursed-http 244, NIOHPACK 1,422), "QPACK encode (401 requests, 4,096 table)" (107 against ls-qpack 751); ratios 92/35 = 2.6, 1,422/89 = 16, 244/89 = 2.7, 751/107 = 7.0; the zero-malloc gates: every `Allocations:` row of final-1 but Body_chunked_gzip (see Part III section 12) -->
+  <!-- src: HTTPBytes/RESULTS.md "QPACK encoder: draining, Duplicate, names alone" (383 responses, 4,096 table, acknowledged at once: 53,137 B against ls-qpack's 53,087) and "round 2, dates and field values" (13 ns per date; Foundation 457 ns) -->
 
 **How to read this document.** It is organized by concept rather than by chronology. Each technique follows the
 same shape: the problem, why the CPU or compiler behaves that way, the technique, a small example, the measured effect,
@@ -76,8 +82,9 @@ Xcode 27.3, Swift 6.4.2 and, for the later measurements (all of the 2026-11-20 o
 (8 performance and 2 efficiency cores, about 3.23 GHz), is used where a section says so; the work of 2026-11-22 (every
 zip method decoded in Swift, the decoder cleanups, the second cleanup pass) was measured on it, in interleaved rounds on an otherwise idle machine, and its
 rows are labeled "M1 Max" and are not comparable with the M3 Ultra's. The HTTPBytes case study (Part III, [section 12](#12-case-study-httpbytes)) was
-measured entirely on the M1 Max, against references run on it in the same session.
-<!-- src: HTTPBytes/RESULTS.md header (M1 Max, 8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4 / Xcode 27.3); HTTPBytes/WRITEUP.md header -->
+measured entirely on the M1 Max, against references run on it in the same session, as was the Zstandard encoder's
+comparison with libzstd (Part III, [section 8](#zstandard-encoding)).
+<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md header (M1 Max);  HTTPBytes/RESULTS.md header (M1 Max, 8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4 / Xcode 27.3); HTTPBytes/WRITEUP.md header -->
 <!-- src: Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip (2026-11-22, M1 Max; …)", "Cleanups after the unification (2026-11-22, M1 Max; …)", "The second cleanup pass (2026-11-22, late, M1 Max; …)"; NativeZipArchive/Benchmarks/RESULTS.md step17 ("Measured on the M1 Max (not comparable with the M3 Ultra rows above)"); Bytes/Benchmarks/RESULTS.md lines 14-26 (machine table; "Xcode 27.3's Swift 6.4.4"); "2026-11-20, M3 Ultra" (macOS 27.2.1, Xcode 27.3, Swift 6.4.4); Tools/probes/results/M3-Ultra-2026-11-20/machine.tsv; Bytes/OPTIMIZATION.md (old) intro ("Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 and later measurements)") -->
 Timings are medians from [package-benchmark](https://github.com/ordo-one/package-benchmark). "GB/s" is bytes processed
 per second, and "x% faster" means x% less time unless it says "throughput". Where a number was taken while other jobs
@@ -2990,6 +2997,12 @@ At `.finish`, every stage either returns `.finished` once all its output is deli
 because its input ended early. With one rule, a loop that drives a stage needs no knowledge of its kind. It stops at `.finished`,
 and `.needsInput` only ever means "more input, please". `transform(_:appending:flush:growth:)` is that loop, written once. <!-- src: Bytes/Sources/Bytes/Pipeline.swift ByteTransform doc comment "The end of a stream" -->
 
+The rule has a consequence for composition: **a pipeline ends when its last stage ends.** That is right when the last stage is the
+one that knows where the data stops, and wrong when a stage before it knows. HTTP's chunked coding followed by gzip ended a message body where the gzip stream ended,
+which let bytes inside the chunked body after the stream be read as the next message (request smuggling). A framing stage must
+not be followed by one that can end first: put both in one stage that ends where the framing does and requires the coded
+stream to end exactly there (HTTPBytes' `HTTPBodyDecoder`; [section 12 of Part III](#round-2-bodies-as-pipeline-stages-and-why-a-body-is-one-stage)).<!-- src: AGENTS.md "A pipeline ends when its last stage ends: a framing stage must not be followed by one that can end first"; HTTPBytes/RESULTS.md "round 2, bodies as pipeline stages" -->
+
 ### 11. Async: `BytesAsync`
 
 `BytesAsync` is the asynchronous side: the same stages with calls that may suspend, and the parallel codecs' async forms.
@@ -3157,7 +3170,7 @@ codec"](#8-algorithms-and-data-structures-codec-by-codec)).
 |---|---|---|
 | DEFLATE, zlib, gzip, Deflate64 | `DeflateEncoder(format:level:)`, `DeflateDecoder(format:)` (`DeflateFormat`: `.raw`, `.zlib`, `.gzip`), `DeflateDecoder(variant:)` (`DeflateVariant`: `.deflate`, `.deflate64`, raw only) | both (Deflate64 decode only) |
 | Brotli | `BrotliEncoder(quality:windowBits:)`, `BrotliDecoder` | both |
-| Zstandard | `ZstdDecoder`, `ZstdFrameHeader`, `XXHash64` | decode |
+| Zstandard | `ZstdDecoder`, `ZstdFrameHeader`, `XXHash64`; `ZstdEncoder(level:windowLog:checksum:)` (levels 1–4, `ZstdEncoder.Parameters`) | both (encoding at libzstd's levels 1–4) |
 | LZ4 | `LZ4Decoder` (`decompressRaw`, `decompressFramed`) | decode |
 | LZMA, LZMA2, `.xz` | whole output: `LZMA2Decoder` (`decompressLZMA2`, `decompressLZMA`, `decompressLZMAFile`, `decompressXZ`); streaming: `LZMADecoder` (raw LZMA1), `XZDecoder`; `CRC64` | decode |
 | bzip2 | `BZip2Decoder` (`decompressAll`, and streaming `decompress(_:into:)`) | decode |
@@ -3179,7 +3192,7 @@ Every codec has the same shapes, borrowed from zlib:
 - **Streaming.** `compress(_:into:flush:)` and `decompress(_:into:)` take input in pieces and return a `TransformProgress`
   (`consumed`, `produced`, a status); input can be split anywhere, and the streaming forms keep a window of their own
   (32 KB of history for DEFLATE, a window that wraps for Zstandard). The DEFLATE and Brotli encoders and decoders are also
-  `ByteTransform`s (and `ResettableByteTransform`s), so they drop into a `Pipeline`. <!-- src: Bytes/Sources/BytesCompression/DeflateEncoder.swift, DeflateDecoder.swift, Transforms.swift; ZstdDecoder.swift -->
+  `ByteTransform`s (and `ResettableByteTransform`s), so they drop into a `Pipeline`, and so is `ZstdEncoder`. <!-- src: Bytes/Sources/BytesCompression/DeflateEncoder.swift, DeflateDecoder.swift, Transforms.swift (`extension ZstdEncoder: ByteTransform` and `: ResettableByteTransform`); ZstdDecoder.swift -->
   The LZMA, xz, and bzip2 decoders stream too (below), and so does DEFLATE *into the caller's own buffers*:
   `decompress(_:into:historyCount:)` decodes after `historyCount` bytes of history that the caller keeps at the front of
   its buffer (at least `historySize`: 32 KB, or 64 KB for Deflate64), so the decoder keeps no window of its own and
@@ -3218,6 +3231,25 @@ encoder.reset()                                                // the next strea
 
 <!-- src: Bytes/Sources/BytesCompression/DeflateEncoder.swift doc comment and init; Bytes/Sources/Bytes/Buffers.swift ByteBuffer.fill -->
 
+`ZstdEncoder` has the same shapes, with the parameters libzstd has. `init(level:windowLog:checksum:)` takes libzstd's level (1
+through `ZstdEncoder.Parameters.maximumLevel`, 4) and optionally a smaller window; `init(parameters:checksum:)` sets the strategy
+(`.fast` or `.doubleFast`), `windowLog` (10 through 27), `hashLog`, `chainLog`, `minimumMatchLength`, and `targetLength` one at a time,
+as the `ZSTD_c_*` parameters. `compressAll` makes a whole frame, stating its content size, and
+`maximumCompressedSize(forByteCount:)` bounds it. `compress(_:into:flush:)` takes the input in pieces (`.flush` ends a block so everything
+so far decodes, `.finish` ends the frame), and `reset(contentSize:)` states the size to a streaming frame. A frame is a single segment
+only when its content size is known and fits the window, so no frame needs a larger window than `windowLog`:
+`Parameters.httpWindowLog` (19, 512 KB) is the window for HTTP's `zstd` coding, where RFC 9659 caps it at 8 MB.
+
+```swift
+var encoder = ZstdEncoder(level: 3, windowLog: ZstdEncoder.Parameters.httpWindowLog)   // allocates its tables once
+try encoder.compressAll(body, into: &output)                  // a whole frame: libzstd's, byte for byte, at the same parameters
+encoder.reset()                                               // the next frame; the tables are not cleared
+var progress = try encoder.compress(chunk, into: &output)     // or in pieces
+progress = try encoder.compress(lastChunk, into: &output, flush: .finish)
+```
+<!-- src: Bytes/Sources/BytesCompression/ZstdEncoder.swift doc comment (the example), `Parameters` (strategy, windowLog 10–27, hashLog, chainLog, minimumMatchLength, targetLength; `maximumLevel` 4; `httpWindowLog` 19), `init(level:windowLog:checksum:)`, `init(parameters:checksum:)`, `maximumCompressedSize(forByteCount:)`, `reset(contentSize:)`, `compressAll`, `compress(_:into:flush:)`; Bytes/Benchmarks/RESULTS-zstd-encoder.md "What it is" (single-segment frames; "RFC 9659 caps `zstd` content coding's window at 8 MB") -->
+How it was made, and what it measured against libzstd, is in [Part III section 8](#zstandard-encoding).
+
 #### Reusable state, workspaces, and what allocates
 
 The state of every encoder and decoder is `~Copyable`. It is allocated once at initialization (tables, window, staging
@@ -3228,6 +3260,10 @@ The exceptions are documented:
 - `ZstdDecoder` allocates its tables and a 160 KB literal buffer at creation. Streaming adds the window (window size +
   128 KB + 64) and a 128 KB input stash on the first frame, growing only for a larger window. Frames needing more than
   `maximumWindowSize`, 128 MB by default, are rejected before anything is allocated.
+- `ZstdEncoder` allocates its tables at creation (`memoryUsage`: 1,455,552 bytes at level 3), and a window for `compress(_:into:flush:)`
+  as streams need it, up to the window plus a block (2,110,912 bytes in all with the HTTP window, 3,683,776 with level 3's own).
+  After that, with the encoder reused, encoding allocates nothing: gates `Allocations:Zstd_encode_L1`, `_L3`, `_L1_streaming`, and `_L3_streaming` are 0.
+  <!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Memory (bytes)" table (level 3: tables 1,455,552; streaming 2,110,912 with w19, 3,683,776 with w21) and "What it is" "Allocations" bullet -->
 - The parallel codecs allocate the thread pool's bookkeeping per call, never in the compression itself:
   `concurrentPerform` measured 11 mallocs on 8 lanes and 27 on 24, plus one more since the scheduler holds its worker as
   a closure; a task group, 34 and 98. <!-- src: Bytes/Benchmarks/RESULTS.md "Zstandard decoding … Allocations"; "Parallel compression: a chunk scheduler instead of rounds" Allocation bullet; "2026-11-17, the proposals pass" ("Sync parallel DEFLATE allocates once more per call (11 → 12)") -->
@@ -4467,6 +4503,12 @@ with `--callee` naming the getter). The remedy is the opposite of the force: tak
 the loop, as "Rare paths stay out of line" above does. The full case, with the rest of the parser's seven steps, is
 [section 12](#12-case-study-httpbytes).
 
+The same limit bites an experiment. Do not give a hot loop a second exit or a new call to try an idea: HTTPBytes' `farStop`
+with an "after 3 blocks, try skip windows" exit became nested, duplicated loops (85 instructions with calls against the
+original 29), and a call added to it left `RawSpan.byteCount` out of line again. Cap the loop's bound instead (it ran at most 3
+blocks, `min(count - 64, block + 128)`), so its shape does not change, and call the new path after it ([section 12's
+round 2](#round-2-two-gaps-measured-not-closed)).<!-- src: HTTPBytes/RESULTS.md "round 2, HTTP/1's remaining gaps" (nested duplicated loops, 85 instructions with calls against 29; the capped variant); AGENTS.md "Don't give a hot loop a second exit or a new call to test an idea" (`min(count - 64, block + 128)`) -->
+
 #### Specialize on a constant, as a copy
 
 Brotli quality 1's one-entry table ran through the bucket code's loop, at 7–10% more instructions. Two `@inline(never)`
@@ -4513,6 +4555,16 @@ Inlining decisions are not local. Code added elsewhere can change them:
   encoder): recount after touching a hot loop's helpers.<!-- src: Bytes/Benchmarks/RESULTS-lz4-lzfse.md Lessons last bullet -->
 - The standard library's own `ByteOrder.==` is an out-of-line call (the derived `==` of any other module's
   `@frozen` enum is too): `switch` over the order instead, 71 to 53 instructions in a byte-ordered writer.<!-- src: AGENTS.md "The standard library's ByteOrder.== is a call" -->
+
+#### A public generic that is not inlinable runs unspecialized
+
+`@inlinable` matters most on the generic public function, because without it nothing specializes it for the caller's types.
+HTTPBytes' `HTTPContentCoding.negotiated` took the codings a server offers as `some Sequence`, and was public without
+`@inlinable`: every call ran the unspecialized function, which boxed the sequence's iterator (6 mallocs a call) and was written to
+parse the `Accept-Encoding` list once per offered coding. Made `@inlinable` and rewritten to read the list in one pass, the
+benchmark's 2,599 values went from 24 M instructions and 16,000 mallocs to 3.51 M and none (that row also includes the vector
+scans of [section 12](#round-2-field-values-as-views-and-a-vector-scan-pass); the machine was under load, so these are instruction
+counts). Look for it with `Tools/calls` on the caller, which says whether the callee is a `specialized` copy, and with a zero-malloc gate.<!-- src: HTTPBytes/RESULTS.md "round 2, dates and field values" ("Accept-Encoding negotiation was generic over `some Sequence` without `@inlinable`: unspecialized, it boxed its iterator (6 mallocs a value), and parsed the list once per offered coding; now inlinable and one pass") and the table row "Accept-Encoding (2,599), br/gzip/identity | 24 M, 16,000 mallocs | 3.51 M, 0"; AGENTS.md "A public generic function over `some Sequence` that isn't `@inlinable` runs unspecialized and boxes its iterator … `Tools/calls` on the caller shows `specialized` when it isn't" -->
 
 #### When not to
 
@@ -4891,6 +4943,29 @@ a block, cost the heads that end in their first block (38-byte heads 55 → 86 c
 Judge scanning code by `Tools/counters`' discarded-cycles share, not its instruction count; [section 12](#12-case-study-httpbytes)
 has the full account.
 
+#### A validity test LLVM turns into a branch
+
+Zstandard's `fast` and `dfast` match finders keep a hash table of earlier positions, and a table entry can be stale: its index
+is below the start of the window, so it must not be used. libzstd's candidate check (`ZSTD_match4Found_cmov`) reads a valid
+position when the entry is invalid, compares the four bytes at both places, and branches once, on a match, which is rare. The same
+test written in Swift, `a == b && valid`, compiled differently: LLVM moved `valid` ahead of the loads, as a branch, to skip them,
+and `valid` is exactly what a CPU cannot predict when many entries are outside the window.
+Folding the two into one condition, `(a ^ b) | invalid == 0`, was split back into the same branch. What held the order was a branch weight
+on the comparison: `unlikely(a == b) && valid`, which compiles to a `csel`, a `cmp`, a `ccmp`, and one branch. (libzstd keeps the
+two conditions apart with an empty `asm`.) On the M3 Ultra, cycles against libzstd's before and after (frames identical):<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "How it got there" step 5 and "Tried and not kept" first bullet; AGENTS.md "LLVM turns `a == b && valid` into a branch on `valid` ahead of the loads (also from `(a ^ b) | invalid == 0`)"; Bytes/Sources/BytesCompression/ZstdMatchFinder.swift `found` (the comment on `unlikely` and "libzstd keeps them apart with an empty asm") -->
+
+| Input, level | before | after |
+|---|---|---|
+| dickens 64 KB, level 1 | +30.8% | −0.9% |
+| Main.js 64 KB, level 1 | +24.0% | −1.5% |
+| dickens 64 KB, level 2 | +18.6% | +1.2% |
+| mozilla, level 3, HTTP window | +17.8% | +1.6% |
+<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "How it got there" step 5 effect column (dickens 64 KB L1 +30.8% → −0.9%, Main.js 64 KB L1 +24.0% → −1.5%, dickens 64 KB L2 +18.6% → +1.2%, mozilla L3 w19 +17.8% → +1.6%) -->
+
+Validity is unpredictable where many table entries are outside the window: small adjusted windows (libzstd shrinks the window and
+tables to a known content size) and the HTTP window on large files. The rule is the section's first one again: a branch on data the CPU cannot predict costs more than the loads it skips, and the compiler cannot know
+which of your conditions is the unpredictable one. Say so with `unlikely` on the other, then read the assembly.
+
 #### CRC braids and folds
 
 Fewer instructions could not shorten the table CRC's chain (slicing-by-8: each lookup feeds the next), but more chains
@@ -5053,7 +5128,166 @@ What closed the rest, each a technique from an earlier section: tables in a work
 Huffman tables chosen by a measured rule. libzstd's own cost model picked double-symbol tables for x-ray's literals, where
 they cost 6%; the rule used here (literals compressing below 10/16, at least 8 KB of them) gave dickens −8% and moved
 nothing else by more than 0.1%. Prefetching each match's source (as libzstd does on AArch64) added 0.7% instructions and
-no speed in an interleaved comparison, so it was removed.<!-- src: Bytes/Benchmarks/RESULTS.md "Zstandard decoding ... How it got there" and "Kept out" tables -->
+no speed in an interleaved comparison, so it was removed. (The encoder, below, found libzstd's prefetches worth keeping.)<!-- src: Bytes/Benchmarks/RESULTS.md "Zstandard decoding ... How it got there" and "Kept out" tables -->
+
+#### Zstandard encoding
+
+`ZstdEncoder` encodes Zstandard frames at libzstd 1.5.7's levels 1 through 4: its `fast` strategy (levels 1 and 2) and `dfast`
+(double-fast, levels 3 and 4: two hash tables, one for short matches and one for long ones), its block pre-splitter,
+and its entropy decisions, **ported decision for decision**. With the same parameters a frame from `compressAll` is libzstd's
+frame byte for byte: on all 12 Silesia files and 5 web files at levels 1 to 4 and at level 3 with the HTTP window, on 1 to 64 KB
+bodies, at block boundaries, and with and without checksums. The numbers in this subsection are from the M1 Max, measured
+while other agents were building (load average 8 to 13): cycles and instructions are the numbers to trust, wall times are
+not.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md header ("2026-11-23, M1 Max … load average 8–13: cycles and instructions are the numbers to trust, wall times are under load") and "What it is" (levels 1–4, fast and dfast, block pre-splitter, entropy decisions, ported decision for decision; "libzstd's frame, byte for byte: every Silesia file, the web assets, 1–64 KB bodies, block boundaries, and the decoder tests' samples, at every level, with and without checksums"); Bytes/Benchmarks/RESULTS.md "2026-11-23, Zstandard encoding" (the whole corpus); Bytes/Sources/BytesCompression/ZstdMatchFinder.swift (dfast's `longMatch` and `shortCandidate` lookups) -->
+
+```swift
+var encoder = ZstdEncoder(level: 3, windowLog: ZstdEncoder.Parameters.httpWindowLog, checksum: false)
+try encoder.compressAll(body, into: &output)            // one frame, content size stated
+encoder.reset()                                         // or reset(contentSize:) to state it when streaming
+let progress = try encoder.compress(chunk, into: &output, flush: .none)   // .flush ends a block, .finish the frame
+```
+<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "What it is" code block; Bytes/Sources/BytesCompression/ZstdEncoder.swift `init(level:windowLog:checksum:)`, `compressAll`, `reset(contentSize:)`, `compress(_:into:flush:)`; Transforms.swift `ZstdEncoder: ByteTransform, ResettableByteTransform` -->
+
+**Why port rather than design.** An encoder's output is not unique, and a round trip passes for any valid frame, so a
+round-trip test cannot tell a good encoder from a poor one: compression bugs show only as size, which a match finder that
+loses matches (but verifies the ones it finds) hides completely. Porting libzstd's decisions one at a time (match finder, block
+splitter, literal and sequence table selection, repeat offsets, raw and RLE blocks) turns libzstd's output into the oracle: the
+test compares whole frames, and every slip shows at its first differing byte. They did: a limit on repeat offsets, and libzstd's
+check for an RLE block on blocks it stores raw. One thing the comparison taught that no reading of the format would have: libzstd
+shrinks the window and tables to a known content size even when every parameter is set (`ZSTD_adjustCParams_internal`), so a port
+must too, or its frames differ for every small input. The comparison gives libzstd `ZSTD_c_strategy`, `windowLog`, `hashLog`,
+`chainLog`, `searchLog` (1), `minMatch`, and `targetLength` (and the checksum flag) one by one, so it does not depend on
+libzstd's tables for small inputs.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Method" first bullet (the parameters passed one by one; "libzstd still shrinks the window and tables to a known content size; so does ZstdEncoder"); AGENTS.md "Port a reference encoder decision for decision, and its frames become the test oracle … found each porting slip at its first differing byte (a repeat-offset limit, libzstd's RLE check on blocks it stores raw). libzstd shrinks the window and tables to a known content size even with every parameter set (ZSTD_adjustCParams_internal): a port must too"; Bytes/Sources/BytesCompression/ZstdEncoder.swift `Parameters.adjusted(forContentSize:)` -->
+Streamed frames are the exception, and a deliberate one: libzstd's circular input buffer turns the window's older part into an
+external dictionary searched by separate match finders, and this encoder slides a flat window (the window plus a block, moved once
+per block when full). Its streamed frames are within 0.1% of the one-shot frame and 0 to 0.9% smaller than libzstd's streamed ones
+(dickens: 3,699,098 bytes against 3,708,272). A body sent at once with `.finish`, or after `reset(contentSize:)`, is the one-shot
+frame.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Streamed in 64 KB pieces" table (dickens 3,699,098 against 3,708,272) and the paragraph after it ("Streamed frames aren't libzstd's … within 0.1% of the one-shot frame and 0–0.9% smaller than libzstd's streamed ones … Bodies sent at once with `.finish` (or after `reset(contentSize:)`) are the one-shot frame") -->
+
+**Results against libzstd** (cycles and instructions per input byte, least of 5 interleaved rounds, both contexts reused; frames
+identical, so the ratios are libzstd's):
+
+| Input | Level | Cycles/B Bytes | libzstd | Δ | Instr/B Bytes | libzstd | Δ |
+|---|---|---|---|---|---|---|---|
+| dickens | 1 | 7.990 | 7.581 | +5.4% | 34.83 | 31.29 | +11.3% |
+| dickens | 3 | 14.173 | 13.754 | +3.0% | 37.23 | 34.11 | +9.2% |
+| mozilla | 1 | 5.679 | 5.458 | +4.0% | 25.14 | 22.83 | +10.1% |
+| mozilla | 3 | 8.409 | 8.253 | +1.9% | 30.77 | 28.57 | +7.7% |
+| x-ray | 1 | 4.414 | 4.500 | −1.9% | 15.44 | 17.92 | −13.8% |
+| x-ray | 3 | 15.624 | 15.178 | +2.9% | 60.55 | 55.70 | +8.7% |
+| Main.js | 3 | 7.639 | 7.458 | +2.4% | 21.73 | 20.02 | +8.6% |
+| xml, 1 KB body | 1 | 10.58 | 12.22 | −13.4% | | | −14.0% |
+| dickens, 4 KB body | 3 | 9.99 | 9.96 | +0.4% | | | +6.9% |
+| dickens, 64 KB body | 3 | 12.51 | 12.16 | +2.9% | | | +8.8% |
+<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Corpus files, one call" table (rows dickens 1 and 3, mozilla 1 and 3, x-ray 1 and 3, Main.js 3) and "HTTP bodies, one call" table (rows xml 1 KB level 1, dickens 4 KB level 3, dickens 64 KB level 3; the instruction columns of those rows are given as a difference only) -->
+
+Over every one-call row the cycles are −14% to +5.4% of libzstd's, within ±3% on most; instructions are 7.5 to 11% higher on large
+inputs (x-ray at level 1 the exception, −14%). Below about 2 KB the per-frame work dominates and this encoder is 8 to 14% cheaper:
+libzstd re-checks and resets its context's parameters on every `ZSTD_compress2`. Streamed in 64 KB pieces with the size unknown, cycles
+are 4 to 10% below libzstd's (dickens −4.3%, mozilla −9.9%, x-ray −9.2%). The row where the encoder is clearly behind is incompressible
+input: 1 MB of random bytes at level 3 takes 1,961,000 instructions against libzstd's 1,622,000 (+21%) and 140 µs against 122 (+15%,
+under load), because every block is stored raw and copied into a staging buffer and then out, where libzstd copies once into the
+destination. Writing blocks straight into the caller's buffer is not done.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Targets" (−14% to +5.4%; instructions +7.5 to +11%), "HTTP bodies" paragraph ("Below about 2 KB the per-frame work dominates, and ours is 8–14% cheaper (libzstd re-checks and resets its context's parameters on every ZSTD_compress2)"), "Streamed" table (dickens −4.3%, mozilla −9.9%, x-ray −9.2%; "−4 to −10%" in Bytes/Benchmarks/RESULTS.md), "In the suite" row "L3 random (1.0 MB): raw blocks" and the paragraph after ("+21% instructions, +15% time"), "Not done" (writing blocks straight into the caller's buffer) -->
+
+**How it got there** (harness; cycles per byte against libzstd's, load 10 to 13):
+
+| Step | Change | Effect |
+|---|---|---|
+| 1 | The port: libzstd's loops and decisions | Frames identical; cycles +8 to +30% at level 1, +4 to +21% at level 3; 64 KB bodies +18 to +31% |
+| 2 | Sequence-code histograms with four interleaved count tables above 1,500 codes, not one | dickens level 3: 15.55 → 14.49 c/B (+10.4% → +3.6%) |
+| 3 | libzstd's prefetches | mozilla level 1 +19.9% → +12.1%, dickens level 1 +15.3% → +12.8% |
+| 4 | Huffman codes stored top-aligned, added with one shift and one OR; groups per flush, alternate groups in a second container | x-ray level 1 5.95 → 4.43 c/B (+31% → −2%); dickens level 1 +12.8% → +5.1% |
+| 5 | Candidate validity checked after the comparison ([section 7](#a-validity-test-llvm-turns-into-a-branch)) | dickens 64 KB level 1 +30.8% → −0.9%; others in section 7's table |
+| 6 | dfast's sequence store left in its `inout` parameter | one hash constant no longer rematerialized per position; the loop 61 → 49 instructions with step 5 (libzstd's: 45) |
+<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "How it got there" table (steps 1 to 6, condensed) -->
+
+Step 2 is the dependency-chain lesson of [section 7](#7-branches-and-data-dependent-work) in a histogram. Counting bytes into one table, a run of one
+code makes each increment wait for the last (the load, add, and store of one counter, repeated); libzstd's
+`HIST_countFast_wksp` counts bytes in turn into four tables and adds them at the end. Above 1,500 symbols the encoder does the same
+(`ZstdHistogram.countBytes`), and the histograms fell from 8.4% of dickens' level 3 profile to under 3%.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md step 2 ("a run of one code made each increment wait for the last"; "Histograms 8.4% → under 3% of dickens' level 3 profile"); Bytes/Sources/BytesCompression/ZstdEncoderEntropy.swift `ZstdHistogram.countBytes` (`guard count >= 1500`, four 256-entry tables in `scratch`) -->
+
+Step 3, **prefetching**, finally paid, in the one place where the decoder's did not (the decoder's, 0.7% more instructions and no speed,
+was removed): the match search skips ahead by a growing step, faster than the hardware prefetcher follows, so libzstd asks for the
+cache line ahead of the search (`ip1 + 64` and `ip1 + 128` when the step grows, and `ip + 256` at each dfast position in its AArch64
+build). The compiler's own prefetch builtin is reachable in a module with the Builtin feature, and emits `prfm`:
+
+```swift
+// BytesCompression's ZstdMatchFinder: an address computed, not accessed (a prefetch never faults, even past the buffer).
+@inline(__always)
+func prefetch(_ position: Int) {
+    let address = unsafe source + position
+    Builtin.int_prefetch_RawPointer(address._rawValue, Int32(0)._value, Int32(3)._value, Int32(1)._value)   // read, locality 3, data cache
+}
+```
+<!-- src: Bytes/Sources/BytesCompression/ZstdMatchFinder.swift `prefetch(_:)` (lines 54–61; the trailing comment is this document's) and the call sites (`ip1 &+ 64`, `ip1 &+ 128`, `ip &+ 256`); Bytes/Benchmarks/RESULTS-zstd-encoder.md step 3 (libzstd's prefetches, aarch64 build; "`Builtin.int_prefetch_RawPointer` emits `prfm`"); AGENTS.md "`Builtin.int_prefetch_RawPointer(p._rawValue, rw, locality, cache)` emits `prfm` … libzstd's prefetches took 2.5–8% off level 1's cycles (dickens, mozilla); level 3 didn't move" -->
+It took 2.5 to 8% off level 1's cycles on dickens and mozilla, and level 3 did not move.
+
+Step 4 is the Huffman writer's layout, the lesson of [Part II section 6](#6-entropy-coding-building-blocks-bitbuffer-bitwriter-huffmantable)
+carried further. A code table entry is stored top-aligned: its code value in the high bits and its length in the low 8 (`value << (64 - length) | length`). The
+writer's container shifts right, so adding a code is one shift and one OR, and the shift amount is the entry itself (a shift uses its
+amount's low 6 bits, which are the length):
+
+```swift
+// BytesCompression's ZstdHuffmanWriter (libzstd's HUF_CStream_t): codes are added at the top of a 64-bit container that shifts right.
+mutating func add0(_ entry: UInt64, fast: Bool) {
+    container0 = (container0 &>> entry) | (fast ? entry : entry & ~0xFF)   // one shift, one OR (fast: no mask)
+    position0 &+= entry                                                    // the bit count lives in the low 8 bits
+}
+```
+<!-- src: Bytes/Sources/BytesCompression/ZstdEncoderEntropy.swift `ZstdHuffmanWriter` doc comment and `add0` (lines 74–101); Bytes/Benchmarks/RESULTS-zstd-encoder.md step 4 ("stored top-aligned (`value << (64 − length) | length`), added with one shift and one OR (the shift is the entry itself)") -->
+The first version, with a 32-bit entry, a mask, a shift, and an OR per code and 4 codes per flush, ran x-ray level 1 at 5.95 cycles a byte
+(+31% over libzstd). Now a flush covers a group of 5 to 9 codes by the table's log (a group must fit beside the 7 bits a flush
+leaves), and alternate groups are built in a second container, so one group's shifts do not wait on the previous: 4.43 cycles a
+byte (−2%), and dickens level 1 from +12.8% to +5.1%. It is [independent chains](#independent-chains-chacha20-and-poly1305) once
+more: two containers are two chains.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md step 4 ("was a 32-bit entry, mask, shift, and OR per code, 4 per flush", "groups of 5–9 codes per flush by table log, alternate groups in a second container (HUF_CStream_t)", x-ray L1 5.95 → 4.43 c/B (+31% → −2%); dickens L1 +12.8% → +5.1%); ZstdEncoderEntropy.swift `encodeStream` (unroll 4 to 9 by `tableLog`) and the `ZstdHuffmanWriter` doc comment ("Two containers, so a group can be built while the previous one shifts in") -->
+
+Step 6 is [section 1](#1-keep-hot-state-in-registers) again, with a twist. dfast touches its sequence store only per match, and
+as a local its six fields took registers the search loop needed; left in its `inout` parameter, one of the loop's two hash constants stopped being
+rematerialized per position. The other constant stays rematerialized: LLVM's cost model prefers recomputing it to keeping it
+(3 instructions a position that run in parallel with the loads), and a variant that treated rematerialization as register pressure
+found nothing more.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md step 6 ("dfast's sequence store left in its `inout` parameter (it's touched per match; as a local its 6 fields took registers)") and "Treating rematerialized constants as register pressure" under "Tried and not kept" ("the other stays (LLVM's cost model rematerializes rather than keep it), 3 instructions a position that run in parallel with the loads") -->
+
+**The gap that is left.** Instructions stay 7.5 to 11% above libzstd's on large inputs, at the same cycles (±3%). The dfast search loop
+is 49 instructions against libzstd's 45: a rematerialized 5-byte-hash prime (3) and two shift amounts reloaded from the stack
+per position (libzstd reloads one). The match-length tails are three compare-and-select steps where clang uses branches. The
+entropy stages are at parity or below.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "The gap that's left" -->
+
+**The window and the memory.** RFC 9659 caps the `zstd` content coding's window at 8 MB, and an encoder's memory is its window. Single-segment
+frames (the frame's window is its content) are made only when the content size is known and fits the configured window, so no frame
+needs a larger window than `windowLog` says; a 9 MiB body with the HTTP window states a 512 KB window, tested with decoders limited to
+512 KB. `ZstdEncoder.Parameters.httpWindowLog` is 19 (512 KB): bodies up to 512 KB lose nothing (their frames are single segments sized to
+them), and larger ones lose a little at level 3 (bytes of frame):
+
+| Level 3, frame bytes | w19 (HTTP) | w20 | w21 (level 3's) |
+|---|---:|---:|---:|
+| dickens (9.7 MB) | 3,699,102 | 3,673,138 | 3,663,504 |
+| mozilla (48.8 MB) | 18,399,681 | 18,290,358 | 18,227,296 |
+| xml (5.1 MB) | 646,234 | 635,444 | 635,299 |
+| samba (20.6 MB) | 5,150,920 | 5,035,802 | 4,955,117 |
+| Main.js (3.8 MB) | 800,142 | 792,875 | 787,883 |
+<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "The HTTP window" and its table (columns w19, w20, w21; rows dickens, mozilla, xml, samba, Main.js; the doc's own sentence: "level 3 loses 0–1.7% except samba's tar (+4.0%)"); "What it is" bullet on single-segment frames ("a 9 MiB body with the HTTP window states a 512 KB window (tested with decoders limited to 512 KB)") -->
+
+Level 3 loses 0 to 1.7% except samba's tar (+4.0%). Window log 20 is the alternative when large bodies dominate (+0.0 to 0.6%, samba +1.6%,
+2.6 MB streaming). The memory is the encoder's tables, a block's sequences and literals, and a staging buffer, and streaming adds the
+window and a block (`memoryUsage`); against libzstd's own estimates (`ZSTD_estimateCStreamSize_usingCParams`) with the same
+parameters:
+
+| Level, window | Bytes: tables | Bytes: streaming | libzstd CCtx | libzstd CStream |
+|---|---:|---:|---:|---:|
+| 1, w19 | 734,656 | 1,390,016 | 582,680 | 1,369,625 |
+| 3, w19 (HTTP) | 1,455,552 | 2,110,912 | 1,303,576 | 2,090,521 |
+| 3, w21 (level 3's) | 1,455,552 | 3,683,776 | 1,303,576 | 3,663,385 |
+<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Memory (bytes)" table (rows 1 w19, 3 w19, 3 w21) and the paragraphs before and after ("Window log 20 is the alternative … +0.0–0.6%, samba +1.6%; 2.6 MB streaming"; "The one-shot difference is the staging buffer (a block, 128.5 KB): libzstd writes blocks straight into the caller's buffer") -->
+
+The one-shot difference from libzstd is the staging buffer (a block, 128.5 KB), which libzstd avoids by writing blocks straight into the
+caller's buffer; of level 3's 1.46 MB, 768 KB are the two hash tables and 352 KB a block's sequences and their codes. The tables are not
+cleared between frames: their indices keep growing from frame to frame, an entry below the frame's start is ignored (which is why
+validity is the branch above), and they are moved down near 3.5 GB as libzstd does (`ZSTD_reduceIndex`), tested by starting a frame just
+below the limit. With a reused encoder, one call or streamed, level 1 and level 3 allocate nothing (four zero-malloc gates).<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Memory" paragraph after the table ("The one-shot difference is the staging buffer (a block, 128.5 KB) … Of level 3's 1.46 MB, 768 KB are the two hash tables and 352 KB a block's sequences and their codes") and "What it is" bullets on reuse ("the tables aren't cleared, their indices keep growing … moved down near 3.5 GB as libzstd's (ZSTD_reduceIndex; tested by starting a frame just below the limit)") and on allocations (gates Allocations:Zstd_encode_L1, _L3, _L1_streaming, _L3_streaming) -->
+
+**What is not done:** levels 5 and above (greedy, lazy, lazy2, the binary-tree and optimal parsers; libzstd 1.5.7 uses its row match finder
+for greedy and lazy with windows over 16 KB, so matching its frames means porting that), dictionaries, long-distance matching,
+multithreading, `targetCBlockSize`, and negative levels.<!-- src: Bytes/Benchmarks/RESULTS-zstd-encoder.md "Not done" -->
 
 #### LZMA, LZMA2, and `.xz`
 
@@ -5974,15 +6208,19 @@ What swift-binary-parsing could take from Bytes, per the comparison: advance wit
 The sections so far take a technique and show where it paid. This one runs the other way: a new protocol family, from
 nothing, using only what Bytes already offers, and what each step of that work taught. `HTTPBytes` is HTTP/1.1, HTTP/2,
 and HTTP/3 framing, HPACK and QPACK field compression, Structured Field Values, and content codings (gzip, deflate,
-Brotli, Zstandard), in six library products of about 13,300 lines, with 207 tests in about 7,000 more. It has no NIO,
-no C, and no Foundation, and every per-message path allocates nothing after setup.<!-- src: HTTPBytes/WRITEUP.md "What's in the package" (13,300 lines, 207 tests in about 7,000 lines; no NIO, no C, no Foundation in the library); HTTPBytes/Benchmarks baseline final-1, every `Allocations:` row: Malloc (total) 0 except Body_chunked_gzip (see "Content codings" below) -->
+Brotli, Zstandard), in six library products of about 16,900 lines, with 264 tests in about 8,600 more (round 1 ended at 13,300
+lines and 207 tests; the second round is described after the first). It has no NIO, no C, and no Foundation, and every
+per-message path allocates nothing after setup.<!-- src: HTTPBytes/WRITEUP.md "What's in the package" (after round 2: about 16,900 lines, 264 tests in about 8,600 lines; "round 1 ended at 13,300 lines and 207 tests"; no NIO, no C, no Foundation in the library); HTTPBytes/Benchmarks baseline final-1, every `Allocations:` row: Malloc (total) 0 except Body_chunked_gzip (see "Content codings" below) -->
 
 **Every number in this section is from an Apple M1 Max** (8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4
 from Xcode 27.3), not the M3 Ultra of the rest of the document: the work was done on that machine. Its one core runs
 about 1.3x slower than an M3 Ultra core ([section 13](#13-measuring-honestly) gives the comparison), so compare the
 ratios against the references, which were measured on the same machine in the same run, not the absolute times.
 Benchmarks are in their own package (`HTTPBytes/Benchmarks`), so the library never builds the C references. The saved
-baseline is `final-1`; the step-by-step record is `HTTPBytes/RESULTS.md`.<!-- src: HTTPBytes/RESULTS.md header (M1 Max, 8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4 / Xcode 27.3; "Benchmarks are in their own package"); HTTPBytes/WRITEUP.md header (baseline final-1); Bytes/OPTIMIZATION.md "The second machine" (M1 Max core 1.31x as long as an M3 Ultra core) -->
+baseline is `final-1`; the step-by-step record is `HTTPBytes/RESULTS.md`. Round 2's baselines are `r2-qpack-before` and
+`r2-qpack-after`, `r2-fields-1` and `r2-fields-3`, and `r2-payload-1`. The one set of numbers in this section from the other
+machine is the Zstandard encoder's comparison with libzstd, which was measured on the M3 Ultra and is in
+[section 8](#zstandard-encoding).<!-- src: HTTPBytes/RESULTS.md round 2 sections (baselines r2-qpack-before, r2-qpack-after, r2-fields-1, r2-fields-3, r2-payload-1); Bytes/Benchmarks/RESULTS-zstd-encoder.md header (M3 Ultra); HTTPBytes/RESULTS.md header (M1 Max, 8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4 / Xcode 27.3; "Benchmarks are in their own package"); HTTPBytes/WRITEUP.md header (baseline final-1); Bytes/OPTIMIZATION.md "The second machine" (M1 Max core 1.31x as long as an M3 Ultra core) -->
 
 The references are the C parsers and compressors people actually use, built the same way as the Swift code (`-O3`,
 `NDEBUG`, from pinned sources): **picohttpparser** and **llhttp** for HTTP/1, **cursed-http** (a C library that uses the
@@ -6283,8 +6521,8 @@ Before the box was found, a head-to-head of the Huffman decoders on the corpus' 
 pass against cursed-http's 454, which told the author the gap was elsewhere: measure the parts before blaming the
 obvious one.<!-- src: HTTPBytes/RESULTS.md QPACK "What moved the numbers" table (static: first version 5,190 K; literal step as lets 2,505 K; @inline(always) 2,333 K) and the paragraph "Before the box was found, a head-to-head of the Huffman decoders on the corpus' 9,502 strings (a throwaway driver) showed HTTPBytes' at 282 µs a pass against cursed-http's hh_decode_f at 454"; HTTPBytes/Sources/HTTP3/QPACKDecoder.swift literal(...) lines 660–668 (the real constants); AGENTS.md "HTTPBytes as a whole" bullet "A var pointer assigned in branches and borrowed by a span is heap-boxed again"; NativeAEA/RESULTS.md SegmentStream box -->
 
-Encoding with a table is 7.0 to 8.3x as fast as ls-qpack (401 requests: 107 µs, 2,089 K instructions against 751 µs, 9,273 K), and decoding 1.4x as fast as cursed-http in time (120 µs against 171). ls-qpack still compresses responses 15% better (it uses Duplicate
-instructions and a draining index, which this encoder does not).<!-- src: HTTPBytes/Benchmarks baseline final-1 rows "QPACK encode (401 requests, 4,096 table)" (HTTPBytes 107 µs, 2,089 K; ls-qpack 751 µs, 9,273 K), "QPACK encode (383 responses, 4,096 table)" (142 µs; ls-qpack 1,180), "QPACK decode (401 requests, 4,096 table)" (120 µs; cursed-http 171); ratios 751/107 = 7.0, 1,180/142 = 8.3, 171/120 = 1.4; HTTPBytes/RESULTS.md QPACK "ls-qpack still compresses responses 15% better" -->
+Encoding with a table is 7.0 to 8.3x as fast as ls-qpack (401 requests: 107 µs, 2,089 K instructions against 751 µs, 9,273 K), and decoding 1.4x as fast as cursed-http in time (120 µs against 171). At `final-1` ls-qpack still compressed responses 15% better (it uses Duplicate
+instructions and a draining index, which this encoder lacked then; [round 2](#round-2-qpack-at-ls-qpacks-size) added them).<!-- src: HTTPBytes/Benchmarks baseline final-1 rows "QPACK encode (401 requests, 4,096 table)" (HTTPBytes 107 µs, 2,089 K; ls-qpack 751 µs, 9,273 K), "QPACK encode (383 responses, 4,096 table)" (142 µs; ls-qpack 1,180), "QPACK decode (401 requests, 4,096 table)" (120 µs; cursed-http 171); ratios 751/107 = 7.0, 1,180/142 = 8.3, 171/120 = 1.4; HTTPBytes/RESULTS.md QPACK "ls-qpack still compresses responses 15% better" -->
 
 #### Structured Fields as iterators
 
@@ -6380,8 +6618,358 @@ Per iteration, p50, from the `final-1` baseline. References are the same machine
 <!-- src: HTTPBytes/Benchmarks baseline final-1 (final-1.tsv), "Time (wall clock)" rows: "HTTP/1 request heads (401 requests, 232 KB)" (HTTPBytes 35, cursed-http 38, picohttpparser 92, llhttp 89), "(top-1k, 3,533 requests, 4.1 MB)" (761, 806, 1,773, 1,744), "HTTP/1 response heads (383 responses, 365 KB)" (53, 45, 127, 131), "(1,000 × 20 fields of 128 B)" (254, 322, 485 llhttp, 806 picohttpparser), "HTTP/1 requests into owned fields (401 requests)" (111 µs, 0 mallocs; HTTPFields 604 µs, 3,669 mallocs), "Fields: 3,000 lookups by name" (8.127, 634), "HPACK decode (401 requests)" (132, 162, 228, 552), "HPACK encode (401 requests)" (89, 239 ls-hpack, 244 cursed-http, 1,422), "QPACK decode (401 requests, 4,096 table)" (120, 171, 235), "QPACK encode (401 requests, 4,096 table)" (107, 238, 751), "Structured Fields: 1,000 dictionaries (7 members)" (196, 22,000), "Body 1 MB text, gzip, chunked in 4 KB" (530) and "gzip, whole: zlib (system)" (627) -->
 
 Where HTTPBytes is behind: HTTP/1 responses (13 to 16% more cycles than cursed-http, from the mispredictions above) and
-tiny heads given only their own bytes (10 to 55% behind, because cursed-http's contract lets it read 64 bytes past the end
-of its input and HTTPBytes copies the partial last block instead: a safe API against an unsafe one).<!-- src: HTTPBytes/WRITEUP.md "Open items" (responses 13–16% more cycles than cursed-http; tiny heads 10–55% behind, cursed-http reads 64 bytes past the input; HTTPBytes copies the partial block); HTTPBytes/RESULTS.md final table rows "tiny requests (38 B)" and "… alone" (23.9 ns, 73 cycles against 15.5, 47) -->
+tiny heads given only their own bytes (10 to 55% behind at `final-1`, where cursed-http's contract lets it read 64 bytes past
+the end of its input and HTTPBytes copies the partial last block: a safe API against an unsafe one). [Round 2](#round-2-two-gaps-measured-not-closed)
+measured both gaps again: the responses stay open, and the tiny heads are 8 to 11 cycles behind, which is not the copy.<!-- src: HTTPBytes/WRITEUP.md "Open items" (responses 13–16% more cycles than cursed-http; tiny heads 10–55% behind, cursed-http reads 64 bytes past the input; HTTPBytes copies the partial block) and "Round 2" ("8–11 cycles, … not the copied partial block"); HTTPBytes/RESULTS.md "round 2, HTTP/1's remaining gaps"; HTTPBytes/RESULTS.md final table rows "tiny requests (38 B)" and "… alone" (23.9 ns, 73 cycles against 15.5, 47) -->
+
+#### Round 2: two gaps measured, not closed
+
+The second round took round 1's open items (all but a connection layer: HTTP/2's stream states and HTTP/3's stream rules as
+state machines over the codecs) and the field parsers the plan had left out. As in round 1, the plan was reviewed
+adversarially before any code, and each part's code after it.<!-- src: HTTPBytes/WRITEUP.md "Round 2: the open items, dates, and field values" first paragraph ("took this document's open items (all but the connection layer) and the field parsers the plan had left out"; "reviewed adversarially as round 1 was: the plan before any code, then each part's code") -->
+The first two items were the HTTP/1 gaps, and neither closed. They were measured with round 1's cycle harness
+(`proc_pid_rusage` around each parser, the previous `HTTP1` as a second module in the same binary, best of 3, cycles per
+head). Before, in that run: 401 requests 240, 383 responses 433, top-1k requests 662, top-1k responses 1,038, tiny requests 48 (given
+the next head's bytes too) and 59 (given only their own), 1-byte fields 365, 16-byte 481, 128-byte 785; cursed-http, on
+responses 367, on top-1k responses 897, on tiny heads given only their bytes 47.<!-- src: HTTPBytes/RESULTS.md "2026-11-23: round 2, HTTP/1's remaining gaps (measured, not kept)" first paragraph (req 240, resp 433, treq 662, tresp 1,038, tiny 48, tiny alone 59, f1 365, f16 481, f128 785; cursed-http resp 367, tresp 897, tiny alone 47) -->
+
+**Skip windows for long lines.** cursed-http's `fb_ctany_simd` asks "is there a control byte in the next 256 bytes, then
+the next 512?" with an add and a signed minimum per 16 bytes, skipping the exact mask. The long lines are there to skip:
+44% of the response heads' bytes in the 383-response corpus are in 231 lines of 512 to 1,023 bytes, and 38% of the top-1k
+responses' in 531 lines of 1 KB or more, none with a byte at or above 0x80. No setting of the windows gained
+(cycles per head):<!-- src: HTTPBytes/RESULTS.md "Skip windows for long lines" (44% of http-corpus responses' bytes in 231 lines of 512–1,023 bytes; 38% of top-1k responses' in 531 lines of 1 KB or more, none with bytes ≥ 0x80) -->
+
+| Variant | resp | tresp | treq | f128 |
+|---|---|---|---|---|
+| Before | 433 | 1,038 | 662 | 785 |
+| Windows inside `farStop` after 3 exact blocks | 449 | 1,109 | 690 | 908 |
+| Windows in an out-of-line function `farStop` calls | 443 | 1,070 | 674 | 947 |
+| `farStop`'s loop kept in shape (its bound capped at 3 blocks), windows after it | 444 | 1,057 | 664 | 792 |
+| … windows after 1 or 0 exact blocks | 445 | 1,059–1,078 | 669–688 | |
+<!-- src: HTTPBytes/RESULTS.md "Skip windows for long lines" table (rows 1 to 4; the Before row is the harness's "Before" line in the section's first paragraph: resp 433, tresp 1,038, treq 662, f128 785) -->
+
+Instructions rose 5 to 8%. The exact masks are cheap here (29 instructions per 64 bytes: the `farStop` listing above), so a
+window is wasted on a line of 256 to 1,023 bytes, and the windows cost more than they skip. And the idea's source does not use it where it would matter: cursed-http's response parser classifies four blocks ahead
+into a per-head array, the design round 1 had measured in a ring of 8 blocks at +25% on requests and +67% on tiny
+heads, so the response gap stays open.<!-- src: HTTPBytes/RESULTS.md "Skip windows for long lines" paragraph after the table ("Instructions rose 5–8%: our exact masks are cheap (29 instructions per 64 bytes …)"; "cursed-http's response parser itself doesn't use windows (an adversarial review of this round's plan pointed out): it classifies 4 blocks ahead into a per-head array, which round 1 measured in our design (a ring of 8 blocks) at +25% on requests and +67% on tiny heads"); the +25% and +67% are 279 → 350 and 55 → 92 in the "Measured and rejected" table above -->
+
+Two code generation lessons came out of the attempts. Adding a call to `farStop` left `RawSpan.byteCount` an out-of-line call
+inside it, the caller limit again. And giving the loop a second exit, "after 3 blocks, try the windows", made LLVM build nested,
+duplicated loops: 85 instructions with calls where the original loop was 29. Do not give a hot loop a second exit or a new call to try an
+idea. Cap its bound instead (here `min(count - 64, block + 128)`, three blocks) so its shape does not change, and call the
+new path after the loop; that variant kept the loop's cost (792 on 128-byte fields against 785) and the idea's cost
+showed on its own.<!-- src: HTTPBytes/RESULTS.md "Two codegen lessons on the way: adding a call to `farStop` left `RawSpan.byteCount` an out-of-line call in it, and a loop with a second exit for '3 blocks done' became nested duplicated loops (85 instructions with calls against 29)"; AGENTS.md "Don't give a hot loop a second exit or a new call to test an idea" (the cap `min(count - 64, block + 128)`); table above, third variant f128 792 against 785 -->
+
+**Tiny heads given only their bytes.** At the end of round 1 the gap to cursed-http on 38-byte requests was put at 21
+cycles. Measured properly it is 8 to 11: 56 to 59 cycles alone, against 48 when the next head's bytes are readable. The
+partial last block is not the cost. Building it from overlapping 16-byte loads clamped to the end of the bytes, with the
+mask moved into place, in place of copying it to the stack, gave 58 cycles against 56 and made 128-byte fields 895 against
+787, because the inlined block mask grew the parse loop again. A padded-input API (the caller promising readable bytes past
+the message) could recover at most those 8 cycles, on heads under 64 bytes only, so it was not built.<!-- src: HTTPBytes/RESULTS.md "Tiny heads given only their bytes" ("the gap is now 8–11 cycles (tiny alone 56–59 against 48 with the next head's bytes readable), not round 1's 21"; clamped overlapping 16-byte loads: tiny alone 58 against 56, and f128 895 against 787; "could recover at most those 8 cycles, on heads under 64 bytes only. Not built"); HTTPBytes/WRITEUP.md "What didn't work, measured" -->
+
+#### Round 2: bodies as pipeline stages, and why a body is one stage
+
+Chunked transfer coding and the content codings are the same kind of thing as the codecs under them: a stream in, a stream
+out, with state between calls. Round 2 made them [`ByteTransform`](#10-pipelines-bytetransform-pipeline-and-why-composition-costs-nothing)
+stages: `HTTP1Dechunker` and `HTTP1Chunker` (HTTP1), and `HTTPContentDecoder` and `HTTPContentEncoder` (HTTPPayload), the
+decoder also a `ResettableByteTransform`, keeping its codecs between bodies. The first version of the whole-body path simply composed them:
+
+```swift
+// The trap (illustrative): the pipeline is finished when its last stage is.
+var body = dechunker.then(gzipDecoder)
+```
+
+A pipeline finishes when its last stage does (Part II's [one end-of-stream rule](#one-end-of-stream-rule)). For a body that is
+the wrong stage to decide. The gzip stream ends before the chunked body does: a body whose last chunk never arrived read as
+finished, and bytes inside the chunked body after the gzip stream (an attacker's second request, say) were left in the
+connection to be read as the next message. That is request smuggling, found by the review of this first version.<!-- src: HTTPBytes/RESULTS.md "round 2, bodies as pipeline stages" ("composing the stages with Bytes' then(_:) finishes the pipeline when its last stage finishes, so dechunker.then(gzipDecoder) ended a body at the gzip stream's end. A body missing its last chunk read as finished, and bytes inside the chunked body after the stream (an attacker's request) were left to be read as the next message: request smuggling"); AGENTS.md "A pipeline ends when its last stage ends: a framing stage must not be followed by one that can end first" -->
+A body is therefore one stage, `HTTPBodyDecoder`, whose framing (`Content-Length`, chunked, or until the connection closes)
+alone decides where the body ends. It finishes only at the framing's end, and it requires the coded stream to end exactly
+there: bytes after the stream, or a stream cut short, are `malformed`. Chunk slices go straight from the chunked decoder into
+the content decoder, with no buffer between them:
+
+```swift
+// HTTPPayload's BodyDecoder.swift doc comment.
+var body = try HTTPBodyDecoder(framing: try framing.requestBody(version: line.version), contentEncoding: encoding)
+let progress = try body.transform(unread, into: &output, flush: .none)
+```
+<!-- src: HTTPBytes/Sources/HTTPPayload/BodyDecoder.swift doc comment (the example is its own) and HTTPBytes/RESULTS.md "HTTPBodyDecoder … finishes only at the framing's end, requires the coded stream to end exactly there (`malformed` for bytes after it or a stream cut short), and hands chunk slices straight to the content decoder (no buffer)" -->
+
+It costs nothing over the hand-written loop (p50, 1 MB of text, gzip, chunked in 4 KB): the loop that hands chunk slices to the
+content decoder 4,887 K instructions and 536 µs, `HTTPBodyDecoder` 4,891 K and 535 µs, and the first version's pipeline (dechunker,
+a 16 KiB buffer, decoder) 4,813 K and 527 µs: 1.6% fewer instructions and 1.5% less time than the stage that is correct. `Allocations:Body_decoder_chunked_gzip`,
+one decoder reset per body, is 0.<!-- src: HTTPBytes/RESULTS.md "round 2, bodies as pipeline stages" last paragraph (4,887 K, 536 µs; 4,891 K, 535 µs; 4,813 K, 527 µs; Allocations:Body_decoder_chunked_gzip 0) -->
+
+The review found more in the stages, all fixed: trailers were left for the next reader by default (they are skipped by default now,
+and `.leave` reads them through `nextTrailer`); a stacked coding's outer stream cut short passed `.finish`; the options were
+mutable after `init` and out of step with an internal flag; a decoder's raised limits let a peer trip `Pipeline`'s unit
+precondition (the limits are clamped to the stage's unit); and the chunker lost a byte at chunk-size digit boundaries (now
+exact, tested for every room from 5 to 300 bytes). Writing the tests found one more: at the framing's end the content decoder
+can still hold output, when it took all its input and the output was full the last time, so it is drained before the end is
+checked.<!-- src: HTTPBytes/RESULTS.md "round 2, bodies as pipeline stages" second paragraph ("The review's other findings, all fixed: …"; "Writing the tests found one more: at the framing's end the content decoder can still hold output … drained before the end is checked") -->
+
+#### Round 2: QPACK at ls-qpack's size
+
+The `final-1` QPACK encoder was 7 to 8x as fast as ls-qpack and compressed worse: on the 383 responses with a 4,096-byte table
+it wrote 62,241 bytes (sections plus encoder stream) against ls-qpack's 53,087, 15% more. ls-qpack (`lsqpack.c`) does three things
+it did not, and the encoder now does all of them:<!-- src: HTTPBytes/RESULTS.md "2026-11-23: QPACK encoder: draining, Duplicate, names alone" first paragraph (ls-qpack compressed http-corpus' responses 15% better: 53,087 B against 62,241 with a 4,096-byte table; `qenc_entry_is_draining`, `qenc_duplicable_entry`, `EEA_INS_LIT_NAME`) -->
+
+- **A draining index** (RFC 9204 §2.1.1.1). A table evicts its oldest entries first, so an entry near the front of a full
+  table is about to go, and a field section that refers to it keeps it from going. The encoder tracks each entry's start among
+  all insertions' bytes (one number per ring slot, memory made with the encoder) and calls an entry **draining** once three
+  quarters of the capacity has been inserted after it: a quarter of the capacity's insertions or less will evict it. A
+  boundary number moves forward as entries are inserted, each entry passed once, so the per-field cost is one compare
+  against it. Draining entries are not used as name references.
+- **Duplicate** (§4.3.4). A field whose newest copy is draining is copied to the table's front, when room can be made
+  without evicting an entry still referred to. A section that may block refers to the copy (the old entry can go); one that
+  cannot refers to the old entry, which is acknowledged, referred to first so that making room cannot evict it, and later
+  sections use the copy. When no copy can be made, the old entry is still referred to if it may be.
+- **Names alone.** A name the static table lacks, seen recently in a literal with another value, is inserted with an empty
+  value and referred to (post-base if the section may block). The responses' lines with literal names went from 157 (9,960 B)
+  to 14 (485 B).
+
+A fourth change was a shorter memory: the history of fields seen (insertion on the second sighting, round 1's rule) has one slot
+per 64 bytes of capacity instead of one per 8, sized by the peer's capacity rather than the encoder's.<!-- src: HTTPBytes/RESULTS.md same section, the four bullets ("A draining index", "Duplicate", "Names alone", "A shorter memory"); HTTPBytes/Sources/HTTP3/QPACKEncoder.swift doc comment ("Draining (RFC 9204 §2.1.1.1)") and `drainingDistance = capacity - capacity >> 2`, `drainingBelow` -->
+The responses, step by step: 62,241 bytes; the draining index and Duplicate, 58,031; the shorter memory, 55,386; names alone and
+no name references to draining entries, 53,137, against ls-qpack's 53,087. The encoder stream shows where the bytes went:
+16,071 B before, 6,264 B after, ls-qpack's 2,831 B (154 Duplicates against its 202); literals with a literal name 157, 14, and 13.<!-- src: HTTPBytes/RESULTS.md same section, "Step by step" ("Step by step (383 responses, 4,096 bytes, acknowledged at once): 62,241 B; draining and Duplicate 58,031; the shorter memory 55,386; names alone, and no name references to draining entries, 53,137 (ls-qpack 53,087)") and "Where the bytes went" (encoder stream 16,071 B, 6,264 B, 2,831 B; 154 Duplicates against ls-qpack's 202; literal name 157, 14, 13) -->
+
+How it was measured matters here, because compression depends on what the peer has acknowledged. A scratch driver runs each
+corpus as a connection: after section *i* the peer's decoder has taken everything through section *i − k* in order, and its
+decoder stream (Section Acknowledgments, Insert Count Increments) reaches the encoder; HTTPBytes' decoder for HTTPBytes'
+encoder, ls-qpack's for ls-qpack's, bytes counted as sections plus encoder stream. The same model is in the benchmarks as
+`QPACKFlight`, which records the decoder stream once in setup and replays it, so an iteration times the encoder alone; each
+setup checks that the output decodes exactly by HTTPBytes' decoder and by ls-qpack's (an FNV digest of every field), and that
+ls-qpack's output decodes by HTTPBytes'.
+
+| Corpus, capacity, sections in flight, blocked | before | after | ls-qpack | after / ls-qpack |
+|---|---|---|---|---|
+| 383 responses, 4,096, at once, 100 | 62,241 | **53,137** | 53,087 | 1.001 |
+| 383 responses, 4,096, at once, 0 | 78,764 | **60,688** | 59,850 | 1.014 |
+| 383 responses, 4,096, 4, 100 | 59,677 | **53,396** | 59,918 | 0.891 |
+| 383 responses, 4,096, 16, 100 | 62,356 | **53,631** | 66,216 | 0.810 |
+| 383 responses, 4,096, 16, 0 | 82,276 | 84,389 | 129,724 | 0.651 |
+| 401 requests, 4,096, at once, 100 | 55,074 | **53,392** | 53,439 | 0.999 |
+| 401 requests, 4,096, 16, 0 | 70,882 | 73,896 | 73,535 | 1.005 |
+| 401 requests, 16,384, at once, 100 | 53,210 | 53,210 | 52,137 | 1.021 |
+<!-- src: HTTPBytes/RESULTS.md "QPACK encoder: draining, Duplicate, names alone" table (a selection of its 17 rows: the columns before, after, ls-qpack, after / ls-qpack) -->
+
+Bytes went up only with no blocking and acknowledgments 4 to 16 sections late (the shorter memory inserts fewer fields
+there), where the encoder still matches or beats ls-qpack. With the table never full (requests, 16,384) nothing drains, and
+ls-qpack is 2% smaller by inserting `:path` and the other fields HPACK's policy leaves out (inserting them too: 47,452 B there,
+but +1% to +22% on the 4,096-byte request rows, not kept). The cost in time is small, and the encoder stays 7 to 15 times as fast as
+ls-qpack on these rows (p50 per corpus; wall times under load):
+
+| Row | before | after | ls-qpack |
+|---|---|---|---|
+| encode 383 responses, 4,096 table | 2,593 K, 149 µs | 2,478 K, 138 µs | 14,000 K, 1,192 µs |
+| … 16 in flight, 0 blocked | 2,882 K, 151 µs | 2,902 K, 155 µs | 26,000 K, 2,343 µs |
+| encode 401 requests, 4,096 table | 2,089 K, 112 µs | 2,083 K, 111 µs | 9,273 K, 780 µs |
+<!-- src: HTTPBytes/RESULTS.md same section's benchmark-rows table (rows "encode 383 responses, 4,096 table", "… 16 in flight, 0 blocked", "encode 401 requests, 4,096 table"); the ratios 1,192/138 = 8.6, 2,343/155 = 15, 780/111 = 7.0 give "7 to 15 times" -->
+
+Every `Allocations:QPACK_encode_*` gate is still 0, two new ones (16 sections in flight, blocking and not) included.<!-- src: HTTPBytes/RESULTS.md same section ("Every `Allocations:QPACK_encode_*` gate is 0, two new ones included") -->
+
+The variants that did not pay are the useful part (383 responses, 4,096 bytes; bytes at once, and with 16 sections in flight and 100
+blocked):
+
+| Variant | at once | 16 in flight |
+|---|---|---|
+| Kept: draining zone a quarter, Duplicate on use, names alone | 53,137 | 53,631 |
+| A literal for a draining entry no copy can be made of (the strict reading of "not referenced") | 53,137 | 69,736 |
+| Second chance: Duplicate, at each section's end, the entries that became draining and were referred to | 54,994 | 69,332 |
+| Draining zone 3/16 / 5/16 of the capacity | 52,350 / 53,412 | 53,419 / 54,391 |
+| History with one slot per 32 bytes / per 8 (as before) | 55,110 / 56,300 | 55,783 / 57,659 |
+| The draining index without Duplicate | 64,443 | 81,179 |
+<!-- src: HTTPBytes/RESULTS.md same section "Tried and not kept" table (all six rows; the second-chance row is shortened) -->
+
+The second chance cost the 4,096-byte rows 0.5 to 29%: copies of fields used once crowded out fields used again. The 3/16 zone won
+the immediate row by 1.5% and lost 7.6% with no blocking (65,333 bytes against 60,688). One slot per 8 bytes was better only with 4
+sections in flight and no blocking (73,451 bytes) and worse everywhere else.<!-- src: HTTPBytes/RESULTS.md same section, paragraph after the "Tried and not kept" table ("Second chance cost the 4,096-byte rows 0.5–29% …"; "Zone 3⁄16 won the immediate row by 1.5% and lost 7.6% with no blocking (65,333 against 60,688). One slot per 8 bytes was better with 4 sections in flight and no blocking (73,451) and worse everywhere else") -->
+
+**A simulated peer must be consistent with itself.** The test harness that checks an encoder against a decoder delivers the
+encoder stream and the sections late, as a network does, and its first version failed the new encoder when acknowledgments
+arrived 4 sections late, because it decoded each section after 16 sections' encoder stream. The harness was right and the
+model was wrong: an acknowledgment says the peer has decoded a section, so the encoder may evict that section's entries after
+it, and a peer that decodes later than it acknowledged is not a peer the encoder can be expected to work with. Deliver late only
+as far as the feedback says. The harness (encoder stream and sections each delivered 0 to 16 sections late, Stream Cancellations,
+Insert Count Increments, the decoder stream fed back whole or a byte at a time, every section decoded exactly, the decoder never
+holding more blocked streams than the setting) then had to fail on purpose-broken encoders, and does: ignoring unacknowledged
+sections' references when evicting gives `invalidIndex`, one blocked stream too many gives `tooManyBlockedStreams`. A
+check that has never failed has not been shown to check.<!-- src: AGENTS.md "A simulated peer must be consistent with itself" bullet ("a check that decoded each section after 16 sections' encoder stream failed an encoder whose acknowledgments arrived 4 sections late, and rightly … Deliver late only as far as the feedback says. And break the code on purpose once …"); HTTPBytes/RESULTS.md same section "Tests (`QPACKDrainingTests`)" (the harness's coverage; `invalidIndex`, `tooManyBlockedStreams`) -->
+
+#### Round 2: dates in four words
+
+`HTTPDate` (RFC 9110 §5.6.7) parses the three formats a recipient must accept and writes the one senders should use,
+IMF-fixdate (`Sun, 06 Nov 1994 08:49:37 GMT`: always 29 bytes, so every field has its place). A fixed-width format with fixed
+characters is a **SWAR** problem: ordinary 64-bit integer operations on eight packed bytes, as in Part II's
+[numbers written as ASCII digits](#numbers-written-as-ascii-digits). The date is read as four overlapping 8-byte words, at offsets 0, 8, 16, and 21:
+the fixed bytes (the commas, spaces, colons, and ` GMT`) are checked by masks and XORs against their expected bytes, and the 14
+digits by one test:<!-- src: HTTPBytes/Sources/HTTPBytes/HTTPDate.swift doc comment ("IMF-fixdate, 29 bytes, is read as four 8-byte words: the fixed bytes checked with masks, the 14 digits with one SWAR test, the month by a perfect hash of its three letters, and the date turned into days without branches (Howard Hinnant's days_from_civil); the day name is checked against the one the date has") and `imfFixdate` (loads at 0, 8, 16, 21) -->
+
+```swift
+// HTTPBytes' HTTPDate.nonDigits: the lanes of `word` in `lanes` that aren't ASCII digits (nonzero if any).
+// A digit XOR 0x30 is 0-9: its high nibble 0, and adding 6 leaves it 0 too. A carry out of a lane that
+// isn't a digit can only make its neighbour fail.
+static func nonDigits(_ word: UInt64, _ lanes: UInt64) -> UInt64 {
+    let x = word ^ 0x3030_3030_3030_3030
+    return (x | (x &+ 0x0606_0606_0606_0606)) & 0xF0F0_F0F0_F0F0_F0F0 & lanes
+}
+// imfFixdate ORs the fixed-byte differences with nonDigits of each word and tests the whole at once:
+guard fixed | digits == 0 else { return nil }
+```
+<!-- src: HTTPBytes/Sources/HTTPBytes/HTTPDate.swift `nonDigits` (verbatim, comments shortened) and `imfFixdate` (`let digits = nonDigits(first, …) | nonDigits(second, …) | nonDigits(third, …) | nonDigits(fourth, …)`; `guard fixed | digits == 0`) -->
+
+The month is found by a **perfect hash** of its three letters (the same device as the field names): the letters as a
+little-endian 24-bit number, times 26,596 in 32 bits, shifted right by 28, index a 16-slot table whose entries are
+`letters << 8 | month`, and the entry's letters are compared with the input's. The date then becomes a day count with Howard
+Hinnant's `days_from_civil`, which has no branches, and the weekday computed from that count must equal the day name read: a date with a wrong day name is refused.
+Writing is the reverse (three words and five bytes), and `HTTPDateCache` keeps the 29 bytes of the current second and
+reformats them only when the second changes. The old forms (RFC 850 with a two-digit year read as at most 50 years past a
+reference date, and asctime) are parsed a byte at a time; they are rare.<!-- src: HTTPBytes/Sources/HTTPBytes/HTTPDate.swift `monthSlots` doc comment ("slot `(letters × 26596) >> 28` … holds `letters << 8 | month`"), `month(_:)`, `days(year:month:day:)`, `weekday(days:)`, `imfFixdate`'s day-name check, `obsoleteDate` ("The rare forms: a byte at a time"); HTTPBytes/RESULTS.md "round 2, dates and field values" first paragraph (three words and five bytes; HTTPDateCache: 29 bytes reformatted when the second changes; RFC 850 two-digit years at most 50 years past a reference date) -->
+
+Per date, over the 3,375 `Date` and `Last-Modified` values of the two corpora: 228 instructions and 13 ns to parse (771 K
+instructions, 44 µs in all), against Foundation's `Date.HTTPFormatStyle` at 8,000 instructions and 457 ns each with 3,807
+mallocs in all (27 M, 1,544 µs). Writing 1,000 dates takes 319 K instructions and 20 µs against Foundation's 4.4 M and 272 µs
+with 1,000 mallocs; 1,000 `Date` fields from the cache take 13 K instructions and 1.5 µs. The tests are the RFC's and Rust's
+`httpdate` vectors, 39 refusals, Foundation agreeing on every day from 1970 to 2200 in both directions, and every day from year
+0 to 9999 round-tripping through all three formats (a bulk test, 0.3 s in release). The deliberate differences from Foundation
+are stated: the parser is case-sensitive (Foundation's and Python's are not), a mismatched weekday is refused, and second 60 is
+accepted as the next minute's first.<!-- src: HTTPBytes/RESULTS.md "round 2, dates and field values" table rows "Date, Last-Modified (3,375): parse" (771 K, 44 µs; 228 instructions, 13 ns per value), "… Foundation Date.HTTPFormatStyle" (27 M, 1,544 µs, 3,807 mallocs; 8,000, 457 ns), "1,000 dates written" (319 K, 20 µs; Foundation 4.4 M, 272 µs, 1,000 mallocs), "1,000 Date fields from HTTPDateCache" (13 K, 1.5 µs); the paragraph on tests and "Deliberate differences: case-sensitive …, a mismatched weekday refused, second 60 accepted as the next minute's first (Go refuses it)" -->
+
+Bytes' own `UTCDateTime` ([Part II](#hexadecimal-and-dates)) uses the same day count.
+
+#### Round 2: field values as views, and a vector-scan pass
+
+The field values a server or client reads are a long list of small grammars: lists and parameters, quoted strings, media types
+and `Accept` negotiation, byte ranges, entity tags and RFC 9110 §13.2.2's precondition order, `Cache-Control`, hosts (IPv6 and
+IPvFuture literals), `Forwarded`, credentials and challenge lists, `Content-Disposition` with RFC 8187 file names, cookies, and
+request-target components. All of them follow the Structured Fields iterators' shape: a value is a view of the field's bytes,
+and a parse hands out views and numbers, so nothing is allocated. Quoted strings keep their escapes in place: they are removed
+only when the text is written or compared. A set of ranges is resolved into the caller's storage.<!-- src: HTTPBytes/RESULTS.md "round 2, dates and field values" second paragraph (the list of field values: "all views or plain values, no allocations"; "HTTPQuotedString with escapes removed only when written or compared"; HTTPRangeSet "resolved into the caller's storage, sorted and merged, with a count limit") -->
+
+The first version scanned a byte at a time. The second moved the scans over tokens, quoted strings, entity tags, and hosts onto the 16-byte tests HTTP/1
+already had, through one Bytes function, `firstByteOffset(where:)` (which also handles values shorter than a vector in one
+overlapping block):
+
+```swift
+// HTTPBytes' FieldGrammar.tokenEnd: the first byte that isn't a token character, 16 bytes at a time.
+let rest = bytes.extracting(droppingFirst: start)
+return start &+ (rest.firstByteOffset(where: HTTPCharacters.nonToken) ?? rest.byteCount)
+// ... and quotedStringEnd: the next quote, backslash, or byte that can't be in a quoted string.
+guard let found = rest.firstByteOffset(where: quotedTextStop) else { break }
+```
+<!-- src: HTTPBytes/Sources/HTTPBytes/FieldGrammar.swift `tokenEnd(_:from:)` and `quotedStringEnd(_:from:)` (lines 43–48 and 66–70, condensed); HTTPBytes/RESULTS.md "Vector scans" paragraph ("tokens by HTTPCharacters.nonToken's nibble lookups, quoted strings and entity tags by a search for the next quote, backslash, or byte that can't be there, a host's registered name by one test of 16 bytes at a time … all through Bytes' firstByteOffset(where:) (short values in one overlapping block)") -->
+
+Tokens use `HTTPCharacters.nonToken`'s nibble lookups (two one-register table lookups on a byte's halves), quoted strings and
+entity tags search for the next quote, backslash, or byte that cannot be there, and a host's registered name tests 16 bytes at a
+time (`HTTPRequestTarget.nonURIByte` and the six delimiters). The table is every value of each field in the two corpora, p50 per
+iteration, the first version against the vector scans:
+
+| Field (values) | First version | Vector scans | Per value |
+|---|---|---|---|
+| ETag (591) | 372 K | 89 K | 150 instructions, 8 ns |
+| Host (3,935) | 2.1 M | 1.49 M | 378, 27 ns |
+| Content-Type (2,332) | 2.1 M | 1.42 M | 608 |
+| Cache-Control (1,942) | 2.6 M | 2.13 M | 1,100 |
+| Accept (2,600), weight of text/html | 7.5 M | 5.68 M | 2,180 |
+| Accept-Encoding (2,599), br/gzip/identity | 24 M, 16,000 mallocs | 3.51 M, 0 | 1,350 |
+| Accept-Language (344), weight of en-US | 333 K | 313 K | 910 |
+<!-- src: HTTPBytes/RESULTS.md "round 2, dates and field values" table (the rows ETag, Host, Content-Type, Cache-Control, Accept, Accept-Encoding, Accept-Language; columns First version, Vector scans, Per value; p50 per iteration over all values, under load: "judge by instructions") -->
+
+The gain is largest where the value is mostly one run of text (an entity tag: −76%) and smallest where the work is the grammar
+around short tokens (Accept-Language: −6%). Wall times were taken under load, so the instruction counts are the claim.
+The `Allocations:` gates for the field values (`FieldValues_dates`, `_cache_control`, `_accept`, `_cookies_targets`) are 0.<!-- src: HTTPBytes/RESULTS.md same table (ETag 372 K → 89 K = −76%; Accept-Language 333 K → 313 K = −6%) and "Allocation gates at 0: FieldValues_dates, _cache_control, _accept, _cookies_targets" -->
+
+**One row is not a scan.** `Accept-Encoding` fell from 24 M instructions and 16,000 mallocs to 3.51 M and none, and the vector scans
+were not most of it. `HTTPContentCoding.negotiated` was a public function generic over `some Sequence` (the codings a server
+offers) without `@inlinable`, so it ran **unspecialized**: it boxed its iterator (6 mallocs a value) and, written to ask the
+header once per offered coding, parsed the list again each time. Now it is inlinable and parses the list in one pass.
+The general rule is in [section 5](#a-public-generic-that-is-not-inlinable-runs-unspecialized).<!-- src: HTTPBytes/RESULTS.md "Accept-Encoding negotiation was generic over `some Sequence` without `@inlinable`: unspecialized, it boxed its iterator (6 mallocs a value), and parsed the list once per offered coding; now inlinable and one pass"; AGENTS.md "A public generic function over `some Sequence` that isn't `@inlinable` runs unspecialized and boxes its iterator" -->
+
+**An API trap in case folding.** `isScheme("Basic")` on a credentials value never matched a `Basic` header. The helper compared the
+header's bytes against a `StaticString` literal with `HTTPToken.equalsIgnoringCase`, which folds only the bytes it is given,
+one side, so the literal had to be lowercase, and a capitalized literal could never match. Public helpers that take a
+caller's literal now fold both sides (`isScheme` does), and the one-sided overload asserts that its literal is lowercase. A
+literal parameter that must be in a particular case is a trap for every caller who has not read its documentation: make the
+function fold, or check, rather than document.<!-- src: AGENTS.md "A case-insensitive comparison against a StaticString that folds only one side is a trap for callers: isScheme("Basic") never matched (the literal must be lowercase). Public helpers taking a caller's literal fold both sides; the one-sided overload asserts its literal is lowercase"; HTTPBytes/Sources/HTTPBytes/Credentials.swift `isScheme` doc comment ("ignoring case (on both sides…)") and FieldValues.swift `HTTPToken.equalsIgnoringCase(_:_: StaticString)` doc comment ("`token` must be lowercase: only `bytes` are folded (the overload taking two spans folds both)") -->
+
+#### Round 2: what the field-value review found
+
+An adversarial review (2.6 million fuzzed inputs through every parser, `HTTPDate` against Foundation on 200,000 dates, IPv6
+literals against `inet_pton` on 300,000: no trap, no allocation) confirmed six defects, each fixed with a regression test.
+Two of them generalize.<!-- src: HTTPBytes/RESULTS.md "round 2, dates and field values" paragraph "An adversarial review (2.6 M fuzzed inputs through every parser, `HTTPDate` against Foundation on 200 K dates, IPv6 against `inet_pton` on 300 K: no traps, no allocations) confirmed six defects, all fixed with regression tests" -->
+
+**Merging into bounded storage: sweep, do not insert in arrival order.** `HTTPRangeSet.resolve` writes the union of a `Range`
+field's byte ranges, sorted and merged, into storage the caller provides, which bounds what a hostile field can make a server
+hold. It refused sets whose union fit the storage. It merged each new range only with the one before it, and inserting in
+arrival order can need more slots on the way than the answer has: in `3-5, 25-41, 4-` the first two ranges are separate until
+the third joins them, so a set whose answer is one range needed more slots than one. The fix reads the set again for each range written: the lowest range not yet covered, grown while any range
+overlaps or touches it, then written, so the storage only ever holds the answer:
+
+```swift
+// HTTPBytes' HTTPRangeSet.resolve (the sweep, condensed): `cursor` is the end of the last range written; every range
+// of the set lies wholly before it or wholly after it.
+while true {
+    var start = Int.max, end = Int.min
+    var pass = try! HTTPRangeSet(parsing: value)          // the first pass already read the set without an error
+    while let range = try! pass.next() {                  // the lowest range not yet covered
+        guard let bytes = range.resolved(length: length), cursor == .min || bytes.lowerBound > cursor else { continue }
+        if bytes.lowerBound < start || bytes.lowerBound == start && bytes.upperBound > end { (start, end) = (bytes.lowerBound, bytes.upperBound) }
+    }
+    guard start != .max else { return .ranges(count) }
+    // ... grow `end` while any range overlaps or touches [start, end], re-reading the set each time ...
+    guard count < ranges.count else { return .ignore }
+    ranges[count] = start..<end; count += 1; cursor = end
+}
+```
+<!-- src: HTTPBytes/Sources/HTTPBytes/Ranges.swift `resolve(_:length:into:)` (condensed; the grow loop elided) and its doc comment ("The union is found by sweeping the set rather than by inserting its ranges in order, so the storage only has to hold the answer"); HTTPBytes/RESULTS.md defect 1 (`3-5, 25-41, 4-`) -->
+The set is re-read for each range written and no copy of it is kept, which spends time for storage; sets of more than
+256 ranges are ignored (RFC 9110 §14.2 allows it). It was checked against an unbounded sort-and-merge on 20,000 random sets at every
+storage size from 0 to 4: test a bounded algorithm against the plain unbounded one at every bound.<!-- src: HTTPBytes/RESULTS.md defect 1 ("It now sweeps the set … so the storage holds only the answer; checked against an unbounded sort-and-merge on 20,000 random sets at every storage size 0–4. Sets of more than 256 ranges are ignored (RFC 9110 §14.2)"); AGENTS.md "Merging into bounded storage: sweep, don't insert in arrival order" -->
+
+**A parser that throws on one bad element loses the good ones.** One malformed element of a `Cache-Control` field threw the whole
+field away, `no-store` with it, and a cache that loses a `no-store` stores what it must not. The parser no longer throws: bad
+elements are skipped and an unclosed quote ends the field there. Whatever the grammar says about the malformed part, a field of independent
+directives should be read as far as it can be.<!-- src: HTTPBytes/RESULTS.md defect 3 ("One malformed Cache-Control element threw the whole field away, no-store with it: parsing no longer throws; bad elements are skipped, an unclosed quote ends the field there"); HTTPBytes/WRITEUP.md "a Cache-Control with a malformed max-age lost its no-store, which a cache must not" -->
+
+The other four: a `Retry-After` with a huge delay wrapped around to the past (the sum saturates); `HTTPTargetComponents` and
+`HTTPRequestTarget.validate` disagreed on the forms `http:foo` and `example.com:443` without CONNECT (components now take the method and
+split as `validate` decides); `Content-Disposition` took the first of two `filename` parameters, where RFC 6266 §4.1 calls the field invalid and a
+recipient taking the last would see another name (repeated parameter names are refused); and `filename*` decoded to control
+bytes and invalid UTF-8 (`%00%2F..%2Fx%0D%0A`; decoded names, and plain ones, must now be well-formed UTF-8 without C0, DEL, or C1
+controls). The lesser fixes include `HTTPEntityTag.write` checking its characters (a quote or CR LF would inject) and
+`Set-Cookie`'s `Path` and `Domain` refusing bytes past ASCII. Several decisions were deliberately left: `HTTPHost` accepts what RFC
+3986's registered name does (`a,b`, `%00`), because a `Host` caller applies its own policy.<!-- src: HTTPBytes/RESULTS.md defects 2, 4, 5, 6 and "Lesser ones fixed" and "Not changed" paragraphs -->
+
+#### Round 2: Zstandard bodies
+
+`HTTPContentEncoder(.zstd)` encodes with BytesCompression's new `ZstdEncoder` ([section 8](#zstandard-encoding)), at level 3 with a
+512 KiB window (`ZstdEncoder.Parameters.httpWindowLog`). RFC 9659 caps the window of the `zstd` content coding at 8 MB; against level
+3's own 2 MB window, 512 KiB costs 0 to 4% in size on large bodies and nothing on bodies that fit in it, and takes the encoder's
+streaming memory from 3.7 to 2.1 MB. `reset()` starts another body and keeps the encoder's memory. One MB of text, the encoder
+reused, p50:<!-- src: HTTPBytes/RESULTS.md "round 2, Zstandard bodies" first paragraph ("level 3 with a 512 KiB window (`ZstdEncoder.Parameters.httpWindowLog`: RFC 9659 caps the window at 8 MB; against level 3's own 2 MB window it costs 0–4% in size, and the encoder's memory falls from 3.7 to 2.1 MB streaming). `reset()` starts another body keeping the encoder's memory") -->
+
+| Coding | Instructions | Time | Mallocs |
+|---|---|---|---|
+| gzip, level 6 | 138 M | 11.0 ms | 0 |
+| br, quality 5 | 183 M | 12.0 ms | 0 |
+| zstd, level 3, 512 KiB window | 26 M | 1.7 ms | 0 |
+<!-- src: HTTPBytes/RESULTS.md "round 2, Zstandard bodies" table (under load) -->
+
+`Allocations:Body_encode_zstd` is 0. Zstandard bodies are tested decoded whole, fed 7 and 1,000 bytes at a time, and through the
+coding-then-chunking pipeline and `HTTPBodyDecoder`.<!-- src: HTTPBytes/RESULTS.md same section ("`Allocations:Body_encode_zstd`: 0. Tests: zstd bodies decoded whole and fed 7 and 1,000 bytes at a time, and through the coding-then-chunking pipeline and `HTTPBodyDecoder`") -->
+
+#### Round 2: the new rows
+
+Beside the table above (`final-1`), round 2 added these, on the same machine:
+
+| Workload | HTTPBytes | Others |
+|---|---|---|
+| 1 MB body encoded, zstd level 3 | **1.7 ms, 0 mallocs** | gzip level 6: 11 ms |
+| 3,375 `Date`/`Last-Modified` values parsed | **44 µs** (13 ns each) | Foundation `Date.HTTPFormatStyle` 1,544 µs |
+| 1,000 IMF-fixdates written | **20 µs** | Foundation 272 µs |
+| QPACK encode, 383 responses, 4,096 table | 2,478 K instructions, **138 µs**; 53,137 B | ls-qpack 1,192 µs; 53,087 B |
+<!-- src: HTTPBytes/WRITEUP.md "Results at a glance" (rows "1 MB body encoded, zstd level 3 (round 2)", "3,375 Date/Last-Modified values parsed (round 2)", "1,000 IMF-fixdates written (round 2)") and HTTPBytes/RESULTS.md "QPACK encoder: draining, Duplicate, names alone" (benchmark rows and byte counts) -->
 
 #### What generalizes
 
@@ -6401,10 +6989,30 @@ of its input and HTTPBytes copies the partial last block instead: a safe API aga
 - **Other implementations' tests, a differential against your own previous code, and an adversarial reader** found what the
   author's tests did not, and an exact table of differences keeps the first of these honest.
 
+From round 2:
+
+- **A technique from another library is a hypothesis about your corpus, and so is its absence.** Skip windows were the idea
+  to copy, cursed-http's own response parser does not use them, and they made HTTP/1 responses slower at every setting tried.
+- **Do not give a hot loop a second exit or a new call to try an idea.** Cap its bound and call the new path after it.
+- **A framing stage must not be followed by one that can end first.** A body is one stage whose framing decides where it ends.
+- **A simulated peer must be consistent with itself, and the harness must be shown to fail:** break the code on purpose once.
+- **Fixed-width formats are SWAR problems.** A date is four words, one digit test, a perfect hash of the month, and Hinnant's
+  arithmetic; 13 ns, where Foundation takes 457.
+- **Vector scans are for runs of text; the grammar between them stays scalar.** Tokens, quoted strings, entity tags, and hosts moved
+  to `firstByteOffset(where:)`, and an entity tag fell 76% in instructions.
+- **A public generic must be `@inlinable`, or it boxes** ([section 5](#a-public-generic-that-is-not-inlinable-runs-unspecialized)):
+  `Accept-Encoding` negotiation went from 24 M instructions and 16,000 mallocs to 3.51 M and none.
+- **A literal that must be lowercase is an API trap**: fold both sides, or assert.
+- **Bound the storage by the answer, not by the order of arrival** (the range sweep), and **do not let one bad element discard
+  the good ones** (`Cache-Control`'s `no-store`).
+- **Port a reference decision for decision, and its output is your test oracle**: the Zstandard encoder's frames are libzstd's,
+  byte for byte ([section 8](#zstandard-encoding)).<!-- src: the sections above and AGENTS.md "HTTPBytes round 2" and "Zstandard encoding" lesson groups -->
+
 **When not to follow it.** The index classifies a whole 64-byte block before it knows how much of it will be used, so work past a
 short head's end is wasted: the batched variants (masks for 5 blocks at a time; a ring of 8) made 38-byte heads 55 → 86 and 55 → 92
-cycles. Tiny heads are also where HTTPBytes is slowest against C parsers that skip the partial-block copy, and a library that
-must not read past its input pays that copy. And a technique tuned on one corpus is tuned to it: measure on your own inputs.<!-- src: HTTPBytes/RESULTS.md "Tried and not kept" table (tiny 55 → 86 and 55 → 92); HTTPBytes/WRITEUP.md "Open items" (tiny heads) -->
+cycles. Tiny heads are also where HTTPBytes is slowest against C parsers that may read past the end of their input; round 2
+found that the gap is 8 to 11 cycles and that the partial-block copy is not its cause. And a technique tuned on
+one corpus is tuned to it: measure on your own inputs.<!-- src: HTTPBytes/RESULTS.md "Tried and not kept" table (tiny 55 → 86 and 55 → 92); "round 2, HTTP/1's remaining gaps" (the copy isn't the cost); HTTPBytes/WRITEUP.md "Open items" (tiny heads) -->
 
 ### 13. Measuring honestly
 
@@ -6519,6 +7127,15 @@ grammar, and CONNECT with a body.<!-- src: HTTPBytes/WRITEUP.md "Correctness" "O
 An adversarial review by an agent given the code and not the conclusions found 15 more, among them CR LF injection
 through an unchecked append and a smuggling check that `Content-Length: ,` slipped past; each became a probe package, then a
 regression test.<!-- src: HTTPBytes/WRITEUP.md "Adversarial reviews" (15 confirmed defects) -->
+
+#### A simulated peer must be consistent with itself, and the check must be shown to fail
+
+A test that stands in for the other end of a protocol has to obey the protocol's own promises. The QPACK encoder's harness
+decoded each section only after 16 sections' worth of encoder stream had arrived, and it failed an encoder whose
+acknowledgments came 4 sections late. The encoder was right: an acknowledgment says the peer has decoded the section, so the
+encoder may evict its entries afterwards. Deliver late only as far as the feedback says. Then break the encoder on purpose once
+(here: evicting without regard to unacknowledged sections, and allowing one blocked stream too many) and confirm the harness
+fails; [section 12](#round-2-qpack-at-ls-qpacks-size) has the case.<!-- src: AGENTS.md "A simulated peer must be consistent with itself (QPACK, 2026-11-23; HTTPBytes/RESULTS.md)"; HTTPBytes/RESULTS.md "QPACK encoder: draining, Duplicate, names alone" Tests paragraph -->
 
 #### Several agents at once
 
@@ -7598,7 +8215,7 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **Conditional select (`csel`)**: pick one of two registers by the condition flags, with no branch.
 - **Content coding**: how an HTTP message body is compressed (`Content-Encoding`: gzip, deflate, br, zstd). HTTPBytes'
   decoder takes a chunked body's data slice by slice, keeping a codec's unconsumed tail in a carry buffer, and is reset for
-  each body instead of made.
+  each body instead of made. The encoder codes with `ZstdEncoder` at level 3 and a 512 KiB window.
 - **Continuation, checked continuation, unsafe continuation**: a value an `async` function gets from
   `withCheckedContinuation` or `withUnsafeContinuation` to wait for something that is not `async`; it must be resumed
   exactly once. The checked form verifies that at the price of an allocation per wait; the unsafe form neither checks nor
@@ -7638,6 +8255,13 @@ Each term is bold where the text first defines it; this list collects the terms 
   `bottlenecks` mode reports it beside useful, front-end, and back-end cycles.
 - **Discarding task group**: a task group made with `withDiscardingTaskGroup` (SE-0381) for child tasks whose results are
   not collected.
+- **Double-fast (`dfast`), fast (Zstandard match-finding strategies)**: libzstd's strategies for levels 1 and 2 (`fast`: one hash
+  table of earlier positions, a step that grows while nothing matches) and 3 and 4 (`dfast`: a second table for long matches
+  beside the short ones). `ZstdEncoder` implements both and no others.
+- **Draining (QPACK)**: an entry of the dynamic table that a quarter of the capacity's insertions or less will evict
+  (RFC 9204 §2.1.1.1). An encoder does not refer to it as a name, and copies a field it holds to the table's front with a
+  **Duplicate** instruction (§4.3.4). HTTPBytes' encoder keeps each entry's place among all insertions' bytes and a boundary
+  number that moves forward as entries are inserted.
 - **Early exit**: a `return`, `throw`, or failing check inside a loop; it prevents vectorization, because the vector loop
   would already have run the lanes after the exit.
 - **Efficiency core (E core), performance core (P core)**: the slower and the faster core types on Apple silicon.
@@ -7687,6 +8311,9 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **HPACK**: HTTP/2's field compression (RFC 7541): a 61-entry static table, a dynamic table of recent fields, and a Huffman
   code for strings. HTTPBytes decodes Huffman with a 14-bit table whose entries decode one or two symbols, keeps dynamic
   entries contiguous and numbered by insertion, and caches each entry's validation.
+- **IMF-fixdate**: HTTP's preferred date format (RFC 9110 §5.6.7): `Sun, 06 Nov 1994 08:49:37 GMT`, always 29 bytes. `HTTPDate`
+  reads it as four 8-byte words (masks for the fixed bytes, one SWAR test for the 14 digits, a perfect hash for the month) and
+  turns the date into days with Hinnant's `days_from_civil`, without branches.
 - **Independent chains**: separate dependency chains interleaved in one loop so their latencies overlap: eight ChaCha20
   blocks at once in place of four, eight CRC fold accumulators, eight `udot` accumulators for Adler-32's weighted sum, and a
   byte sum started from zero in each step so that no step waits on the one before.
@@ -7788,14 +8415,15 @@ Each term is bold where the text first defines it; this list collects the terms 
   modules and builds.
 - **Perfect hash**: a hash function chosen, by a generator, so that no two keys of a fixed set share a slot: a lookup is one
   hash, one load, and one comparison, with no probing. HTTPBytes' known field names (about 120) are looked up from the name's
-  length and two 8-byte words.
+  length and two 8-byte words, and `HTTPDate`'s month from its three letters (times 26,596, shifted right by 28, into 16 slots).
 - **Pipeline stage (`ByteTransform`)**: a transform from input spans into an output span that reports what it consumed and
   produced, as zlib's `deflate` and `inflate` do; stages compose with `then` into a `Pipeline` that specializes to one
   function.
 - **Pipeline, superscalar**: overlapping instruction stages; starting several instructions per cycle.
 - **Placement**: how SocketStream assigns executors: `threadPerTask` (a single-thread `PThreadTaskExecutor` for every
   sender and receiver) or `sharedPool` (one pool of threads for every task).
-- **Prefetching**: loading cache lines before they are asked for, when a pattern is detected.
+- **Prefetching**: loading cache lines before they are asked for, when a pattern is detected, or on request: the compiler's
+  `Builtin.int_prefetch_RawPointer` emits `prfm` (`ZstdEncoder`'s match search, where libzstd's prefetches took 2.5 to 8% off level 1).
 - **Process model (package-benchmark)**: one process to list the benchmarks, then one per benchmark, each running the
   whole registration closure.
 - **`PThreadTaskExecutor`**: swift-platform-executors' task executor that owns its threads, with an I/O backend; SocketStream
@@ -7809,7 +8437,8 @@ Each term is bold where the text first defines it; this list collects the terms 
   `reuse` takes them back before the next.
 - **QPACK**: HTTP/3's field compression (RFC 9204): HPACK redesigned for streams that arrive out of order. A field section can
   name a table entry that has not arrived (a **blocked stream**); HTTPBytes' decoder records the stream and the caller, which
-  already holds its bytes, decodes it when `nextUnblockedStream()` names it.
+  already holds its bytes, decodes it when `nextUnblockedStream()` names it. The encoder inserts a field on its second
+  sighting, refers to a **draining** entry's **Duplicate** instead, and inserts a recurring name alone.
 - **rANS**: the ANS entropy coder of LZRAVEN's literals; its decoder interleaves eight states, and its refill branches stay
   branches because their mispredictions are off the critical path.
 - **Record (`BinaryParsable`, `BinaryWritable`, `FixedSizeBinary`)**: a fixed run of fields read or written in one call;
@@ -7825,7 +8454,8 @@ Each term is bold where the text first defines it; this list collects the terms 
   claiming the next index of a work queue (`claim(below:)`); `RelaxedCounters` holds *N* of them in one allocation.
 - **Request smuggling**: attacking a chain of HTTP servers that disagree about where a message ends (Content-Length against
   chunked, obsolete line folding, a comma in a length). A parser's framing rules are tested against other implementations'
-  smuggling suites, with every deliberate difference listed.
+  smuggling suites, with every deliberate difference listed. Composing a chunked decoder before a gzip decoder with `then` invites it: the
+  pipeline ends at the gzip stream, so `HTTPBodyDecoder` makes a body one stage that ends where its framing does.
 - **`resumeSynchronously`**: the PR toolchain's continuation call that swift-platform-executors uses to resume a suspended
   socket operation directly from the event loop, on the thread where it suspended.
 - **Root table, subtable**: `HuffmanTable`'s layout: a table indexed by the next `rootBits` bits (10 by default), in which
@@ -7849,6 +8479,10 @@ Each term is bold where the text first defines it; this list collects the terms 
   can move to another domain even though its type is not `Sendable`.
 - **SIL (Swift Intermediate Language)**: the compiler's Swift-aware IR where inlining, specialization, and ARC passes run.
 - **SIMD, vector instruction**: Single Instruction, Multiple Data: one instruction operating on several values at once.
+- **Single-segment frame (Zstandard)**: a frame whose window is its content, so a decoder needs no window beyond the frame's
+  size. `ZstdEncoder` makes one only when the content size is known and fits the configured window.
+- **Skip window**: cursed-http's test "is there a control byte in the next 256, then 512 bytes?" (an add and a signed minimum per
+  16 bytes) in place of an exact mask, for long lines. HTTPBytes tried it and did not keep it.
 - **Slack (`BitWriter.slack`)**: the 8 bytes of room past the last whole byte that a bit writer's flush needs, because it
   stores all 8 bytes of its register and advances only past the whole ones.
 - **Span**: a view of contiguous memory, conceptually a pointer and a count, with the compiler's promise that the memory
@@ -7880,7 +8514,11 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **Suspension point**: an `await` where the task may give up its thread; an `await` of something already ready does not
   suspend and costs only a call.
 - **SWAR (SIMD within a register)**: ordinary 64-bit integer operations on eight packed byte fields at once, as in reading
-  up to 8 ASCII digits with one load, one check, and three multiplies.
+  up to 8 ASCII digits with one load, one check, and three multiplies, or an HTTP date's 14 digits tested with an XOR, an add,
+  and a mask per 8-byte word.
+- **Sweep (merging into bounded storage)**: producing a union of ranges by repeatedly finding the lowest range not yet covered and
+  growing it while anything touches it, re-reading the input each time, so the storage holds only the answer
+  (`HTTPRangeSet.resolve`); inserting in arrival order can need more slots on the way than the answer has.
 - **`swift_once`**: the runtime call behind lazily initialized globals and `static let`s.
 - **`swift_task_switch`, executor check**: the runtime call at the entry of an `async` function, and after each call that
   might have changed executors. When the task is already where it must be, it returns at once (a check) and nothing moves.
@@ -7895,7 +8533,13 @@ Each term is bold where the text first defines it; this list collects the terms 
   code in them runs there; set per child with `addTask(executorPreference:)`.
 - **Task priority**: a task's scheduling priority, which a child inherits from its parent; an `async` `main` runs at 21
   (`.medium`).
+- **Test oracle**: a trusted implementation whose output a new one is compared with, byte for byte. `ZstdEncoder` was ported
+  decision for decision from libzstd, so libzstd's frame is the oracle: a slip shows at the first differing byte, where a round
+  trip would pass.
 - **Thunk**: a compiler-generated wrapper function; merged closures called through one kept a writer in memory.
+- **Top-aligned code (Huffman writer)**: a code table entry with its code value in the high bits and its length in the low 8
+  (`value << (64 - length) | length`), so adding a code to a right-shifting container is one shift and one OR, the shift
+  amount being the entry itself.
 - **Type metadata, witness table, value witness table**: the run-time descriptions generic code uses for types it cannot
   see.
 - **Typed span of blocks**: a `Span` whose elements are fixed-size blocks (`Span<InlineArray<48, UInt8>>`); loop indices

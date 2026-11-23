@@ -88,8 +88,9 @@ public struct ZstdEncoder: ~Copyable {
 
         /// A window for HTTP's `zstd` content coding: 512 KB (log 19).
         ///
-        /// RFC 9659 requires encoders to keep the window at most 8 MB, decoders to support that much. 512 KB keeps an
-        /// encoder's streaming memory under 1 MB and costs bodies smaller than it nothing (their frames are a single
+        /// RFC 9659 requires encoders to keep the window at most 8 MB, decoders to support that much. 512 KB keeps a
+        /// level 3 encoder's streaming memory at 2.1 MB (3.7 MB with level 3's own 2 MB window; level 1: 1.4 MB) and
+        /// costs bodies smaller than it nothing (their frames are a single
         /// segment, their window their size); on larger bodies, ratios are within a few percent of level 3's 2 MB
         /// window (Benchmarks/RESULTS-zstd-encoder.md).
         @inlinable
