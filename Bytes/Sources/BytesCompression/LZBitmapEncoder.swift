@@ -49,6 +49,8 @@ public struct LZBitmapEncoder: ~Copyable {
 
     /// Encodes `input` as one LZBITMAP stream, appending it to `output`: Compression's bytes for the input.
     ///
+    /// Every call starts a new stream: an encoder used before writes what a fresh one would, keeping its memory.
+    ///
     /// - Parameters:
     ///   - input: The data, under 4 GiB.
     ///   - output: Where to append the stream. Its free capacity is Compression's destination size: the stream

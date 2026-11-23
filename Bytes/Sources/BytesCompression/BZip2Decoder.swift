@@ -54,8 +54,9 @@ public struct BZip2Decoder: ~Copyable {
 
     /// Decodes a bzip2 stream, and any streams that directly follow it, into `output`'s free capacity.
     ///
-    /// The fastest way to decode, when the output has room for all of it. It discards any stream
-    /// ``decompress(_:into:)`` was decoding (as ``reset()`` does).
+    /// The fastest way to decode, when the output has room for all of it. Every call starts a new stream: a decoder
+    /// used before (by any call) starts over as after ``reset()``, keeping its memory, so it discards any stream
+    /// ``decompress(_:into:)`` was decoding.
     ///
     /// - Parameters:
     ///   - input: The stream, at its `BZh` header. Bytes after the last stream's end marker (rounded up to a

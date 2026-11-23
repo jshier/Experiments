@@ -1,5 +1,6 @@
 import BytesAsync
 import BytesTestSupport
+import BytesTesting
 import Darwin
 @testable import Disk
 import DiskTestSupport
@@ -9,13 +10,14 @@ import Testing
 
 /// Every entry kind and metadata item through the synchronous API (``Destination``, ``FileWriter``), and the call
 /// ordering rules.
-@Suite struct DestinationTests {
+@Suite(.diskLifetimes) struct DestinationTests {
     @Test func writesFilesWithParentsModesAndTimes() throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         var options = DestinationOptions()
         options.permissions = .exact
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         var writer = FileWriter(destination)
         let bytes = testBytes(10_000, seed: 1, compressible: true)
         let times = EntryTimes(modification: Timestamp(seconds: 1_000_000_000, nanoseconds: 123), creation: Timestamp(seconds: 900_000_000))
@@ -36,6 +38,7 @@ import Testing
         defer { directory.remove() }
         let mask = getumask()
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         var writer = FileWriter(destination)
         try withPath("f") { try writer.writeFile($0, contents: ([1, 2, 3] as [UInt8]).span.bytes, metadata: EntryMetadata(mode: 0o777)) }
         #expect(try readItem(at: directory.path("out/f")).mode == 0o777 & ~UInt16(mask))
@@ -50,6 +53,7 @@ import Testing
         options.permissions = .exact
         options.keepsSpecialBits = keep
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         var writer = FileWriter(destination)
         try withPath("setuid") { try writer.writeFile($0, contents: ([1] as [UInt8]).span.bytes, metadata: EntryMetadata(mode: 0o4755)) }
         try withPath("sticky-dir") { try destination.makeDirectory($0, metadata: EntryMetadata(mode: 0o1777)) }
@@ -64,6 +68,7 @@ import Testing
         var options = DestinationOptions()
         options.restoresOwnership = true
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         var writer = FileWriter(destination)
         // Root's own file: as a user, the owner isn't restored (and isn't an error).
         try withPath("owned") { try writer.writeFile($0, contents: ([1] as [UInt8]).span.bytes, metadata: EntryMetadata(owner: Owner(user: 0, group: 0))) }
@@ -78,6 +83,7 @@ import Testing
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         var writer = FileWriter(destination)
         let times = EntryTimes(modification: Timestamp(seconds: 1_234_567_890, nanoseconds: 5))
         for (name, size) in [("small", 2_000), ("fork", 300_000), ("batches", 1_100_000)] {
@@ -109,6 +115,7 @@ import Testing
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         var writer = FileWriter(destination)
         let bytes = testBytes(2_000, seed: 5, compressible: true)
         let form = try withPath("bare") { try writer.writeFile($0, contents: bytes.span.bytes, storage: .compressed(.appleArchive)) }
@@ -145,6 +152,7 @@ import Testing
         var options = DestinationOptions()
         options.permissions = .exact
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         // Through the scheduler: attachments wait for the writers, then the mode.
         var blob = ExtendedAttributeBlob()
         blob.append(name: "com.example.tag", value: ([7, 8, 9] as [UInt8]).span.bytes)
@@ -167,6 +175,7 @@ import Testing
         var options = DestinationOptions()
         options.permissions = .exact
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         var writer = FileWriter(destination)
         try withPath("dir/file") { try writer.writeFile($0, contents: ([1, 2, 3] as [UInt8]).span.bytes) }
         let times = EntryTimes(modification: Timestamp(seconds: 1_111_111_111))
@@ -194,6 +203,7 @@ import Testing
         options.quarantinesDestination = true
         #expect(options.quarantine?.value == value)
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         var writer = FileWriter(destination)
         try withPath("d/f") { try writer.writeFile($0, contents: ([1] as [UInt8]).span.bytes) }
         try withPath("d") { try destination.finishDirectory($0, metadata: EntryMetadata()) }
@@ -210,6 +220,7 @@ import Testing
             var options = DestinationOptions()
             options.existingItems = policy
             let destination = try Destination(directory.filePath("\(policy)"), options: options)
+            defer { destination.close() }
             var writer = FileWriter(destination)
             try withPath("f") { try writer.writeFile($0, contents: ([1] as [UInt8]).span.bytes) }
             let result = Result { try withPath("f") { try writer.writeFile($0, contents: ([2, 2] as [UInt8]).span.bytes) } }
@@ -252,7 +263,7 @@ import Testing
 }
 
 
-@Suite struct ClientHooksTests {
+@Suite(.diskLifetimes) struct ClientHooksTests {
     /// `existingItem(at:)` sees what's there, never through a link (NativeZip's freshen and "replace?" questions).
     @Test func reportsExistingItems() throws {
         let directory = try TemporaryDirectory()
@@ -262,6 +273,7 @@ import Testing
         try Data([1, 2, 3]).write(to: out.appending(path: "dir/file"))
         try FileManager.default.createSymbolicLink(atPath: out.appending(path: "link").path, withDestinationPath: "dir")
         let destination = try Destination(FilePath(out.path))
+        defer { destination.close() }
         #expect(try withPath("dir/file") { try destination.existingItem(at: $0) }?.kind == .file)
         #expect(try withPath("dir/file") { try destination.existingItem(at: $0) }?.size == 3)
         #expect(try withPath("dir") { try destination.existingItem(at: $0) }?.kind == .directory)
@@ -276,9 +288,11 @@ import Testing
             let seen = RelaxedCounter()
             let writers: Int
             init(writers: Int) { self.writers = writers }
-            func write(_ contents: Int, to output: inout FileOutput) async throws(DiskError) {
+            func write(_ contents: Int, to output: inout FileOutput) async throws(EntryError<Never>) {
                 if output.writerIndex >= 0, output.writerIndex < writers { seen.add() }
-                try await output.write(([UInt8(truncatingIfNeeded: contents)] as [UInt8]).span.bytes)
+                try await EntryError<Never>.fromDisk { () async throws(DiskError) in
+                    try await output.write(([UInt8(truncatingIfNeeded: contents)] as [UInt8]).span.bytes)
+                }
             }
             func release(_ contents: Int) {}
         }
@@ -287,14 +301,37 @@ import Testing
         var options = ExtractionSettings()
         options.writers = 3
         let source = IndexSource(writers: 3)
-        try await Extraction.run(into: try Destination(directory.filePath("out")), source: source, settings: options) { (planner: inout Planner<IndexSource>) throws(DiskError) in
+        let destination = try Destination(directory.filePath("out"))
+        try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<IndexSource>) throws(DiskError) in
             for index in 0..<100 { _ = try await planFile(&planner, "f\(index)", index: index, size: 1) }
         }
+        destination.close()
         #expect(source.seen.value == 100)
     }
 }
 
-@Suite struct TreeRemovalTests {
+/// Mappings on a volume where a truncated mapping faults (an exFAT disk image: `hdiutil`, about 2 s).
+@Suite(.bulk, .diskLifetimes) struct MappingBulkTests {
+    /// On exFAT, `.automatic` maps a private copy: the file truncated under it, every page still reads its bytes (the
+    /// file itself mapped would raise `SIGBUS` on 675 of 676 pages past the new end: RESULTS.md, 2026-11-23).
+    @Test(.timeLimit(.minutes(1))) func mapsACopyWhereTruncationFaults() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let image = directory.path("volume.dmg").path, mount = directory.path("mount").path
+        try ExternalTool.run("/usr/bin/hdiutil", ["create", "-quiet", "-size", "64m", "-fs", "ExFAT", "-volname", "DiskTest", "-o", image])
+        try ExternalTool.run("/usr/bin/hdiutil", ["attach", "-quiet", "-nobrowse", "-mountpoint", mount, image])
+        defer { _ = try? ExternalTool.run("/usr/bin/hdiutil", ["detach", "-quiet", "-force", mount]) }
+        let bytes = testBytes(16 << 20, seed: 14, compressible: false)
+        let file = URL(filePath: mount).appending(path: "archive")
+        try Data(bytes).write(to: file)
+        let mapped = try MappedFile(path: FilePath(file.path), access: .sequential)
+        #expect(mapped.isCopy)
+        #expect(truncate(file.path, 4_096) == 0)
+        #expect(Array(mapped.buffer(0..<mapped.count)) == bytes)
+    }
+}
+
+@Suite(.diskLifetimes) struct TreeRemovalTests {
     /// Removes read-only directories, locked files, and links (not what they point at).
     @Test func removesExtractedTrees() throws {
         let directory = try TemporaryDirectory()
@@ -315,7 +352,7 @@ import Testing
     }
 }
 
-@Suite struct QuarantineTests {
+@Suite(.diskLifetimes) struct QuarantineTests {
     /// Parents an archive doesn't list are made on the way to its files: with a quarantine they get it too (files and
     /// listed directories always did), in both directory resolutions; the destination itself only when asked.
     @Test(arguments: [DirectoryResolution.paths, .descriptors])
@@ -327,6 +364,7 @@ import Testing
         options.quarantine = Quarantine(value: value)
         options.directoryResolution = resolution
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         let source = ArraySource([[1], [2], [3]])
         let report = try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
             _ = try await planFile(&planner, "a/b/c/one", index: 0, size: 1)
@@ -347,18 +385,85 @@ import Testing
         #expect(stat(directory.path("out/a/b/c")).map { $0.st_mode & 0o777 } == 0o755 & ~getumask())
     }
 
+    #if DEBUG
+    /// A volume that can't hold extended attributes (`ENOTSUP`, `EOPNOTSUPP`: some network and FAT volumes) gets no
+    /// quarantine, and that isn't a failure: every item is counted in the report instead (files, listed and unlisted
+    /// directories, links, the destination itself). Any other error still fails the item.
+    @Test(arguments: [ENOTSUP, EOPNOTSUPP, EIO])
+    func quarantineOnAVolumeWithoutExtendedAttributes(_ code: Int32) async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        var options = DestinationOptions()
+        options.quarantine = Quarantine(value: Array("0083;673e3000;Safari;".utf8))
+        let faults = SyscallFaults(failing: [.fsetxattr: code, .setxattr: code])
+        let path = directory.filePath("out")
+        let outcome: (Destination, ExtractionReport)? = try await faults.run { () async throws -> (Destination, ExtractionReport)? in
+            let destination = try Destination(path, options: options)
+            let source = ArraySource([[1], [2], [3]])
+            var settings = ExtractionSettings()
+            settings.stopsOnFirstFailure = false
+            let report = try await Extraction.run(into: destination, source: source, settings: settings) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+                _ = try await planFile(&planner, "a/b/one", index: 0, size: 1, tag: 0)
+                try withPath("a") { (path) throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o750)) }
+                _ = try await planFile(&planner, "two", index: 1, size: 1, tag: 1)
+                _ = try await planFile(&planner, "three", index: 2, size: 1, tag: 2)
+                try withPath("link") { (path) throws(DiskError) in _ = try planner.symbolicLink(path, target: Array("two".utf8).span.bytes) }
+            }
+            return (destination, report)
+        }
+        let (destination, report) = try #require(outcome)
+        defer { destination.close() }
+        if code == EIO {
+            // Each item fails (the files and the link; directories fail in their pass).
+            #expect(!report.failures.isEmpty && report.unquarantinedItems == 0)
+            #expect(report.failures.allSatisfy { $0.error == .disk(.system("setxattr quarantine", path: $0.path, Errno(rawValue: EIO))) }, "\(report.failures)")
+        } else {
+            // one, two, three, link, a/b, and a twice (made as a parent, then listed: quarantined both times).
+            #expect(report.failures.isEmpty, "\(report.failures)")
+            #expect(report.files == 3 && report.symbolicLinks == 1)
+            #expect(report.unquarantinedItems == 7 && destination.unquarantinedItems == 7, "\(report.unquarantinedItems)")
+            #expect(extendedAttribute("com.apple.quarantine", of: directory.path("out/two")) == nil)
+            #expect(try readItem(at: directory.path("out/three")).contents == [3])
+        }
+        #expect(faults.injected > 0)
+    }
+
+    /// The destination itself on such a volume: opened, counted, not failed.
+    @Test func quarantinedDestinationOnAVolumeWithoutExtendedAttributes() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        var options = DestinationOptions()
+        options.quarantine = Quarantine(value: Array("0083;673e3000;Safari;".utf8))
+        options.quarantinesDestination = true
+        let path = directory.filePath("out")
+        let faults = SyscallFaults(failing: [.fsetxattr: ENOTSUP, .setxattr: ENOTSUP])
+        let destination = try faults.run { try Destination(path, options: options) }
+        defer { destination.close() }
+        #expect(destination.unquarantinedItems == 1)
+        // A client's reopened destination counts into its caller's: the app reads its staging directory's count.
+        let reopened = try destination.reopened(with: options)
+        try faults.run {
+            try withPath("dir") { try reopened.makeDirectory($0) }
+            try withPath("dir") { try reopened.finishDirectory($0, metadata: EntryMetadata()) }
+        }
+        reopened.close()
+        #expect(destination.unquarantinedItems == 2)
+    }
+    #endif
+
     /// Without a quarantine, unlisted parents cost nothing: no attribute, no call.
     @Test func leavesUnlistedParentsAloneWithoutOne() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         try await extract([("a/b/one", [1])], into: destination)
         #expect(extendedAttribute("com.apple.quarantine", of: directory.path("out/a")) == nil)
         #expect(extendedAttribute("com.apple.quarantine", of: directory.path("out/a/b/one")) == nil)
     }
 }
 
-@Suite struct FilesTests {
+@Suite(.diskLifetimes) struct FilesTests {
     /// A mapped file's span and buffers are the file's bytes; an empty file maps to nothing; a missing one throws
     /// `open`'s error.
     @Test func mapsFiles() throws {
@@ -386,6 +491,24 @@ import Testing
         #expect(Array(prefix.buffer(0..<4_096)) == Array(bytes[..<4_096]))
     }
 
+    /// A private copy holds the file's bytes as they were: truncating the file afterwards changes nothing mapped, and
+    /// the copy (unlinked when made) leaves nothing behind. On APFS, `.automatic` maps the file itself.
+    @Test func mapsPrivateCopies() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let bytes = testBytes(300_000, seed: 12, compressible: false)
+        try Data(bytes).write(to: directory.path("file"))
+        let path = directory.filePath("file")
+        let copy = try MappedFile(path: path, source: .copy)
+        let direct = try MappedFile(path: path)
+        #expect(copy.isCopy && !direct.isCopy)
+        #expect(truncate(path.string, 10) == 0)
+        #expect(Array(copy.buffer(0..<copy.count)) == bytes)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: directory.url.path) == ["file"])
+        let temporary = try FileManager.default.contentsOfDirectory(atPath: NSTemporaryDirectory())
+        #expect(!temporary.contains { $0.hasPrefix("Disk-mapped-") })
+    }
+
     /// A range of a file maps from any offset (not just page boundaries); ranges past the end are refused.
     @Test func mapsRanges() throws {
         let directory = try TemporaryDirectory()
@@ -393,6 +516,7 @@ import Testing
         let bytes = testBytes(100_000, seed: 8, compressible: false)
         try Data(bytes).write(to: directory.path("file"))
         let file = try InputFile(directory.filePath("file"))
+        defer { file.close() }
         for range in [0..<100_000, 1..<2, 4_095..<4_097, 16_384..<50_000, 99_999..<100_000, 70_000..<70_000] {
             let mapped = try file.map(range: range, access: .sequential)
             #expect(mapped.count == range.count)
@@ -408,6 +532,7 @@ import Testing
         let bytes = testBytes(10_000, seed: 3, compressible: false)
         try Data(bytes).write(to: directory.path("file"))
         let file = try InputFile(directory.filePath("file"))
+        defer { file.close() }
         let buffer = UnsafeMutableRawBufferPointer.allocate(byteCount: 5_000, alignment: 16)
         defer { unsafe buffer.deallocate() }
         try unsafe file.read(at: 4_000, into: buffer)
@@ -427,6 +552,10 @@ import Testing
             try output.write(bytes.span.bytes.extracting(200_000...), at: 200_000)
             try output.write(bytes.span.bytes.extracting(..<200_000), at: 0)
             try output.write(RawSpan(), at: 5)
+            try output.close()
+            // Closed: writes fail with `EBADF`, and closing again is nothing.
+            #expect(throws: DiskError.self) { try output.write(([1] as [UInt8]).span.bytes, at: 0) }
+            try output.close()
         }
         #expect(try [UInt8](Data(contentsOf: directory.path("out.bin"))) == bytes)
         #expect(stat(directory.path("out.bin")).map { $0.st_mode & 0o777 } == 0o644 & ~getumask())
@@ -434,6 +563,7 @@ import Testing
         do {
             let output = try OutputFile(path, replacing: true, mode: [.ownerReadWrite])
             try output.write(([1, 2, 3] as [UInt8]).span.bytes, at: 0)
+            try output.close()
         }
         #expect(try [UInt8](Data(contentsOf: directory.path("out.bin"))) == [1, 2, 3])
         #expect(throws: DiskError.self) { _ = try OutputFile(directory.filePath("no/such/dir/file"), replacing: true) }
@@ -444,6 +574,7 @@ import Testing
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         #expect(destination.isCaseSensitive == (pathconf(directory.path("out").path, _PC_CASE_SENSITIVE) == 1))
     }
 }

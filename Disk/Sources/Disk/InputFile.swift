@@ -3,8 +3,9 @@ import Darwin
 public import System
 
 /// A file opened for reading at a path of the caller's choosing: an archive's headers and blocks, read with positioned
-/// reads, or mapped (``map(access:)``). Closed on deinit. Small files (keys, passwords) are read whole with
-/// ``contents(of:maximumCount:)``.
+/// reads, or mapped (``map(access:)``). Close it with ``close()`` when the last read is done (destroying it unclosed
+/// still closes it, but Disk's descriptor audit counts that as a lifetime bug). Small files (keys, passwords) are read
+/// whole with ``contents(of:maximumCount:)``.
 ///
 /// ```swift
 /// let archive = try InputFile(FilePath("/tmp/a.aar"))
@@ -16,7 +17,9 @@ public import System
 /// Reads keep no file position (`pread`), so several tasks can read one file at once. The path is the caller's own:
 /// links in it are followed, as `open` follows them. (Entries of an archive go through a ``Destination``.)
 public final class InputFile: Sendable {
-    private let descriptor: Int32
+    private let slot: DescriptorSlot
+    /// The descriptor (-1 after ``close()``: reads then fail with `EBADF`).
+    private var descriptor: Int32 { slot.descriptor }
     /// Where the file is.
     public let path: FilePath
     /// The file's size in bytes when it was opened (`fstat`): what reads are checked against.
@@ -35,13 +38,14 @@ public final class InputFile: Sendable {
             Sys.close(descriptor)
             throw .system("fstat", path: path.string, Errno(rawValue: code))
         }
-        self.descriptor = descriptor
+        slot = DescriptorSlot(OwnedDescriptor(adopting: descriptor, kind: .inputFile))
         self.path = path
         count = Int(info.st_size)
     }
 
-    deinit {
-        Sys.close(descriptor)
+    /// Closes the file: the end of its use (reads after it fail). Safe to call more than once, from any thread.
+    public func close() {
+        slot.close()
     }
 
     /// Fills `bytes` from `offset`, with as many positioned reads as it takes (one, unless the kernel returns less).
@@ -127,12 +131,15 @@ public final class InputFile: Sendable {
     /// The whole file at `path`: a key, a password, a small configuration file. Read to its end whatever its size says,
     /// so pipes (`/dev/stdin`, a shell's `<(…)`) work too.
     ///
-    /// - Parameter maximumCount: The most bytes accepted.
+    /// - Parameters:
+    ///   - path: The file (or pipe).
+    ///   - maximumCount: The most bytes accepted.
     /// - Throws: ``DiskError/tooLarge(_:limit:)`` for a longer file (before reading it, when its size says so), or
     ///   ``DiskError/system(_:path:_:)`` with `open`'s or `read`'s error.
     public static func contents(of path: FilePath, maximumCount: Int) throws(DiskError) -> [UInt8] {
         precondition(maximumCount >= 0, "a negative maximum count")
         let file = try InputFile(path)
+        defer { file.close() }
         guard file.count <= maximumCount else { throw .tooLarge(path.string, limit: maximumCount) }
         // Room for one byte past the limit, to see a file that grew (or a pipe) go over it.
         let cap = maximumCount < Int.max ? maximumCount + 1 : maximumCount

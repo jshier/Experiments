@@ -10,7 +10,7 @@ import System
 import Testing
 
 /// LZVN: AEA segments (`f`) and `pbzf` blocks, made by Apple's AppleArchive library, decoded with Bytes' LZVN decoder.
-@Suite struct LZVNTests {
+@Suite(.diskLifetimes) struct LZVNTests {
     /// libcompression's LZVN (`ArchiveCompression` isn't `Sendable`, so made where it's used).
     static var lzvn: ArchiveCompression { ArchiveCompression(rawValue: 0x900) }
 
@@ -43,6 +43,7 @@ import Testing
         let url = directory.path("lzvn.aea")
         let key = try makeLZVNArchive(input, url, blockSize: blockSize)
         let archive = try AEAArchive(url: url, signingKey: .publicKey(key))
+        defer { archive.close() }
         #expect(archive.rootHeader.compression == .lzvn)
         let output = directory.path("out.bin")
         for threads in [1, 4] {
@@ -76,6 +77,7 @@ import Testing
         try input.close()
 
         let archiveFile = try AppleArchiveFile(path: FilePath(pbz.path))
+        defer { archiveFile.close() }
         #expect(archiveFile.compression == .lzvn)
         let destination = directory.path("out")
         try await archiveFile.extract(to: FilePath(destination.path))
@@ -84,7 +86,9 @@ import Testing
         let url = directory.path("pbzf.aea")
         let key = try makeLZVNArchive(pbz, url, blockSize: 65_536)
         let nested = directory.path("nested")
-        try await AEAArchive(url: url, signingKey: .publicKey(key)).extract(to: FilePath(nested.path))
+        let opened = try AEAArchive(url: url, signingKey: .publicKey(key))
+        defer { opened.close() }
+        try await opened.extract(to: FilePath(nested.path))
         #expect(try readTree(nested, including: .entries) == readTree(source, including: .entries))
     }
 }

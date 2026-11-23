@@ -121,6 +121,37 @@ import Testing
         }
     }
 
+    /// Concatenated streams: gzip members (RFC 1952 §2.2) and zstd frames (RFC 8878 §3) decode to their contents joined,
+    /// whatever the pieces: chunk boundaries and handed-over pieces falling exactly between members included. Data after
+    /// a member that isn't another member is still refused.
+    @Test(arguments: [HTTPContentCoding.gzip, .zstd])
+    func concatenatedStreamsDecodeWhole(coding: HTTPContentCoding) throws {
+        let parts = [Array(Self.body.prefix(3_000)), Array(Self.body.dropFirst(3_000).prefix(10_000)), [], Array(Self.body.suffix(7))]
+        let streams = try parts.map { try ContentCodingTests.encode($0, coding) }
+        let coded = streams.flatMap { $0 }
+        let expected = parts.flatMap { $0 }
+        let next = Array("GET / HTTP/1.1\r\n".utf8)
+        // Chunks that end exactly where each member does, then fixed-size chunks; pieces whole, odd, and a byte each.
+        let byMember = streams.filter { !$0.isEmpty }.reduce(into: [UInt8]()) { wire, stream in
+            wire += Array(String(stream.count, radix: 16).utf8) + [13, 10] + stream + [13, 10]
+        } + Array("0\r\n\r\n".utf8)
+        for wire in [byMember, Self.chunked(coded, size: 1_000)] {
+            for (step, room) in [(100_000, 65_536), (streams[0].count, 4_096), (333, 100), (1, 4_096)] {
+                let result = try Self.decode(wire + next, framing: .chunked, encoding: String(describing: coding.token), step: step, room: room)
+                #expect(result.body == expected, "\(coding) \(step)")
+                #expect(result.consumed == wire.count)
+            }
+        }
+        // By length, ending exactly at a member's end.
+        let byLength = try Self.decode(coded + next, framing: .length(coded.count), encoding: String(describing: coding.token), step: streams[0].count, room: 512)
+        #expect(byLength.body == expected && byLength.consumed == coded.count)
+        // Cut inside the second member: malformed, not the first member's bytes alone.
+        #expect(throws: HTTPPayloadError.malformed) {
+            let cut = streams[0] + streams[1].prefix(20)
+            _ = try Self.decode(cut, framing: .length(cut.count), encoding: String(describing: coding.token), step: 1_000, room: 4_096)
+        }
+    }
+
     @Test func stackedTruncationIsCaughtAtTheEnd() throws {
         let plain = Array(Self.body.prefix(1_300))
         let coded = try ContentCodingTests.encode(try ContentCodingTests.encode(plain, .gzip), .brotli)

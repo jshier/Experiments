@@ -9,11 +9,16 @@ public extension ZipArchive {
     ///
     /// - Parameter url: The archive's file URL.
     /// - Returns: The entries, as ``ZipArchive/init(url:)`` would index them.
-    /// - Throws: `DiskError` if the file can't be opened or mapped; ``ZipError`` if the central directory is
+    /// - Throws: ``ZipError/disk(_:)`` if the file can't be opened or mapped; ``ZipError`` if the central directory is
     ///   missing, truncated, or invalid.
     @_spi(Benchmarking)
-    static func entriesUsingByteReader(of url: URL) throws -> [ZipEntry] {
-        let file = try MappedFile(path: .init(url.path(percentEncoded: false)))
+    static func entriesUsingByteReader(of url: URL) throws(ZipError) -> [ZipEntry] {
+        let file: MappedFile
+        do throws(DiskError) {
+            file = try MappedFile(path: .init(url.path(percentEncoded: false)))
+        } catch {
+            throw ZipError(error)
+        }
         return try ByteReaderParsing.readEntries(file.bytes)
     }
 
@@ -23,7 +28,7 @@ public extension ZipArchive {
     /// - Returns: The payload's byte count.
     /// - Throws: ``ZipError`` if the local header is missing or damaged, or the payload runs past the end.
     @_spi(Benchmarking)
-    func payloadCountUsingByteReader(of entry: ZipEntry) throws -> Int {
+    func payloadCountUsingByteReader(of entry: ZipEntry) throws(ZipError) -> Int {
         try ByteReaderParsing.payload(of: entry, in: file.bytes).byteCount
     }
 
@@ -33,7 +38,7 @@ public extension ZipArchive {
     /// - Returns: The payload's byte count.
     /// - Throws: ``ZipError`` if the local header is missing or damaged, or the payload runs past the end.
     @_spi(Benchmarking)
-    func payloadCount(of entry: ZipEntry) throws -> Int {
+    func payloadCount(of entry: ZipEntry) throws(ZipError) -> Int {
         try Self.payload(of: entry, in: file.bytes).byteCount
     }
 }

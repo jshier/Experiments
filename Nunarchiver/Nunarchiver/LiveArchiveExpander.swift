@@ -3,6 +3,7 @@ import Darwin
 import Disk
 import Foundation
 import NativeAEA
+import NativeZip
 import OSLog
 import Synchronization
 import System
@@ -42,16 +43,15 @@ final class LiveArchiveExpander: ArchiveExpander {
         // (no window yet, not frontmost) otherwise ran its writers at background QoS, every thread at priority 4 on the
         // efficiency cores (Xcode's xip: minutes instead of 10 s). A child task keeps the caller's cancellation.
         let outcome = await withPriority(.userInitiated) { () async -> ExpansionOutcome in
-            do {
+            do throws(ExpansionError) {
                 return .expanded(try await Expander.expand(FilePath(archive.path), credentials: credentials, progress: progress))
-            } catch let request as CredentialRequest {
-                return .needsCredential(request)
             } catch {
-                if Task.isCancelled || DiskError.isCancellation(error) { return .cancelled }
+                if case .credential(let request) = error { return .needsCredential(request) }
+                if Task.isCancelled || error.isCancellation { return .cancelled }
                 // The failure as the package reported it (the call and the path, for file system errors), for
                 // diagnosing from the system log: `log show --predicate 'subsystem == "com.jonshier.Nunarchiver"'`.
                 Self.log.error(
-                    "\(archive.path, privacy: .public): failed: \(String(describing: error), privacy: .public) [\(String(reflecting: type(of: error)), privacy: .public)]"
+                    "\(archive.path, privacy: .public): failed: \(String(describing: error), privacy: .public) [\(String(reflecting: error), privacy: .public)]"
                 )
                 return .failed(ExpansionFailure.message(error))
             }
@@ -134,7 +134,7 @@ enum Expander {
     ///
     /// On failure or cancellation the staging directory is removed: nothing appears beside the archive.
     @concurrent
-    static func expand(_ archive: FilePath, credentials: ArchiveCredentials, progress: ExtractionProgress) async throws -> URL {
+    static func expand(_ archive: FilePath, credentials: ArchiveCredentials, progress: ExtractionProgress) async throws(ExpansionError) -> URL {
         let format = try ArchiveKind.detect(archive)
         let folder = archive.removingLastComponent().appending(folderName(for: archive))
         let opened = try format.open(archive, credentials: credentials)
@@ -144,12 +144,26 @@ enum Expander {
         var options = DestinationOptions()
         options.quarantine = format == .xip ? nil : Quarantine(copyingFrom: archive)
         options.quarantinesDestination = true
-        let staging = try Destination.staging(for: folder, options: options)
-        do {
-            try await opened.extract(into: staging, progress: progress)
-            try Task.checkCancellation()
-            return URL(filePath: try staging.publishUnwrapped(as: folder).string)
+        let staging: Destination
+        do throws(DiskError) {
+            staging = try Destination.staging(for: folder, options: options)
         } catch {
+            opened.close()
+            throw .disk(error)
+        }
+        do throws(ExpansionError) {
+            try await opened.extract(into: staging, progress: progress)
+            // Read to its end: the archive's file closes now, not after publishing.
+            opened.close()
+            if Task.isCancelled { throw .cancelled }
+            // Publishing closes the staging directory's descriptors (and discarding does, below).
+            do throws(DiskError) {
+                return URL(filePath: try staging.publishUnwrapped(as: folder).string)
+            } catch {
+                throw .disk(error)
+            }
+        } catch {
+            opened.close()
             staging.discard()
             throw error
         }
@@ -183,13 +197,49 @@ enum ExpansionFailure: Error, CustomStringConvertible {
         }
     }
 
-    /// The alert's message for any error the expansion throws: its description as a sentence. Every package's errors
-    /// describe themselves (NativeAEA's and Disk's in lowercase without a period, ZipError's as sentences).
-    static func message(_ error: any Error) -> String {
-        // Cocoa's errors (an `NSError`'s `description` is its domain and code) by their localized description.
-        if type(of: error) is NSError.Type { return (error as NSError).localizedDescription }
-        let description = String(describing: error)
+    /// The alert's message for an expansion's error: its description as a sentence. Every package's errors describe
+    /// themselves (NativeAEA's and Disk's in lowercase without a period, ZipError's as sentences).
+    static func message(_ error: ExpansionError) -> String {
+        let description = error.description
         let sentence = description.prefix(1).uppercased() + description.dropFirst()
         return sentence.hasSuffix(".") ? sentence : sentence + "."
+    }
+}
+
+/// Everything an expansion can end with, each as its package threw it: composed, not flattened, so the outcome (ask
+/// again, cancelled, failed) is decided by case, never by message.
+enum ExpansionError: Error, CustomStringConvertible {
+    /// The archive needs a password or key the user hasn't entered (or entered wrongly).
+    case credential(CredentialRequest)
+    /// The app's own: a format it doesn't recognize, a key it can't ask for, a call on the archive file.
+    case failure(ExpansionFailure)
+    /// NativeZip's.
+    case zip(ZipError)
+    /// NativeAEA's (`.aea`, `.aar`, `.xip`).
+    case appleArchive(AEAError)
+    /// Disk's: making, publishing, or discarding the staging directory.
+    case disk(DiskError)
+    /// The expansion was cancelled.
+    case cancelled
+
+    /// Whether the expansion ended because it was cancelled, whichever package noticed.
+    var isCancellation: Bool {
+        switch self {
+        case .cancelled, .disk(.cancelled): true
+        case .zip(let error): error.isCancellation
+        case .appleArchive(let error): error.isCancellation
+        case .credential, .failure, .disk: false
+        }
+    }
+
+    var description: String {
+        switch self {
+        case .credential(let request): "the archive needs a \(request.kind)"
+        case .failure(let failure): failure.description
+        case .zip(let error): error.description
+        case .appleArchive(let error): error.description
+        case .disk(let error): error.description
+        case .cancelled: "cancelled"
+        }
     }
 }

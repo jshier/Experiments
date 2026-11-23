@@ -97,7 +97,7 @@ enum AEASignature {
             let stored = prologue.signature
             let mac = AEAKeys.mac(signatureKey.mac, data: stored.span.bytes.extracting(0..<128))
             guard AEAKeys.equal(mac, stored.span.bytes.extracting(128..<160)) else {
-                throw .authenticationFailed("signature (wrong key?)")
+                throw .incorrectKey("signature")
             }
             signatureKey.crypt(&field)
         }

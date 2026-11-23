@@ -1,6 +1,7 @@
 import Benchmark
 import Bytes
 import BytesCompression
+import BytesReferenceCodecs
 import BytesTestSupport
 import Compression
 
@@ -9,6 +10,7 @@ let benchmarks: @Sendable () -> Void = {
     Benchmark.defaultConfiguration = Fixtures.defaultConfiguration
     registerChecksumBenchmarks()
     registerInflateBenchmarks()
+    registerGzipMemberBenchmarks()
     registerDeflateBenchmarks()
     registerBrotliDecodeBenchmarks()
     registerBrotliEncodeBenchmarks()
@@ -187,8 +189,7 @@ func registerBrotliDecodeBenchmarks() {
 
 @inline(__always)
 func brotliDecodeAll(_ decoder: inout BrotliDecoder, _ input: [UInt8], into output: inout [UInt8]) -> Int {
-    decoder.reset()
-    return output.withOutputRawSpan { span in
+    output.withOutputRawSpan { span in // `decompressAll` starts a new stream itself.
         _ = try! decoder.decompressAll(input.span.bytes, into: &span)
         return span.byteCount
     }
@@ -369,6 +370,20 @@ func registerCodecAllocationBenchmarks() {
         decodeAll(&f.decoder, f.compressed, into: &f.output)
     }
     register("Allocations:Inflate_gzip_streaming", configuration: configuration, gzip, check: { $0.decodedCount($1) }) { f in
+        decodeStreaming(&f.decoder, f.compressed, chunk: 4 << 10, into: &f.output)
+    }
+    // gzip members of 4 KB each: a member's start allocates nothing either.
+    let members = Lazy {
+        let bytes = content.value.bytes
+        let compressed = stride(from: 0, to: bytes.count, by: 4 << 10).flatMap { start in
+            Fixtures.zlibCompress(Array(bytes[start..<min(start + (4 << 10), bytes.count)]), windowBits: 31)
+        }
+        return DecodeFixture(original: bytes, compressed: compressed, outputCount: bytes.count + 64, decoder: DeflateDecoder(format: .gzip))
+    }
+    register("Allocations:Inflate_gzip_members", configuration: configuration, members, check: { $0.decodedAll($1) }) { f in
+        decodeAll(&f.decoder, f.compressed, into: &f.output)
+    }
+    register("Allocations:Inflate_gzip_members_streaming", configuration: configuration, members, check: { $0.decodedCount($1) }) { f in
         decodeStreaming(&f.decoder, f.compressed, chunk: 4 << 10, into: &f.output)
     }
 
@@ -595,11 +610,10 @@ func registerInflateBenchmarks() {
     }
 }
 
-/// Decodes a whole stream into `output` with `decompressAll`.
+/// Decodes a whole stream into `output` with `decompressAll`, which starts a new stream itself.
 @inline(__always)
 func decodeAll(_ decoder: inout DeflateDecoder, _ input: [UInt8], into output: inout [UInt8]) -> Int {
-    decoder.reset()
-    return output.withOutputRawSpan { span in
+    output.withOutputRawSpan { span in
         _ = try! decoder.decompressAll(input.span.bytes, into: &span)
         return span.byteCount
     }
@@ -623,6 +637,55 @@ func decodeStreaming(_ decoder: inout DeflateDecoder, _ input: [UInt8], chunk: I
             return progress
         }
         offset += progress.consumed
-        if progress.status == .finished { return total }
+        // A gzip member's end: another may follow in the input not yet given.
+        if progress.status == .finished && offset == span.byteCount { return total }
+    }
+}
+
+/// gzip files of several members (RFC 1952 §2.2): the same 1 MB of text as one member, 16 of 64 KB, and 256 of 4 KB,
+/// each zlib's level 6. Bytes decodes every member in one call (or streamed); zlib member by member, as `gunzip` does
+/// (`inflateReset` between).
+///
+/// Smaller members compress worse and decode slower (no history at each start, a new dynamic block, more literals),
+/// so the control is one member with a full flush where each member would start (history forgotten, a block ended):
+/// the same DEFLATE data, so the difference is what the members themselves cost (header, trailer, reset).
+func registerGzipMemberBenchmarks() {
+    guard let sample = Fixtures.silesia("dickens", limit: 1 << 20) else { return }
+    let configuration = Fixtures.configuration(forByteCount: sample.byteCount)
+    let zlib = Lazy { ZlibInflater(windowBits: 31) }
+    for memberSize in [64 << 10, 4 << 10] {
+        let fixture = Lazy {
+            let flushed = Fixtures.cached("\(sample.name)-\(sample.byteCount).zlib-6.full-flush-\(memberSize).gz") {
+                Zlib.compress(sample.bytes, windowBits: 31, level: 6, flushingEvery: memberSize, flushes: [Zlib.fullFlush])
+            }
+            return DecodeFixture(original: sample.bytes, compressed: flushed, outputCount: sample.byteCount + 64, decoder: DeflateDecoder(format: .gzip))
+        }
+        let name = "Inflate gzip members \(sample.label), 1 member, full flush every \(memberSize >> 10) KB"
+        register("\(name): Bytes", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+            decodeAll(&f.decoder, f.compressed, into: &f.output)
+        }
+        register("\(name): zlib", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+            zlib.value.decompressMembers(f.compressed, into: &f.output)
+        }
+    }
+    for (memberSize, label) in [(1 << 20, "1 member"), (64 << 10, "16 × 64 KB"), (4 << 10, "256 × 4 KB")] {
+        let fixture = Lazy {
+            let members = Fixtures.cached("\(sample.name)-\(sample.byteCount).zlib-6.members-\(memberSize).gz") {
+                stride(from: 0, to: sample.byteCount, by: memberSize).flatMap { start in
+                    Fixtures.zlibCompress(Array(sample.bytes[start..<min(start + memberSize, sample.byteCount)]), windowBits: 31)
+                }
+            }
+            return DecodeFixture(original: sample.bytes, compressed: members, outputCount: sample.byteCount + 64, decoder: DeflateDecoder(format: .gzip))
+        }
+        let name = "Inflate gzip members \(sample.label), \(label)"
+        register("\(name): Bytes", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+            decodeAll(&f.decoder, f.compressed, into: &f.output)
+        }
+        register("\(name): Bytes, streaming 64 KB", configuration: configuration, fixture, check: { $0.decodedCount($1) }) { f in
+            decodeStreaming(&f.decoder, f.compressed, chunk: 1 << 16, into: &f.output)
+        }
+        register("\(name): zlib", configuration: configuration, fixture, check: { $0.decodedAll($1) }) { f in
+            zlib.value.decompressMembers(f.compressed, into: &f.output)
+        }
     }
 }

@@ -5,7 +5,7 @@ import Foundation
 import System
 import Testing
 
-@Suite struct InputFileTests {
+@Suite(.diskLifetimes) struct InputFileTests {
     /// Positioned reads fill the span from the offset, in any order; a read past the end throws `endOfFile`.
     @Test func readsAtOffsets() throws {
         let directory = try TemporaryDirectory()
@@ -14,6 +14,7 @@ import Testing
         try Data(bytes).write(to: directory.path("file"))
         let path = directory.filePath("file")
         let file = try InputFile(path)
+        defer { file.close() }
         #expect(file.count == bytes.count && file.path == path)
 
         for (offset, count) in [(0, 16), (99_000, 1_003), (4_096, 65_536), (17, 0), (bytes.count, 0), (0, bytes.count)] {
@@ -51,6 +52,7 @@ import Testing
         defer { directory.remove() }
         try Data().write(to: directory.path("empty"))
         let empty = try InputFile(directory.filePath("empty"))
+        defer { empty.close() }
         #expect(empty.count == 0)
         #expect(try empty.read(at: 0, count: 0) == [])
         #expect(throws: DiskError.endOfFile(empty.path.string)) { _ = try empty.read(at: 0, count: 1) }
@@ -92,20 +94,20 @@ import Testing
         #expect(try InputFile.contents(of: fifo, maximumCount: 1 << 20) == bytes)
     }
 
-    /// The mapping is the file's bytes and outlives the input file.
+    /// The mapping is the file's bytes and outlives the input file's descriptor.
     @Test func maps() throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let bytes = testBytes(50_000, seed: 5, compressible: false)
         try Data(bytes).write(to: directory.path("file"))
-        var mapped: MappedFile?
-        do {
-            let file = try InputFile(directory.filePath("file"))
-            mapped = try file.map(access: .sequential)
-        }
-        let mapping = try #require(mapped)
+        let file = try InputFile(directory.filePath("file"))
+        let mapping = try file.map(access: .sequential)
+        file.close()
         #expect(mapping.count == bytes.count)
         #expect(Array(mapping.buffer(0..<bytes.count)) == bytes)
+        // Closed: reads fail with `EBADF` rather than reaching whatever file has the number now; closing again is nothing.
+        #expect(throws: DiskError.self) { _ = try file.read(at: 0, count: 1) }
+        file.close()
     }
 
     /// Several tasks read one file at once (`pread` keeps no position).
@@ -115,6 +117,7 @@ import Testing
         let bytes = testBytes(1 << 20, seed: 13, compressible: false)
         try Data(bytes).write(to: directory.path("file"))
         let file = try InputFile(directory.filePath("file"))
+        defer { file.close() }
         let matches = await withTaskGroup(of: Bool.self) { group in
             for piece in 0..<16 {
                 group.addTask {

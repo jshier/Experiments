@@ -51,6 +51,9 @@ public struct BrotliDecoder: ~Copyable {
 
     /// Decodes a whole stream, from the start, straight into `output`'s free capacity.
     ///
+    /// Every call starts a new stream: a decoder used before (by any call) starts over as after ``reset()``,
+    /// keeping its memory.
+    ///
     /// - Parameters:
     ///   - input: The whole compressed stream. Bytes after its end are ignored.
     ///   - output: Where to append the decompressed bytes; it needs room for all of them.
@@ -58,7 +61,8 @@ public struct BrotliDecoder: ~Copyable {
     /// - Throws: ``BytesError/insufficientData`` for a truncated stream; ``BytesError/insufficientCapacity``
     ///   if the output doesn't fit; ``BytesError/invalidValue`` for corrupt data.
     public mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
-        try output.withFreeCapacity { span, written throws(BytesError) -> Int in
+        reset()
+        return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
             let result = try stream.run(input, from: 0, into: &span, at: 0)
             switch result.stop {
             case .finished: break

@@ -1,9 +1,11 @@
 import Bytes
 import BytesTestSupport
+import BytesTesting
 import DiskTestSupport
 import Foundation
 @testable import NativeAEA
 import System
+import Testing
 
 // Temporary directories (`TemporaryDirectory`, removed with their read-only files and ACLs), running tools
 // (`ExternalTool.run`), and `hex` are Bytes' `BytesTestSupport`; the bulk trait is `BytesTesting`'s. Reading extracted
@@ -147,4 +149,11 @@ extension TreeParts {
     /// What the extraction tests compare by default: kinds, modes, link targets, contents, and flags (APFS
     /// compression's `UF_COMPRESSED` among them).
     static let entries: TreeParts = [.contents, .flags]
+}
+
+extension Trait where Self == LifetimeChecks {
+    /// Every test: nothing left open under its temporary directories, and no Disk descriptor closed at deinit.
+    static var diskLifetimes: Self {
+        .lifetimeChecked(audit: "descriptors closed at deinit") { try await DiskLifetimes.dropped(during: $0) }
+    }
 }

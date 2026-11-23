@@ -58,6 +58,10 @@ public struct TransformProgress: Hashable, Sendable {
 /// delivered (``TransformStatus/needsOutput`` until then), or throws if its input ended early (a decoder's
 /// truncated stream, a partial record). So a drive loop stops at `.finished`, and `.needsInput` only ever
 /// means "more input, please". ``transform(_:appending:flush:growth:)`` is that loop.
+///
+/// Some formats are a series of streams: gzip's members, Zstandard's frames, xz's and bzip2's streams. A stage
+/// decoding one can't tell the input's end from a pause at a stream's end, so before `.finish` it reports that end
+/// as ``TransformStatus/needsInput``, and ``TransformStatus/finished`` keeps meaning the whole input has ended.
 public protocol ByteTransform: ~Copyable {
     /// What the stage throws: `Never` if it can't fail.
     associatedtype Failure: Error

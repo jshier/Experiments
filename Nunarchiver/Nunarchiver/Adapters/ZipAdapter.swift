@@ -19,29 +19,35 @@ enum ZipAdapter {
     /// encrypted entry (its check bytes, or AES's verification value: no decryption), all before anything is staged.
     ///
     /// - Returns: The archive, and the password to extract it with (`nil` for one that isn't encrypted).
-    static func open(_ archive: FilePath, credentials: ArchiveCredentials) throws -> (ZipArchive, password: String?) {
-        let zip = try ZipArchive(url: URL(filePath: archive.string))
+    static func open(_ archive: FilePath, credentials: ArchiveCredentials) throws(ExpansionError) -> (ZipArchive, password: String?) {
+        let zip: ZipArchive
+        do throws(ZipError) {
+            zip = try ZipArchive(url: URL(filePath: archive.string))
+        } catch {
+            throw .zip(error)
+        }
         let password = credentials[.password]
         guard let encrypted = zip.entries.first(where: \.isEncrypted) else { return (zip, password) }
-        guard let password else { throw CredentialRequest(kind: .password) }
+        guard let password else { throw .credential(CredentialRequest(kind: .password)) }
         // As nunzip checks before it extracts. Entries may use different passwords: one that fails later still asks
         // again (`extract`), discarding what was staged.
-        guard zip.passwordMatches(password, for: encrypted) else { throw CredentialRequest(kind: .password, isRetry: true) }
+        guard zip.passwordMatches(password, for: encrypted) else { throw .credential(CredentialRequest(kind: .password, isRetry: true)) }
         return (zip, password)
     }
 
-    static func extract(_ zip: ZipArchive, password: String?, into staging: Destination, progress: ExtractionProgress) async throws {
+    static func extract(_ zip: ZipArchive, password: String?, into staging: Destination, progress: ExtractionProgress) async throws(ExpansionError) {
         var options = ZipExtractionOptions()
         options.password = password
         options.progress = progress
         options.restoresLinkTimestamps = true
         options.decomposesNames = true
-        do {
+        do throws(ZipError) {
             try await zip.extract(into: staging, options: options)
-        } catch ZipError.incorrectPassword {
+        } catch {
             // Found at the first encrypted entry (its check bytes, or AES's verification value): ask again. What was
             // staged before it is discarded with the rest.
-            throw CredentialRequest(kind: .password, isRetry: true)
+            if case .incorrectPassword = error { throw .credential(CredentialRequest(kind: .password, isRetry: true)) }
+            throw .zip(error)
         }
     }
 }

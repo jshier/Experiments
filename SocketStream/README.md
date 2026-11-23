@@ -12,9 +12,9 @@ decrypted and decompressed on the other end. The sockets and executors are
 ## Requirements
 
 swift-platform-executors' I/O is behind its `ExperimentalIO` trait and needs a toolchain with
-[swiftlang/swift#91981](https://github.com/swiftlang/swift/pull/91981) (the split continuation), which isn't
-merged, so no release or `main` snapshot has it (swiftly can't install it). This was built and measured with
-the PR's macOS toolchain build 2511 (Swift 6.5-dev, October 25). `.swift-toolchain` names it (`pr-91981`),
+[swiftlang/swift#91981](https://github.com/swiftlang/swift/pull/91981) (the split continuation), merged on
+2026-11-18 (6c557eb): no release has it yet, and `main` snapshots from after that date should (untested here). This
+was built and measured with the PR's macOS toolchain build 2511 (Swift 6.5-dev, October 25). `.swift-toolchain` names it (`pr-91981`),
 and `../Tools/toolchains.json` records where it comes from; to install it (a 3 GB download):
 
 ```sh

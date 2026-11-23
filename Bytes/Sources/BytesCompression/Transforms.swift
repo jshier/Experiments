@@ -1,7 +1,9 @@
 public import Bytes
 
 // The codecs as pipeline stages. Encoders flush as asked; decoders take `.finish` to mean the input has
-// ended, and throw `insufficientData` if their stream hasn't.
+// ended, and throw `insufficientData` if their stream hasn't. Where another stream may follow one (gzip members,
+// Zstandard frames, xz and bzip2 streams), a stream's end reads as `.needsInput` until `.finish`: `.finished`
+// always means the whole input decoded.
 
 extension DeflateEncoder: ByteTransform {
     /// What compressing throws: `insufficientCapacity` and nothing else in practice.
@@ -27,18 +29,25 @@ extension DeflateDecoder: ByteTransform {
 
     /// Decodes as much of `input` as it can into `output`: ``decompress(_:into:)`` as a pipeline stage.
     ///
+    /// In gzip format another member may follow any member's end, so until `.finish` says the input has ended, the
+    /// end of a member reads as ``TransformStatus/needsInput``: ``TransformStatus/finished`` means the whole stream
+    /// has ended.
+    ///
     /// - Parameters:
     ///   - input: The next bytes of the stream, starting with any not consumed last time.
     ///   - output: Where to append the decoded bytes.
     ///   - flush: `.finish` when the input has ended: a stream that hasn't is then an error.
     /// - Returns: What was consumed and produced, and why it returned.
     /// - Throws: ``BytesError`` for a malformed stream; ``BytesError/insufficientData`` if `flush` is `.finish`
-    ///   and the stream doesn't end in `input`.
+    ///   and the stream (gzip: the last member) doesn't end in `input`.
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
-        let progress = try decompress(input, into: &output)
-        if flush == .finish && progress.status == .needsInput && progress.consumed == input.byteCount {
-            throw .insufficientData // The input ended inside the stream.
+        var progress = try decompress(input, into: &output)
+        if flush == .finish {
+            // What it kept back (a partial code or header) can't be finished: no more input is coming.
+            if progress.status == .needsInput { throw .insufficientData } // The input ended inside the stream.
+        } else if progress.status == .finished && format == .gzip {
+            progress.status = .needsInput // Another member may follow.
         }
         return progress
     }
@@ -78,7 +87,8 @@ extension BrotliDecoder: ByteTransform {
     @inlinable
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         let progress = try decompress(input, into: &output)
-        if flush == .finish && progress.status == .needsInput && progress.consumed == input.byteCount {
+        // At `.finish`, what it kept back (a partial unit) can't be finished: no more input is coming.
+        if flush == .finish && progress.status == .needsInput {
             throw .insufficientData // The input ended inside the stream.
         }
         return progress

@@ -171,6 +171,43 @@ enum GzipFlags {
     static var name: BitFlag { BitFlag(bit: 3) }
     static var extra: BitFlag { BitFlag(bit: 2) }
     static var headerCRC: BitFlag { BitFlag(bit: 1) }
+    static var text: BitFlag { BitFlag(bit: 0) }
+}
+
+/// A gzip member's header fields (RFC 1952, 2.3.1), as ``DeflateDecoder/gzipHeader`` reports them: the fixed ones,
+/// and which optional fields the member has.
+///
+/// The optional fields' contents (the file name, comment, and extra subfields) are checked by the header CRC when
+/// there is one, then skipped: keeping them would need storage of no fixed size, made while streaming.
+public struct GzipHeader: Hashable, Sendable {
+    /// FTEXT: the encoder thought the data was text.
+    public var isText: Bool
+    /// FHCRC: the header ends with the low 16 bits of its CRC-32 (verified).
+    public var hasHeaderCRC: Bool
+    /// FEXTRA: extra subfields follow the fixed fields.
+    public var hasExtraField: Bool
+    /// FNAME: the original file's name follows, zero-terminated.
+    public var hasName: Bool
+    /// FCOMMENT: a comment follows, zero-terminated.
+    public var hasComment: Bool
+    /// MTIME: the original file's modification time in seconds since 1970 (UTC), or 0 for none.
+    public var modificationTime: UInt32
+    /// XFL: the encoder's extra flags (2 slowest, 4 fastest for DEFLATE).
+    public var extraFlags: UInt8
+    /// OS: the file system the member was made on (3 Unix, 255 unknown, …).
+    public var operatingSystem: UInt8
+
+    /// The fields of a header whose flags byte is `flags`.
+    init(flags: Byte, modificationTime: UInt32, extraFlags: UInt8, operatingSystem: UInt8) {
+        isText = flags[GzipFlags.text]
+        hasHeaderCRC = flags[GzipFlags.headerCRC]
+        hasExtraField = flags[GzipFlags.extra]
+        hasName = flags[GzipFlags.name]
+        hasComment = flags[GzipFlags.comment]
+        self.modificationTime = modificationTime
+        self.extraFlags = extraFlags
+        self.operatingSystem = operatingSystem
+    }
 }
 
 /// DEFLATE's fixed tables (RFC 1951, 3.2.5 and 3.2.7).

@@ -6,6 +6,19 @@ M1 Max (8 performance and 2 efficiency cores), macOS 27.2, Swift 6.4 (Xcode 27.3
 HTTP/3 traffic as HTTP/1 heads: 401 requests, 580 B average; 383 responses, 953 B average). References: picohttpparser
 (dd573d8) and llhttp (release 9.4.4), built -O3 with NDEBUG from `Tools/test-data fetch picohttpparser llhttp`.
 
+## 2026-11-23, later: concatenated gzip members and zstd frames in a body
+
+BytesCompression's gzip decoder now takes any number of members (Bytes' RESULTS.md, "one-shot reuse and gzip members"),
+and its `decompress` reports `.finished` at each member's end: "complete if your input has ended". The content decoding
+stage latched that first `.finished` and refused everything after it, so a gzip body of several members (or a zstd
+body of several frames, RFC 8878 §3) whose piece ended exactly at a member boundary lost the rest. Now a stage at the end
+of a gzip member or zstd frame decodes what follows as the next one; brotli and deflate still end for good, so bytes
+after them are malformed, and so is anything after a gzip member that isn't another member (`1F 8B 08`): the smuggling
+test (a request hidden after the gzip stream inside a chunked body) still fails as it should.
+`BodyPipelineTests.concatenatedStreamsDecodeWhole` (gzip and zstd; four members, one empty; chunks ending at each
+member's end and fixed-size ones; pieces whole, at the first member's size, odd, and a byte at a time; a body cut inside
+the second member) failed against the old stage and passes now.
+
 ## 2026-11-23: HTTP/1 head parsing (baselines `http1-1`, `http1-2`)
 
 ### The design, from three prototypes (PLAN.md, phase 0.5)

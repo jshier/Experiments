@@ -1,5 +1,6 @@
 import Bytes
 import BytesCompression
+import BytesReferenceCodecs
 import BytesTesting
 import BytesTestSupport
 import Foundation
@@ -102,15 +103,16 @@ import zlib
     }
 
     /// Data after the stream with `00 00 FF FF` in it: a split there is past the final block, and the segment
-    /// holding the stream's end finishes it. The call reports the stream's length and leaves the rest.
+    /// holding the stream's end finishes it. The call reports the stream's length and leaves the rest. (zlib: in gzip,
+    /// bytes after a member must start another.)
     @Test func splitsAfterTheStreamAreIgnored() throws {
         let large = largePrefix()
-        var encoder = ParallelDeflateEncoder(format: .gzip, level: 1, chunkSize: 32 << 10, lanes: 4, independentChunks: true)
+        var encoder = ParallelDeflateEncoder(format: .zlib, level: 1, chunkSize: 32 << 10, lanes: 4, independentChunks: true)
         let compressed = try parallelEncodeAll(&encoder, large)
         var trailing: [UInt8] = []
         while trailing.count < 256 << 10 { trailing += [0, 0, 0xFF, 0xFF, 1, 2, 3] }
         let input = compressed + trailing
-        var decoder = ParallelDeflateDecoder(format: .gzip, lanes: 8)
+        var decoder = ParallelDeflateDecoder(format: .zlib, lanes: 8)
         var output = [UInt8](repeating: 0, count: large.count)
         let consumed = try output.withOutputRawSpan { span throws(BytesError) in
             try decoder.decompressAll(input.span.bytes, into: &span)
@@ -170,33 +172,5 @@ import zlib
 /// zlib's encoding of `data` with a flush after every `every` bytes of input, taking `flushes` in turn
 /// (`Z_FULL_FLUSH` resets the history, `Z_SYNC_FLUSH` keeps it), and `Z_FINISH` at the end.
 func zlibCompressFlushing(_ data: [UInt8], format: DeflateFormat, every: Int, flushes: [Int32]) -> [UInt8] {
-    var stream = z_stream()
-    precondition(deflateInit2_(
-        &stream, Z_DEFAULT_COMPRESSION, Z_DEFLATED, format.zlibWindowBits, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION,
-        Int32(MemoryLayout<z_stream>.size)
-    ) == Z_OK)
-    defer { deflateEnd(&stream) }
-    var output = [UInt8](repeating: 0, count: Int(deflateBound(&stream, uLong(data.count))) + (data.count / every + 1) * 16)
-    var input = data
-    var produced = 0
-    input.withUnsafeMutableBufferPointer { input in
-        output.withUnsafeMutableBufferPointer { output in
-            var offset = 0
-            var piece = 0
-            repeat {
-                let end = min(offset + every, input.count)
-                stream.next_in = input.baseAddress! + offset
-                stream.avail_in = uInt(end - offset)
-                stream.next_out = output.baseAddress! + produced
-                stream.avail_out = uInt(output.count - produced)
-                let flush = end == input.count ? Z_FINISH : flushes[piece % flushes.count]
-                let status = deflate(&stream, flush)
-                precondition(status == (flush == Z_FINISH ? Z_STREAM_END : Z_OK) && stream.avail_in == 0)
-                produced = output.count - Int(stream.avail_out)
-                offset = end
-                piece += 1
-            } while offset < input.count
-        }
-    }
-    return Array(output[..<produced])
+    Zlib.compress(data, windowBits: format.zlibWindowBits, flushingEvery: every, flushes: flushes)
 }

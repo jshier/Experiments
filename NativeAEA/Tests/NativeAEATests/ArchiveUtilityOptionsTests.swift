@@ -7,7 +7,7 @@ import Testing
 
 /// What Nunarchiver asks for to match Archive Utility (off by default, as `aa extract` and `xip --expand` behave), and
 /// the helpers it opens encrypted archives with. Measured against Archive Utility in NativeAEA/RESULTS.md, 2026-11-21.
-@Suite struct ArchiveUtilityOptionsTests {
+@Suite(.diskLifetimes) struct ArchiveUtilityOptionsTests {
     /// `aa archive -d DIR` writes an entry for the root: with the option, the destination gets its mode and time.
     @Test(arguments: [false, true])
     func rootEntrySetsTheDestination(_ restores: Bool) async throws {
@@ -26,7 +26,9 @@ import Testing
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
         var options = AEAExtractionOptions()
         options.restoresDestinationMetadata = restores
-        try await AppleArchiveFile(path: FilePath(archive.path)).extract(to: FilePath(output.path), options: options)
+        let opened = try AppleArchiveFile(path: FilePath(archive.path))
+        defer { opened.close() }
+        try await opened.extract(to: FilePath(output.path), options: options)
         var info = stat()
         #expect(lstat(output.path, &info) == 0)
         #expect(info.st_mode & 0o7777 == (restores ? 0o750 : 0o700))
@@ -44,7 +46,9 @@ import Testing
         var options = AEAExtractionOptions()
         options.restoresXIPDirectoryTimes = restores
         let output = directory.path("out")
-        try await XIPArchive(path: FilePath(url.path), signature: .none).extract(to: FilePath(output.path), options: options)
+        let opened = try XIPArchive(path: FilePath(url.path), signature: .none)
+        defer { opened.close() }
+        try await opened.extract(to: FilePath(output.path), options: options)
         let metadata = try readTree(output, including: .modification)
         // Directories holding files, a link, and hard links (made after the directory's contents): all of them.
         for path in ["Xcode.app", "Xcode.app/Contents"] {

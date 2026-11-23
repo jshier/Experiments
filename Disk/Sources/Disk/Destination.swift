@@ -1,4 +1,5 @@
 import Bytes
+import BytesAsync
 import Darwin
 public import System
 
@@ -86,11 +87,16 @@ public enum SpecialFileKind: Sendable, Hashable {
 /// - Files are created owner-writable and get their final mode last (setting an extended attribute checks the file's
 ///   mode, not the descriptor); setuid, setgid, sticky, and owners are kept only when the options say so.
 public final class Destination: Sendable {
-    /// The destination's descriptor.
-    let root: Int32
+    /// The destination's descriptor, until ``close()``.
+    let rootSlot: DescriptorSlot
+    /// The destination's descriptor (-1 after ``close()``: calls then fail with `EBADF`).
+    var root: Int32 { rootSlot.descriptor }
     /// Where it is (as given).
     public let path: FilePath
     public let options: DestinationOptions
+    /// Items the quarantine wasn't set on because the volume doesn't take extended attributes there (`ENOTSUP`):
+    /// shared with destinations reopened from this one, so a caller sees what a client extracted into its directory.
+    private let unquarantined: RelaxedCounter
     /// The process's umask, read once without setting it (`getumask()`): setting and restoring it raced between
     /// concurrent extractions (NativeAEA, 2026-11-19).
     let umask: mode_t
@@ -100,8 +106,15 @@ public final class Destination: Sendable {
     /// `O_RESOLVE_BENEATH` and `AT_RESOLVE_BENEATH` if the options ask.
     let openBeneath: Int32
     let atBeneath: Int32
-    /// A staging directory: its name in `stagingParent`, to publish or discard.
-    let staging: (parent: Int32, name: [UInt8])?
+    /// A staging directory's parent (empty if this isn't a staging destination), until ``close()``.
+    let stagingParent: DescriptorSlot
+    /// A staging directory's name in its parent.
+    let stagingName: [UInt8]?
+    /// A staging directory: its parent and its name there, to publish or discard.
+    var staging: (parent: Int32, name: [UInt8])? {
+        guard let stagingName else { return nil }
+        return (stagingParent.descriptor, stagingName)
+    }
 
     /// Opens `directory` (made, with its parents, if it isn't there) as a destination.
     ///
@@ -119,10 +132,13 @@ public final class Destination: Sendable {
     }
 
     private init(root: Int32, path: FilePath, options: DestinationOptions, staging: (parent: Int32, name: [UInt8])?) throws(DiskError) {
-        self.root = root
+        rootSlot = DescriptorSlot(OwnedDescriptor(adopting: root, kind: .destination))
+        stagingParent = if let staging { DescriptorSlot(OwnedDescriptor(adopting: staging.parent, kind: .stagingParent)) }
+            else { DescriptorSlot(empty: .stagingParent) }
+        stagingName = staging?.name
+        unquarantined = RelaxedCounter()
         self.path = path
         self.options = options
-        self.staging = staging
         umask = getumask()
         isRoot = geteuid() == 0
         openBeneath = options.resolvesBeneath ? O_RESOLVE_BENEATH : 0
@@ -134,9 +150,14 @@ public final class Destination: Sendable {
         resolvedPath = got == 0 ? Array(resolved.prefix { $0 != 0 }) : []
         if options.quarantinesDestination, let quarantine = options.quarantine {
             do {
-                try quarantine.apply(root, path: .none)
+                if let code = quarantine.apply(root) { try quarantineFailed(code, path: .none) }
             } catch {
-                Sys.close(root)
+                // Every property is set, so `deinit` runs after this throw: the slots close once, here, and their
+                // `deinit` then finds them empty. (Closing the raw descriptor here and again in `deinit` was the double
+                // close the 2026-11-23 survey found.)
+                close()
+                // The quarantine's error names no item (it's the destination itself): name the destination.
+                if case .system(let operation, path: _, let code) = error { throw .system(operation, path: path.string, code) }
                 throw error
             }
         }
@@ -144,10 +165,12 @@ public final class Destination: Sendable {
 
     /// A copy of `original` on a descriptor of its own, with other options; see ``reopened(with:)``.
     private init(reopening original: Destination, root: Int32, options: DestinationOptions) {
-        self.root = root
+        rootSlot = DescriptorSlot(OwnedDescriptor(adopting: root, kind: .reopenedDestination))
+        stagingParent = DescriptorSlot(empty: .stagingParent)
+        stagingName = nil
+        unquarantined = original.unquarantined
         path = original.path
         self.options = options
-        staging = nil
         umask = original.umask
         isRoot = original.isRoot
         resolvedPath = original.resolvedPath
@@ -169,15 +192,44 @@ public final class Destination: Sendable {
     ///
     /// - Throws: ``DiskError/system(_:path:_:)`` if the descriptor can't be duplicated (the process is out of them).
     public func reopened(with options: DestinationOptions) throws(DiskError) -> Destination {
-        Sys.countOther()
-        let duplicate = fcntl(root, F_DUPFD_CLOEXEC, 0)
+        let duplicate = Sys.duplicate(root)
         guard duplicate >= 0 else { throw .system("dup", path: path.string, code: errno) }
         return Destination(reopening: self, root: duplicate, options: options)
     }
 
-    deinit {
-        Sys.close(root)
-        if let staging { Sys.close(staging.parent) }
+    /// How many items (files, directories, links) this destination made without the options' quarantine because their
+    /// volume doesn't support extended attributes (`setxattr` fails with `ENOTSUP`: some network and FAT volumes).
+    /// Such an item isn't a failure: the volume can't hold the attribute, as it couldn't hold the archive's. Counted
+    /// per attempt: a directory made as a parent and listed later counts twice.
+    public var unquarantinedItems: Int { unquarantined.value }
+
+    /// Sets the options' quarantine (if any) on an open item. A volume that can't hold it (`ENOTSUP`, `EOPNOTSUPP`)
+    /// counts the item in ``unquarantinedItems`` instead of failing it; any other error throws.
+    @inline(__always)
+    func quarantine(_ descriptor: Int32, path: PathRef) throws(DiskError) {
+        guard let quarantine = options.quarantine else { return }
+        if let code = quarantine.apply(descriptor) { try quarantineFailed(code, path: path) }
+    }
+
+    /// A failed quarantine: counted if the volume doesn't support it, thrown otherwise.
+    func quarantineFailed(_ code: Int32, path: PathRef) throws(DiskError) {
+        if code == ENOTSUP || code == EOPNOTSUPP {
+            _ = unquarantined.add()
+            return
+        }
+        throw .system("setxattr quarantine", path: path, code: code)
+    }
+
+    /// Closes the destination's descriptors: the end of its use. Call it when the last entry is written (or after
+    /// ``publish(as:uniquing:)``, ``publishUnwrapped(as:)``, or ``discard()``, which call it), not later: descriptors
+    /// are a limited resource, and one held open keeps its directory's vnode busy. Calls after this fail with
+    /// ``DiskError/system(_:path:_:)`` (`EBADF`). Safe to call more than once and from any thread.
+    ///
+    /// A destination destroyed without it still closes its descriptors, but Disk's descriptor audit counts each one as
+    /// a lifetime bug (tests require none).
+    public func close() {
+        rootSlot.close()
+        stagingParent.close()
     }
 
     /// `mkdir -p`: the directory and its missing parents (following links in it: the caller's own path).
@@ -252,7 +304,10 @@ public final class Destination: Sendable {
             let moved = unsafe CString.with(staging.name.span.bytes) { from in
                 name.withCString { unsafe Sys.renameatx(staging.parent, from, staging.parent, $0, UInt32(RENAME_EXCL)) }
             }
-            if moved == 0 { return final.removingLastComponent().appending(name) }
+            if moved == 0 {
+                close()
+                return final.removingLastComponent().appending(name)
+            }
             let code = errno
             guard code == EEXIST, uniquing else { throw .system("rename", path: final.string, code: code) }
         }
@@ -334,7 +389,7 @@ public final class Destination: Sendable {
             throw .system("opendir", path: path.string, code: code)
         }
         // Unsafe: `closedir` on the stream. Safe: open until then, closed exactly once, and not used after.
-        defer { unsafe closedir(stream) }
+        defer { unsafe Sys.closedir(stream, descriptor: directory) }
         var only: [UInt8]?
         // Unsafe: `readdir` on the stream, returning a pointer to an entry. Safe: the open stream; the entry is the
         // stream's, valid until the next `readdir` or `closedir` on it, and used only in this iteration's body.
@@ -355,10 +410,14 @@ public final class Destination: Sendable {
         return only
     }
 
-    /// Removes a staging destination and everything in it (after a failure or cancellation).
+    /// Removes a staging destination and everything in it (after a failure or cancellation), then closes it
+    /// (``close()``). A destination that isn't a staging one is only closed: what it wrote stays.
     public func discard() {
-        guard let staging else { return }
+        guard let staging else { return close() }
+        // The root is inside what's removed: closed first, then the parent once the removal is done.
+        rootSlot.close()
         TreeRemoval.remove(name: staging.name, in: staging.parent)
+        close()
     }
 
     // MARK: Modes
@@ -444,7 +503,7 @@ public final class Destination: Sendable {
     /// Sets the quarantine and the attributes on an open entry: the last calls before `close`.
     @inline(__always)
     func finish(_ descriptor: Int32, attributes: inout AttributeList, path: PathRef) throws(DiskError) {
-        if let quarantine = options.quarantine { try quarantine.apply(descriptor, path: path) }
+        try quarantine(descriptor, path: path)
         if attributes.apply(descriptor) != 0 { throw .system("setattrlist", path: path, code: errno) }
     }
 
@@ -561,9 +620,9 @@ public final class Destination: Sendable {
                 times: metadata.times, owner: finalOwner(metadata.owner), mode: finalMode(metadata.mode, default: 0o755),
                 flags: options.restoresFlags ? finalFlags(metadata.flags, compressed: false) : nil
             )
-            if !path.isRoot || options.quarantinesDestination, let quarantine = options.quarantine {
-                // Unsafe: `name` as a `PathRef`. Safe: as above; read only during `apply`, inside this body.
-                try unsafe quarantine.apply(descriptor, path: PathRef(cString: name))
+            if !path.isRoot || options.quarantinesDestination {
+                // Unsafe: `name` as a `PathRef`. Safe: as above; read only during the call, inside this body.
+                try unsafe quarantine(descriptor, path: PathRef(cString: name))
             }
             // Unsafe: `name` as a `PathRef`. Safe: as above; read at once, into the error.
             if attributes.apply(descriptor) != 0 { throw unsafe .system("setattrlist", path: PathRef(cString: name), code: errno) }
@@ -663,7 +722,7 @@ public final class Destination: Sendable {
                 defer { Sys.close(descriptor) }
                 // Unsafe (the next two): `path` as a `PathRef`, to `apply` and `applyExtendedAttributes`. Safe:
                 // NUL-terminated; each reads the reference only while it runs, inside this call.
-                if let quarantine = options.quarantine { try unsafe quarantine.apply(descriptor, path: PathRef(cString: path)) }
+                try unsafe quarantine(descriptor, path: PathRef(cString: path))
                 if let blob { try unsafe EntryAttributes.applyExtendedAttributes(descriptor, blob, path: PathRef(cString: path)) }
             }
             var attributes = AttributeList(

@@ -10,8 +10,11 @@ extension HTTPContentDecoder: ByteTransform {
     /// Decodes as much of `input` as fits into `output`: ``decode(_:into:)`` as a stage. Partial units at the end of
     /// `input` are kept in the decoder's carry buffer (and reported consumed), so the stage keeps nothing back.
     ///
-    /// - Parameter flush: `.finish` when the body has ended: a coded stream cut short then throws
-    ///   ``HTTPPayloadError/malformed`` (as ``finish()``); an identity body finishes there.
+    /// - Parameters:
+    ///   - input: The body's next coded bytes.
+    ///   - output: Where the decoded bytes go.
+    ///   - flush: `.finish` when the body has ended: a coded stream cut short then throws
+    ///     ``HTTPPayloadError/malformed`` (as ``finish()``); an identity body finishes there.
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(HTTPPayloadError) -> TransformProgress {
         var progress = try decode(input, into: &output)
         // At the end, every coding's stream must have ended: the outer one too when the inner one reports `.finished`

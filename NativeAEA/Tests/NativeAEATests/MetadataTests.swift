@@ -9,7 +9,7 @@ import Testing
 /// What extraction restores besides contents and modes, checked against Apple's `aa extract` on the same stream:
 /// extended attributes (large ones across segments), ACLs, hard links, attributes on links, the quarantine
 /// attribute copied from the archive, and FIFOs and devices.
-@Suite struct MetadataTests {
+@Suite(.diskLifetimes) struct MetadataTests {
     private func makeSourceTree(at root: URL) throws {
         let manager = FileManager.default
         try manager.createDirectory(at: root.appending(path: "dir/inner"), withIntermediateDirectories: true)
@@ -67,7 +67,9 @@ import Testing
         options.read.decodeThreads = threads
         options.disk.writers = threads
         options.disk.fileSystemWidth = min(threads, 2)
-        let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path), options: options)
+        let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { opened.close() }
+        let statistics = try await opened.extract(to: FilePath(destination.path), options: options)
         #expect(statistics.unreleasedBuffers == 0)
         #expect(statistics.hardLinks == 3)
         #expect(statistics.withAccessControlLists == 2)
@@ -96,7 +98,9 @@ import Testing
         // The destination itself: not for an `.aea` (as `aa extract` does with Xcode's), yes for a plain `.aar`.
         #expect(extendedAttribute("com.apple.quarantine", of: destination) == nil)
         let fromStream = directory.path("from-stream")
-        try await AppleArchiveFile(path: FilePath(stream.path)).extract(to: FilePath(fromStream.path), options: options)
+        let streamFile = try AppleArchiveFile(path: FilePath(stream.path))
+        defer { streamFile.close() }
+        try await streamFile.extract(to: FilePath(fromStream.path), options: options)
         #expect(extendedAttribute("com.apple.quarantine", of: fromStream) == quarantine)
         #expect(extendedAttribute("com.apple.quarantine", of: reference) != nil)
         #expect(try readTree(fromStream, including: parts, ignoringAttributes: ignored) == expected)
@@ -105,7 +109,9 @@ import Testing
         // Without quarantine copying.
         let bare = directory.path("bare")
         options.copiesQuarantine = false
-        try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(bare.path), options: options)
+        let bareArchive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { bareArchive.close() }
+        try await bareArchive.extract(to: FilePath(bare.path), options: options)
         let bareMetadata = try readTree(bare, including: parts)
         #expect(bareMetadata.values.allSatisfy { $0.attributes?["com.apple.quarantine"] == nil })
         #expect(bareMetadata == extracted)
@@ -118,7 +124,9 @@ import Testing
         let final = FilePath(directory.path("Staged").path)
         let staging = try Destination.staging(for: final, options: stagingOptions)
         options.copiesQuarantine = true
-        try await AEAArchive(url: url, signingKey: keys.signingKey).extract(into: staging, options: options)
+        let stagedArchive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { stagedArchive.close() }
+        try await stagedArchive.extract(into: staging, options: options)
         let published = URL(filePath: try staging.publish(as: final).string)
         #expect(try readTree(published, including: parts, ignoringAttributes: ignored) == extracted)
         for path in extracted.keys.sorted() {
@@ -142,7 +150,9 @@ import Testing
         try writer.write(to: stream)
         let url = try makeAEA(stream, keys: keys, in: directory)
         let destination = directory.path("out")
-        let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path))
+        let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { opened.close() }
+        let statistics = try await opened.extract(to: FilePath(destination.path))
 
         var info = stat()
         #expect(lstat(destination.appending(path: "dev/pipe").path, &info) == 0)

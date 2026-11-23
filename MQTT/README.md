@@ -10,7 +10,7 @@ import Bytes
 import MQTT
 
 // Parse packets as bytes arrive; a partial packet is left for later.
-var reader = AlignedBytesReader(received.span)
+var reader = BigEndianBytesReader(received.span)
 while let packet = try MQTTPacket.read(from: &reader, maximumPacketSize: 1 << 20) {
     switch packet {
     case .publish(let publish):
@@ -38,9 +38,10 @@ while let frame = try MQTTFrame.read(from: &reader, maximumPacketSize: 1 << 20) 
 let packet = MQTTPacket.publish(MQTTPublish(
     qos: .atLeastOnce, topic: "sensors/kitchen".utf8Span, packetIdentifier: 7, payload: reading.span.bytes
 ))
-let bytes = try [UInt8](alignedByteCapacity: packet.encodedByteCount) { (writer) throws(BytesError) in
-    try packet.write(to: &writer)
-}
+var bytes = [UInt8](repeating: 0, count: packet.encodedByteCount)
+var span = bytes.mutableSpan
+var writer = BigEndianBytesWriter(&span)
+try packet.write(to: &writer)
 ```
 
 ## What it checks
@@ -75,7 +76,7 @@ PUBLISH packets. Writing through it costs nothing extra: it tests its case once.
 
 Every type is `~Escapable`. `UTF8Span` strings and `RawSpan` payloads borrow the input or, when encoding,
 your values. Lists (`MQTTProperties`, `MQTTSubscriptions`, `MQTTTopicFilters`) are checked once and decoded
-on each `forEach`, without allocating. Build one for encoding by writing its entries with an `AlignedBytesWriter`,
+on each `forEach`, without allocating. Build one for encoding by writing its entries with a `BigEndianBytesWriter`,
 then view it with `init(validating:)`.
 
 ## Caveats

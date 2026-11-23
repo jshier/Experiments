@@ -11,7 +11,7 @@ import Testing
 ///
 /// Trees are read with DiskTestSupport's `readTree` (`readdir`, so `._` files show) without `com.apple.provenance`: in a
 /// session macOS tracks, the kernel puts it on everything made, `ditto`'s reference trees included.
-@Suite struct AppleDoubleTests {
+@Suite(.diskLifetimes) struct AppleDoubleTests {
     /// A tree with attributes on files, a directory, and a symbolic link, a resource fork, Finder info, and an ACL.
     private static func makeTree(in directory: URL) throws -> URL {
         let tree = directory.appending(path: "Tree")

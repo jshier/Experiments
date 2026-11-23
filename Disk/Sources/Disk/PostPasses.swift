@@ -105,17 +105,17 @@ extension Planner {
             }
         }
         if let error = failure.error {
-            context.fail(error, path: "", tag: -1, stopping: true)
+            context.fail(.disk(error), path: "", tag: -1, stopping: true)
             throw error
         }
-        if let stopping = context.stoppingFailure { throw stopping }
+        if let stopping = context.stoppingDiskFailure { throw stopping }
     }
 
     private static func record(_ context: ExtractionContext<Source>, _ error: DiskError, path: UnsafePointer<CChar>, tag: Int) throws(DiskError) {
         if !context.options.stopsOnFirstFailure {
             // Unsafe: `path` as a `PathRef` (`strlen`, then its bytes). Safe: the caller's NUL-terminated string in
             // the arena, which outlives the pass; read at once, into the failure's string.
-            context.fail(error, path: unsafe PathRef(cString: path).string, tag: tag)
+            context.fail(.disk(error), path: unsafe PathRef(cString: path).string, tag: tag)
             return
         }
         throw error
@@ -307,7 +307,7 @@ extension Planner {
                 }
             }
             // Unsafe: `path` for the message. Safe: NUL-terminated in the arena, which outlives the pass.
-            if result != 0 { throw .system("setxattr quarantine", path: unsafe PathRef(cString: path), code: errno) }
+            if result != 0 { try destination.quarantineFailed(errno, path: unsafe PathRef(cString: path)) }
             return
         }
         // Unsafe: `path` for messages. Safe: NUL-terminated in the arena, which outlives the pass.
@@ -322,7 +322,7 @@ extension Planner {
             guard descriptor >= 0 else { throw .system("open", path: name, code: errno) }
         }
         defer { if fix.descriptor < 0 { Sys.close(descriptor) } }
-        if let quarantine { try quarantine.apply(descriptor, path: name) }
+        if let quarantine, let code = quarantine.apply(descriptor) { try destination.quarantineFailed(code, path: name) }
         if fix.quarantineOnly { return }
         if let attachments {
             if !attachments.extendedAttributes.isEmpty {

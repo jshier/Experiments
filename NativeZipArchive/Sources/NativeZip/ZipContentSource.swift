@@ -30,9 +30,11 @@ final class ArchiveJob: Sendable {
 /// - The size and CRC-32 are checked after the file's last bytes are written: Disk finishes a file only once `write`
 ///   returns, so a damaged entry's file is removed when this throws.
 ///
-/// Failures are thrown as ``DiskError/source(_:)`` carrying the error itself, which ``ZipExtractionFailure/error`` and the
-/// extraction's throw unwrap.
+/// Failures are thrown as they are: the archive's as `EntryError.source` (a ``ZipError``), the output's as
+/// `EntryError.disk`; ``ZipExtractionFailure/error`` and the extraction's throw carry both as ``ZipError``.
 struct ZipContentSource: ContentSource {
+    typealias Failure = ZipError
+
     struct Contents: Sendable {
         let job: ArchiveJob
         /// The entry's index in `job.entries`.
@@ -54,17 +56,12 @@ struct ZipContentSource: ContentSource {
         state = SourceState(writers: writers)
     }
 
-    func write(_ contents: Contents, to output: inout FileOutput) async throws(DiskError) {
+    func write(_ contents: Contents, to output: inout FileOutput) async throws(EntryError<ZipError>) {
         let job = contents.job
         let entry = job.entries[Int(contents.entry)]
         // The earlier entry at this path is written first, then replaced (Disk's `.replace`): the archive's order.
         if contents.replaces >= 0 { await state.waitUntilWritten(Int(contents.replaces)) }
-        do {
-            try await Self.write(entry, of: job, to: &output, state: state)
-        } catch {
-            // Disk's errors as they are, cancellation as Disk's, the archive's (`ZipError`) as the source's.
-            throw DiskError(wrapping: error)
-        }
+        try await Self.write(entry, of: job, to: &output, state: state)
     }
 
     func release(_ contents: Contents) {
@@ -75,20 +72,32 @@ struct ZipContentSource: ContentSource {
 
     nonisolated(nonsending) private static func write(
         _ entry: ZipEntry, of job: ArchiveJob, to output: inout FileOutput, state: SourceState
-    ) async throws {
+    ) async throws(EntryError<ZipError>) {
         let archive = job.archive
-        let range = try archive.payloadRange(of: entry)
+        let range: Range<Int>
+        do throws(ZipError) {
+            range = try archive.payloadRange(of: entry)
+        } catch {
+            throw .source(error)
+        }
         // Unsafe: a pointer into the mapping, which `job.archive` keeps alive for the extraction (the job outlives the
         // write: the queue holds it until `release`).
         let payload = unsafe archive.file.buffer(range)
-        guard let size = Int(exactly: entry.uncompressedSize) else { throw ZipError.corruptData(entry.path) }
+        guard let size = Int(exactly: entry.uncompressedSize) else {
+            throw .source(.invalidRecord(.invalidValue, "size of '\(entry.path)'"))
+        }
         if entry.method == ZipArchive.Method.stored, !entry.isEncrypted {
             try await unsafe writeStored(entry, payload: payload, size: size, to: &output)
             return
         }
         let decoder = unsafe state.decoder(output.writerIndex)
-        // Unsafe: the writer's own decoder slot (no other writer uses this index while it writes), at a stable address.
-        try unsafe decoder.pointee!.beginEntry(payload, entry: entry, password: job.password)
+        do throws(ZipError) {
+            // Unsafe: the writer's own decoder slot (no other writer uses this index while it writes), at a stable
+            // address.
+            try unsafe decoder.pointee!.beginEntry(payload, entry: entry, password: job.password)
+        } catch {
+            throw .source(error)
+        }
         defer { unsafe decoder.pointee!.endEntry() }
         if entry.method != ZipArchive.Method.stored, entry.uncompressedSize >= overlapThreshold {
             try await unsafe writeOverlapped(entry, decoder: decoder, size: size, to: &output)
@@ -101,9 +110,9 @@ struct ZipContentSource: ContentSource {
     @unsafe
     nonisolated(nonsending) private static func writeStored(
         _ entry: ZipEntry, payload: UnsafeRawBufferPointer, size: Int, to output: inout FileOutput
-    ) async throws {
+    ) async throws(EntryError<ZipError>) {
         guard payload.count == size else {
-            throw ZipError.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: UInt64(payload.count))
+            throw .source(.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: UInt64(payload.count)))
         }
         // Unsafe: the mapping, valid for the extraction (`write`'s comment).
         let bytes = unsafe RawSpan(_unsafeBytes: payload)
@@ -113,35 +122,60 @@ struct ZipContentSource: ContentSource {
         while offset < size {
             let piece = bytes.extracting(offset..<min(offset + storedPieceSize, size))
             crc = ZipDecoder.crc32(crc, piece)
-            try await output.write(piece)
+            try await writeBytes(piece, to: &output)
             offset += piece.byteCount
         }
-        try ZipArchive.check(entry, written: UInt64(size), crc: crc)
+        try check(entry, written: size, crc: crc)
+    }
+
+    /// Writes `bytes` to the file: Disk's errors as `EntryError.disk`.
+    @inline(__always)
+    nonisolated(nonsending) private static func writeBytes(_ bytes: RawSpan, to output: inout FileOutput) async throws(EntryError<ZipError>) {
+        do throws(DiskError) {
+            try await output.write(bytes)
+        } catch {
+            throw .disk(error)
+        }
+    }
+
+    /// ``ZipArchive/check(_:written:crc:)``: its errors as the source's.
+    @inline(__always)
+    private static func check(_ entry: ZipEntry, written: Int, crc: UInt) throws(EntryError<ZipError>) {
+        do throws(ZipError) {
+            try ZipArchive.check(entry, written: UInt64(written), crc: crc)
+        } catch {
+            throw .source(error)
+        }
     }
 
     /// Decodes a chunk, writes it, then decodes the next, on the writer's task.
     @unsafe
     nonisolated(nonsending) private static func writeInline(
         _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, to output: inout FileOutput
-    ) async throws {
+    ) async throws(EntryError<ZipError>) {
         // Unsafe: the writer's decoder (see `write`); chunks point into its buffers, which nothing else writes until
         // the next `nextChunk` into the same buffer.
         var crc: UInt = 0
         var written = 0
         while true {
-            let (chunk, finished) = try unsafe decoder.pointee!.nextChunk(into: 0)
-            let count = unsafe chunk.bytes.count
+            let next: (chunk: ZipDecoder.Chunk, finished: Bool)
+            do throws(ZipError) {
+                try unsafe next = decoder.pointee!.nextChunk(into: 0)
+            } catch {
+                throw .source(error)
+            }
+            let count = unsafe next.chunk.bytes.count
             if count > 0 {
                 written += count
                 // More than the entry's size: its own error, before Disk's.
-                if written > size { try ZipArchive.check(entry, written: UInt64(written), crc: crc) }
-                crc = unsafe ZipDecoder.crc32(crc, RawSpan(_unsafeBytes: chunk.bytes))
-                try await output.write(unsafe RawSpan(_unsafeBytes: chunk.bytes))
+                if written > size { try check(entry, written: written, crc: crc) }
+                crc = unsafe ZipDecoder.crc32(crc, RawSpan(_unsafeBytes: next.chunk.bytes))
+                try await writeBytes(unsafe RawSpan(_unsafeBytes: next.chunk.bytes), to: &output)
             }
-            if finished { break }
+            if unsafe next.finished { break }
         }
         // After the last write: a failed check removes the file (Disk finishes it after this returns).
-        try ZipArchive.check(entry, written: UInt64(written), crc: crc)
+        try check(entry, written: written, crc: crc)
     }
 
     /// Decodes in a child task while the writer writes the previous chunk: two buffers alternate (see
@@ -149,7 +183,7 @@ struct ZipContentSource: ContentSource {
     @unsafe
     nonisolated(nonsending) private static func writeOverlapped(
         _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, to output: inout FileOutput
-    ) async throws {
+    ) async throws(EntryError<ZipError>) {
         // Unsafe (here and at `close` and `fail` below): a handoff of `Chunk`s, which are pointers into the decoder's
         // buffers. Safe: these calls move no chunk; `send` and `receive` say why theirs stay valid.
         let handoff = unsafe ChunkHandoff()
@@ -158,40 +192,56 @@ struct ZipContentSource: ContentSource {
         let slot = unsafe DecoderSlot(pointer: decoder)
         var crc: UInt = 0
         var written = 0
-        try await withThrowingTaskGroup(of: Void.self) { group in
+        // The child returns its error, as a value (a child that threw would type it `any Error`). The throwing group,
+        // though nothing throws (`try?`: its `any Error` is never made): the non-throwing `withTaskGroup` measured one
+        // more malloc per large entry (`Extract 32 MB text: Bytes`, 105 → 106).
+        let failure = try? await withThrowingTaskGroup(of: ZipError?.self) { group -> EntryError<ZipError>? in
             group.addTask {
                 defer { unsafe handoff.close() }
                 var target = 0
                 while true {
                     // Large entries only: stop promptly when the task is cancelled.
-                    try Task.checkCancellation()
-                    let (chunk, finished) = try unsafe slot.pointer.pointee!.nextChunk(into: target)
-                    if unsafe !chunk.bytes.isEmpty {
+                    if Task.isCancelled { return .cancelled }
+                    let next: (chunk: ZipDecoder.Chunk, finished: Bool)
+                    do throws(ZipError) {
+                        try unsafe next = slot.pointer.pointee!.nextChunk(into: target)
+                    } catch {
+                        return error
+                    }
+                    if unsafe !next.chunk.bytes.isEmpty {
                         // Returns once the writer has finished the previous chunk and taken this one: the other
                         // buffer is free. `false`: the writer failed; stop.
-                        guard await unsafe handoff.send(chunk) else { return }
+                        guard await unsafe handoff.send(next.chunk) else { return nil }
                         target ^= 1
                     }
-                    if finished { return }
+                    if unsafe next.finished { return nil }
                 }
             }
-            do {
+            do throws(EntryError<ZipError>) {
                 // Unsafe: each chunk is in a decoder buffer the child doesn't write until the next `receive`.
                 while let chunk = await unsafe handoff.receive() {
                     let bytes = unsafe RawSpan(_unsafeBytes: chunk.bytes)
                     written += bytes.byteCount
-                    guard written <= size else { throw ZipError.corruptData(entry.path) }
+                    guard written <= size else {
+                        throw .source(.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: UInt64(written)))
+                    }
                     crc = ZipDecoder.crc32(crc, bytes)
-                    try await output.write(bytes)
+                    try await writeBytes(bytes, to: &output)
                 }
             } catch {
                 unsafe handoff.fail()
-                throw error
+                group.cancelAll()
+                return error
             }
-            try await group.waitForAll()
+            // The handoff closed: the child is done, with its error if it failed.
+            for try await result in group {
+                if let result { return .source(result) }
+            }
+            return nil
         }
+        if let failure { throw failure }
         // After the last write: a failed check removes the file.
-        try ZipArchive.check(entry, written: UInt64(written), crc: crc)
+        try check(entry, written: written, crc: crc)
     }
 }
 

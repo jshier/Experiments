@@ -13,6 +13,64 @@ swift package --traits SyscallCounting --scratch-path .build-syscalls --disable-
 Tools/bench-table Disk --metric 'wall|Disk syscalls|Malloc' syscalls disk-1
 ```
 
+## 2026-11-23: explicit descriptor lifetimes, mappings that can't fault, quarantine on any volume, composed errors (M1 Max)
+
+The survey's first four bugs (Writeups/Library-Survey-2026-11-23.md), fixed in Disk and its clients.
+
+**Descriptors closed on purpose, and checked in every test** (ARCHITECTURE.md §8). `Destination.init` closed its
+descriptor when the quarantine failed, and `deinit` closed the same number again: if another thread had opened a file in
+between and got that number, `deinit` closed *its* file. The fix isn't the one line: descriptors are now owned
+(`OwnedDescriptor`, noncopyable, `consuming close()`) or shared (`DescriptorSlot`, an atomic exchange to -1 on close), and
+every owner has an explicit `close()` at the end of its use: `Destination` (or `publish`/`publishUnwrapped`/`discard`),
+`InputFile`, `OutputFile` (whose `close()` throws `close`'s error), NativeAEA's archives, the extraction's own
+destinations (closed as soon as Disk's last pass returns). `deinit` only audits: `DescriptorAudit` counts a descriptor
+still open, per task, and Bytes' `LifetimeChecks` trait fails any test that drops one or leaves a file open under its
+temporary directories. On in every suite of Disk, NativeZip, and NativeAEA (72 + 51 + 67 tests) from the start; it found
+the tests' own unclosed destinations and archives (about 130 sites, closed), no library leak, and one false positive (a
+shared fixture's directory charged to whichever test made it first: made outside the record now).
+
+Debug builds inject failures into Disk's calls (`SyscallFaults`, task-local) and record every open and close:
+`LifetimeTests` fails `fsetxattr`, `pwrite`, `fsetattrlist`, `mkdirat`, `openat`, `linkat`, `symlinkat`, `fchflags`, and
+`unlinkat` in turn during an extraction and checks no descriptor is closed twice, left open, or closed late; run against
+the old `Destination.init`, the quarantine test fails all three checks. Release builds compile none of it.
+
+Cost, from the release object (per-function instruction counts against HEAD): taking a writer's `OwnedDescriptor?` is a
+load, a tag test, and a store; `FileOutput.writeWhole`, `openStream`, and `finishWhole` grew 13–17 instructions, no calls
+(the descriptor's kind is a one-byte enum: as a `StaticString` it made the optional 32 bytes). Against the tens of
+thousands of kernel instructions each file's `open`/`write`/`close` costs, nothing measurable.
+
+**A mapped archive truncated under the reader** (C probes on disk images, macOS 27.2):
+
+| Volume | Pages past the new end, after `ftruncate` |
+|---|---|
+| APFS (cached, and cold through a fresh clone) | the original bytes, no signal |
+| HFS+ | the original bytes, no signal |
+| FAT (MS-DOS), exFAT | `SIGBUS` on 675 of 676 pages |
+
+So NativeZip could crash on an archive on a USB stick or SD card that something truncated while it extracted.
+`MappedFile(path:)` now maps the file on APFS and HFS+ and a private copy elsewhere (`fcopyfile` into an unlinked
+temporary file; `source: .file`/`.copy` force either). Cost of the copy, 256 MB from an exFAT image: cold, 82 ms to copy
+and 12 ms to touch, against 137 ms of page faults on the file itself (bulk reads beat faults); cached, 131 against 12.
+A clone was the first idea and is wrong twice: FAT has none, and a clone's page cache is its own (a cached gigabyte read
+through a fresh clone: 1,524 against 46 ms). `MappingBulkTests` truncates a file on an exFAT image under the mapping
+and reads every byte back. Removing the media under a mapping of the file itself presumably still faults (not tested).
+
+**Quarantine on a volume without extended attributes.** `ENOTSUP`/`EOPNOTSUPP` from the quarantine's `setxattr` failed
+the item (the destination itself, with `quarantinesDestination`). Now the item is made, counted in
+`Destination.unquarantinedItems` (shared with reopened destinations, so an app reads its staging directory's count) and
+`ExtractionReport.unquarantinedItems`; any other error still fails it. Tested by fault injection: 7 counted for 3 files,
+a link, and 2 directories (one quarantined twice: made as a parent, then listed); `EIO` fails each.
+
+**Errors composed, not flattened.** `DiskError.source(any Error)` (and `init(wrapping:)`, `unwrapped`,
+`isCancellation(_:)`, `CancellationReporting`) are gone. `ContentSource` declares its `Failure` (default `Never`);
+`write(_:to:)` throws `EntryError<Failure>` (`.disk(DiskError)` or `.source(Failure)`); `EntryFailure`,
+`ExtractionReport`, and `ExtractionError<PlanFailure, SourceFailure>` (`.disk`, `.source`, `.plan`) carry it. A planner
+call after a source's failure stopped the extraction throws `DiskError.stopped` (the plan's closure can't carry the
+source's type); the extraction's error is the source's own. NativeAEA's source can't fail (`Never`); NativeZip's fails
+with `ZipError`.
+
+Tests: 72 in 17 suites (~15 s), plus `MappingBulkTests` (an exFAT image, ~4 s) in the bulk set.
+
 ## 2026-11-22, late: access by usage, typed timings, one allocation for counters (baselines `pass2-old-{1,2}` → `pass2-new-{1,2}`, M1 Max)
 
 HEAD (425420e) against the working tree, the whole suite, two interleaved rounds on an otherwise idle machine (37 GB

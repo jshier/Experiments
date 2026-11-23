@@ -17,7 +17,7 @@ enum Outcome: Equatable {
 /// NativeZip's decoding of a raw DEFLATE stream.
 func inflate(_ payload: [UInt8]) -> Outcome {
     var decoder = ZipDecoder()
-    do {
+    do throws(ZipError) {
         return try .decoded(DeflateBackends.inflate(payload.span.bytes, using: &decoder))
     } catch {
         return .failed

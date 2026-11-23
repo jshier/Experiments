@@ -12,6 +12,71 @@ Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module h
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
 
+## 2026-11-23, M1 Max, one-shot reuse and gzip members (baselines `r3-codec-before` → `r3-codec-after`)
+
+Two behaviour fixes in BytesCompression, measured under load (other agents building): instruction counts are the
+evidence, times are labelled as taken under load.
+
+**One-shot calls start a new stream on a used value.** Every whole-buffer call (`compressAll`, `decompressAll`,
+`compress` for LZBITMAP, `decompressLZMA`/`XZ`/`LZMAFile`, the parallel coders, `Decompressor.decompressAll`) now
+behaves as after `reset()`, keeping its memory. Before, `DeflateEncoder`'s and `BrotliEncoder`'s `compressAll` trapped
+(`precondition(!headerWritten)`) and `DeflateDecoder`'s and `BrotliDecoder`'s `decompressAll` returned 0 with nothing
+appended; Zstd and bzip2 already reset. The decoders reset unconditionally (a few stores); the DEFLATE and Brotli
+encoders only when used, since `DeflateEncoder.reset()` clears two hash tables. `OneShotReuseTests` runs every codec's
+one-shot on a value after a different input, after a cut-short stream, and after an unfinished streaming call, and
+compares with a fresh value.
+
+**gzip files of several members** (RFC 1952 §2.2) decode whole, streamed, after history, in parallel (the first member;
+the rest sequentially), and through `Decompressor` and pipelines. Each member's CRC-32 and ISIZE are checked; bytes after
+a member must start another (`1F 8B 08`, checked as soon as a byte arrives) or the input must end, else `invalidValue`.
+Each member starts with no history: the output span is cut at the member's start, so a match into the previous member
+throws in every API (a lenient decoder would accept it, with a matching trailer). `decompress` returns `.finished` at a
+member's end once all input is used (more input continues with the next member); `transform` reports `.needsInput`
+there until `.finish`, so `.finished` means the whole stream (the rule Zstandard, xz, and bzip2 already followed, now
+stated in `ByteTransform`'s docs). At `.finish`, any `.needsInput` from the DEFLATE and Brotli stages throws
+`insufficientData` (it used to require all input consumed, so a partial header at the end went unreported).
+`DeflateDecoder.gzipHeader` gives the latest member's fixed fields (MTIME, XFL, OS, FTEXT, which optional fields are
+present); the name, comment, and extra bytes are skipped, since keeping them would need storage of no fixed size.
+
+Fresh one-shot and single-member costs, p0 instructions (exact, from the histograms' minima; `bench-table` rounds to 3
+digits). The benchmark helpers no longer reset decoders before `decompressAll` (it resets itself), so each row is the
+call a client makes. Every change is within the run-to-run spread (zlib's own rows moved up to 223):
+
+| row | before | after | change |
+|---|---:|---:|---:|
+| Inflate gzip JSON (1.6 KB) | 27,143 | 27,136 | −7 |
+| Inflate gzip JSON (119 KB) | 372,914 | 372,787 | −127 |
+| Inflate gzip Main.js (3.8 MB) | 16,951,694 | 16,952,077 | +383 (0.002%) |
+| Inflate gzip dickens (9.7 MB) | 81,501,371 | 81,496,364 | −5,007 |
+| Inflate JSON (1.6 KB), raw | 26,488 | 26,462 | −26 |
+| Inflate Main.js, streaming 4 KB | 17,079,048 | 17,079,935 | +887 (0.005%) |
+| Brotli decode q5 JSON (1.6 KB) | 54,944 | 54,972 | +28 |
+| Deflate 6 gzip JSON (1.6 KB) | 222,240 | 222,180 | −60 |
+| Brotli encode q5 JSON (1.6 KB) | 291,283 | 291,284 | +1 |
+
+The DEFLATE decode loops are unchanged: `Tools/loops --target Bytes BytesCompression 'InflateStream\.decodeSymbols'`
+reports the same 64 loops (size, depth, instruction mix) before and after. The gzip header's fixed fields are read as
+two words now (they went through a checked reader one at a time) and its CRC is computed only with FHCRC: that paid for
+keeping `gzipHeader` (the first version cost +133 instructions a member). Zero mallocs, including the new gates
+`Allocations:Inflate_gzip_members` and `…_streaming` (4 KB members).
+
+Members: the same 1 MB of dickens, zlib level 6, as one member, 16 of 64 KB, and 256 of 4 KB. Smaller members compress
+worse and decode slower whatever the decoder (each starts with no history and a new dynamic block), so the control is
+one member with a zlib full flush where each member would start (same DEFLATE data, one header and trailer):
+
+| 1 MB of dickens | Bytes instructions | Bytes time (µs, loaded) | zlib member by member, instructions | zlib time |
+|---|---:|---:|---:|---:|
+| 1 member | 8,198,417 | 1,151 | 11,893,421 | 1,234 |
+| 1 member, full flush every 64 KB | 8,737,908 | 1,291 | 12,549,152 | 1,356 |
+| 16 × 64 KB | 8,742,550 | 1,284 | 12,561,774 | 1,357 |
+| 1 member, full flush every 4 KB | 16,269,677 | 2,488 | 19,615,951 | 2,593 |
+| 256 × 4 KB | 16,348,907 | 2,505 | 19,826,775 | 2,621 |
+| 256 × 4 KB, streamed in 64 KB pieces | 16,575,784 | 2,515 | | |
+
+A member costs about 300 instructions beyond its DEFLATE data (header, trailer, reset: (8,742,550 − 8,737,908) / 16,
+(16,348,907 − 16,269,677) / 256), 0.5% of a 4 KB member's decode; zlib's `inflateReset` loop costs about 820. Per byte
+of the same DEFLATE data, members decode at one member's throughput.
+
 ## 2026-11-23, M1 Max, Zstandard encoding: `ZstdEncoder` against libzstd 1.5.7 (baseline `r2-zstd-encode`)
 
 A Zstandard encoder at libzstd's levels 1–4 (its `fast` and `dfast` strategies, block pre-splitter, and entropy

@@ -24,6 +24,8 @@ public final class TemporaryDirectory: Sendable {
         try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         // Not `URL.resolvingSymlinksInPath()`: it takes `/private` off the paths it resolves, giving `/var/…` back.
         self.url = resolvingSymbolicLinks ? Self.realPath(url) : url
+        // Under `LifetimeChecks`, the test's record keeps it (and checks it) until the test ends.
+        Self.lifetimeRecord?.add(self)
     }
 
     /// `url`'s path with every symbolic link resolved, by `realpath(3)`; `url` itself if that fails.
@@ -44,7 +46,14 @@ public final class TemporaryDirectory: Sendable {
     /// Removes the directory and everything in it, including read-only files and directories and ones whose ACLs
     /// deny deleting (extracted archives have both): if removing fails, drops the ACLs and makes everything
     /// writable, then tries again.
+    ///
+    /// Under `BytesTesting`'s `LifetimeChecks` trait, anything this process still has open in the directory is
+    /// reported first: a descriptor that outlived its use.
     public func remove() {
+        if let record = Self.lifetimeRecord {
+            record.check(self, when: "when the directory was removed")
+            record.removed(self)
+        }
         if (try? FileManager.default.removeItem(at: url)) != nil { return }
         _ = try? ExternalTool.run("/bin/chmod", ["-R", "-N", url.path(percentEncoded: false)])
         _ = try? ExternalTool.run("/bin/chmod", ["-R", "u+w", url.path(percentEncoded: false)])

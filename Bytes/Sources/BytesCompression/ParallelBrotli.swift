@@ -81,6 +81,8 @@ public struct ParallelBrotliEncoder: ~Copyable {
     /// Compresses all of `input` into `output` as one stream, compressing up to ``laneCount`` chunks at once.
     /// Blocks the calling thread until done.
     ///
+    /// Every call starts a new stream: nothing carries over from earlier calls but the lanes' memory.
+    ///
     /// - Parameters:
     ///   - input: All the data.
     ///   - output: Where to append the stream.

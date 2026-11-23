@@ -13,21 +13,21 @@ public extension ZipArchive {
     ///   - entries: The entries to check; all of the archive's by default.
     ///   - maxConcurrency: The most entries to decompress at once.
     ///   - password: The password, for encrypted entries.
-    /// - Returns: The entries that failed and why (the errors of ``contents(of:using:password:_:)``), in the
+    /// - Returns: The entries that failed and why (the errors of ``contents(of:using:password:_:)-77zt7``), in the
     ///   order given. Empty means every entry is intact. If the task is cancelled, the entries not checked are
-    ///   returned with `CancellationError`.
+    ///   returned with ``ZipError/cancelled``.
     @concurrent
     func verify(
         _ entries: [ZipEntry]? = nil,
         maxConcurrency: Int = ProcessInfo.processInfo.activeProcessorCount,
         password: String? = nil
-    ) async -> [(entry: ZipEntry, error: any Error)] {
+    ) async -> [(entry: ZipEntry, error: ZipError)] {
         let indexed = Array((entries ?? self.entries).filter { $0.kind != .directory }.enumerated())
         let failures = FailureLog(count: indexed.count)
         // The body never throws (failures are recorded instead), so neither does the loop.
-        try? await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, weight: \.element.uncompressedSize) {
+        await forEachConcurrently(indexed, maxConcurrency: maxConcurrency, weight: \.element.uncompressedSize) {
             [self] item, decoder in
-            do {
+            do throws(ZipError) {
                 try contents(of: item.element, using: &decoder, password: password) { _ in }
                 failures.checked(index: item.offset)
             } catch {
@@ -36,7 +36,7 @@ public extension ZipArchive {
         }
         // Cancelled: workers stopped claiming entries. Those never checked aren't reported intact.
         for (index, entry) in indexed where !failures.wasChecked(index) {
-            failures.record(index: index, entry: entry, error: CancellationError())
+            failures.record(index: index, entry: entry, error: .cancelled)
         }
         return failures.sorted()
     }
@@ -71,7 +71,7 @@ public extension ZipArchive {
 /// Results from concurrent workers: failures, and which entries were checked at all.
 private final class FailureLog: Sendable {
     private struct State {
-        var failures: [(index: Int, entry: ZipEntry, error: any Error)] = []
+        var failures: [(index: Int, entry: ZipEntry, error: ZipError)] = []
         var checked: [Bool]
     }
 
@@ -85,7 +85,7 @@ private final class FailureLog: Sendable {
         state.withLock { $0.checked[index] = true }
     }
 
-    func record(index: Int, entry: ZipEntry, error: any Error) {
+    func record(index: Int, entry: ZipEntry, error: ZipError) {
         state.withLock { state in
             state.checked[index] = true
             state.failures.append((index, entry, error))
@@ -96,7 +96,7 @@ private final class FailureLog: Sendable {
         state.withLock { $0.checked[index] }
     }
 
-    func sorted() -> [(entry: ZipEntry, error: any Error)] {
+    func sorted() -> [(entry: ZipEntry, error: ZipError)] {
         state.withLock { $0.failures.sorted { $0.index < $1.index }.map { ($0.entry, $0.error) } }
     }
 }

@@ -136,6 +136,7 @@ struct NUnarchiver: AsyncParsableCommand {
             untrustedChain ? .untrustedCertificateChain : .certificateChain
         }
         let archive = try AEAArchive(path: FilePath(archive), signingKey: key, decryptionKey: try await decryptionKey())
+        defer { archive.close() }
         let root = archive.rootHeader
         if info || verbose {
             let signer = archive.signer.map { "\($0.subject ?? "given key")\($0.isTrusted ? " (trusted)" : " (not evaluated)")" } ?? "none"
@@ -186,6 +187,7 @@ struct NUnarchiver: AsyncParsableCommand {
 
     private func runAppleArchive() async throws {
         let file = try AppleArchiveFile(path: FilePath(archive))
+        defer { file.close() }
         if info || verbose {
             print("Apple Archive, \(file.compression.map { "pbz '\(Character(Unicode.Scalar($0.rawValue)))', blocks of \(file.blockSize) bytes" } ?? "uncompressed")")
         }
@@ -207,6 +209,7 @@ struct NUnarchiver: AsyncParsableCommand {
         // `--no-verify` skips what `xip --expand` skips: the signature and the content's SHA-1.
         let check: XIPSignatureCheck = noVerify ? .none : untrustedChain ? .untrustedCertificateChain : .certificateChain
         let file = try XIPArchive(path: FilePath(archive), signature: check)
+        defer { file.close() }
         if info || verbose {
             let signer = file.signer.map { "\($0)\(file.isSignatureTrusted ? " (trusted)" : " (not evaluated)")" } ?? "not checked"
             print("""

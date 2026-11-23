@@ -383,7 +383,10 @@ let benchmarks: @Sendable () -> Void = {
             benchmark.startMeasurement()
             for index in benchmark.scaledIterations {
                 if quarantined {
-                    try await archive.extract(into: Destination(destinations[index], options: destinationOptions), options: options)
+                    // The caller's destination, closed by the caller (as an app closes its staging directory).
+                    let destination = try Destination(destinations[index], options: destinationOptions)
+                    try await archive.extract(into: destination, options: options)
+                    destination.close()
                 } else {
                     try await archive.extract(to: destinations[index], options: options)
                 }
@@ -403,7 +406,7 @@ let benchmarks: @Sendable () -> Void = {
         let destinations = benchmark.scaledIterations.map { _ in FilePath(Fixtures.outputDirectory().path) }
         benchmark.startMeasurement()
         for index in benchmark.scaledIterations {
-            let failures = try await ZipExtractor.extract(into: destinations[index], stopOnFirstError: true) { extractor in
+            let failures = try await ZipExtractor.extract(into: destinations[index], stopOnFirstError: true) { (extractor) async throws(ZipError) in
                 for archive in archives { try await extractor.add(archive) }
             }
             precondition(failures.isEmpty)

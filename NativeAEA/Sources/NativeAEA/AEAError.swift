@@ -1,7 +1,7 @@
 public import Disk
 
 /// Why an archive couldn't be read, verified, or extracted.
-public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible, CancellationReporting {
+public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     /// The file doesn't start with `AEA1`.
     case notAnAEAFile
     /// The profile number isn't one of the six.
@@ -17,7 +17,12 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible, Cance
     /// The signing key couldn't be found or trusted: no certificate chain in the auth data, a chain that doesn't
     /// evaluate as trusted, or a key file that doesn't parse.
     case untrustedSigningKey(String)
-    /// An HMAC didn't match: the root header's, a cluster header's, a segment's, or the padding's.
+    /// The key or password given doesn't open the archive: the first MAC it derives fails (the root header's, or an
+    /// encrypted signature's), which is what a wrong key fails, and what a damaged header does too (the two can't be
+    /// told apart). What it failed on. An app asks for the key again on this.
+    case incorrectKey(String)
+    /// An HMAC didn't match: a cluster header's, a segment's, or the padding's (and the root header's on a signed,
+    /// unencrypted archive).
     case authenticationFailed(String)
     /// A segment's decompressed bytes don't match its checksum.
     case checksumMismatch(segment: Int)
@@ -44,6 +49,7 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible, Cance
         case .truncated: "the archive is truncated"
         case .invalidSignature: "the signature doesn't verify"
         case .untrustedSigningKey(let why): "untrusted signing key: \(why)"
+        case .incorrectKey(let what): "the key or password doesn't open the archive (\(what))"
         case .authenticationFailed(let what): "authentication failed: \(what)"
         case .checksumMismatch(let segment): "segment \(segment) doesn't match its checksum"
         case .decompressionFailed(let segment, let why): "segment \(segment) failed to decompress: \(why)"
@@ -55,7 +61,7 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible, Cance
         }
     }
 
-    /// Whether this is ``cancelled`` (or Disk's cancellation): for `DiskError.isCancellation(_:)`.
+    /// Whether this is ``cancelled`` (or Disk's cancellation).
     public var isCancellation: Bool {
         switch self {
         case .cancelled, .disk(.cancelled): true
@@ -63,14 +69,13 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible, Cance
         }
     }
 
-    /// Disk's failure as the archive's: Disk's own as ``disk(_:)``, except what has a case here (an unsafe entry path, a
-    /// source's ``AEAError``, an archive file that ends early, cancellation).
+    /// Disk's failure as the archive's: Disk's own as ``disk(_:)``, except what has a case here (an unsafe entry path,
+    /// an archive file that ends early, cancellation).
     init(_ error: DiskError) {
         switch error {
         case .unsafePath(let path): self = .unsafePath(path)
         // `InputFile` reading the archive: it ends before its format says.
         case .endOfFile: self = .truncated
-        case .source(let error as AEAError): self = error
         case .cancelled: self = .cancelled
         default: self = .disk(error)
         }

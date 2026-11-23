@@ -29,6 +29,8 @@ public struct LZFSEDecoder: ~Copyable {
     /// Decodes an LZFSE stream, from its first block through its `bvx$` end marker, into `output`'s free
     /// capacity.
     ///
+    /// Every call starts a new stream: nothing carries over from earlier calls but the decoder's memory.
+    ///
     /// - Parameters:
     ///   - input: The stream, at its start. Bytes after its end marker are left alone.
     ///   - output: Where to append the decoded bytes; it needs room for all of them. Bytes of its free capacity

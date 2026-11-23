@@ -15,7 +15,7 @@ public enum ArchiveKind: Sendable, Hashable, CaseIterable {
     /// `.xip`: ``XIPArchive`` (a XAR archive, `xar!`).
     case xip
 
-    /// The bytes ``init(magic:)`` looks at: a file's first 4.
+    /// The bytes ``init(magic:)-(RawSpan)`` looks at: a file's first 4.
     public static let magicCount = 4
 
     /// The kind of a file whose first bytes are `bytes`, or `nil` if they're no archive's.
@@ -51,6 +51,7 @@ public enum ArchiveKind: Sendable, Hashable, CaseIterable {
         let head: [UInt8]
         do throws(DiskError) {
             let file = try InputFile(path)
+            defer { file.close() }
             head = try file.read(at: 0, count: min(Self.magicCount, file.count))
         } catch {
             throw AEAError(error)

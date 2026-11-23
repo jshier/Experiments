@@ -223,7 +223,7 @@ func makeXIP(
     return url
 }
 
-@Suite struct XIPTests {
+@Suite(.diskLifetimes) struct XIPTests {
     /// The tree the tests archive, and what `xip --expand` makes of it.
     /// What `tree()` expects of an item, read with `TreeParts.entries`: flags only `UF_COMPRESSED`, when compressed.
     static func flags(compressed: Bool) -> UInt32 { compressed ? UInt32(UF_COMPRESSED) : 0 }
@@ -273,6 +273,7 @@ func makeXIP(
         let (cpio, expected, compressed) = Self.tree()
         let url = try makeXIP(pbzx(cpio, blockSize: blockSize, store: store), in: directory)
         let archive = try XIPArchive(path: FilePath(url.path), signature: .none)
+        defer { archive.close() }
         #expect(archive.blockSize == blockSize)
         #expect(archive.contentChecksum?.count == 20)
         // Hard links after the writers, by one writer and by several.
@@ -319,6 +320,7 @@ func makeXIP(
         let (cpio, expected, _) = Self.tree()
         let url = try makeXIP(pbzx(cpio, blockSize: 8_192), in: directory, cpioSize: cpio.count)
         let archive = try XIPArchive(path: FilePath(url.path), signature: .none)
+        defer { archive.close() }
         // Metadata: bzip2 (Bytes' decoder), both checksums checked.
         #expect(archive.metadata?.uncompressedSize == cpio.count)
         #expect(archive.metadata?.fileSystemCompressionFormat == "10.10")
@@ -340,11 +342,14 @@ func makeXIP(
         cpio.file("./data", testBytes(100_000, seed: 9, compressible: false))
         cpio.end()
         let url = try makeXIP(pbzx(cpio.bytes, blockSize: 65_536, store: true), in: directory)
-        let start = try XIPArchive(path: FilePath(url.path), signature: .none).contentStart
+        let first = try XIPArchive(path: FilePath(url.path), signature: .none)
+        let start = first.contentStart
+        first.close()
         var bytes = Array(try Data(contentsOf: url))
         bytes[start + 12 + 16 + 200 + 5_000] ^= 1 // In the file's contents, past the headers.
         try Data(bytes).write(to: url)
         let archive = try XIPArchive(path: FilePath(url.path), signature: .none)
+        defer { archive.close() }
         await #expect(throws: AEAError.authenticationFailed("the xip's Content SHA-1")) {
             _ = try await archive.extract(to: FilePath(directory.path("out").path))
         }
@@ -368,11 +373,15 @@ func makeXIP(
         let path = FilePath(url.path)
 
         let trusted = try XIPArchive(path: path, signature: .certificateChainTrusting([chain.root]))
+        defer { trusted.close() }
         #expect(trusted.signer == "Software Update" && trusted.isSignatureTrusted)
         _ = try await trusted.forEachEntry { _ in }
         let untrusted = try XIPArchive(path: path, signature: .untrustedCertificateChain)
+        defer { untrusted.close() }
         #expect(untrusted.signer == "Software Update" && !untrusted.isSignatureTrusted)
-        #expect(try XIPArchive(path: path, signature: .none).signer == nil)
+        let unchecked = try XIPArchive(path: path, signature: .none)
+        #expect(unchecked.signer == nil)
+        unchecked.close()
         // Not Apple's root.
         #expect(throws: AEAError.untrustedSigningKey("the chain doesn't end at Apple Root CA")) { _ = try XIPArchive(path: path) }
         // Another root.
@@ -383,13 +392,14 @@ func makeXIP(
 
         // A changed signature byte.
         let archive = try XIPArchive(path: path, signature: .none)
+        defer { archive.close() }
         var bytes = Array(try Data(contentsOf: url))
         bytes[archive.heapStart + 20 + 100] ^= 1
         try Data(bytes).write(to: url)
         for check in [XIPSignatureCheck.untrustedCertificateChain, .certificateChainTrusting([chain.root])] {
             #expect(throws: AEAError.invalidSignature) { _ = try XIPArchive(path: path, signature: check) }
         }
-        _ = try XIPArchive(path: path, signature: .none) // `xip --expand` doesn't look.
+        try XIPArchive(path: path, signature: .none).close() // `xip --expand` doesn't look.
 
         // Signed by another key than the leaf's.
         let swapped = try makeXIP(content, in: directory, name: "swapped.xip", signedBy: XIPSigningChain(
@@ -397,6 +407,7 @@ func makeXIP(
         ))
         var swappedBytes = Array(try Data(contentsOf: swapped))
         let swappedArchive = try XIPArchive(path: FilePath(swapped.path), signature: .none)
+        defer { swappedArchive.close() }
         let signedByOther = try other.sign(sha1: Array(swappedBytes[swappedArchive.heapStart..<swappedArchive.heapStart + 20]), in: directory)
         swappedBytes.replaceSubrange(swappedArchive.heapStart + 20..<swappedArchive.heapStart + 276, with: signedByOther)
         try Data(swappedBytes).write(to: swapped)
@@ -405,7 +416,7 @@ func makeXIP(
         // Made before the certificates were valid; a leaf without Apple's software update usage; no signature.
         let early = try makeXIP(content, in: directory, name: "early.xip", signedBy: chain, creationTime: "2001-01-01T00:00:00")
         #expect(throws: AEAError.self) { _ = try XIPArchive(path: FilePath(early.path), signature: .certificateChainTrusting([chain.root])) }
-        _ = try XIPArchive(path: FilePath(early.path), signature: .untrustedCertificateChain)
+        try XIPArchive(path: FilePath(early.path), signature: .untrustedCertificateChain).close()
         let plain = try XIPSigningChain(in: directory, name: "plain", leafUsage: false)
         let unusable = try makeXIP(content, in: directory, name: "usage.xip", signedBy: plain)
         #expect(throws: AEAError.untrustedSigningKey("the leaf certificate isn't for this kind of signature")) {
@@ -421,6 +432,7 @@ func makeXIP(
     func verifiesXcodeSignatures() async throws {
         for url in Self.downloadedXIPs {
             let archive = try XIPArchive(path: FilePath(url.path))
+            defer { archive.close() }
             #expect(archive.signer == "Software Update" && archive.isSignatureTrusted, "\(url.lastPathComponent)")
             #expect(archive.blockSize == 16 << 20)
         }
@@ -439,6 +451,7 @@ func makeXIP(
         let url = try makeXIP(pbzx(cpio, blockSize: 65_536), in: directory)
         let good = Array(try Data(contentsOf: url))
         let archive = try XIPArchive(path: FilePath(url.path), signature: .none)
+        defer { archive.close() }
 
         // The TOC checksum (the heap's first bytes).
         var bytes = good
@@ -468,7 +481,9 @@ func makeXIP(
         var options = AEAReadOptions()
         options.verifyChecksums = false
         await #expect(throws: AEAError.invalidArchive("the cpio stream ends without its trailer")) {
-            _ = try await XIPArchive(path: FilePath(cut.path), signature: .none).forEachEntry(options: options) { _ in }
+            let opened = try XIPArchive(path: FilePath(cut.path), signature: .none)
+            defer { opened.close() }
+            _ = try await opened.forEachEntry(options: options) { _ in }
         }
 
         // A header that isn't octal.
@@ -479,12 +494,14 @@ func makeXIP(
         badBytes[20] = 0x39 // A '9' in the mode.
         let notOctal = try makeXIP(pbzx(badBytes, blockSize: 65_536), in: directory, name: "octal.xip")
         await #expect(throws: AEAError.invalidArchive("a cpio header field isn't octal")) {
-            _ = try await XIPArchive(path: FilePath(notOctal.path), signature: .none).forEachEntry(options: options) { _ in }
+            let opened = try XIPArchive(path: FilePath(notOctal.path), signature: .none)
+            defer { opened.close() }
+            _ = try await opened.forEachEntry(options: options) { _ in }
         }
     }
 }
 
-@Suite struct XARTimeTests {
+@Suite(.diskLifetimes) struct XARTimeTests {
     /// `creation-time` through Bytes' `UTCDateTime`: checked fields, so dates that don't exist are rejected (the
     /// hand-written parser before took any day up to 31), and a leap second is allowed.
     @Test func parsesCreationTimes() {

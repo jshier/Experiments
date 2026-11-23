@@ -75,13 +75,16 @@ public struct BrotliEncoder: ~Copyable {
 
     /// Encodes `input` as one whole stream, appending it to `output`.
     ///
+    /// Every call starts a new stream: an encoder used before (by any call) starts over as after ``reset()``,
+    /// keeping its memory; a fresh or reset one pays nothing for that.
+    ///
     /// - Parameters:
     ///   - input: All the data.
     ///   - output: Where to append the stream.
     /// - Throws: ``BytesError/insufficientCapacity`` if the stream doesn't fit (`output` then holds part of
     ///   it). ``maximumCompressedSize(forByteCount:)`` bytes of free capacity are always enough.
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
-        precondition(!headerWritten, "compressAll needs a fresh or reset encoder")
+        if headerWritten { reset() }
         engine.writeStreamHeader()
         headerWritten = true
         var position = 0

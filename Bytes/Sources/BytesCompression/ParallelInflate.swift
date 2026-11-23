@@ -11,7 +11,7 @@ internal import Synchronization
 /// later match reaches back across it, what follows decodes on its own. The decoder speculates, as
 /// rapidgzip and pugz do, but accepts a speculation only when it's proven right:
 ///
-/// 1. The input is cut into windows, up to ``segmentsPerLane`` per lane, so a lane that runs slow (a busy or
+/// 1. The input is cut into windows, up to four (`segmentsPerLane`) per lane, so a lane that runs slow (a busy or
 ///    efficiency core) holds up one small segment, not a whole share of the stream. Each window's split point
 ///    is just after the first `00 00 FF FF` in it that a block header could follow (a vectorized scan; most
 ///    `00 00 FF FF`s inside blocks are followed by bits no header starts with).
@@ -98,7 +98,13 @@ public struct ParallelDeflateDecoder: ~Copyable {
     /// Decompresses one whole stream from `input` into `output`, in parallel if the stream allows it.
     /// Blocks the calling thread until done.
     ///
-    /// - Returns: The bytes of `input` the stream took (bytes after it are left alone).
+    /// Every call starts a new stream (nothing carries over from the last). A gzip stream's members are all
+    /// decoded, as ``DeflateDecoder/decompressAll(_:into:)`` decodes them: the first in parallel if it allows it
+    /// (``lastSegmentCount`` describes it), the rest sequentially, since where a member ends is known only once
+    /// it's decoded.
+    ///
+    /// - Returns: The bytes of `input` the stream took (raw and zlib: bytes after it are left alone; gzip: all of
+    ///   them, the input ending after a member).
     /// - Throws: As ``DeflateDecoder/decompressAll(_:into:)``: ``BytesError/invalidValue`` for a corrupt
     ///   stream, ``BytesError/insufficientData`` for a truncated one, ``BytesError/insufficientCapacity``
     ///   if `output` is too small, ``BytesError/mismatch`` for a wrong checksum or length.
@@ -114,6 +120,18 @@ public struct ParallelDeflateDecoder: ~Copyable {
     ///   `output`, though the lanes may have copied segments into its free capacity); otherwise as
     ///   ``decompressAll(_:into:)``.
     package mutating func decompressAll(
+        _ input: RawSpan, into output: inout OutputRawSpan, stop: StopFlag?
+    ) throws(BytesError) -> Int {
+        let consumed = try decompressStream(input, into: &output, stop: stop)
+        guard format == .gzip && consumed < input.byteCount else { return consumed }
+        // gzip's members after the first, sequentially: where a member ends is known only once it's decoded, so a
+        // parallel decode of each would split (and decode) the whole rest of the input again, member after member.
+        if stop?.isStopped == true { throw .cancelled }
+        return try consumed &+ sequential.decompressAll(input.extracting(consumed...), into: &output)
+    }
+
+    /// Decompresses the stream (gzip: the member) at the start of `input`, as ``decompressAll(_:into:stop:)`` does.
+    private mutating func decompressStream(
         _ input: RawSpan, into output: inout OutputRawSpan, stop: StopFlag?
     ) throws(BytesError) -> Int {
         let segmentCount = min(segments.count, input.byteCount / Self.minimumSegment)
@@ -151,7 +169,6 @@ public struct ParallelDeflateDecoder: ~Copyable {
         if stop?.isStopped == true { throw .cancelled }
         lastSegmentCount = 1
         lastRepairCount = 0
-        sequential.reset()
         return try sequential.decompressAll(input, into: &output)
     }
 

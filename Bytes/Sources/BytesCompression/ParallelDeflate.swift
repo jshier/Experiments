@@ -26,10 +26,10 @@ internal import Dispatch
 /// - ``compressAll(_:into:)``: synchronous. Dispatch's `concurrentPerform` runs them, the calling thread
 ///   among them, and the call returns when all are done. For threads that may block: a dedicated I/O thread,
 ///   a command-line tool.
-/// - ``compressAll(_:into:on:)``: async, on Dispatch. The whole call moves to a Dispatch queue and runs
+/// - `compressAll(_:into:on:)` (BytesAsync): async, on Dispatch. The whole call moves to a Dispatch queue and runs
 ///   there as the synchronous form does; the calling task suspends until it's done, its thread free for
 ///   other tasks, and Swift's cooperative threads never run the compression.
-/// - ``compressAllConcurrently(_:into:)``: async, with Swift concurrency. The workers are child tasks of a
+/// - `compressAllConcurrently(_:into:)` (BytesAsync): async, with Swift concurrency. The workers are child tasks of a
 ///   task group on the cooperative thread pool. The fastest of the three on an M3 Ultra (10% ahead of
 ///   `concurrentPerform`, whose last workers started later), but it occupies the cooperative pool's threads
 ///   for the whole call.
@@ -147,6 +147,9 @@ public struct ParallelDeflateEncoder: ~Copyable {
     /// Compresses all of `input` into `output` as one stream, header and trailer included, compressing up to
     /// ``laneCount`` chunks at once. Blocks the calling thread until done.
     ///
+    /// Every call starts a new stream: an encoder used before (by any call) starts over as after ``reset()``,
+    /// keeping its memory.
+    ///
     /// - Parameters:
     ///   - input: All the data.
     ///   - output: Where to append the stream, header and trailer included.
@@ -168,8 +171,10 @@ public struct ParallelDeflateEncoder: ~Copyable {
 
     // MARK: - The steps of a call, for `BytesAsync`
 
-    /// Starts a call over `byteCount` bytes: its job, and the container header written to `output`.
+    /// Starts a call over `byteCount` bytes: its job, and the container header written to `output`. A stream
+    /// ``compress(_:into:flush:)`` was writing ends here (the call's own state is the lanes', set up per call).
     package mutating func begin(byteCount: Int, into output: inout OutputRawSpan) throws(BytesError) -> Job {
+        reset()
         let job = job(byteCount: byteCount)
         try Self.write(header: job.format, level: job.level, into: &output)
         return job

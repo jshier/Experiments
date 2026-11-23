@@ -960,7 +960,7 @@ Swift has three levels of request:
 - `@inline(__always)` is the older, underscored attribute: a strong hint without a guarantee. Anything a hot function
   calls once per entry, initializers included, should be `@inline(__always)`.
   <!-- src: AGENTS.md "`@inlinable` doesn't mean inlined" -->
-- `@inline(always)` (Swift Evolution proposal SE-0496, in Swift 6.4) is a guarantee. Adopting it, with the decoder split
+- `@inline(always)` (Swift Evolution proposal SE-0496, in Swift 6.3) is a guarantee. Adopting it, with the decoder split
   into small functions that each hold their cursors as locals, was the largest of the changes that took the DEFLATE
   decoder from 2x slower than zlib to faster. It also made Brotli's match search inline where `@inline(__always)` had
   not (quality 5 ran 2–8% more instructions without it).
@@ -4448,7 +4448,7 @@ inline and specialize it; it does not make them do so. Two attributes force inli
 - `@inline(__always)`: a hint. The SIL inliner declined it for Brotli's match search ("Not profitable to inline ... cost
   = 785" in `Tools/remarks --passes sil-inliner`) once the loop grew, and LLVM then found it too costly: quality 5 ran
   2–8% more instructions.<!-- src: AGENTS.md "@inline(__always) is a hint; @inline(always) is a guarantee" -->
-- `@inline(always)` (Swift 6.4, SE-0496): a guarantee. It inlined the same function.<!-- src: AGENTS.md same; OPTIMIZATION-old.md "5." -->
+- `@inline(always)` (Swift 6.3, SE-0496): a guarantee. It inlined the same function.<!-- src: AGENTS.md same; OPTIMIZATION-old.md "5." -->
 
 #### Where forcing paid
 
@@ -8322,7 +8322,7 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **`@inlinable`**: makes a function's body visible to other modules so it can be inlined and specialized; does not by
   itself cause inlining.
 - **`@inline(always)`, `@inline(__always)`**: the guaranteed and the hint-only inlining attributes. The SIL inliner
-  declined an `@inline(__always)` function once its caller's loop grew; `@inline(always)` (Swift 6.4, SE-0496) inlined it
+  declined an `@inline(__always)` function once its caller's loop grew; `@inline(always)` (Swift 6.3, SE-0496) inlined it
   (Part I, ["Inlining and its cost model"](#42-inlining-and-its-cost-model)).
 - **`InlineArray`**: `InlineArray<N, T>` stores exactly `N` elements in the value that holds it, with no allocation and no
   reference count. Indexing one that is a stored property or a `borrowing` parameter can copy the whole array per access;

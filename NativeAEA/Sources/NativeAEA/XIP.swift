@@ -79,10 +79,11 @@ public final class XIPArchive: Sendable {
     let tocCompressed: [UInt8]
 
     public init(path: FilePath, signature check: XIPSignatureCheck = .certificateChain) throws(AEAError) {
+        // Closed by `close()`, or here if `init` throws.
         let file = try AEAArchive.open(path)
         self.file = file
         self.path = path
-        do {
+        do throws(AEAError) {
             let fileSize = file.count
             guard fileSize >= XAR.fixedHeaderSize else { throw AEAError.invalidArchive("not a XAR archive (too short)") }
             let head = try AEAArchive.read(file, at: 0, count: XAR.fixedHeaderSize)
@@ -157,7 +158,15 @@ public final class XIPArchive: Sendable {
             } else {
                 metadata = nil
             }
+        } catch {
+            file.close()
+            throw error
         }
+    }
+
+    /// Closes the archive's file: the end of reading it (see ``AEAArchive/close()``). Safe to call more than once.
+    public func close() {
+        file.close()
     }
 
     /// Checks the signature (in the heap) over the TOC's checksum as `check` asks; returns the signer's name and whether

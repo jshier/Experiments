@@ -8,7 +8,8 @@ public import System
 ///
 /// Opening reads the prologue and every cluster header (about 18 KB per 256 segments; Xcode's archive has three)
 /// with positioned reads, verifies the signature and the header MACs, and keeps each segment's location,
-/// checksum, and MAC. Segment data is read later, by ``AEAExtractor`` or ``withSegment(_:verify:_:)``.
+/// checksum, and MAC. Segment data is read later, by ``extract(to:options:)``, ``decrypt(to:range:overwrite:options:)``,
+/// ``forEachEntry(options:_:)``, or ``verify(options:)``. Call ``close()`` when done reading.
 public final class AEAArchive: Sendable {
     public let prologue: AEAPrologue
     public let rootHeader: AEARootHeader
@@ -37,6 +38,7 @@ public final class AEAArchive: Sendable {
     /// (a symmetric key, a password, a recipient's key, a signer), for an app to ask before it opens the archive.
     public static func profile(at path: FilePath) throws(AEAError) -> AEAProfile {
         let file = try open(path)
+        defer { file.close() }
         guard file.count >= AEAPrologue.fixedByteCount else { throw .notAnAEAFile }
         let fixed = try read(file, at: 0, count: AEAPrologue.fixedByteCount)
         return try AEAPrologue.profile(parsing: fixed.span.bytes)
@@ -48,13 +50,14 @@ public final class AEAArchive: Sendable {
     ///   - path: The `.aea` file.
     ///   - signingKey: Where the signing key comes from; by default the certificate chain in the archive,
     ///     evaluated as trusted.
+    ///   - decryptionKey: The key or password for an encrypted profile (``AEAProfile``); `nil` for a signed one.
     /// - Throws: ``AEAError``: not an archive, an unsupported profile, a bad signature or MAC, a truncated file.
     public init(path: FilePath, signingKey: AEASigningKey = .certificateChain, decryptionKey: AEADecryptionKey? = nil) throws(AEAError) {
-        // Closed when the archive goes (or when `init` throws).
+        // Closed by `close()`, or here if `init` throws.
         let file = try Self.open(path)
         self.file = file
         self.path = path
-        do {
+        do throws(AEAError) {
             let fileSize = file.count
             guard fileSize >= AEAPrologue.fixedByteCount else { throw AEAError.notAnAEAFile }
             let fixed = try Self.read(file, at: 0, count: AEAPrologue.fixedByteCount)
@@ -93,7 +96,7 @@ public final class AEAArchive: Sendable {
             )
             guard AEAKeys.equal(rootMAC, prologue.rootHeaderMAC.span.bytes) else {
                 // On an encrypted profile, a wrong key fails here first.
-                throw encrypted ? AEAError.authenticationFailed("root header (wrong key?)") : AEAError.authenticationFailed("root header")
+                throw encrypted ? AEAError.incorrectKey("root header") : AEAError.authenticationFailed("root header")
             }
             var rootBytes = prologue.rootHeaderBytes
             if encrypted { rootKey.crypt(&rootBytes) }
@@ -199,7 +202,17 @@ public final class AEAArchive: Sendable {
             self.segmentMACs = segmentMACs
             self.segmentKeys = segmentKeys
             largestCompressedSegment = largest
+        } catch {
+            file.close()
+            throw error
         }
+    }
+
+    /// Closes the archive's file: the end of reading it. Call it once the last extraction or decryption from it
+    /// returns; reads after it fail (`EBADF`). An archive destroyed without it still closes the file, but Disk's
+    /// descriptor audit counts that as a lifetime bug (tests require none). Safe to call more than once.
+    public func close() {
+        file.close()
     }
 
     /// Opens and verifies an archive.

@@ -44,6 +44,9 @@ public struct AEAStatistics: Sendable {
     /// doors, ports, metadata entries, and devices without root.
     public var specialFiles = 0
     public var skippedEntries = 0
+    /// Items made without the quarantine because their volume can't hold extended attributes (Disk's
+    /// `ExtractionReport.unquarantinedItems`).
+    public var unquarantinedItems = 0
     /// Seconds from start to end.
     public var seconds = 0.0
     /// Seconds the decoders were busy, summed, and the part spent reading.

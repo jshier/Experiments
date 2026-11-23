@@ -347,7 +347,7 @@ public struct LZMADecoder: ~Copyable {
         case endMarker, sizeReached, windowFull, needsInput
     }
 
-    /// Creates a decoder, allocating its probability model; ``reset(properties:uncompressedSize:)`` starts a
+    /// Creates a decoder, allocating its probability model; ``reset(properties:uncompressedSize:sizeHint:)`` starts a
     /// stream.
     ///
     /// - Parameter maximumDictionarySize: The most dictionary the window may keep.
@@ -433,7 +433,7 @@ public struct LZMADecoder: ~Copyable {
     /// - Returns: What was consumed and produced, and why it returned: ``TransformStatus/finished`` once the
     ///   stream has ended and all its output is delivered. A stream cut short keeps asking for input.
     /// - Throws: ``BytesError/invalidValue`` for corrupt data, an end marker before the stated size, or no stream
-    ///   (``reset(properties:uncompressedSize:)`` was never called); ``BytesError/insufficientCapacity`` for a
+    ///   (``reset(properties:uncompressedSize:sizeHint:)`` was never called); ``BytesError/insufficientCapacity`` for a
     ///   dictionary larger than ``maximumDictionarySize`` once it's needed. After an error, every call throws it
     ///   until the next reset.
     public mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {

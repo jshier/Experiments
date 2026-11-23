@@ -1070,3 +1070,29 @@ moved came from below:
 | Extract 2,000 / 20,000 small files | instructions −7 to +4% both ways (kernel included), no consistent direction |
 | Extract 8 archives of 64 MB text (one pool) | 2.88 → 2.77 G (−3.5%); 158 → 102 / 103 → 90 ms (round 1's old sample an outlier; parallel rows ±20%) |
 | Parse central directory | +0.2% |
+
+## step20 (2026-11-23): typed, composed errors (baselines `zip-errors-before` → `zip-errors-after`, `zip-errors-after-groups`, M1 Max, under load)
+
+Every `throws` in NativeZip and nunzip is typed (`ZipError`, or `ZipContentsError<Failure>` for a reading body with
+errors of its own); Disk's, the decoders' (`BytesError`), and cancellation are cases of `ZipError` rather than `any
+Error` or `corruptData`. `zip-errors-before` is HEAD (1420f8f) with its own Disk and Bytes, run from a `git archive` copy
+(the working tree's Disk changed its error API, which the old NativeZip doesn't build against); the extraction rows
+therefore include Disk's own changes. `swift_allocError` call sites in the NativeZip target: 62 in 30 functions → 0
+(`Tools/calls --target NativeZipArchive NativeZip '.*' --callee swift_allocError`).
+
+| Benchmark | Instructions | Mallocs |
+|---|---|---|
+| Every `Inflate + CRC 32 MB`, `Decrypt + CRC`, `Zstd + CRC` row | 0.0% | unchanged |
+| Inflate + CRC 2,000 small files: Bytes | 161.567 → 161.560 M (min) | 3 → 3 |
+| Parse central directory (2,000 entries) | +0.2% (4.297 → 4.305 M, includes `open`/`mmap`) | unchanged |
+| Verify 2,000 small files (parallel): Bytes | 0.0% | 137 → 137 |
+| Extract 32 MB text: Bytes | 175 → 176–177 M (kernel included; samples 171–180 M) | 105 → 105 |
+| Extract 2,000 small files (1 worker) | −1.6% (kernel included) | unchanged |
+
+Two costs found and removed on the way:
+- Reading through one generic loop for both `contents` overloads (`readContents`, `beginEntry`/`nextChunk` inline in
+  the caller) ran 415 more instructions per small entry (161.57 → 162.40 M): the `ZipError` overload keeps the
+  decoder's own `decode` loop, typed; only the generic overload uses `readContents`.
+- The non-throwing `withDiscardingTaskGroup` and `withTaskGroup` each cost mallocs the throwing ones don't: verify
+  137 → 147 per call (one per worker, 10 cores), a large entry's overlapped decode 105 → 106. Both use the throwing
+  groups with `try?` (children return their errors as values; the groups' `any Error` is never made).

@@ -8,7 +8,7 @@ import Testing
 
 /// Each attack an archive (or what's already in the destination) can make: nothing is ever made or changed outside
 /// the destination.
-@Suite struct SecurityTests {
+@Suite(.diskLifetimes) struct SecurityTests {
     /// A destination beside an `outside` directory holding a file that must survive.
     struct Setup {
         let directory: TemporaryDirectory
@@ -39,6 +39,7 @@ import Testing
         var destinationOptions = DestinationOptions()
         destinationOptions.existingItems = policy
         let destination = try Destination(setup.directory.filePath("out"), options: destinationOptions)
+        defer { destination.close() }
         let source = ArraySource([Array("planted".utf8), Array("new".utf8)])
         var options = ExtractionSettings()
         options.stopsOnFirstFailure = false
@@ -69,6 +70,7 @@ import Testing
             var destinationOptions = DestinationOptions()
             destinationOptions.existingItems = policy
             let destination = try Destination(FilePath(out.path), options: destinationOptions)
+            defer { destination.close() }
             var writer = FileWriter(destination)
             #expect(throws: DiskError.self) { try withPath("evil/victim") { try writer.writeFile($0, contents: Array("x".utf8).span.bytes) } }
             #expect(throws: DiskError.self) { try withPath("evil/new") { try writer.writeFile($0, contents: Array("x".utf8).span.bytes) } }
@@ -96,6 +98,7 @@ import Testing
         var options = DestinationOptions()
         options.existingItems = .replace
         let replacing = try Destination(FilePath(out.path), options: options)
+        defer { replacing.close() }
         try withPath("evil/dir") { try replacing.makeDirectory($0) }
         #expect(try readItem(at: out.appending(path: "evil")).kind == .directory)
         try setup.checkOutside()
@@ -116,8 +119,10 @@ import Testing
         try FileManager.default.createSymbolicLink(atPath: out.appending(path: "link").path, withDestinationPath: setup.victim.path)
         var options = DestinationOptions()
         options.existingItems = policy
-        var writer = FileWriter(try Destination(FilePath(out.path), options: options))
+        let destination = try Destination(FilePath(out.path), options: options)
+        var writer = FileWriter(destination)
         _ = try? withPath("link") { try writer.writeFile($0, contents: Array("overwritten".utf8).span.bytes) }
+        destination.close()
         try setup.checkOutside()
     }
 
@@ -135,8 +140,9 @@ import Testing
         let setup = try Setup()
         defer { setup.directory.remove() }
         let destination = try Destination(setup.directory.filePath("out"))
+        defer { destination.close() }
         let source = ArraySource([Array("x".utf8)])
-        await #expect(throws: ExtractionError<DiskError>.self) {
+        await #expect(throws: ExtractionError<DiskError, DecodingFailure>.self) {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 let plain = try await planFile(&planner, "plain", index: 0, size: 1)
                 try withPath("other") { (path) throws(DiskError) in try planner.hardLink(path, to: plain) }
@@ -151,6 +157,7 @@ import Testing
         var options = DestinationOptions()
         options.symbolicLinks = .withinDestination
         let destination = try Destination(directory.filePath("out"), options: options)
+        defer { destination.close() }
         for (path, target, allowed) in [
             ("a/b/l1", "../c", true), ("a/l2", "../../x", false), ("l3", "/etc", false), ("a/l4", "./b/../c", true), ("l5", "..", false),
             ("a/l6", "b/../../../x", false),
@@ -165,8 +172,9 @@ import Testing
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         let source = ArraySource([])
-        await #expect(throws: ExtractionError<DiskError>.self) {
+        await #expect(throws: ExtractionError<DiskError, DecodingFailure>.self) {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 try withPath("null") { (path) throws(DiskError) in try planner.specialFile(path, .characterDevice(0x0300_0002)) }
             }
@@ -174,6 +182,7 @@ import Testing
         var options = DestinationOptions()
         options.allowsDevices = true
         let allowed = try Destination(directory.filePath("allowed"), options: options)
+        defer { allowed.close() }
         let made = try withPath("null") { try allowed.makeSpecialFile($0, .characterDevice(0x0300_0002)) }
         #expect(made == (geteuid() == 0))
     }
@@ -187,6 +196,7 @@ import Testing
             for index in 0..<8 {
                 group.addTask {
                     let destination = try Destination(directory.filePath("out\(index)"))
+                    defer { destination.close() }
                     try await extract((0..<50).map { ("f\($0)", [UInt8(truncatingIfNeeded: $0)]) }, into: destination, metadata: EntryMetadata(mode: 0o666))
                 }
             }

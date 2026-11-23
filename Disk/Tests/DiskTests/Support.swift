@@ -1,6 +1,8 @@
 import BytesTestSupport
+import BytesTesting
 import Darwin
 @testable import Disk
+import DiskTestSupport
 import Foundation
 import Synchronization
 import System
@@ -9,6 +11,14 @@ import Testing
 // Temporary directories (`TemporaryDirectory`, removed with read-only files and ACLs) and `ExternalTool.run` are Bytes'
 // `BytesTestSupport`; the bulk trait is `BytesTesting`'s. Reading what an extraction wrote (`readTree`, `readItem`,
 // extended attributes, ACLs, `decmpfs`) is `DiskTestSupport`.
+
+extension Trait where Self == LifetimeChecks {
+    /// Every Disk suite's: nothing left open under a test's directories, and no descriptor closed by its owner's
+    /// `deinit` instead of an explicit close (``DescriptorAudit``).
+    static var diskLifetimes: Self {
+        .lifetimeChecked(audit: "descriptors closed at deinit") { try await DiskLifetimes.dropped(during: $0) }
+    }
+}
 
 extension TemporaryDirectory {
     convenience init() throws {
@@ -87,7 +97,7 @@ final class ArraySource: ContentSource, PieceSource, @unchecked Sendable {
     /// A file (`index >= 0`) or a piece (`-1 - index`).
     typealias Contents = Int
 
-    func write(_ contents: Int, to output: inout FileOutput) async throws(DiskError) {
+    func write(_ contents: Int, to output: inout FileOutput) async throws(EntryError<DecodingFailure>) {
         if let delay { try? await Task.sleep(for: delay) }
         if contents == failing { throw .source(DecodingFailure(file: contents)) }
         let bytes = files[contents]
@@ -96,8 +106,12 @@ final class ArraySource: ContentSource, PieceSource, @unchecked Sendable {
         var offset = 0
         while offset < bytes.count {
             let end = min(bytes.count, offset + step)
-            try await bytes.withUnsafeBytesAsyncForTests { buffer throws(DiskError) in
-                try await output.write(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: buffer[offset..<end])))
+            do throws(DiskError) {
+                try await bytes.withUnsafeBytesAsyncForTests { buffer throws(DiskError) in
+                    try await output.write(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: buffer[offset..<end])))
+                }
+            } catch {
+                throw .disk(error)
             }
             offset = end
         }
@@ -136,7 +150,7 @@ extension Array where Element == UInt8 {
 func extract(
     _ entries: [(path: String, bytes: [UInt8])], into destination: Destination, options: ExtractionSettings = .init(),
     storage: Storage = .plain, writesPerFile: Int = 1, metadata: EntryMetadata = .init()
-) async throws -> (ExtractionReport, ArraySource) {
+) async throws -> (ExtractionReport<DecodingFailure>, ArraySource) {
     let source = ArraySource(entries.map(\.bytes), writesPerFile: writesPerFile)
     let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
         for (index, entry) in entries.enumerated() {

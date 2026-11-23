@@ -219,7 +219,8 @@ public struct ZstdEncoder: ~Copyable {
 
     /// Encodes `input` as one whole frame, appending it to `output`, from the start of a new frame.
     ///
-    /// The frame states its content size; it's a single segment when the content fits in the window. Matches are
+    /// Every call starts a new frame: an encoder used before (by any call) starts over as after ``reset()``, keeping
+    /// its memory. The frame states its content size; it's a single segment when the content fits in the window. Matches are
     /// searched in `input` itself, nothing is copied but the output. ``maximumCompressedSize(forByteCount:)`` bytes
     /// of free capacity are always enough.
     ///

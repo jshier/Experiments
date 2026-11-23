@@ -85,9 +85,18 @@ don't apply (the path is the caller's, links in it followed as `open` follows th
 - `MappedFile`: a read-only mapping of an archive (`mmap`, `MAP_PRIVATE`), its bytes at a stable address for the
   object's life: `bytes` is a `RawSpan` borrowing it, `buffer(_:)` a checked range for work that outlives a borrow
   (a decode loop across `await`s). `Access.sequential` adds `MADV_SEQUENTIAL`. It was NativeZip's `MappedFile` and
-  NativeAEA's `RawMapping`; errors are the kernel's `Errno`, as both threw them.
+  NativeAEA's `RawMapping`; errors are the kernel's `Errno`, as both threw them. A mapped file someone else
+  truncates faults on some volumes: on FAT and exFAT a read past the new end raises `SIGBUS` (675 of 676 pages, an
+  exFAT image), while APFS and HFS+ keep the mapping's bytes, cold pages too (C probes, 2026-11-23). So `init(path:)`
+  maps the file itself on APFS and HFS+ and, elsewhere, a private copy: `fcopyfile` into an unlinked temporary file
+  on the internal volume (`Source.automatic`; `.file` and `.copy` force either). From a cold exFAT image the copy and
+  its first pass took 94 ms for 256 MB against 137 ms of page faults on the file; cached, 131 against 12. A clone
+  would cost nothing to make but has its own page cache (1.5 s against 46 ms for a cached gigabyte), and FAT has none.
+  Removing the media under a mapping of an APFS volume's file presumably still faults (not tested): only reading
+  instead of mapping would avoid that.
 - `OutputFile`: one file created at a path (`O_EXCL`, or truncated when replacing), written with positioned writes
-  to the end (`write(_:at:)`, the same loop the writers use), closed on deinit: NativeAEA's decryption to a file.
+  to the end (`write(_:at:)`, the same loop the writers use), closed by `close()` (which reports `close`'s error:
+  the last sign data didn't reach the disk): NativeAEA's decryption to a file.
 
 ## 3. Metadata, in order
 
@@ -254,3 +263,35 @@ Every file system call goes through `Sys` (`Syscalls.swift`). With the `SyscallC
 an atomic per kind; without it (the default) the wrappers are the calls. `SyscallCounter` (SPI) reads them; the
 benchmarks report the total as `Disk syscalls` beside package-benchmark's process-wide `.syscalls` (which on macOS
 counts every thread's Unix and Mach calls: waits, the allocator, the runtime).
+
+In debug builds the same wrappers take injected failures (`SyscallFaults`, a task-local: a kind of call and the `errno`
+it sets, for the task that sets it and the tasks it starts) and record every descriptor opened and closed, in order.
+Release builds compile none of it. Tests reach the paths a working volume rarely takes (a refused quarantine, a full
+disk, a failed link) and check `doubleCloses` and `leftOpen` are empty.
+
+## 8. Descriptor lifetimes
+
+A descriptor is closed where the code decides its use ends, never whenever its owner happens to be destroyed: the
+extraction's descriptors when Disk's last pass returns, a file's after its last write, a client's destination when the
+client is done with it (`Destination.close()`, or `publish`, `publishUnwrapped`, `discard`, which close it). Nothing
+relies on `deinit` (RAII) to close.
+
+- `OwnedDescriptor` (`Descriptors.swift`): one owner (noncopyable), `consuming close()` and `release()`. Closing twice,
+  or using it after closing, doesn't compile. A writer's file is an `OwnedDescriptor?`, taken when it's closed.
+- `DescriptorSlot`: a descriptor several threads read (a destination's, used by every writer). `close()` swaps in -1
+  atomically and closes once, so a late reader gets `EBADF`, never a number the kernel has since given another file.
+  `Destination`, `InputFile`, `OutputFile`, and a large file's state hold slots; their `close()` is safe to call more
+  than once, from any thread.
+- `deinit` is an audit. A descriptor still open when its owner goes was never closed on purpose: `DescriptorAudit`
+  counts it (per task, for tests running in parallel), names it on standard error in debug builds, and closes it, so a
+  missed close doesn't also leak in a shipped build.
+
+The checks run with every test, not as a separate audit: Bytes' `LifetimeChecks` trait (`.diskLifetimes` in Disk's,
+NativeZip's, and NativeAEA's suites) fails a test that drops a descriptor (the audit's count through `DiskLifetimes`,
+DiskTestSupport) or leaves anything open under its `TemporaryDirectory`s when they're removed (`OpenFiles`, from
+`proc_pidinfo`). `LifetimeTests` checks the checks: a dropped destination is counted, an open file is seen, the
+survey's double close (a destination whose quarantine failed closed its descriptor, then `deinit` closed the number
+again) fails against the old code, and every descriptor closes once when any one call of an extraction fails.
+
+The cost: an `OwnedDescriptor?` is 8 bytes (its kind is a byte), and taking it is a load, a tag test, and a store:
+13–17 instructions per file on the writers' paths, no calls (RESULTS.md, 2026-11-23).

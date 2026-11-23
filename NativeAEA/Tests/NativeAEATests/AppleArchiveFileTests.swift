@@ -7,7 +7,7 @@ import Testing
 
 /// Apple Archive files as `aa archive` writes them: plain, and `pbz`-compressed with every algorithm, on their own
 /// and inside AEA containers (whose decoded segments are then a `pbz` stream).
-@Suite struct AppleArchiveFileTests {
+@Suite(.diskLifetimes) struct AppleArchiveFileTests {
     private static func makeSourceTree(at root: URL) throws {
         let manager = FileManager.default
         try manager.createDirectory(at: root.appending(path: "a/b"), withIntermediateDirectories: true)
@@ -34,6 +34,7 @@ import Testing
         // Small blocks: files and headers cross many of them.
         try ExternalTool.run("/usr/bin/aa", ["archive", "-a", compression, "-b", "256k", "-d", source.path, "-o", archive.path])
         let file = try AppleArchiveFile(path: FilePath(archive.path))
+        defer { file.close() }
         #expect((file.compression == nil) == (compression == "raw"))
 
         var paths: [String] = []
@@ -63,6 +64,7 @@ import Testing
         // Segments of a different size than the blocks, so blocks cross segments.
         let url = try makeAEA(stream, keys: keys, in: directory, compression: "copy", blockSize: "100k")
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         for threads in [1, 4] {
             let destination = directory.path("out-\(threads)")
             var options = AEAExtractionOptions()
@@ -102,6 +104,7 @@ import Testing
         let corrupt = directory.path("corrupt.aar")
         try Data(bytes).write(to: corrupt)
         let file = try AppleArchiveFile(path: FilePath(corrupt.path))
+        defer { file.close() }
         for threads in [1, 8] {
             var options = AEAExtractionOptions()
             options.read.decodeThreads = threads
@@ -109,7 +112,9 @@ import Testing
             await #expect(throws: AEAError.self) { try await file.extract(to: FilePath(directory.path("out-\(threads)").path), options: options) }
             let url = try makeAEA(corrupt, keys: keys, in: directory, compression: "copy", blockSize: "100k")
             await #expect(throws: AEAError.self) {
-                try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(directory.path("aea-out-\(threads)").path), options: options)
+                let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+                defer { opened.close() }
+                try await opened.extract(to: FilePath(directory.path("aea-out-\(threads)").path), options: options)
             }
         }
     }
@@ -128,6 +133,7 @@ import Testing
         let cut = directory.path("cut.aar")
         try bytes.prefix(bytes.count - 1000).write(to: cut)
         let file = try AppleArchiveFile(path: FilePath(cut.path))
+        defer { file.close() }
         await #expect(throws: AEAError.self) { try await file.extract(to: FilePath(directory.path("out").path)) }
     }
 }

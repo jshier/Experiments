@@ -82,8 +82,11 @@ public struct HTTPBodyDecoder: ~Copyable, ByteTransform, ResettableByteTransform
 
     /// Decodes as much of `input`, the body's next bytes, as fits into `output`.
     ///
-    /// - Parameter flush: `.finish` when the connection has closed: what's missing is then
-    ///   ``HTTPPayloadError/incompleteBody`` (or, for a body read until the close, the body's end).
+    /// - Parameters:
+    ///   - input: The connection's next bytes: this body's, then perhaps the next message's (left unconsumed).
+    ///   - output: Where the decoded body goes.
+    ///   - flush: `.finish` when the connection has closed: what's missing is then
+    ///     ``HTTPPayloadError/incompleteBody`` (or, for a body read until the close, the body's end).
     /// - Returns: What was consumed and produced; `.finished` at the framing's end, with bytes after it (the next
     ///   message) not consumed.
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(HTTPPayloadError) -> TransformProgress {
@@ -151,7 +154,8 @@ public struct HTTPBodyDecoder: ~Copyable, ByteTransform, ResettableByteTransform
                 }
             }
             // Body data after the coded stream ended: not this coding's stream.
-            if content.isFinished { throw .malformed }
+            // (After a gzip member or a zstd frame, it's the next one's.)
+            if content.isClosed { throw .malformed }
             sawData = true
             let decoded = try content.decode(piece, into: &output)
             position &+= decoded.consumed

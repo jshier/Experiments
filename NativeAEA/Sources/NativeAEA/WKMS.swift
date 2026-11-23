@@ -59,6 +59,7 @@ extension AEAArchive {
     /// Reads an archive's prologue without opening it: its profile and auth data, to find what decrypts it.
     public static func prologue(at path: FilePath) throws(AEAError) -> AEAPrologue {
         let file = try open(path)
+        defer { file.close() }
         let fixed = try read(file, at: 0, count: AEAPrologue.fixedByteCount)
         let count = try AEAPrologue.byteCount(parsing: fixed.span.bytes)
         // A u32 size from the file: no allocation past what the file holds (`read` checks the file's size first).

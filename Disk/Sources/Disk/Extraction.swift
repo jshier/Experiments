@@ -21,7 +21,7 @@ public struct ExtractionSettings: Sendable {
     /// The largest file a writer gathers from several writes before writing it (bigger ones stream): its staging
     /// buffer's size. Pages past 2 MiB are given back after each use.
     package var stagingCapacity = 1 << 20
-    /// Large files (``Planner/beginLargeFile(_:size:metadata:storage:first:minimumPieceSize:tag:)``) open at once: a
+    /// Large files (``Planner/beginLargeFile(_:size:metadata:storage:first:minimumPieceSize:attachments:hardLinked:tag:)``) open at once: a
     /// file's slot is held until its last piece is written, which waits behind the queue (NativeAEA: 4 slots left its
     /// walker waiting 6 of 9 seconds; 128 none).
     var largeFileSlots = 128
@@ -34,19 +34,50 @@ public struct ExtractionSettings: Sendable {
     public var collectsTimings = false
 }
 
+/// Why an entry failed: Disk's own error, or the source's (``ContentSource/Failure``: decoding, a checksum), each as it
+/// was thrown. Composed, not flattened: a client matches its own error type, with nothing boxed.
+public enum EntryError<SourceFailure: Error>: Error, CustomStringConvertible {
+    /// Writing it: making, writing, or finishing the item.
+    case disk(DiskError)
+    /// The source of its contents.
+    case source(SourceFailure)
+
+    public var description: String {
+        switch self {
+        case .disk(let error): error.description
+        case .source(let error): "\(error)"
+        }
+    }
+
+    /// Runs Disk calls (`FileOutput.write`) inside a source's ``ContentSource/write(_:to:)``: their errors as ``disk(_:)``.
+    @inlinable @inline(__always)
+    public static func fromDisk<R>(_ body: () async throws(DiskError) -> R) async throws(EntryError) -> R {
+        do throws(DiskError) {
+            return try await body()
+        } catch {
+            throw .disk(error)
+        }
+    }
+}
+
+extension EntryError: Sendable where SourceFailure: Sendable {}
+extension EntryError: Equatable where SourceFailure: Equatable {}
+
 /// An entry that failed, with ``ExtractionSettings/stopsOnFirstFailure`` off.
-public struct EntryFailure: Error, Sendable, CustomStringConvertible {
+public struct EntryFailure<SourceFailure: Error>: Error, CustomStringConvertible {
     /// The entry's path in the destination.
     public var path: String
     /// The caller's tag for the entry (an index in its archive).
     public var tag: Int
-    public var error: DiskError
+    public var error: EntryError<SourceFailure>
 
     public var description: String { "\(path): \(error)" }
 }
 
-/// What an extraction did.
-public struct ExtractionReport: Sendable {
+extension EntryFailure: Sendable where SourceFailure: Sendable {}
+
+/// What an extraction did. Generic over the source's failure only for ``failures``.
+public struct ExtractionReport<SourceFailure: Error> {
     public var directories = 0
     public var files = 0
     public var symbolicLinks = 0
@@ -56,12 +87,15 @@ public struct ExtractionReport: Sendable {
     public var skipped = 0
     /// Bytes of file contents (before compression).
     public var fileBytes = 0
+    /// Items made without the destination's quarantine because their volume can't hold extended attributes
+    /// (``Destination/unquarantinedItems``, counted for this extraction): an app can say so once.
+    public var unquarantinedItems = 0
     /// Files stored plain, inline, and in resource forks.
     package var plainFiles = 0
     package var inlineFiles = 0
     package var forkFiles = 0
     /// With ``ExtractionSettings/stopsOnFirstFailure`` off: the entries that failed, in the order they failed.
-    public var failures: [EntryFailure] = []
+    public var failures: [EntryFailure<SourceFailure>] = []
     public var seconds = 0.0
     /// Seconds per phase: the planning, then each pass after the writers that ran.
     public var phaseSeconds: [ExtractionPhase: Double] = [:]
@@ -93,16 +127,29 @@ public enum WriterWork: Int, Sendable, Hashable, CaseIterable {
     case piece, turn, largeFileFinish
 }
 
-/// An extraction's failure: the disk's, or the plan's own (its walker's error).
-public enum ExtractionError<PlanFailure: Error>: Error {
+extension ExtractionReport: Sendable where SourceFailure: Sendable {}
+
+/// An extraction's failure, as it was thrown: the disk's, a source's (``ContentSource/Failure``), or the plan's own
+/// (its walker's error).
+public enum ExtractionError<PlanFailure: Error, SourceFailure: Error>: Error {
     case disk(DiskError)
+    case source(SourceFailure)
     case plan(PlanFailure)
+
+    /// An entry's failure (the one that stopped the extraction).
+    init(_ error: EntryError<SourceFailure>) {
+        switch error {
+        case .disk(let error): self = .disk(error)
+        case .source(let error): self = .source(error)
+        }
+    }
 }
 
-extension ExtractionError: Sendable where PlanFailure: Sendable {}
+extension ExtractionError: Sendable where PlanFailure: Sendable, SourceFailure: Sendable {}
+extension ExtractionError: Equatable where PlanFailure: Equatable, SourceFailure: Equatable {}
 
 /// Identifies a planned entry, to add extended attributes or an ACL to it (``Planner/addExtendedAttributes(_:to:)``),
-/// or, for a file, to link other names to it (``Planner/hardLink(_:to:metadata:)``).
+/// or, for a file, to link other names to it (``Planner/hardLink(_:to:tag:)``).
 public struct EntryToken: Sendable, Hashable {
     /// The entry's deferred record, or -1.
     let deferred: Int
@@ -131,7 +178,7 @@ public struct LargeFileToken: Sendable {
 // MARK: - Running
 
 /// Extracting a tree: a planner on the calling task makes directories and queues files, writers write them, and the
-/// passes after them make links and finish metadata. See ``run(into:source:options:_:)``.
+/// passes after them make links and finish metadata. See ``run(into:source:settings:_:)``.
 public enum Extraction {
     /// Extracts the tree `plan` describes into `destination`.
     ///
@@ -157,8 +204,9 @@ public enum Extraction {
     public static func run<Source: ContentSource, PlanFailure: Error>(
         into destination: Destination, source: Source, settings: ExtractionSettings = .init(),
         _ plan: (inout Planner<Source>) async throws(PlanFailure) -> Void
-    ) async throws(ExtractionError<PlanFailure>) -> ExtractionReport {
+    ) async throws(ExtractionError<PlanFailure, Source.Failure>) -> ExtractionReport<Source.Failure> {
         let started = MonotonicClock.now
+        let unquarantinedBefore = destination.unquarantinedItems
         if settings.writers > 0, destination.options.directoryResolution == .descriptors { DiskDefaults.raiseDescriptorLimit() }
         let context = ExtractionContext(destination: destination, source: source, options: settings)
         var planner = Planner(context)
@@ -182,7 +230,7 @@ public enum Extraction {
                     // failure; its own error otherwise.
                     if context.stoppingFailure == nil {
                         planFailure = error
-                        context.fail(.cancelled, path: "", tag: -1, stopping: true)
+                        context.fail(.disk(.cancelled), path: "", tag: -1, stopping: true)
                     }
                 }
                 await planner.abandonOpenFile()
@@ -191,19 +239,22 @@ public enum Extraction {
                 await writersDone.wait()
             }
         } onCancel: {
-            context.fail(.cancelled, path: "", tag: -1, stopping: true)
+            context.fail(.disk(.cancelled), path: "", tag: -1, stopping: true)
         }
         defer { planner.closeDirectories() }
         if let planFailure { throw .plan(planFailure) }
+        if let failure = context.stoppingFailure { throw ExtractionError(failure) }
         do throws(DiskError) {
-            if let failure = context.stoppingFailure { throw failure }
             try await planner.finish()
         } catch {
+            // The passes after the writers stop on Disk's errors only; a source's is recorded by then.
+            if let failure = context.stoppingFailure { throw ExtractionError(failure) }
             throw .disk(error)
         }
         var report = planner.report
         context.counters.add(to: &report)
         report.failures = context.failures.withLock { $0 }
+        report.unquarantinedItems = destination.unquarantinedItems - unquarantinedBefore
         report.seconds = MonotonicClock.seconds(since: started)
         report.phaseSeconds = planner.phases
         report.writerSeconds = context.timings.seconds
@@ -237,7 +288,7 @@ final class WriterCounters: Sendable {
         bytes.add(byteCount, ordering: .relaxed)
     }
 
-    func add(to report: inout ExtractionReport) {
+    func add<Failure>(to report: inout ExtractionReport<Failure>) {
         report.files += files.load(ordering: .relaxed)
         report.fileBytes += bytes.load(ordering: .relaxed)
         report.plainFiles += plain.load(ordering: .relaxed)
@@ -332,8 +383,8 @@ final class ExtractionContext<Source: ContentSource>: @unchecked Sendable {
     let fileSystem: AsyncLimiter
     let counters = WriterCounters()
     let timings = WorkTimings()
-    let failures = Mutex<[EntryFailure]>([])
-    private let stopping = Mutex<DiskError?>(nil)
+    let failures = Mutex<[EntryFailure<Source.Failure>]>([])
+    private let stopping = Mutex<EntryError<Source.Failure>?>(nil)
     let stopped = Atomic<Bool>(false)
     /// Large files' slots, each made when first used.
     let largeFiles: LargeFileTable
@@ -353,11 +404,21 @@ final class ExtractionContext<Source: ContentSource>: @unchecked Sendable {
         writerPaths = RawStorage(byteCount: writers * WriterCore.pathCapacity, alignment: RawStorage.small)
     }
 
-    var stoppingFailure: DiskError? { stopping.withLock { $0 } }
+    var stoppingFailure: EntryError<Source.Failure>? { stopping.withLock { $0 } }
+
+    /// The stopping failure as the planner and the passes throw it: Disk's own as it is, a source's as ``DiskError/stopped``
+    /// (the extraction's error carries the source's own).
+    var stoppingDiskFailure: DiskError? {
+        switch stoppingFailure {
+        case .disk(let error): error
+        case .source: .stopped
+        case nil: nil
+        }
+    }
 
     /// Records a failure: the first stops everything (with ``ExtractionSettings/stopsOnFirstFailure``, or `stopping`);
     /// otherwise it's listed and the extraction goes on.
-    func fail(_ error: DiskError, path: @autoclosure () -> String, tag: Int, stopping force: Bool = false) {
+    func fail(_ error: EntryError<Source.Failure>, path: @autoclosure () -> String, tag: Int, stopping force: Bool = false) {
         if force || options.stopsOnFirstFailure {
             stopping.withLock { if $0 == nil { $0 = error } }
             stopped.store(true, ordering: .relaxed)
@@ -426,7 +487,11 @@ final class LargeFile: @unchecked Sendable {
     var pathCount = 0
     var directory: Int32 = -1
     var leaf = 0
-    var descriptor: Int32 = -1
+    /// The file, from the planner's `open` to the close by whoever finishes it (the last piece's writer, or the planner
+    /// if it fails first).
+    let file = DescriptorSlot(empty: .largeFile)
+    /// The file's descriptor, or -1.
+    var descriptor: Int32 { file.descriptor }
     var size = 0
     var metadata = EntryMetadata()
     var mode: mode_t = 0

@@ -39,7 +39,7 @@ private let largeFixtures = [
     "zstd-large.zip", "zstd-zipcrypto.zip",
 ]
 
-@Suite struct FormatTests {
+@Suite(.diskLifetimes) struct FormatTests {
     @Test(arguments: ["bzip2.zip", "lzma.zip", "xz.zip", "deflate64.zip", "zstd.zip", "zipcrypto.zip", "bsdtar-traditional.zip",
                       "bsdtar-aes128.zip", "bsdtar-aes256.zip", "prefixed.zip", "prefixed-adjusted.zip"] + largeFixtures)
     func decodesAndVerifies(name: String) async throws {
@@ -85,7 +85,7 @@ private let largeFixtures = [
 
     @Test func rejectsUnsupportedMethods() async throws {
         let failures = try await fixture("ppmd.zip").verify()
-        guard case ZipError.unsupportedMethod(98, _)? = failures.first?.error as? ZipError else {
+        guard case .unsupportedMethod(98, _)? = failures.first?.error else {
             Issue.record("expected unsupportedMethod(98): \(failures)")
             return
         }
@@ -100,7 +100,7 @@ private let largeFixtures = [
 
         let missing = await archive.verify()
         #expect(missing.count == 1)
-        if case ZipError.passwordRequired? = missing.first?.error as? ZipError {} else { Issue.record("\(missing)") }
+        #expect(missing.first?.error == .passwordRequired(entry.path))
         // A wrong password fails its check (or, once in 256 tries for the traditional cipher, the CRC-32).
         let wrong = await archive.verify(password: "wrong!")
         #expect(wrong.count == 1)
@@ -121,7 +121,7 @@ private let largeFixtures = [
         try Data(bytes).write(to: tampered)
 
         let failures = try await ZipArchive(url: tampered).verify(password: "secret")
-        if case ZipError.authenticationFailed? = failures.first?.error as? ZipError {} else { Issue.record("\(failures)") }
+        #expect(failures.first?.error == .authenticationFailed(archive.entries[0].path))
     }
 
     @Test func findsPrependedData() throws {
@@ -135,7 +135,7 @@ private let largeFixtures = [
     }
 }
 
-@Suite struct ExtractionTests {
+@Suite(.diskLifetimes) struct ExtractionTests {
     @Test func makesUnsafePathsSafe() async throws {
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
@@ -173,9 +173,10 @@ private let largeFixtures = [
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
         let directory = temporary.url
-        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
-            for name in ["bzip2.zip", "xz.zip", "deflate64.zip", "symlink.zip"] {
-                try await extractor.add(fixture(name))
+        let archives = try ["bzip2.zip", "xz.zip", "deflate64.zip", "symlink.zip"].map(fixture)
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { (extractor) async throws(ZipError) in
+            for archive in archives {
+                try await extractor.add(archive)
             }
         }
         #expect(failures.isEmpty, "\(failures)")
@@ -193,9 +194,10 @@ private let largeFixtures = [
         let directory = temporary.url
         var options = ZipExtractionOptions()
         options.password = "secret"
-        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
-            for name in largeFixtures {
-                _ = try await extractor.add(fixture(name), into: FilePath(name), options: options)
+        let archives = try largeFixtures.map { (name: $0, archive: try fixture($0)) }
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { (extractor) async throws(ZipError) in
+            for (name, archive) in archives {
+                _ = try await extractor.add(archive, into: FilePath(name), options: options)
             }
         }
         #expect(failures.isEmpty, "\(failures)")
@@ -219,12 +221,16 @@ private let largeFixtures = [
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
         let directory = temporary.url
-        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
-            try await extractor.add(fixture("ppmd.zip"), into: "ppmd")
-            try await extractor.add(fixture("zipcrypto.zip"), into: "crypto")
-            try await extractor.add(fixture("bzip2.zip"), into: "bzip2")
+        let (ppmd, crypto, bzip2) = try (fixture("ppmd.zip"), fixture("zipcrypto.zip"), fixture("bzip2.zip"))
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { (extractor) async throws(ZipError) in
+            try await extractor.add(ppmd, into: "ppmd")
+            try await extractor.add(crypto, into: "crypto")
+            try await extractor.add(bzip2, into: "bzip2")
         }
         #expect(failures.count == 2)
+        #expect(failures.map(\.error) == [
+            .unsupportedMethod(98, ppmd.entries[0].path), .passwordRequired(crypto.entries[0].path),
+        ])
         #expect(FileManager.default.fileExists(atPath: directory.appending(path: "bzip2/sample.txt").path))
         #expect(!FileManager.default.fileExists(atPath: directory.appending(path: "ppmd/sample.txt").path))
     }
@@ -246,20 +252,20 @@ private let largeFixtures = [
         try Data(bytes).write(to: damaged)
 
         let out = directory.appending(path: "out")
-        do {
+        do throws(ZipError) {
             try await ZipArchive(url: damaged).extract(to: FilePath(out.path))
             Issue.record("no error")
         } catch {
-            if case ZipError.crcMismatch? = error as? ZipError {} else { Issue.record("\(error)") }
+            if case .crcMismatch("small.txt", _, _) = error {} else { Issue.record("\(error)") }
         }
         #expect(!FileManager.default.fileExists(atPath: out.appending(path: "small.txt").path))
 
         let collected = directory.appending(path: "collected")
-        let failures = try await ZipExtractor.extract(into: FilePath(collected.path)) { extractor in
+        let failures = try await ZipExtractor.extract(into: FilePath(collected.path)) { (extractor) async throws(ZipError) in
             try await extractor.add(ZipArchive(url: damaged))
         }
         #expect(failures.count == 1)
-        if case ZipError.crcMismatch? = failures.first?.error as? ZipError {} else { Issue.record("\(failures)") }
+        if case .crcMismatch("small.txt", _, _)? = failures.first?.error {} else { Issue.record("\(failures)") }
         #expect(!FileManager.default.fileExists(atPath: collected.appending(path: "small.txt").path))
     }
 
@@ -285,9 +291,11 @@ private let largeFixtures = [
         archive[archive.count - 200] ^= 0xFF
         try Data(archive).write(to: directory.appending(path: "corrupt.zip"))
         let corruptOut = directory.appending(path: "corrupt")
-        await #expect(throws: ZipError.self) {
-            try await ZipArchive(url: directory.appending(path: "corrupt.zip")).extract(to: FilePath(corruptOut.path))
+        let corrupt = try ZipArchive(url: directory.appending(path: "corrupt.zip"))
+        let error = await #expect(throws: ZipError.self) {
+            try await corrupt.extract(to: FilePath(corruptOut.path))
         }
+        if case .crcMismatch("big.bin", _, _)? = error {} else { Issue.record("\(String(describing: error))") }
         #expect(!FileManager.default.fileExists(atPath: corruptOut.appending(path: "big.bin").path))
     }
 
@@ -351,9 +359,11 @@ private let largeFixtures = [
         try await archive.extract(into: staging)
         #expect(try staging.publish(as: FilePath(single.path)) == FilePath(single.path))
         let pooled = directory.appending(path: "pooled")
-        let failures = try await ZipExtractor.extract(into: Destination(FilePath(pooled.path), options: destinationOptions)) { extractor in
+        let pooledDestination = try Destination(FilePath(pooled.path), options: destinationOptions)
+        let failures = try await ZipExtractor.extract(into: pooledDestination) { (extractor) async throws(ZipError) in
             try await extractor.add(archive, into: "x/y")
         }
+        pooledDestination.close()
         #expect(failures.isEmpty)
         for (root, prefix) in [(single, ""), (pooled, "x/y/")] {
             for item in items {

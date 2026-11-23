@@ -9,7 +9,7 @@ import Testing
 
 /// Extraction: trees `aa archive` makes from real directories, Xcode-style streams with APFS compression (`AFT`),
 /// files across segment boundaries, and hostile paths.
-@Suite struct ExtractionTests {
+@Suite(.diskLifetimes) struct ExtractionTests {
     /// A source tree with every kind of entry and the sizes that matter: empty, under and over a chunk (64 KiB),
     /// over a batch (1 MiB), over a segment (the archives use 64 KiB and 1 KiB segments).
     private static func makeSourceTree(at root: URL) throws {
@@ -55,7 +55,9 @@ import Testing
                     group.addTask {
                         var options = AEAExtractionOptions()
                         options.disk.writers = 2
-                        _ = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path), options: options)
+                        let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+                        defer { opened.close() }
+                        _ = try await opened.extract(to: FilePath(destination.path), options: options)
                     }
                 }
                 try await group.waitForAll()
@@ -83,8 +85,9 @@ import Testing
             options.disk.fileSystemWidth = min(threads, 2)
             // Entries made relative to opened parents (Disk's `.descriptors`) as well as by path.
             options.relativeToParents = threads > 1
-            let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey)
-                .extract(to: FilePath(destination.path), options: options)
+            let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+            defer { opened.close() }
+            let statistics = try await opened.extract(to: FilePath(destination.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
             #expect(try readTree(destination, including: .entries) == readTree(source, including: .entries))
             // Times, as `aa` archived them.
@@ -181,7 +184,9 @@ import Testing
         options.diskCompression = mode
         options.disk.writers = 6
         options.disk.fileSystemWidth = 3
-        let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path), options: options)
+        let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { opened.close() }
+        let statistics = try await opened.extract(to: FilePath(destination.path), options: options)
         #expect(statistics.unreleasedBuffers == 0)
         let tree = try readTree(destination, including: .entries)
         for (path, bytes) in files {
@@ -247,7 +252,9 @@ import Testing
         let (stream, reference, files) = try Self.decisions.get()
         let url = try makeAEA(stream, keys: keys, in: directory, blockSize: blockSize)
         let destination = directory.path("out")
-        let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path))
+        let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { opened.close() }
+        let statistics = try await opened.extract(to: FilePath(destination.path))
         #expect(statistics.unreleasedBuffers == 0)
         for (path, bytes) in files {
             #expect(Array(try Data(contentsOf: destination.appending(path: path))) == bytes, "\(path)")
@@ -286,7 +293,9 @@ import Testing
         let reference = directory.path("reference")
         try ExternalTool.run("/usr/bin/aa", ["extract", "-i", stream.path, "-d", reference.path])
         let destination = directory.path("out")
-        let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path))
+        let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { opened.close() }
+        let statistics = try await opened.extract(to: FilePath(destination.path))
         #expect(statistics.unreleasedBuffers == 0)
         var compressed = 0
         for (path, bytes, codec) in files {
@@ -322,7 +331,9 @@ import Testing
         var options = AEAExtractionOptions()
         options.disk.fileSystemWidth = 1
         options.overwrite = overwrite
-        _ = try? await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(directory.path("out").path), options: options)
+        let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { opened.close() }
+        _ = try? await opened.extract(to: FilePath(directory.path("out").path), options: options)
         // Nothing was made or removed outside.
         #expect(try String(contentsOf: victim, encoding: .utf8) == "keep me")
         #expect(try FileManager.default.contentsOfDirectory(atPath: outside.path) == ["victim"])
@@ -336,6 +347,7 @@ import Testing
         // 16 KiB segments (`aea`'s smallest): most files are written in pieces.
         let (url, keys, files) = try Self.xcodeStyleArchive(blockSize: "1k")
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         let bytes = files.values.reduce(0) { $0 + $1.count }
         for mode in [DiskCompressionMode.none, .archived] {
             let progress = ExtractionProgress()
@@ -360,6 +372,7 @@ import Testing
         let (url, keys, _) = try Self.xcodeStyleArchive()
         let destination = FilePath(directory.path("out").path)
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         try await archive.extract(to: destination)
         // Disk's error as it threw it: the first entry that's there.
         let error = await #expect(throws: AEAError.self) { try await archive.extract(to: destination) }
@@ -388,7 +401,9 @@ import Testing
         let url = try makeAEA(stream, keys: keys, in: directory)
         let destination = directory.path("inside/out")
         await #expect(throws: AEAError.self) {
-            try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path))
+            let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+            defer { opened.close() }
+            try await opened.extract(to: FilePath(destination.path))
         }
         #expect(!FileManager.default.fileExists(atPath: directory.path("escape").path))
         #expect(!FileManager.default.fileExists(atPath: directory.path("inside/escape").path))
@@ -407,7 +422,9 @@ import Testing
         try writer.write(to: stream)
         let url = try makeAEA(stream, keys: keys, in: directory)
         await #expect(throws: AEAError.self) {
-            try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(directory.path("out").path))
+            let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
+            defer { opened.close() }
+            try await opened.extract(to: FilePath(directory.path("out").path))
         }
         #expect(try FileManager.default.contentsOfDirectory(atPath: outside.path).isEmpty)
     }
@@ -417,6 +434,7 @@ import Testing
         defer { directory.remove() }
         let (url, keys, files) = try Self.xcodeStyleArchive()
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         var listed: [String: Int] = [:]
         let statistics = try await archive.forEachEntry { entry in
             if entry.header.type == .regularFile { listed[entry.path] = entry.size }
@@ -438,7 +456,7 @@ import Testing
     }
 }
 
-@Suite(.bulk) struct ExtractionBulkTests {
+@Suite(.bulk, .diskLifetimes) struct ExtractionBulkTests {
     /// The modes and segment sizes `ExtractionTests.extractsXcodeStyleArchives` leaves out: LZBITMAP forks in 1 KiB
     /// and 1 MiB segments.
     @Test(arguments: ["1k", "1m"])

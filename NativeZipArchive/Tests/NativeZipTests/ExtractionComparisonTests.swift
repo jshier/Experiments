@@ -12,7 +12,7 @@ import Testing
 /// modification time of files and directories, link target), from an archive `/usr/bin/zip` makes of a tree with
 /// nested and read-only directories, setuid and private modes, symbolic links, a large compressible file (decoded in a
 /// child task while it's written), and a stored file over 8 MiB (checksummed and written in pieces).
-@Suite struct InfoZIPComparisonTests {
+@Suite(.diskLifetimes) struct InfoZIPComparisonTests {
     /// The archive, made once per test in `directory`.
     private static func makeArchive(in directory: URL) throws -> URL {
         let source = directory.appending(path: "source")
@@ -83,7 +83,7 @@ import Testing
     }
 }
 
-@Suite struct ExtractionProgressTests {
+@Suite(.diskLifetimes) struct ExtractionProgressTests {
     private static func fixture(_ name: String) throws -> ZipArchive {
         try ZipArchive(url: TestData.file(set: "nativezip-formats", name: name))
     }
@@ -94,7 +94,7 @@ import Testing
         defer { temporary.remove() }
         let progress = ExtractionProgress()
         let archives = try ["symlink.zip", "zstd-large.zip", "bzip2-large.zip"].map(Self.fixture)
-        let failures = try await ZipExtractor.extract(into: FilePath(temporary.url.path), progress: progress) { extractor in
+        let failures = try await ZipExtractor.extract(into: FilePath(temporary.url.path), progress: progress) { (extractor) async throws(ZipError) in
             for (index, archive) in archives.enumerated() {
                 try await extractor.add(archive, into: FilePath("\(index)"))
             }
@@ -129,11 +129,13 @@ import Testing
         defer { temporary.remove() }
         let archive = try Self.fixture("symlink.zip")
         for subdirectory in ["../out", "/tmp/out", "a/../../out"] {
-            await #expect(throws: DiskError.self) {
-                _ = try await ZipExtractor.extract(into: FilePath(temporary.url.path)) { extractor in
+            // Disk's refusal, as Disk threw it.
+            let error = await #expect(throws: ZipError.self) {
+                _ = try await ZipExtractor.extract(into: FilePath(temporary.url.path)) { (extractor) async throws(ZipError) in
                     try await extractor.add(archive, into: FilePath(subdirectory))
                 }
             }
+            if case .disk(.unsafePath)? = error {} else { Issue.record("\(subdirectory): \(String(describing: error))") }
         }
     }
 }

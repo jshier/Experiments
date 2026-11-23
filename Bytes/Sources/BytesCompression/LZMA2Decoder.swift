@@ -59,7 +59,8 @@ public struct LZMAProperties: Hashable, Sendable {
 ///
 /// Each call decodes a whole stream into the caller's buffer, which is the dictionary: matches copy within it,
 /// so any dictionary size works and nothing is allocated for it. The decoder's probability model is allocated
-/// once, at creation (raw LZMA with more than 4 literal context and position bits together grows it once).
+/// once, at creation (raw LZMA with more than 4 literal context and position bits together grows it once). Every
+/// call starts a new stream: nothing carries over from earlier calls but that memory.
 ///
 /// The decode loop is `LzmaDec.c`'s design in Swift, with the range decoder in registers: tree bits with
 /// conditional selects, decisions with branches, a copy specialized for the default lc 3, lp 0, pb 2, input

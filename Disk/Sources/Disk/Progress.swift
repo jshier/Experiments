@@ -116,8 +116,10 @@ public final class ExtractionProgress: Sendable {
     /// total; negative ones as none.
     ///
     /// - Parameters:
-    ///   - entries: Entries made so far, of `expectedEntries` (0: not known).
-    ///   - bytes: Bytes of contents written so far, of `expectedBytes` (0: not known).
+    ///   - entries: Entries made so far.
+    ///   - expectedEntries: The entries in all (0: not known).
+    ///   - bytes: Bytes of contents written so far.
+    ///   - expectedBytes: The bytes in all (0: not known).
     ///   - entryWeight: What an entry counts as, in bytes.
     public static func fraction(
         entries: Int, of expectedEntries: Int, bytes: Int, of expectedBytes: Int, entryWeight: Int = defaultEntryWeight

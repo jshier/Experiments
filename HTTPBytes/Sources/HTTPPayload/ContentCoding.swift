@@ -68,7 +68,15 @@ struct ContentDecodingStage: ~Copyable {
     @usableFromInline var zstd: ZstdDecoder?
     /// For `deflate`: whether the stream's container has been decided (zlib, or raw DEFLATE).
     @usableFromInline var decided = false
+    /// At the end of a stream: for gzip and zstd, the end of a member or frame (more may follow: RFC 1952 §2.2, RFC
+    /// 8878 §3); for the others, the end of the stream.
     @usableFromInline var finished = false
+
+    /// Whether the coding's streams may be concatenated (gzip members, zstd frames): data after an end is the next one.
+    @inlinable var continuesAfterEnd: Bool { coding == .gzip || coding == .zstd }
+
+    /// At an end after which no more data may come: the body's data must end here.
+    @inlinable var isClosed: Bool { finished && !continuesAfterEnd }
 
     /// RFC 9659 §3: a zstd content coding's window is at most 8 MB, so a decoder may refuse larger ones.
     @inlinable static var zstdWindowLimit: Int { 8 << 20 }
@@ -97,7 +105,11 @@ struct ContentDecodingStage: ~Copyable {
 
     @inlinable
     mutating func decode(_ input: RawSpan, into output: inout OutputRawSpan) throws(HTTPPayloadError) -> TransformProgress {
-        if finished { return TransformProgress(consumed: 0, produced: 0, status: .finished) }
+        if finished {
+            // More data after a member or frame begins the next one; after any other stream's end, nothing does.
+            if input.byteCount == 0 || !continuesAfterEnd { return TransformProgress(consumed: 0, produced: 0, status: .finished) }
+            finished = false
+        }
         do throws(BytesError) {
             let progress: TransformProgress
             switch coding {
@@ -234,8 +246,13 @@ public struct HTTPContentDecoder: ~Copyable {
         }
     }
 
-    /// Whether the coded stream has ended (every coding's stream).
+    /// Whether the coded stream is at an end: the body may end here (for gzip and zstd, the end of a member or frame,
+    /// which more may follow).
     public var isFinished: Bool { last.finished }
+
+    /// Whether the coded stream has ended for good: no more body data may follow (after a gzip member or a zstd frame,
+    /// the next one may).
+    @inlinable var isClosed: Bool { last.isClosed }
 
     /// Decodes as much of `input` as it can into `output`.
     ///

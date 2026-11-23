@@ -5,7 +5,7 @@ import Synchronization
 
 /// Reusable decompression state: a decoder for every supported method plus output buffers.
 ///
-/// Create one per worker and pass it to ``ZipArchive/contents(of:using:password:_:)``. Every method decodes with
+/// Create one per worker and pass it to ``ZipArchive/contents(of:using:password:_:)-77zt7``. Every method decodes with
 /// `BytesCompression`'s `Decompressor`, in Swift: DEFLATE and Deflate64, bzip2, LZMA, xz, and Zstandard. Its buffers
 /// and each method's state are allocated once (a method's on the first entry that needs it), so steady-state decoding
 /// performs no allocations. Encrypted entries are decrypted in pieces into a staging buffer the decoder owns, as
@@ -85,10 +85,9 @@ public struct ZipDecoder: ~Copyable {
     ///   - payload: The compressed stream.
     ///   - path: The entry's name, for errors.
     ///   - body: Called with each non-empty chunk, in order.
-    /// - Throws: ``ZipError/corruptData(_:)`` for invalid or truncated data; whatever `body` throws.
-    @usableFromInline
-    mutating func inflate(_ payload: RawSpan, path: String, _ body: (RawSpan) throws -> Void) throws {
-        try payload.withUnsafeBytes { input in
+    /// - Throws: ``ZipError/decoding(_:_:)`` for invalid or truncated data; whatever `body` throws.
+    mutating func inflate(_ payload: RawSpan, path: String, _ body: (RawSpan) throws(ZipError) -> Void) throws(ZipError) {
+        try payload.withUnsafeBytes { (input) throws(ZipError) in
             try unsafe begin(input, method: ZipArchive.Method.deflated, size: nil, endMarker: false, path: path)
             try run(path: path, body)
         }
@@ -108,24 +107,26 @@ public struct ZipDecoder: ~Copyable {
     ///   - hasEndMarker: For LZMA, general-purpose flag bit 1: the stream ends with an end marker.
     ///   - chunk: Called with each non-empty piece, in order.
     /// - Throws: ``ZipError/unsupportedMethod(_:_:)`` for a method (or LZMA properties) that can't be read;
-    ///   ``ZipError/corruptData(_:)`` for invalid or truncated data, or output that isn't `uncompressedSize` bytes;
-    ///   whatever `chunk` throws.
+    ///   ``ZipError/decoding(_:_:)`` for invalid or truncated data; ``ZipError/sizeMismatch(_:expected:actual:)`` for
+    ///   output that isn't `uncompressedSize` bytes; whatever `chunk` throws.
     @_spi(Testing)
     public mutating func decodePayload(
         _ payload: RawSpan, method: UInt16, uncompressedSize: UInt64, hasEndMarker: Bool = false,
-        _ chunk: (RawSpan) throws -> Void
-    ) throws {
+        _ chunk: (RawSpan) throws(ZipError) -> Void
+    ) throws(ZipError) {
         let path = "payload"
         var written: UInt64 = 0
-        try payload.withUnsafeBytes { input in
+        try payload.withUnsafeBytes { (input) throws(ZipError) in
             try unsafe begin(input, method: method, size: uncompressedSize, endMarker: hasEndMarker, path: path)
-            try run(path: path) { piece in
+            try run(path: path) { (piece) throws(ZipError) in
                 written += UInt64(piece.byteCount)
-                guard written <= uncompressedSize else { throw ZipError.corruptData(path) }
+                guard written <= uncompressedSize else {
+                    throw .sizeMismatch(path, expected: uncompressedSize, actual: written)
+                }
                 try chunk(piece)
             }
         }
-        guard written == uncompressedSize else { throw ZipError.corruptData(path) }
+        guard written == uncompressedSize else { throw .sizeMismatch(path, expected: uncompressedSize, actual: written) }
     }
 
     /// Decrypts (if needed) and decompresses an entry's `payload`, calling `body` with each chunk of output.
@@ -138,12 +139,13 @@ public struct ZipDecoder: ~Copyable {
     ///   - entry: The entry.
     ///   - password: The password for an encrypted entry.
     ///   - body: Called with each non-empty chunk, in order.
-    /// - Throws: ``ZipError/unsupportedMethod(_:_:)``; the errors of decryption (see ``ZipError``);
-    ///   ``ZipError/corruptData(_:)`` for invalid or truncated data; whatever `body` throws.
+    /// - Throws: The errors of ``beginEntry(_:entry:password:)`` and ``nextChunk(into:)``; whatever `body` throws.
     @usableFromInline
-    mutating func decode(_ payload: RawSpan, entry: ZipEntry, password: String?, _ body: (RawSpan) throws -> Void) throws {
+    mutating func decode(
+        _ payload: RawSpan, entry: ZipEntry, password: String?, _ body: (RawSpan) throws(ZipError) -> Void
+    ) throws(ZipError) {
         defer { endDecryption() }
-        try payload.withUnsafeBytes { payload in
+        try payload.withUnsafeBytes { (payload) throws(ZipError) in
             let input = try unsafe prepareInput(payload, entry: entry, password: password)
             if entry.method == ZipArchive.Method.stored {
                 if decryptor != nil {
@@ -165,7 +167,7 @@ public struct ZipDecoder: ~Copyable {
     }
 
     /// Steps the current stream to its end, calling `body` with each chunk.
-    private mutating func run(path: String, _ body: (RawSpan) throws -> Void) throws {
+    private mutating func run(path: String, _ body: (RawSpan) throws(ZipError) -> Void) throws(ZipError) {
         while true {
             let (chunk, finished) = try unsafe step(into: 0, path: path)
             if unsafe !chunk.isEmpty { try body(unsafe chunk.bytes) }
@@ -177,8 +179,9 @@ public struct ZipDecoder: ~Copyable {
     /// `@unchecked Sendable`: a pointer into the decoder's buffer, handed to exactly one consumer task, and the
     /// buffer isn't written again until that consumer is done with it (``ChunkHandoff``'s protocol).
     @unsafe
+    @usableFromInline
     struct Chunk: @unchecked Sendable {
-        let bytes: UnsafeRawBufferPointer
+        @usableFromInline let bytes: UnsafeRawBufferPointer
     }
 
     // MARK: Pulling chunks
@@ -193,8 +196,12 @@ public struct ZipDecoder: ~Copyable {
     ///     ``MappedFile``).
     ///   - entry: The entry: compressed, or stored and encrypted (unencrypted stored entries are their payload).
     ///   - password: The password for an encrypted entry.
-    /// - Throws: The errors of ``decode(_:entry:password:_:)`` that come before any output.
-    mutating func beginEntry(_ payload: UnsafeRawBufferPointer, entry: ZipEntry, password: String?) throws {
+    /// - Throws: ``ZipError/unsupportedMethod(_:_:)``; the errors of decryption (``ZipError/passwordRequired(_:)``,
+    ///   ``ZipError/incorrectPassword(_:)``, ``ZipError/authenticationFailed(_:)``,
+    ///   ``ZipError/unsupportedEncryption(_:)``, ``ZipError/truncated(_:)``); ``ZipError/decoding(_:_:)`` for a stream
+    ///   whose header can't be read.
+    @usableFromInline
+    mutating func beginEntry(_ payload: UnsafeRawBufferPointer, entry: ZipEntry, password: String?) throws(ZipError) {
         endEntry()
         let input = try unsafe prepareInput(payload, entry: entry, password: password)
         entryPath = entry.path
@@ -213,8 +220,10 @@ public struct ZipDecoder: ~Copyable {
     /// or 64 KB as history, so a consumer may read one buffer's chunk while the next is decoded into the other (both
     /// only read the first).
     ///
-    /// - Throws: ``ZipError/corruptData(_:)`` for invalid or truncated data.
-    mutating func nextChunk(into index: Int) throws -> (chunk: Chunk, finished: Bool) {
+    /// - Throws: ``ZipError/decoding(_:_:)`` for invalid or truncated data (``ZipError/cancelled`` for a decoder that
+    ///   was cancelled).
+    @usableFromInline
+    mutating func nextChunk(into index: Int) throws(ZipError) -> (chunk: Chunk, finished: Bool) {
         if decryptsStored {
             let chunk = unsafe decryptStored(into: index)
             return unsafe (chunk, decryptor?.isFinished ?? true)
@@ -224,6 +233,7 @@ public struct ZipDecoder: ~Copyable {
     }
 
     /// Ends the entry ``beginEntry(_:entry:password:)`` started (its decryption): after its last chunk, or a failure.
+    @usableFromInline
     mutating func endEntry() {
         endDecryption()
     }
@@ -237,10 +247,10 @@ public struct ZipDecoder: ~Copyable {
     /// - Throws: ``ZipError/passwordRequired(_:)`` without a password; ``ZipError/incorrectPassword(_:)``
     ///   when its check fails; ``ZipError/authenticationFailed(_:)`` for an AES entry whose authentication
     ///   code doesn't match; ``ZipError/unsupportedEncryption(_:)``; ``ZipError/truncated(_:)``.
-    private mutating func prepareInput(_ payload: UnsafeRawBufferPointer, entry: ZipEntry, password: String?) throws -> UnsafeRawBufferPointer {
+    private mutating func prepareInput(_ payload: UnsafeRawBufferPointer, entry: ZipEntry, password: String?) throws(ZipError) -> UnsafeRawBufferPointer {
         guard let encryption = entry.encryption else { return unsafe payload }
-        if case .unsupported = encryption { throw ZipError.unsupportedEncryption(entry.path) }
-        guard let password else { throw ZipError.passwordRequired(entry.path) }
+        if case .unsupported = encryption { throw .unsupportedEncryption(entry.path) }
+        guard let password else { throw .passwordRequired(entry.path) }
         var key = password
         // Unsafe: a span over `payload`, valid for this call (it's in the mapped archive).
         let source = unsafe RawSpan(_unsafeBytes: payload)
@@ -248,14 +258,14 @@ public struct ZipDecoder: ~Copyable {
         switch encryption {
         case .traditional:
             let header = TraditionalCipher.headerSize
-            guard source.byteCount >= header else { throw ZipError.truncated("encryption header for '\(entry.path)'") }
+            guard source.byteCount >= header else { throw .truncated("encryption header for '\(entry.path)'") }
             var cipher = key.withUTF8 { unsafe TraditionalCipher(password: RawSpan(_unsafeBytes: UnsafeRawBufferPointer($0))) }
             // With a data descriptor the CRC wasn't known when the header was made: it checks the time instead.
             let expected = entry.flags & 0x8 != 0 ? UInt8(truncatingIfNeeded: entry.dosTime >> 8) : UInt8(truncatingIfNeeded: entry.crc32 >> 24)
-            guard cipher.checkByte(source.extracting(0..<header)) == expected else { throw ZipError.incorrectPassword(entry.path) }
+            guard cipher.checkByte(source.extracting(0..<header)) == expected else { throw .incorrectPassword(entry.path) }
             decryptor = PayloadDecryptor(cipher: .traditional(cipher), ciphertext: header..<source.byteCount, position: header)
         case let .aes(bits, _):
-            do {
+            do throws(WinZipAES.Failure) {
                 // Unsafe: the password's UTF-8 as a span, valid inside `withUTF8`'s closure, which it doesn't outlive.
                 let (aes, counter, ciphertext) = try key.withUTF8 { (utf8) throws(WinZipAES.Failure) in
                     try unsafe WinZipAES.open(source, bits: bits, password: RawSpan(_unsafeBytes: UnsafeRawBufferPointer(utf8)))
@@ -263,13 +273,13 @@ public struct ZipDecoder: ~Copyable {
                 decryptor = PayloadDecryptor(cipher: .aes(aes, counter), ciphertext: ciphertext, position: ciphertext.lowerBound)
             } catch {
                 switch error {
-                case .badPassword: throw ZipError.incorrectPassword(entry.path)
-                case .authenticationFailed: throw ZipError.authenticationFailed(entry.path)
-                case .truncated: throw ZipError.truncated("encryption header for '\(entry.path)'")
+                case .badPassword: throw .incorrectPassword(entry.path)
+                case .authenticationFailed: throw .authenticationFailed(entry.path)
+                case .truncated: throw .truncated("encryption header for '\(entry.path)'")
                 }
             }
         case .unsupported:
-            throw ZipError.unsupportedEncryption(entry.path)
+            throw .unsupportedEncryption(entry.path)
         }
         unsafe self.payload = payload
         self.decryptor = decryptor
@@ -347,7 +357,11 @@ public struct ZipDecoder: ~Copyable {
     /// - Parameters:
     ///   - size: The entry's recorded size; `nil` for a bare stream of unknown size (``inflate(_:path:_:)``).
     ///   - endMarker: For LZMA, general-purpose flag bit 1: the stream ends with an end marker.
-    private mutating func begin(_ input: UnsafeRawBufferPointer, method: UInt16, size: UInt64?, endMarker: Bool, path: String) throws {
+    ///
+    /// - Throws: ``ZipError/unsupportedMethod(_:_:)``; ``ZipError/decoding(_:_:)`` when the decoder can't start.
+    private mutating func begin(
+        _ input: UnsafeRawBufferPointer, method: UInt16, size: UInt64?, endMarker: Bool, path: String
+    ) throws(ZipError) {
         unsafe self.input = input
         consumed = 0
         lastEnd = 0
@@ -364,12 +378,12 @@ public struct ZipDecoder: ~Copyable {
         // Zip method 95 stores a whole `.xz` stream; the recorded size keeps a small entry's window small.
         case ZipArchive.Method.xz: format = .xz(sizeHint: size.flatMap { Int(exactly: $0) })
         case ZipArchive.Method.lzma: format = try lzmaFormat(size: size, endMarker: endMarker, path: path)
-        default: throw ZipError.unsupportedMethod(method, path)
+        default: throw .unsupportedMethod(method, path)
         }
         do throws(BytesError) {
             try decompressor.reset(for: format)
         } catch {
-            throw ZipError.corruptData(path)
+            throw ZipError(decoding: error, path)
         }
         // Small and unencrypted: one call into the output buffer, which is the history, with no window. (A wrong
         // size in the header makes it throw, as corrupt data.)
@@ -390,12 +404,13 @@ public struct ZipDecoder: ~Copyable {
     /// one.
     ///
     /// - Throws: ``ZipError/unsupportedMethod(_:_:)`` for a header or properties this decoder can't read;
-    ///   ``ZipError/corruptData(_:)`` for a payload too short to hold them.
-    private mutating func lzmaFormat(size: UInt64?, endMarker: Bool, path: String) throws -> DecompressionFormat {
+    ///   ``ZipError/truncated(_:)`` for a payload too short to hold them; ``ZipError/decoding(_:_:)``
+    ///   (`invalidValue`) for an entry of no size, or one larger than memory can hold.
+    private mutating func lzmaFormat(size: UInt64?, endMarker: Bool, path: String) throws(ZipError) -> DecompressionFormat {
         // An encrypted entry's header is in its first decrypted bytes.
         while unsafe pendingInput().count < 9, refillInput() > 0 {}
         let header = unsafe pendingInput()
-        guard header.count >= 9 else { throw ZipError.corruptData(path) }
+        guard header.count >= 9 else { throw .truncated("LZMA header for '\(path)'") }
         // Unsafe: loads from the 9 bytes just checked.
         let propertiesSize = unsafe UInt16(header[2]) | UInt16(header[3]) << 8
         let dictionarySize = unsafe UInt32(header[5]) | UInt32(header[6]) << 8 | UInt32(header[7]) << 16 | UInt32(header[8]) << 24
@@ -404,10 +419,10 @@ public struct ZipDecoder: ~Copyable {
             guard propertiesSize == 5 else { throw .invalidValue }
             properties = unsafe try LZMAProperties(byte: header[4], dictionarySize: Int(dictionarySize))
         } catch {
-            throw ZipError.unsupportedMethod(ZipArchive.Method.lzma, path)
+            throw .unsupportedMethod(ZipArchive.Method.lzma, path)
         }
         consumeInput(9)
-        guard let size, let count = Int(exactly: size) else { throw ZipError.corruptData(path) }
+        guard let size, let count = Int(exactly: size) else { throw .decoding(.invalidValue, path) }
         if endMarker { outputLimit = size }
         return .lzma(properties, uncompressedSize: endMarker ? nil : count, sizeHint: endMarker ? count : nil)
     }
@@ -418,9 +433,11 @@ public struct ZipDecoder: ~Copyable {
     ///   - index: Which of the two buffers to decode into.
     ///   - path: The entry's name, for errors.
     /// - Returns: The chunk (excluding history) and whether the stream ended.
-    /// - Throws: ``ZipError/corruptData(_:)`` for invalid or truncated data.
-    private mutating func step(into index: Int, path: String) throws -> (chunk: UnsafeRawBufferPointer, finished: Bool) {
+    /// - Throws: ``ZipError/decoding(_:_:)`` with the decoder's error for invalid or truncated data
+    ///   (``ZipError/cancelled`` for a cancelled one).
+    private mutating func step(into index: Int, path: String) throws(ZipError) -> (chunk: UnsafeRawBufferPointer, finished: Bool) {
         let output = unsafe index == 0 ? buffers.0 : buffers.1
+        let limit: UInt64
         do throws(BytesError) {
             switch mode {
             case let .history(historySize):
@@ -437,12 +454,16 @@ public struct ZipDecoder: ~Copyable {
                 let chunk = unsafe UnsafeMutableRawBufferPointer(rebasing: output[..<Self.chunkSize])
                 let (count, finished) = try unsafe streamStep(into: chunk)
                 produced &+= UInt64(count)
-                if let outputLimit, produced > outputLimit { throw BytesError.invalidValue }
-                return unsafe (UnsafeRawBufferPointer(rebasing: chunk[..<count]), finished)
+                guard let outputLimit, produced > outputLimit else {
+                    return unsafe (UnsafeRawBufferPointer(rebasing: chunk[..<count]), finished)
+                }
+                limit = outputLimit
             }
         } catch {
-            throw ZipError.corruptData(path)
+            throw ZipError(decoding: error, path)
         }
+        // An LZMA stream ending with an end marker ran past the entry's size.
+        throw .sizeMismatch(path, expected: limit, actual: produced)
     }
 
     /// Inflates the next chunk straight into buffer `index`, after the last window of the previous chunk's output,
@@ -521,8 +542,8 @@ public enum DeflateBackends {
     ///   - decoder: The decoder to use.
     ///   - discarding: If `true`, the output is dropped, for timing decoding alone.
     /// - Returns: The output, or an empty array if `discarding`.
-    /// - Throws: ``ZipError/corruptData(_:)`` for invalid or truncated data.
-    public static func inflate(_ payload: RawSpan, using decoder: inout ZipDecoder, discarding: Bool = false) throws -> [UInt8] {
+    /// - Throws: ``ZipError/decoding(_:_:)`` for invalid or truncated data.
+    public static func inflate(_ payload: RawSpan, using decoder: inout ZipDecoder, discarding: Bool = false) throws(ZipError) -> [UInt8] {
         var output: [UInt8] = []
         try decoder.inflate(payload, path: "payload") { chunk in
             if !discarding { output.append(copying: chunk) }

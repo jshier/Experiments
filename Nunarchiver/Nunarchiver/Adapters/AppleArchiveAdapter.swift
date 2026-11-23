@@ -10,13 +10,13 @@ import System
 /// into `progress` and sets its totals itself.
 enum AppleArchiveAdapter {
     /// Opens an `.aar`.
-    static func openArchive(_ archive: FilePath) throws -> AppleArchiveFile {
-        try AppleArchiveFile(path: archive)
+    static func openArchive(_ archive: FilePath) throws(ExpansionError) -> AppleArchiveFile {
+        do throws(AEAError) { return try AppleArchiveFile(path: archive) } catch { throw .appleArchive(error) }
     }
 
     /// Opens a `.xip`, verifying its signature.
-    static func openXIP(_ archive: FilePath) throws -> XIPArchive {
-        try XIPArchive(path: archive)
+    static func openXIP(_ archive: FilePath) throws(ExpansionError) -> XIPArchive {
+        do throws(AEAError) { return try XIPArchive(path: archive) } catch { throw .appleArchive(error) }
     }
 
     /// Opens an `.aea`, verifying its signature and keys; one that needs a key the user hasn't entered (or entered
@@ -27,48 +27,49 @@ enum AppleArchiveAdapter {
     ///   with "Error 22"), the signer's public key is asked for.
     /// - Profiles 1 and 2: the symmetric key. Profile 5: the password.
     /// - Profiles 3 and 4 (a recipient's private key): not asked for; reported as unsupported.
-    static func openEncryptedArchive(_ archive: FilePath, credentials: ArchiveCredentials) throws -> AEAArchive {
-        let profile = try AEAArchive.profile(at: archive)
+    static func openEncryptedArchive(_ archive: FilePath, credentials: ArchiveCredentials) throws(ExpansionError) -> AEAArchive {
+        let profile: AEAProfile
+        do throws(AEAError) { profile = try AEAArchive.profile(at: archive) } catch { throw .appleArchive(error) }
         var decryptionKey: AEADecryptionKey?
         var decryptionKind: CredentialKind?
         switch profile {
         case .signed:
             break
         case .symmetric, .symmetricSigned:
-            guard let text = credentials[.key] else { throw CredentialRequest(kind: .key) }
+            guard let text = credentials[.key] else { throw .credential(CredentialRequest(kind: .key)) }
             // Text that isn't a 32-byte key in hex or base64: ask again.
             guard case .symmetric(let key)? = try? AEADecryptionKey.symmetric(text: text), key.count == 32 else {
-                throw CredentialRequest(kind: .key, isRetry: true)
+                throw .credential(CredentialRequest(kind: .key, isRetry: true))
             }
             decryptionKey = .symmetric(key)
             decryptionKind = .key
         case .scrypt:
-            guard let password = credentials[.password] else { throw CredentialRequest(kind: .password) }
+            guard let password = credentials[.password] else { throw .credential(CredentialRequest(kind: .password)) }
             decryptionKey = .password(Array(password.utf8))
             decryptionKind = .password
         case .ecdhe, .ecdheSigned:
-            throw ExpansionFailure.unsupportedKey("a recipient’s private key")
+            throw .failure(.unsupportedKey("a recipient’s private key"))
         }
         var signingKey = AEASigningKey.certificateChain
         if let text = credentials[.signingPublicKey] {
-            guard let key = try? AEASigningKey.publicKey(text: text) else { throw CredentialRequest(kind: .signingPublicKey, isRetry: true) }
+            guard let key = try? AEASigningKey.publicKey(text: text) else { throw .credential(CredentialRequest(kind: .signingPublicKey, isRetry: true)) }
             signingKey = key
         }
-        do {
+        do throws(AEAError) {
             return try AEAArchive(path: archive, signingKey: signingKey, decryptionKey: decryptionKey)
         } catch {
             switch error {
             case .untrustedSigningKey where profile.isSigned && credentials[.signingPublicKey] == nil:
                 // No certificate chain to take the signer from (or one that doesn't lead to Apple's root).
-                throw CredentialRequest(kind: .signingPublicKey)
+                throw .credential(CredentialRequest(kind: .signingPublicKey))
             case .invalidSignature where credentials[.signingPublicKey] != nil:
-                throw CredentialRequest(kind: .signingPublicKey, isRetry: true)
-            case .authenticationFailed(let what) where what.hasSuffix("(wrong key?)"):
+                throw .credential(CredentialRequest(kind: .signingPublicKey, isRetry: true))
+            case .incorrectKey:
                 // The root header's MAC (or the encrypted signature's): the first thing a wrong key or password fails.
-                if let decryptionKind { throw CredentialRequest(kind: decryptionKind, isRetry: true) }
-                throw error
+                if let decryptionKind { throw .credential(CredentialRequest(kind: decryptionKind, isRetry: true)) }
+                throw .appleArchive(error)
             default:
-                throw error
+                throw .appleArchive(error)
             }
         }
     }

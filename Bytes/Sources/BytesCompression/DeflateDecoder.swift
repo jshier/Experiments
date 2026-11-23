@@ -23,6 +23,22 @@ public import Bytes
 ///
 /// ``init(variant:)`` makes a decoder for raw Deflate64 streams (zip method 9): see ``DeflateVariant``.
 ///
+/// ## gzip members
+///
+/// A gzip file is a series of members (RFC 1952 §2.2): `cat a.gz b.gz`, pigz's and BGZF's blocks. In gzip format
+/// the decoder decodes every member, each a DEFLATE stream of its own with its CRC-32 and length checked, and
+/// appends their outputs. After a member, the next bytes must start another member's header (`1F 8B 08`) or the
+/// input must end: anything else throws ``BytesError/invalidValue``. Empty members are fine. Each member starts
+/// with no history (a match reaching into an earlier member's output throws), and costs only its header, trailer,
+/// and a reset: no allocation.
+///
+/// When decoding in steps, the decoder can't tell whether another member follows until it sees the next bytes.
+/// So ``decompress(_:into:)`` returns ``TransformStatus/finished`` at a member's end when all of `input` is used
+/// and all output delivered: the stream is complete if the input has ended, and a call with more input decodes
+/// the next member. As a pipeline stage (``transform(_:into:flush:)``) that end reads as
+/// ``TransformStatus/needsInput`` until `.finish` says the input has ended, so `.finished` there means the whole
+/// stream has. Raw and zlib streams have one stream and end at it. ``gzipHeader`` is the latest member's header.
+///
 /// The decode loop is libdeflate's design: packed table entries holding a length's base and extra-bit count
 /// and flags tested one bit at a time, the next entry looked up before the current symbol is finished, up to
 /// three literals per refill, and matches copied 16 bytes at a time with an overrun. It runs while at least
@@ -44,6 +60,9 @@ public struct DeflateDecoder: ~Copyable {
     private var windowEnd = 0
     /// The first decoded byte not yet delivered.
     private var windowDelivered = 0
+    /// The bytes the current gzip member has decoded through ``decompress(_:into:historyCount:)``: how much of the
+    /// caller's history back-references may reach.
+    private var memberProduced = 0
 
     /// Creates a decoder, allocating its tables and window.
     ///
@@ -82,32 +101,44 @@ public struct DeflateDecoder: ~Copyable {
         stream.reset()
         windowEnd = 0
         windowDelivered = 0
+        memberProduced = 0
     }
 
-    /// Whether the stream has ended and all its output has been delivered.
+    /// Whether the stream has ended and all its output has been delivered. In gzip format, whether a member has
+    /// ended so: the input may end here, or another member may follow.
     public var isFinished: Bool { stream.isDone && windowDelivered == windowEnd }
+
+    /// The header of the latest gzip member read, since the decoder was made or ``reset()``: `nil` before the first
+    /// (and always for raw and zlib streams).
+    public var gzipHeader: GzipHeader? { stream.gzipHeader }
 
     /// Decodes a whole stream, from the start, straight into `output`'s free capacity.
     ///
-    /// The fastest way to decode: no window, no copies. The decoder must be fresh or ``reset()``.
+    /// The fastest way to decode: no window, no copies. Every call starts a new stream: a decoder used before (by
+    /// any call) starts over as after ``reset()``, keeping its memory.
     ///
     /// - Parameters:
-    ///   - input: The whole compressed stream. Bytes after its end are ignored.
+    ///   - input: The whole compressed stream. For raw and zlib streams, bytes after its end are ignored; for
+    ///     gzip, every member is decoded, and the input must end after the last.
     ///   - output: Where to append the decompressed bytes; it needs room for all of them.
-    /// - Returns: The number of input bytes the stream took, including its container's header and trailer.
+    /// - Returns: The number of input bytes the stream took, including its container's header and trailer (gzip:
+    ///   all of them).
     /// - Throws: ``BytesError/insufficientData`` for a truncated stream; ``BytesError/insufficientCapacity``
-    ///   if the output doesn't fit; ``BytesError/invalidValue`` for corrupt data; ``BytesError/mismatch`` for
-    ///   a wrong checksum or length, or a stored block's bad length complement.
+    ///   if the output doesn't fit; ``BytesError/invalidValue`` for corrupt data (in gzip, bytes after a member
+    ///   that don't start another); ``BytesError/mismatch`` for a wrong checksum or length, or a stored block's
+    ///   bad length complement.
     public mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
-        try output.withFreeCapacity { span, written throws(BytesError) -> Int in
+        reset()
+        return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
             let result = try stream.run(input, from: 0, into: &span, at: 0)
-            switch result.stop {
-            case .finished: break
-            case .needsInput: throw .insufficientData
-            case .outputFull: throw .insufficientCapacity
+            try InflateStream.checkWhole(result.stop)
+            var position = result.position
+            var end = result.end
+            if stream.format == .gzip && position &>> 3 < input.byteCount {
+                end = try stream.runMembers(input, from: &position, into: &span, at: end)
             }
-            written = result.end
-            return result.position &>> 3
+            written = end
+            return position &>> 3
         }
     }
 
@@ -146,8 +177,11 @@ public struct DeflateDecoder: ~Copyable {
     ///   - input: The compressed bytes, starting with any not consumed last time.
     ///   - buffer: The history, then room to decode into.
     ///   - historyCount: How many bytes at the start of `buffer` are history.
+    /// gzip members follow one another as in ``decompress(_:into:)``: `.finished` at a member's end with all of
+    /// `input` used; history from an earlier member is out of reach.
+    ///
     /// - Returns: What was consumed and produced, and whether more input or more room is needed, or the
-    ///   stream is finished.
+    ///   stream (gzip: a member, with nothing after it in `input`) is finished.
     /// - Throws: As ``decompress(_:into:)``; ``BytesError/invalidValue`` also for a match reaching before the
     ///   history.
     /// - Precondition: `historyCount` is within `buffer`, and no output of ``decompress(_:into:)`` is waiting.
@@ -156,14 +190,37 @@ public struct DeflateDecoder: ~Copyable {
     ) throws(BytesError) -> TransformProgress {
         precondition(historyCount >= 0 && historyCount <= buffer.byteCount, "History outside the buffer")
         precondition(windowDelivered == windowEnd, "Output of decompress(_:into:) is waiting")
-        let result = try stream.run(input, from: stream.bitOffset, into: &buffer, at: historyCount)
-        stream.bitOffset = result.position & 7
-        let status: TransformStatus = switch result.stop {
-        case .finished: .finished
-        case .outputFull: .needsOutput
-        case .needsInput: .needsInput
+        guard stream.format == .gzip else {
+            let result = try stream.run(input, from: stream.bitOffset, into: &buffer, at: historyCount)
+            stream.bitOffset = result.position & 7
+            return TransformProgress(consumed: result.position &>> 3, produced: result.end &- historyCount, status: result.stop.status)
         }
-        return TransformProgress(consumed: result.position &>> 3, produced: result.end &- historyCount, status: status)
+        // gzip: back-references reach only the current member's output, so the buffer is cut where the member began
+        // (or the history starts); and a member's end with more input starts the next.
+        var position = stream.bitOffset
+        var end = historyCount
+        var stop: InflateStream.Stop
+        while true {
+            if stream.isDone {
+                guard position &>> 3 < input.byteCount else {
+                    stop = .finished
+                    break
+                }
+                stream.startMember()
+                memberProduced = 0
+            }
+            let history = min(end, memberProduced)
+            let base = end &- history
+            var member = buffer._mutatingExtracting(base...)
+            let result = try stream.run(input, from: position, into: &member, at: history)
+            position = result.position
+            memberProduced &+= result.end &- history
+            end = base &+ result.end
+            stop = result.stop
+            guard stop == .finished else { break }
+        }
+        stream.bitOffset = position & 7
+        return TransformProgress(consumed: position &>> 3, produced: end &- historyCount, status: stop.status)
     }
 
     /// Decodes as much of `input` as it can, appending to `output`, continuing the current stream.
@@ -176,10 +233,15 @@ public struct DeflateDecoder: ~Copyable {
     /// - Parameters:
     ///   - input: The next compressed bytes, starting with any not consumed last time.
     ///   - output: Where to append decompressed bytes.
+    /// In gzip format a member's end with more of `input` after it goes on into the next member (see "gzip
+    /// members" above); input can be split anywhere there too.
+    ///
     /// - Returns: What was consumed and produced, and whether more input or more room is needed, or the
-    ///   stream is finished.
-    /// - Throws: ``BytesError/invalidValue`` for corrupt data; ``BytesError/mismatch`` for a wrong checksum
-    ///   or length. A stream that never ends just keeps asking for input.
+    ///   stream is finished: for gzip, a member ended with all of `input` used and all output delivered (call
+    ///   again with more input if there is more: another member).
+    /// - Throws: ``BytesError/invalidValue`` for corrupt data (in gzip, bytes after a member that can't start
+    ///   another); ``BytesError/mismatch`` for a wrong checksum or length. A stream that never ends just keeps
+    ///   asking for input.
     public mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         var position = stream.bitOffset
         var produced = 0
@@ -192,8 +254,15 @@ public struct DeflateDecoder: ~Copyable {
                 break
             }
             if stream.isDone {
-                status = .finished
-                break
+                // gzip: input after a member starts the next, with a window of its own (everything is delivered).
+                guard stream.format == .gzip && position &>> 3 < input.byteCount else {
+                    status = .finished
+                    break
+                }
+                stream.startMember()
+                windowEnd = 0
+                windowDelivered = 0
+                windowFull = false
             }
             // Full: the next symbol didn't fit. For DEFLATE that's always within `fastRoom` of the end; a
             // Deflate64 match can need up to 64 KB, which a slid window (128 KB free) always has.
@@ -296,6 +365,8 @@ struct InflateStream: ~Copyable {
     var bitOffset = 0
     /// gzip's header flags.
     private var gzipFlags = Byte.zero
+    /// The latest gzip member's header, kept from one member to the next until a reset.
+    private(set) var gzipHeader: GzipHeader?
     /// The CRC-32 of the gzip header so far, for its optional header CRC.
     private var headerCRC = CRC32()
     /// The running checksum of the output: CRC-32 for gzip, Adler-32 for zlib.
@@ -328,7 +399,6 @@ struct InflateStream: ~Copyable {
         }
     }
 
-    /// Prepares to decode a new stream. Keeps the tables.
     /// Whether the stream is between two blocks, the last not final: where a parallel decoder's segment may
     /// end.
     var isBetweenBlocks: Bool {
@@ -336,7 +406,15 @@ struct InflateStream: ~Copyable {
         return false
     }
 
+    /// Prepares to decode a new stream. Keeps the tables.
     mutating func reset() {
+        startMember()
+        gzipHeader = nil
+    }
+
+    /// Prepares to decode the next gzip member after one that ended (or, as part of ``reset()``, a new stream):
+    /// the stream's state but the latest header.
+    mutating func startMember() {
         stage = Self.initialStage(format)
         isFinalBlock = false
         bitOffset = 0
@@ -344,6 +422,47 @@ struct InflateStream: ~Copyable {
         headerCRC = CRC32()
         checksum = format.initialChecksum
         length = 0
+    }
+
+    /// Throws for a whole-stream decode that stopped before the stream's end.
+    ///
+    /// - Throws: ``BytesError/insufficientData`` for input that ended first, ``BytesError/insufficientCapacity`` for
+    ///   output that filled.
+    @inline(__always)
+    static func checkWhole(_ stop: Stop) throws(BytesError) {
+        switch stop {
+        case .finished: break
+        case .needsInput: throw .insufficientData
+        case .outputFull: throw .insufficientCapacity
+        }
+    }
+
+    /// Decodes the gzip members after the first, each into `output` after the last with no history before it,
+    /// until the input ends: the rest of a whole-stream decode, out of line so a single member's call doesn't
+    /// carry it.
+    ///
+    /// - Parameters:
+    ///   - input: The whole stream.
+    ///   - position: The bit after the first member's trailer; advanced to the input's end.
+    ///   - output: The buffer the first member was decoded into.
+    ///   - end: Where its output ended.
+    /// - Returns: Where the last member's output ends.
+    /// - Throws: As ``run(_:from:into:at:)``; ``BytesError/insufficientData`` for a member cut short,
+    ///   ``BytesError/insufficientCapacity`` for output that doesn't fit.
+    @inline(never)
+    mutating func runMembers(
+        _ input: RawSpan, from position: inout Int, into output: inout MutableRawSpan, at end: Int
+    ) throws(BytesError) -> Int {
+        var end = end
+        repeat {
+            startMember()
+            var member = output._mutatingExtracting(end...)
+            let result = try run(input, from: position, into: &member, at: 0)
+            try Self.checkWhole(result.stop)
+            position = result.position
+            end &+= result.end
+        } while position &>> 3 < input.byteCount
+        return end
     }
 
     /// Starts a new stream and reads just its container's header (nothing for raw DEFLATE), for a parallel
@@ -371,6 +490,15 @@ struct InflateStream: ~Copyable {
     /// Why ``run(_:from:into:at:)`` stopped.
     enum Stop: Equatable {
         case needsInput, outputFull, finished
+
+        /// The streaming status it reports.
+        var status: TransformStatus {
+            switch self {
+            case .finished: .finished
+            case .outputFull: .needsOutput
+            case .needsInput: .needsInput
+            }
+        }
     }
 
     /// Decodes from bit `start` of `input` into `output` from `outputStart`, through the stream's stages,
@@ -483,12 +611,26 @@ struct InflateStream: ~Copyable {
                       header.isClear(ZlibHeader.presetDictionary) else { throw BytesError.invalidValue }
                 stage = .blockHeader
             case .gzipHeader:
+                guard reader.remainingByteCount >= 10 else {
+                    // Not all there yet, but bytes that can't start a member (after one: trailing garbage) throw now,
+                    // rather than waiting for input that can't help.
+                    try Self.checkGzipMagic(reader.remainingBytes)
+                    return false
+                }
                 let fixed = try reader.read(byteCount: 10)
-                var header = AlignedBytesReader(fixed)
-                try header.expect(0x1F_8B_08 as Byte3) // ID1, ID2, CM (8, DEFLATE)
-                gzipFlags = try header.read(Byte.self)
+                // Unsafe: two loads within the 10 bytes just read. As two words, the fields cost a few shifts (they
+                // were read one at a time through a checked reader, about 100 instructions a member).
+                let low = UInt64(littleEndian: unsafe fixed.unsafeLoadUnaligned(as: UInt64.self))
+                let high = UInt16(littleEndian: unsafe fixed.unsafeLoadUnaligned(fromByteOffset: 8, as: UInt16.self))
+                guard low & 0xFF_FFFF == 0x08_8B_1F else { throw BytesError.invalidValue } // ID1, ID2, CM (8, DEFLATE)
+                gzipFlags = Byte(truncatingIfNeeded: low &>> 24)
                 try gzipFlags.requireZero(GzipFlags.reserved)
-                headerCRC.update(fixed)
+                gzipHeader = GzipHeader(
+                    flags: gzipFlags, modificationTime: UInt32(truncatingIfNeeded: low &>> 32),
+                    extraFlags: UInt8(truncatingIfNeeded: high), operatingSystem: UInt8(truncatingIfNeeded: high &>> 8)
+                )
+                // The header's CRC only matters with FHCRC (the optional fields, when present, add to it regardless).
+                if gzipFlags[GzipFlags.headerCRC] { headerCRC.update(fixed) }
                 stage = .gzipExtraLength
             case .gzipExtraLength:
                 if gzipFlags[GzipFlags.extra] {
@@ -534,6 +676,16 @@ struct InflateStream: ~Copyable {
         }
         position = reader.bitPosition
         return true
+    }
+
+    /// Throws unless `bytes` start as a gzip header does, as far as they go: its magic and method, `1F 8B 08`.
+    ///
+    /// - Throws: ``BytesError/invalidValue`` for a byte that differs.
+    private static func checkGzipMagic(_ bytes: RawSpan) throws(BytesError) {
+        let magic: InlineArray<3, UInt8> = [0x1F, 0x8B, 0x08]
+        for index in 0..<min(bytes.byteCount, 3) where bytes.load(fromByteOffset: index, as: UInt8.self) != magic[index] {
+            throw .invalidValue
+        }
     }
 
     /// Reads and checks the container's trailer at byte `position / 8`.

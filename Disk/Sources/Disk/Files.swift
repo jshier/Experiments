@@ -37,20 +37,92 @@ public final class MappedFile: Sendable {
         case sequential
     }
 
-    /// Maps the whole file at `path` (Disk's ``InputFile``, then ``InputFile/map(access:)``).
+    /// What's mapped: the file itself, or a private copy of it that no one else can truncate.
+    ///
+    /// A mapped file truncated by someone else while it's read faults on some volumes: on FAT and exFAT (USB sticks, SD
+    /// cards) a read past the new end raises `SIGBUS` and ends the process; on APFS and HFS+ the mapping keeps its
+    /// bytes (measured on macOS 27, cold pages and cached alike: Disk/RESULTS.md, 2026-11-23).
+    public enum Source: Sendable {
+        /// The file itself on APFS and HFS+, a private copy elsewhere (FAT, exFAT, network volumes, anything else).
+        case automatic
+        /// The file itself, wherever it is: a truncation by someone else can end the process on some volumes.
+        case file
+        /// Always a private copy.
+        case copy
+    }
+
+    /// Whether this maps a private copy of the file (an unlinked temporary file on the internal volume) rather than
+    /// the file itself.
+    public let isCopy: Bool
+
+    /// Maps the whole file at `path` (Disk's ``InputFile``, then ``InputFile/map(access:)``), or a private copy of it
+    /// where a truncated mapping would fault (`source`).
+    ///
+    /// The copy is the whole file read once, before the mapping returns: on a USB stick, the time it takes to read the
+    /// archive, which a mapping would have spent in page faults later. It's made in the user's temporary directory and
+    /// unlinked at once (its blocks go when the mapping does). If it can't be made (no room), the file itself is mapped.
     ///
     /// - Throws: ``DiskError/system(_:path:_:)`` with `open`'s, `fstat`'s, or `mmap`'s error.
-    public convenience init(path: FilePath, access: Access = .random) throws(DiskError) {
+    public convenience init(path: FilePath, access: Access = .random, source: Source = .automatic) throws(DiskError) {
         let file = try InputFile(path)
+        // The mapping outlives the descriptor: closed as soon as the file is mapped.
+        defer { file.close() }
+        var descriptor = file.descriptorForMapping
+        let copy = switch source {
+        case .file: Int32(-1)
+        case .copy: Self.privateCopy(of: descriptor)
+        case .automatic: Self.truncationFaults(descriptor) ? Self.privateCopy(of: descriptor) : -1
+        }
+        if copy >= 0 { descriptor = copy }
+        defer { if copy >= 0 { Sys.close(copy) } }
         let (base, lead): (UnsafeRawPointer?, Int)
         do throws(Errno) {
             // Unsafe: the mapping's address. Safe: handed straight to `self.init`, which owns it.
-            unsafe (base, lead) = try Self.map(file.descriptorForMapping, range: 0..<file.count, access: access)
+            unsafe (base, lead) = try Self.map(descriptor, range: 0..<file.count, access: access)
         } catch {
             throw .system("mmap", path: path.string, error)
         }
         // Unsafe: the mapping just made, `file.count` bytes after `lead`. Safe: owned from here by `self`.
-        unsafe self.init(base: base, count: file.count, lead: lead)
+        unsafe self.init(base: base, count: file.count, lead: lead, isCopy: copy >= 0)
+    }
+
+    /// Whether a mapping of `descriptor`'s file can fault when someone else truncates it: true except on APFS and HFS+
+    /// (and when the volume can't be asked).
+    static func truncationFaults(_ descriptor: Int32) -> Bool {
+        var volume = statfs()
+        Sys.countOther()
+        // Unsafe: a pointer to `volume` to `fstatfs`. Safe: it writes one `statfs` into the local, during the call.
+        guard unsafe fstatfs(descriptor, &volume) == 0 else { return true }
+        // Unsafe: the type's name, a NUL-terminated C string in the fixed-size field. Safe: `fstatfs` filled it,
+        // terminated within `MFSTYPENAMELEN` bytes; read only inside the closure.
+        let name = withUnsafeBytes(of: volume.f_fstypename) { unsafe String(cString: $0.baseAddress!.assumingMemoryBound(to: CChar.self)) }
+        return name != "apfs" && name != "hfs"
+    }
+
+    /// A private copy of `descriptor`'s file: an open descriptor on an unlinked temporary file holding its bytes, or -1
+    /// if one can't be made.
+    static func privateCopy(of descriptor: Int32) -> Int32 {
+        var directory = [CChar](repeating: 0, count: Int(PATH_MAX))
+        // Unsafe: the array's buffer to `confstr`. Safe: `PATH_MAX` bytes, the most it writes with that size.
+        let length = directory.withUnsafeMutableBufferPointer { unsafe confstr(_CS_DARWIN_USER_TEMP_DIR, $0.baseAddress, $0.count) }
+        guard length > 0 else { return -1 }
+        var template = Array(directory.prefix { $0 != 0 }) + Array("Disk-mapped-XXXXXX".utf8CString)
+        // Unsafe: the template to `mkstemp`, which replaces its X's in place. Safe: NUL-terminated, the array's own.
+        let copy = template.withUnsafeMutableBufferPointer { unsafe mkstemp($0.baseAddress!) }
+        guard copy >= 0 else { return -1 }
+        #if DEBUG
+        SyscallFaults.recordOpen(copy)
+        #endif
+        // Unlinked at once: no one else can open (or truncate) it, and its blocks go with the last reference.
+        // Unsafe: the name `mkstemp` wrote, to `unlink`. Safe: NUL-terminated, the array's own.
+        _ = template.withUnsafeBufferPointer { unsafe unlink($0.baseAddress!) }
+        Sys.countOther()
+        // Two open descriptors; no state (`nil`, which `fcopyfile` allows).
+        guard fcopyfile(descriptor, copy, nil, copyfile_flags_t(COPYFILE_DATA)) == 0 else {
+            Sys.close(copy)
+            return -1
+        }
+        return copy
     }
 
     /// Maps the first `count` bytes of an open file. The descriptor isn't kept: the caller may close it.
@@ -74,11 +146,12 @@ public final class MappedFile: Sendable {
 
     /// Takes ownership of a mapping: `count` bytes at `base`, mapped from `lead` bytes before it.
     @unsafe
-    private init(base: UnsafeRawPointer?, count: Int, lead: Int) {
+    private init(base: UnsafeRawPointer?, count: Int, lead: Int, isCopy: Bool = false) {
         // Unsafe: stores the pointer. Safe: the caller's mapping, valid until `deinit` unmaps it.
         unsafe self.base = base
         self.count = unsafe base == nil ? 0 : count
         self.lead = lead
+        self.isCopy = isCopy
     }
 
     /// Maps `range` of `descriptor` read-only, from the page that holds its start: the address of its first byte and
@@ -144,18 +217,23 @@ public final class MappedFile: Sendable {
 /// ```swift
 /// let output = try OutputFile(FilePath("/tmp/payload.aar"), replacing: false)
 /// try output.write(segment, at: offset)     // any order, from one task at a time per range
+/// try output.close()                         // the end of its use, and close's error if any
 /// ```
 ///
 /// The path is the caller's own: links in it are followed, as `open` follows them. (Entries of an archive go through
-/// a ``Destination``, which follows none.)
+/// a ``Destination``, which follows none.) Destroying it unclosed still closes it, but Disk's descriptor audit counts
+/// that as a lifetime bug.
 public final class OutputFile: Sendable {
-    private let descriptor: Int32
+    private let slot: DescriptorSlot
+    /// The descriptor (-1 after ``close()``: writes then fail with `EBADF`).
+    private var descriptor: Int32 { slot.descriptor }
     /// Where the file is.
     public let path: FilePath
 
     /// Creates the file.
     ///
     /// - Parameters:
+    ///   - path: Where (the caller's path: links in it are followed, as `open` follows them).
     ///   - replacing: Whether an existing file is truncated and written over (otherwise it's an error:
     ///     ``DiskError/exists(_:)``).
     ///   - mode: Its permissions, before the umask.
@@ -164,12 +242,17 @@ public final class OutputFile: Sendable {
         // Unsafe: `withPlatformString`'s C string passed to `open`. Safe: valid for the call.
         let descriptor = unsafe path.withPlatformString { unsafe Sys.openat(AT_FDCWD, $0, flags, mode.rawValue) }
         guard descriptor >= 0 else { throw .system("open", path: path.string, code: errno) }
-        self.descriptor = descriptor
+        slot = DescriptorSlot(OwnedDescriptor(adopting: descriptor, kind: .outputFile))
         self.path = path
     }
 
-    deinit {
-        Sys.close(descriptor)
+    /// Closes the file: the end of its use. Safe to call more than once (later calls do nothing).
+    ///
+    /// - Throws: ``DiskError/system(_:path:_:)`` with `close`'s error (on some file systems the first report of a
+    ///   failed write). The descriptor is released either way.
+    public func close() throws(DiskError) {
+        let code = slot.closeChecked()
+        guard code == 0 else { throw .system("close", path: path.string, code: code) }
     }
 
     /// Writes all of `bytes` at `offset`, with as many positioned writes as it takes. Ranges that don't overlap can be

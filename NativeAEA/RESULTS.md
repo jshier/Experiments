@@ -7,6 +7,25 @@ and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIV
 synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
 M1 Max's (baseline `m1max`).
 
+## 2026-11-23: explicit closes, a wrong key by its own case, composed errors (M1 Max)
+
+The survey's bugs, NativeAEA's part (Disk/RESULTS.md has the design):
+
+- **The archive's file closes when reading ends, not when the archive object goes.** `AEAArchive`, `XIPArchive`, and
+  `AppleArchiveFile` hold an `InputFile` and have `close()`; a failed `init` closes it before throwing; `profile(at:)`,
+  `prologue(at:)`, and `ArchiveKind(detecting:)` close theirs at once. An extraction's own destination (opened or
+  reopened for it) closes as soon as Disk's extraction returns; `decrypt(to:)` closes its output after the last write
+  and reports `close`'s error. Every suite runs with `.diskLifetimes` (67 tests; about 70 test sites now close what
+  they open); it found no library leak, and one false positive (a shared fixture's directory charged to the test that
+  made it, now made outside the record).
+- **`AEAError.incorrectKey(what)`** (the root header's MAC on an encrypted profile, or the encrypted signature's): what
+  a wrong key or password fails first. The app asked for the key again by matching `"(wrong key?)"` at the end of an
+  `.authenticationFailed` message; it matches the case now. `rejectsWrongKeys` checks the case for profiles 1 and 5.
+- **Composed errors:** the segments' content source can't fail (`Failure = Never`), so Disk's composed
+  `ExtractionError<AEAError, Never>` adds nothing to map; `AEAError(DiskError)` lost its `.source` unwrapping and
+  `CancellationReporting` (gone from Disk); `AEAStatistics.unquarantinedItems` reports items on volumes without
+  extended attributes.
+
 ## 2026-11-22, late: Disk's settings inside the options, `ArchiveKind`, input by reads (baselines `pass2-old-{1,2}` → `pass2-new-{1,2}`, M1 Max)
 
 HEAD (425420e) against the working tree, two interleaved rounds of the whole suite on an otherwise idle machine.

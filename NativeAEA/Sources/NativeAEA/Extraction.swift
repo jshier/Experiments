@@ -201,8 +201,8 @@ enum Extractor {
     /// - Parameters:
     ///   - format: What the stream holds.
     ///   - target: The destination, opened with ``AEAExtractionOptions``' policies (``open(_:options:archivePath:quarantinesDestination:)``
-    ///     or ``reopen(_:options:)``).
-    ///   - expectedBytes: The estimate of the files' bytes ``AEAExtractionOptions/progress`` starts with.
+    ///     or ``reopen(_:options:)``), owned by this call: closed as soon as Disk's extraction returns.
+    ///   - expectedBytes: The estimate of the files' bytes the progress (`options.disk.progress`) starts with.
     nonisolated(nonsending) static func extract(
         _ source: some ChunkSource, format: StreamFormat = .appleArchive, into target: Destination, options: AEAExtractionOptions,
         expectedBytes: Int = 0
@@ -216,6 +216,8 @@ enum Extractor {
                 return .failure(error)
             }
         }
+        // The extraction's own descriptor (opened or reopened for it): its last use was Disk's last pass.
+        target.close()
         var statistics = try outcome.get()
         statistics.seconds = MonotonicClock.seconds(since: started)
         statistics.unreleasedBuffers = source.pools.reduce(0) { $0 + $1.buffersInUse }
@@ -230,8 +232,8 @@ enum Extractor {
         let pool = source.pool
         var walked = AEAStatistics()
         var compression = DiskCompressionCounts()
-        let report: ExtractionReport
-        do throws(ExtractionError<AEAError>) {
+        let report: ExtractionReport<Never>
+        do throws(ExtractionError<AEAError, Never>) {
             report = try await Extraction.run(into: destination, source: SegmentContents(pool: pool), settings: options.scheduling) {
                 (planner: inout Planner<SegmentContents>) async throws(AEAError) in
                 // The sink holds the planner while the walk runs, and hands it back after.
@@ -253,12 +255,15 @@ enum Extractor {
             switch error {
             case .disk(let error): throw AEAError(error)
             case .plan(let error): throw error
+            // The segments' source can't fail (its contents are decoded and checked before they're planned).
+            case .source(let impossible): switch impossible {}
             }
         }
         var statistics = walked
         compression.add(to: &statistics.filesByDiskCompression)
         statistics.specialFiles = report.specialFiles
         statistics.skippedEntries += report.skipped
+        statistics.unquarantinedItems = report.unquarantinedItems
         statistics.phaseSeconds = report.phaseSeconds
         statistics.writerWork = report.writerSeconds
         statistics.writeSeconds = report.writerSeconds.values.reduce(0, +)
@@ -300,16 +305,20 @@ struct SegmentContents: PieceSource {
         unsafe pool.segmentBase(buffer) + offset
     }
 
-    func write(_ contents: Contents, to output: inout FileOutput) async throws(DiskError) {
-        if contents.buffer >= 0 {
-            // The job's reference keeps the buffer's bytes until `release`, after the write.
-            let span = unsafe RawSpan(_unsafeStart: bytes(contents.buffer, contents.offset), byteCount: contents.count)
-            try await output.write(span)
-        }
-        if contents.secondBuffer >= 0 {
-            // Same, for the second buffer.
-            let span = unsafe RawSpan(_unsafeStart: bytes(contents.secondBuffer, contents.secondOffset), byteCount: contents.secondCount)
-            try await output.write(span)
+    func write(_ contents: Contents, to output: inout FileOutput) async throws(EntryError<Never>) {
+        do throws(DiskError) {
+            if contents.buffer >= 0 {
+                // The job's reference keeps the buffer's bytes until `release`, after the write.
+                let span = unsafe RawSpan(_unsafeStart: bytes(contents.buffer, contents.offset), byteCount: contents.count)
+                try await output.write(span)
+            }
+            if contents.secondBuffer >= 0 {
+                // Same, for the second buffer.
+                let span = unsafe RawSpan(_unsafeStart: bytes(contents.secondBuffer, contents.secondOffset), byteCount: contents.secondCount)
+                try await output.write(span)
+            }
+        } catch {
+            throw .disk(error)
         }
     }
 

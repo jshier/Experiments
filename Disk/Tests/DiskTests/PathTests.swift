@@ -2,7 +2,7 @@ import Bytes
 @testable import Disk
 import Testing
 
-@Suite struct PathTests {
+@Suite(.diskLifetimes) struct PathTests {
     static let valid = [
         "", "a", "a/b", "a/b/c.txt", "Xcode.app/Contents/Info.plist", ".hidden", "a/.hidden", "a/..b", "a/b..", "...", "a/...",
         "a/.b/c", String(repeating: "x", count: 15), String(repeating: "x", count: 16), String(repeating: "y", count: 17),

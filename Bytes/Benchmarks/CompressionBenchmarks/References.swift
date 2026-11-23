@@ -33,6 +33,25 @@ final class ZlibInflater {
             }
         }
     }
+
+    /// Decodes the gzip members in `input` into `output` one after another, as `gunzip` does: `inflateReset` after
+    /// each member's end, while input remains. Returns the decoded size.
+    func decompressMembers(_ input: [UInt8], into output: inout [UInt8]) -> Int {
+        inflateReset(&stream)
+        return input.withUnsafeBufferPointer { input in
+            output.withUnsafeMutableBufferPointer { output in
+                stream.next_in = UnsafeMutablePointer(mutating: input.baseAddress)
+                stream.avail_in = uInt(input.count)
+                stream.next_out = output.baseAddress
+                stream.avail_out = uInt(output.count)
+                while true {
+                    precondition(inflate(&stream, Z_FINISH) == Z_STREAM_END)
+                    if stream.avail_in == 0 { return output.count - Int(stream.avail_out) }
+                    inflateReset(&stream) // The next member; the input and output pointers stay.
+                }
+            }
+        }
+    }
 }
 
 /// zlib's deflate at a level, reset per stream.

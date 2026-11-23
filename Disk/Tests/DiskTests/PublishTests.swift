@@ -8,7 +8,7 @@ import Testing
 
 /// Publishing a staging destination as Archive Utility publishes an expansion (``Destination/publishUnwrapped(as:)``),
 /// and what the folder it makes looks like: measured against Archive Utility, 2026-11-21 (Disk/RESULTS.md).
-@Suite struct PublishTests {
+@Suite(.diskLifetimes) struct PublishTests {
     static let quarantine = Quarantine(value: Array("0081;673e3000;Safari;11111111-2222-3333-4444-555555555555".utf8))
 
     private func staging(for final: FilePath, quarantined: Bool = true) throws -> Destination {
@@ -93,9 +93,10 @@ import Testing
             try withPath("a.txt") { try writer.writeFile($0, contents: ([UInt8(round)] as [UInt8]).span.bytes, metadata: EntryMetadata(mode: 0o604)) }
         }
         try withPath("b.txt") { try writer.writeFile($0, contents: ([2] as [UInt8]).span.bytes) }
-        // Not a staging destination: nothing to publish or discard.
+        // Not a staging destination: nothing to publish, and discarding only closes it (what it wrote stays).
         #expect(throws: DiskError.refused("publish: not a staging destination")) { _ = try reopened.publish(as: directory.filePath("Other")) }
         reopened.discard()
+        #expect(reopened.root == -1 && staging.root >= 0)
         let published = try staging.publishUnwrapped(as: directory.filePath("Archive"))
         #expect(published == directory.filePath("Archive"))
         let item = try readItem(at: directory.path("Archive/a.txt"))
@@ -112,6 +113,7 @@ import Testing
         #expect(try staging.publishUnwrapped(as: directory.filePath("Empty")) == directory.filePath("Empty"))
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.path("Empty").path).isEmpty)
         let plain = try Destination(directory.filePath("plain"))
+        defer { plain.close() }
         #expect(throws: DiskError.self) { _ = try plain.publishUnwrapped(as: directory.filePath("other")) }
     }
 
@@ -146,6 +148,7 @@ import Testing
         let blob = try #require(parsed)
         #expect(other == nil)
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         let source = ArraySource([[1]])
         _ = try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
             try withPath("d") { (path) throws(DiskError) in

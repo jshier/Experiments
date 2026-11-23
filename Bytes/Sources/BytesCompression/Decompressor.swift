@@ -8,8 +8,8 @@ public import Bytes
 /// let progress = try decompressor.decompress(payload, into: &output)
 /// ```
 public enum DecompressionFormat: Hashable, Sendable {
-    /// DEFLATE (RFC 1951) in its container: raw (zip's method 8, PNG), zlib, or gzip. Streams, and decodes into the
-    /// caller's buffers after history (``historySize``).
+    /// DEFLATE (RFC 1951) in its container: raw (zip's method 8, PNG), zlib, or gzip (one member or several). Streams,
+    /// and decodes into the caller's buffers after history (``historySize``).
     case deflate(DeflateFormat)
     /// PKWARE's Deflate64 (zip's method 9), raw. Streams, and decodes into the caller's buffers after history.
     case deflate64
@@ -300,7 +300,8 @@ public struct Decompressor: ~Copyable {
     // MARK: Whole buffers
 
     /// Decodes a whole stream, from its start, straight into `output`'s free capacity: no window and no copies,
-    /// the fastest way when the output has room for all of it. Discards any stream ``decompress(_:into:)`` was
+    /// the fastest way when the output has room for all of it. Every call starts a new stream of the current format,
+    /// whatever was decoded before, keeping the decoders' memory; it discards any stream ``decompress(_:into:)`` was
     /// decoding (the next one starts with ``reset(for:)``).
     ///
     /// Raw LZMA and xz decode with ``LZMA2Decoder`` here, straight into `output`: no window is made.
@@ -340,30 +341,27 @@ public struct Decompressor: ~Copyable {
             try LZ4Decoder().decompressRaw(input, decodedSize: decodedSize, into: &output)
             return input.byteCount
         // The others, checked after.
+        // Each decoder's one-shot call starts a new stream itself.
         case .deflate:
-            deflate!.reset()
             consumed = try deflate!.decompressAll(input, into: &output)
         case .zlib:
-            zlib!.reset()
             consumed = try zlib!.decompressAll(input, into: &output)
         case .gzip:
-            gzip!.reset()
             consumed = try gzip!.decompressAll(input, into: &output)
         case .deflate64:
-            deflate64!.reset()
             consumed = try deflate64!.decompressAll(input, into: &output)
         case .brotli:
-            brotli!.reset()
             consumed = try brotli!.decompressAll(input, into: &output)
         case .zstd:
-            zstd!.reset()
             consumed = try zstd!.decompressAll(input, into: &output)
         case .lzma:
             guard case let .lzma(properties, uncompressedSize, _)? = format else { preconditionFailure("Raw LZMA's format") }
             if lzma2 == nil { lzma2 = LZMA2Decoder() }
+            streamPending = true // A streaming call after this starts the stream over.
             consumed = try lzma2!.decompressLZMA(input, properties: properties, uncompressedSize: uncompressedSize, into: &output)
         case .xz:
             if lzma2 == nil { lzma2 = LZMA2Decoder() }
+            streamPending = true
             consumed = try lzma2!.decompressXZ(input, into: &output)
         case .lzfse:
             consumed = try lzfse!.decompressAll(input, into: &output)
@@ -396,8 +394,8 @@ extension Decompressor: ResettableByteTransform {
     }
 
     /// Decodes as the format's decoder's `transform(_:into:flush:)` does: at `.finish`, input that ends inside the
-    /// stream throws ``BytesError/insufficientData``; for formats where another stream may follow (xz, Zstandard),
-    /// a stream's end reads as ``TransformStatus/needsInput`` until then.
+    /// stream throws ``BytesError/insufficientData``; for formats where another stream may follow (gzip members,
+    /// Zstandard frames, xz and bzip2 streams), a stream's end reads as ``TransformStatus/needsInput`` until then.
     ///
     /// - Throws: As ``decompress(_:into:)``.
     public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {

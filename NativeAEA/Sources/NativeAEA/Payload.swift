@@ -161,10 +161,11 @@ public final class AppleArchiveFile: Sendable {
     private let size: Int
 
     public init(path: FilePath) throws(AEAError) {
+        // Closed by `close()`, or here if `init` throws.
         let file = try AEAArchive.open(path)
         self.file = file
         self.path = path
-        do {
+        do throws(AEAError) {
             size = file.count
             let head = try AEAArchive.read(file, at: 0, count: min(size, PBZ.headerSize))
             let detected: AEACompression? = head.withUnsafeBytes { unsafe PBZ.compression($0) }
@@ -180,7 +181,15 @@ public final class AppleArchiveFile: Sendable {
                 compression = nil
                 blockSize = 16 << 20
             }
+        } catch {
+            file.close()
+            throw error
         }
+    }
+
+    /// Closes the archive's file: the end of reading it (see ``AEAArchive/close()``). Safe to call more than once.
+    public func close() {
+        file.close()
     }
 
     /// The decoded contents as a chunk source (not yet running).
@@ -192,7 +201,7 @@ public final class AppleArchiveFile: Sendable {
         )
     }
 
-    /// Extracts the archive beneath `destination`; see ``AEAArchive/extract(to:options:)``. ``AEAExtractionOptions/progress``
+    /// Extracts the archive beneath `destination`; see ``AEAArchive/extract(to:options:)``. The extraction's progress (`options.disk.progress`)
     /// starts from the file's size as its estimate of the bytes (the stream's, for a plain archive; low for `pbz`).
     @concurrent @discardableResult
     public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {

@@ -18,7 +18,7 @@ let plannerWaits = BenchmarkMetric.custom("Planner waits", polarity: .prefersSma
 
 /// Runs `body` over `iterations` destinations made before the measurement, and records Disk's call count and the
 /// planner's waits.
-func measure(_ benchmark: Benchmark, _ name: String, _ body: (FilePath) async throws -> ExtractionReport) async throws {
+func measure(_ benchmark: Benchmark, _ name: String, _ body: (FilePath) async throws -> ExtractionReport<Never>) async throws {
     let paths = Output.paths(benchmark.scaledIterations.count, name)
     let before = SyscallCounter.total
     var waits = 0
@@ -140,6 +140,7 @@ let benchmarks: @Sendable () -> Void = {
         let source = PieceWriter(base: UnsafeRawPointer(tree.contents.baseAddress!), count: tree.byteCount, piece: 8 << 20)
         try await measure(benchmark, "streamed") { path in
             let destination = try Destination(path)
+            defer { destination.close() }
             return try await Extraction.run(into: destination, source: source, settings: streamed) { (planner: inout Planner<PieceWriter>) throws(DiskError) in
                 let name = Array("large.bin".utf8)
                 try await planner.file(try EntryPath(validating: name.span.bytes), size: tree.byteCount, contents: 0)
@@ -223,11 +224,15 @@ struct PieceWriter: ContentSource, @unchecked Sendable {
     let count: Int
     let piece: Int
 
-    func write(_ contents: Int, to output: inout FileOutput) async throws(DiskError) {
+    func write(_ contents: Int, to output: inout FileOutput) async throws(EntryError<Never>) {
         var offset = 0
         while offset < count {
             let length = min(piece, count - offset)
-            try await output.write(RawSpan(_unsafeStart: base + offset, byteCount: length))
+            do throws(DiskError) {
+                try await output.write(RawSpan(_unsafeStart: base + offset, byteCount: length))
+            } catch {
+                throw .disk(error)
+            }
             offset += length
         }
     }

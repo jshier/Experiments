@@ -161,10 +161,11 @@ struct NUnzip: AsyncParsableCommand {
         // The main task runs at the default priority; the work runs in a child at `.userInitiated` (the user waits
         // for it), which the extraction's and verification's worker tasks inherit.
         let command = self
-        try await withPriority(.userInitiated) { try await command.work() }
+        try await withPriority(.userInitiated) { () async throws(ExitCode) in try await command.work() }
     }
 
-    private func work() async throws {
+    /// Every failure is reported where it happens; what's thrown is the exit status.
+    private func work() async throws(ExitCode) {
         let paths = try resolveArchives()
         var status = Status()
         switch mode {
@@ -174,13 +175,10 @@ struct NUnzip: AsyncParsableCommand {
             for (index, path) in paths.enumerated() {
                 if index > 0, quiet < 2, mode != .pipe { Console.out("") }
                 guard let zip = open(path, status: &status) else { continue }
-                do {
+                do throws(ExitCode) {
                     try await process(zip, at: path, status: &status)
-                } catch let exit as ExitCode {
-                    status.archive(failed: exit.rawValue)
                 } catch {
-                    Console.error("nunzip: \(error)")
-                    status.archive(failed: 2)
+                    status.archive(failed: error.rawValue)
                 }
             }
         }
@@ -190,7 +188,7 @@ struct NUnzip: AsyncParsableCommand {
         if status.code != 0 { throw ExitCode(status.code) }
     }
 
-    private func process(_ zip: ZipArchive, at path: String, status: inout Status) async throws {
+    private func process(_ zip: ZipArchive, at path: String, status: inout Status) async throws(ExitCode) {
         let mode = mode!
         if mode == .comment {
             Console.out("Archive:  \(path)")
@@ -218,7 +216,7 @@ struct NUnzip: AsyncParsableCommand {
     }
 
     /// The archives to process: the argument itself, with `.zip` or `.ZIP` added, or a wildcard's matches.
-    private func resolveArchives() throws -> [String] {
+    private func resolveArchives() throws(ExitCode) -> [String] {
         let manager = FileManager.default
         for candidate in [archive, archive + ".zip", archive + ".ZIP"] where manager.fileExists(atPath: candidate) {
             return [candidate]
@@ -232,24 +230,25 @@ struct NUnzip: AsyncParsableCommand {
     }
 
     private func open(_ path: String, status: inout Status) -> ZipArchive? {
-        do {
+        do throws(ZipError) {
             let zip = try ZipArchive(url: URL(filePath: path))
             if zip.leadingByteCount > 0, quiet < 2 {
                 Console.error("warning [\(path)]:  \(zip.leadingByteCount) extra bytes at beginning or within zipfile")
                 Console.error("  (attempting to process anyway)")
             }
             return zip
-        } catch ZipError.notAZipArchive {
-            Console.error("nunzip:  cannot find zipfile directory in '\(path)': it is not a zip archive, or it is truncated.")
-        } catch let error as DiskError {
-            // Info-ZIP's message for a file it can't open: the error alone (Disk's names the call and the path too).
-            if case .system(_, _, let code) = error {
-                Console.error("nunzip:  cannot open '\(path)': \(code).")
-            } else {
-                Console.error("nunzip:  cannot open '\(path)': \(error).")
-            }
         } catch {
-            Console.error("nunzip:  error in '\(path)': \(error)")
+            switch error {
+            case .notAZipArchive:
+                Console.error("nunzip:  cannot find zipfile directory in '\(path)': it is not a zip archive, or it is truncated.")
+            // Info-ZIP's message for a file it can't open: the error alone (Disk's names the call and the path too).
+            case .disk(.system(_, _, let code)):
+                Console.error("nunzip:  cannot open '\(path)': \(code).")
+            case .disk(let error):
+                Console.error("nunzip:  cannot open '\(path)': \(error).")
+            default:
+                Console.error("nunzip:  error in '\(path)': \(error)")
+            }
         }
         status.archive(failed: 9)
         return nil
@@ -314,8 +313,8 @@ struct NUnzip: AsyncParsableCommand {
 
         // Archives are planned in order (opened, listed, asked about) while their files are being written.
         let failures: [ZipExtractionFailure]
-        do {
-            failures = try await ZipExtractor.extract(into: destination, maxConcurrency: jobs) { extractor in
+        do throws(ZipError) {
+            failures = try await ZipExtractor.extract(into: destination, maxConcurrency: jobs) { (extractor) async throws(ZipError) in
                 for (index, path) in paths.enumerated() {
                     if index > 0, quiet < 2 { Console.out("") }
                     guard let zip = open(path, status: &status) else { continue }
@@ -378,7 +377,7 @@ struct NUnzip: AsyncParsableCommand {
                         }
                         Console.out("\(label.leftPadded(to: 11)): \(base.pushing(path))\(suffix)")
                     }
-                    do {
+                    do throws(ZipError) {
                         try await extractor.add(zip, entries: selected, options: options)
                     } catch {
                         Console.error("nunzip: \(error)")
@@ -412,21 +411,19 @@ struct NUnzip: AsyncParsableCommand {
         }
     }
 
-    private static func message(for error: any Error) -> String {
+    private static func message(for error: ZipError) -> String {
         switch error {
-        case let error as ZipError: error.description
-        case let error as Errno: error.description
-        // Disk's errors (`DiskError`) describe the path and the call.
-        case let error as any CustomStringConvertible: error.description
-        default: error.localizedDescription
+        // Disk's errors (`DiskError`) describe the path and the call, as they always have here.
+        case let .disk(error): error.description
+        default: error.description
         }
     }
 
     /// Info-ZIP's exit codes for an entry's failure: 81 unsupported, 82 bad password, otherwise 2.
-    private static func exitCode(for error: any Error) -> Int32 {
+    private static func exitCode(for error: ZipError) -> Int32 {
         switch error {
-        case ZipError.unsupportedMethod, ZipError.unsupportedEncryption: 81
-        case ZipError.incorrectPassword, ZipError.passwordRequired: 82
+        case .unsupportedMethod, .unsupportedEncryption: 81
+        case .incorrectPassword, .passwordRequired: 82
         default: 2
         }
     }
@@ -526,7 +523,7 @@ struct NUnzip: AsyncParsableCommand {
 
     // MARK: Test
 
-    private func test(_ entries: [ZipEntry], in zip: ZipArchive, at path: String) async throws {
+    private func test(_ entries: [ZipEntry], in zip: ZipArchive, at path: String) async throws(ExitCode) {
         if quiet < 2 { Console.out("Archive:  \(path)") }
         // Entries are verified in parallel; results are reported afterwards, in archive order.
         let failed = await zip.verify(entries, maxConcurrency: jobs ?? ProcessInfo.processInfo.activeProcessorCount, password: password(for: zip, entries: entries, at: path))
@@ -552,33 +549,61 @@ struct NUnzip: AsyncParsableCommand {
 
     /// `-p` and `-c`: entries' contents to standard output, in archive order. A failing entry is reported and
     /// skipped; the others are still written.
-    private func write(_ entries: [ZipEntry], from zip: ZipArchive, at path: String, withNames: Bool) throws {
+    private func write(_ entries: [ZipEntry], from zip: ZipArchive, at path: String, withNames: Bool) throws(ExitCode) {
         if withNames { header(zip, at: path) }
         let password = password(for: zip, entries: entries, at: path)
         var decoder = ZipDecoder()
         var code: Int32 = 0
         for entry in entries where entry.kind == .file {
             if withNames, quiet == 0 { Console.out("\(Self.label(for: entry).leftPadded(to: 11)): \(entry.path)") }
-            do {
-                try zip.contents(of: entry, using: &decoder, password: password) { chunk in
-                    // Unsafe: System's `writeAll` takes a buffer pointer, not a span. Safe: read within the call.
-                    _ = try chunk.withUnsafeBytes { try unsafe FileDescriptor.standardOutput.writeAll($0) }
+            do throws(ZipContentsError<Errno>) {
+                try zip.contents(of: entry, using: &decoder, password: password) { (chunk) throws(Errno) in
+                    try Self.writeToStandardOutput(chunk)
                 }
             } catch {
-                Console.error("nunzip: \(entry.path): \(Self.message(for: error))")
-                code = max(code, Self.exitCode(for: error))
+                switch error {
+                case let .zip(error):
+                    Console.error("nunzip: \(entry.path): \(Self.message(for: error))")
+                    code = max(code, Self.exitCode(for: error))
+                case let .body(error):
+                    Console.error("nunzip: \(entry.path): \(error)")
+                    code = max(code, 2)
+                }
             }
             if withNames { Console.out("") }
         }
         if code != 0 { throw ExitCode(code) }
     }
 
+    /// Writes all of `bytes` to standard output (`write(2)` until they're written, again after an interruption).
+    private static func writeToStandardOutput(_ bytes: RawSpan) throws(Errno) {
+        // Unsafe: `write` takes a pointer. Safe: within `buffer`, which is valid for the closure.
+        try bytes.withUnsafeBytes { (buffer) throws(Errno) in
+            var offset = 0
+            while offset < buffer.count {
+                let written = unsafe Darwin.write(STDOUT_FILENO, buffer.baseAddress! + offset, buffer.count - offset)
+                if written < 0 {
+                    let error = Errno(rawValue: errno)
+                    if error == .interrupted { continue }
+                    throw error
+                }
+                offset += written
+            }
+        }
+    }
+
     // MARK: Timestamp
 
     /// `-T`: sets the archive's modification time to its newest entry's.
-    private func timestamp(_ zip: ZipArchive, at path: String) throws {
+    private func timestamp(_ zip: ZipArchive, at path: String) throws(ExitCode) {
         guard let newest = zip.entries.compactMap(\.modificationDate).max() else { return }
-        try FileManager.default.setAttributes([.modificationDate: newest], ofItemAtPath: path)
+        do {
+            try FileManager.default.setAttributes([.modificationDate: newest], ofItemAtPath: path)
+        } catch {
+            // Foundation's error (untyped): reported here, as an archive's failure.
+            Console.error("nunzip: \(error)")
+            throw ExitCode(2)
+        }
         if quiet == 0 { Console.out("Updated time stamp for \(path).") }
     }
 }

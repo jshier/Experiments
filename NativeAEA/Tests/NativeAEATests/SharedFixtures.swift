@@ -10,17 +10,21 @@ enum SharedFixtures {
     private static let directories = Mutex<[TemporaryDirectory]>([])
 
     /// Makes a fixture in a new directory, removed at exit. Use it to initialize a `static let`, so it's made once.
+    /// The directory belongs to no test's lifetime record (`LifetimeChecks`): the test that happens to make it first would
+    /// be held to account for the files other tests, running in parallel, have open in it.
     static func make<T>(_ body: (TemporaryDirectory) throws -> T) -> Result<T, any Error> {
-        Result {
-            let directory = try TemporaryDirectory()
-            let first = directories.withLock { list in
-                list.append(directory)
-                return list.count == 1
+        TemporaryDirectory.$lifetimeRecord.withValue(nil) {
+            Result {
+                let directory = try TemporaryDirectory()
+                let first = directories.withLock { list in
+                    list.append(directory)
+                    return list.count == 1
+                }
+                if first {
+                    atexit { SharedFixtures.directories.withLock { list in list.forEach { $0.remove() } } }
+                }
+                return try body(directory)
             }
-            if first {
-                atexit { SharedFixtures.directories.withLock { list in list.forEach { $0.remove() } } }
-            }
-            return try body(directory)
         }
     }
 

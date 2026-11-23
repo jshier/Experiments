@@ -42,6 +42,8 @@ public struct LZRAVENDecoder: ~Copyable {
     /// Decodes a whole LZRAVEN buffer (header, blocks, end marker, and nothing after) into `output`'s free capacity:
     /// an Apple Encrypted Archive segment or an Apple Archive block, whose container states the size.
     ///
+    /// Every call starts a new stream: nothing carries over from earlier calls but the decoder's memory.
+    ///
     /// - Parameters:
     ///   - input: The whole buffer: header, blocks, and end marker.
     ///   - decodedSize: The size the container says the buffer decodes to, if it does: a buffer decoding to more or

@@ -160,15 +160,20 @@ public struct ZipArchive: Sendable {
     /// Memory-maps the file and parses the central directory; entry contents aren't read until requested.
     ///
     /// - Parameter url: The archive's file URL.
-    /// - Throws: Disk's `DiskError` (`.system("open", path: PATH, .noSuchFileOrDirectory)`, say) if the file can't be
-    ///   opened or mapped; ``ZipError/notAZipArchive`` if there's no end of central directory record;
-    ///   ``ZipError/multiDiskUnsupported`` for a spanned archive; ``ZipError/truncated(_:)``,
-    ///   ``ZipError/badSignature(_:)``, or ``ZipError/corruptData(_:)`` if the central directory is damaged.
-    public init(url: URL) throws {
+    /// - Throws: ``ZipError/disk(_:)`` with Disk's error (`.system("open", path: PATH, .noSuchFileOrDirectory)`, say)
+    ///   if the file can't be opened or mapped; ``ZipError/notAZipArchive`` if there's no end of central directory
+    ///   record; ``ZipError/multiDiskUnsupported`` for a spanned archive; ``ZipError/truncated(_:)``,
+    ///   ``ZipError/badSignature(_:)``, or ``ZipError/invalidRecord(_:_:)`` if the central directory is damaged.
+    public init(url: URL) throws(ZipError) {
         self.url = url
         // Memory-map the archive (Disk's `MappedFile`) so large files aren't read into RAM up front. Everything
         // below parses `file.bytes` (a RawSpan) in place.
-        let file = try MappedFile(path: FilePath(url.path(percentEncoded: false)))
+        let file: MappedFile
+        do throws(DiskError) {
+            file = try MappedFile(path: FilePath(url.path(percentEncoded: false)))
+        } catch {
+            throw ZipError(error)
+        }
         self.file = file
         (entries, comment, leadingByteCount) = try Self.readDirectory(file.bytes)
     }
@@ -561,22 +566,26 @@ public extension ZipArchive {
     ///   - decoder: The decoder to use.
     ///   - password: The password, for encrypted entries.
     ///   - body: Called with each chunk, in order. Chunks are at most about 1 MB for compressed entries; a stored
-    ///     entry arrives as one chunk.
+    ///     entry arrives as one chunk. It may throw ``ZipError`` (or nothing); a `body` with errors of its own gets
+    ///     the overload that throws ``ZipContentsError``.
     /// - Throws: ``ZipError/unsupportedMethod(_:_:)`` for a method ``ZipArchive/Method`` can't read;
     ///   ``ZipError/passwordRequired(_:)``, ``ZipError/incorrectPassword(_:)``,
     ///   ``ZipError/authenticationFailed(_:)``, or ``ZipError/unsupportedEncryption(_:)`` for encrypted
-    ///   entries; ``ZipError/truncated(_:)`` or ``ZipError/badSignature(_:)`` if the local header is damaged or
-    ///   the payload runs past the archive's end; ``ZipError/corruptData(_:)`` if compressed data is invalid
-    ///   or its output isn't `uncompressedSize` bytes; ``ZipError/sizeMismatch(_:expected:actual:)`` if a
-    ///   stored entry's size is wrong; ``ZipError/crcMismatch(_:expected:actual:)`` if the CRC-32 doesn't
-    ///   match; and whatever `body` throws.
+    ///   entries; ``ZipError/truncated(_:)``, ``ZipError/badSignature(_:)``, or ``ZipError/invalidRecord(_:_:)`` if
+    ///   the local header is damaged or the payload runs past the archive's end; ``ZipError/decoding(_:_:)`` with the
+    ///   decoder's error if compressed data is invalid or cut short; ``ZipError/sizeMismatch(_:expected:actual:)`` if
+    ///   the output isn't `uncompressedSize` bytes; ``ZipError/crcMismatch(_:expected:actual:)`` if the CRC-32
+    ///   doesn't match; ``ZipError/cancelled``; and whatever `body` throws.
     @inlinable
-    func contents(of entry: ZipEntry, using decoder: inout ZipDecoder, password: String? = nil, _ body: (RawSpan) throws -> Void) throws {
+    func contents(
+        of entry: ZipEntry, using decoder: inout ZipDecoder, password: String? = nil, _ body: (RawSpan) throws(ZipError) -> Void
+    ) throws(ZipError) {
         let archive = file.bytes
         let payload = try Self.payload(of: entry, in: archive)
 
         // Closure literals (not a local func passed as a value), so `crc` and `written` stay on the
-        // stack instead of being boxed on the heap: measured 2 mallocs per entry before this.
+        // stack instead of being boxed on the heap: measured 2 mallocs per entry before this. (The decoder's own
+        // loop, not ``readContents(of:using:password:_:)``'s: measured 415 fewer instructions per small entry.)
         var crc: UInt = 0
         var written: UInt64 = 0
         if entry.method == Method.stored, !entry.isEncrypted {
@@ -584,7 +593,7 @@ public extension ZipArchive {
             written = UInt64(payload.byteCount)
             try body(payload)
         } else {
-            try decoder.decode(payload, entry: entry, password: password) { chunk in
+            try decoder.decode(payload, entry: entry, password: password) { (chunk) throws(ZipError) in
                 crc = ZipDecoder.crc32(crc, chunk)
                 written += UInt64(chunk.byteCount)
                 try body(chunk)
@@ -593,47 +602,120 @@ public extension ZipArchive {
         try Self.check(entry, written: written, crc: crc)
     }
 
-    /// Like ``contents(of:using:password:_:)``, with a temporary decoder.
+    /// ``contents(of:using:password:_:)-77zt7`` with a `body` that throws its own errors: they're thrown as
+    /// ``ZipContentsError/body(_:)``, the archive's as ``ZipContentsError/zip(_:)``. (Disfavored: a `body` that
+    /// throws nothing, or ``ZipError``, gets the form that throws ``ZipError``.)
+    @inlinable @_disfavoredOverload
+    func contents<Failure: Error>(
+        of entry: ZipEntry, using decoder: inout ZipDecoder, password: String? = nil, _ body: (RawSpan) throws(Failure) -> Void
+    ) throws(ZipContentsError<Failure>) {
+        try readContents(of: entry, using: &decoder, password: password, body)
+    }
+
+    /// Like ``contents(of:using:password:_:)-77zt7``, with a temporary decoder.
     ///
-    /// Creating a decoder allocates its buffers, so prefer ``contents(of:using:password:_:)`` in loops.
+    /// Creating a decoder allocates its buffers, so prefer ``contents(of:using:password:_:)-77zt7`` in loops.
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
     ///   - password: The password, for encrypted entries.
     ///   - body: Called with each chunk of decompressed contents, in order.
-    /// - Throws: The errors of ``contents(of:using:password:_:)``.
+    /// - Throws: The errors of ``contents(of:using:password:_:)-77zt7``.
     @inlinable
-    func contents(of entry: ZipEntry, password: String? = nil, _ body: (RawSpan) throws -> Void) throws {
+    func contents(of entry: ZipEntry, password: String? = nil, _ body: (RawSpan) throws(ZipError) -> Void) throws(ZipError) {
         var decoder = ZipDecoder()
         try contents(of: entry, using: &decoder, password: password, body)
     }
 
+    /// Like ``contents(of:using:password:_:)-77zt7``, with a temporary decoder and a `body` that throws its own errors.
+    @inlinable @_disfavoredOverload
+    func contents<Failure: Error>(
+        of entry: ZipEntry, password: String? = nil, _ body: (RawSpan) throws(Failure) -> Void
+    ) throws(ZipContentsError<Failure>) {
+        var decoder = ZipDecoder()
+        try readContents(of: entry, using: &decoder, password: password, body)
+    }
+
+    /// Both forms of ``contents(of:using:password:_:)-77zt7``: the archive's errors and `body`'s, each as thrown.
+    @inlinable
+    internal func readContents<Failure: Error>(
+        of entry: ZipEntry, using decoder: inout ZipDecoder, password: String?, _ body: (RawSpan) throws(Failure) -> Void
+    ) throws(ZipContentsError<Failure>) {
+        let range: Range<Int>
+        do throws(ZipError) {
+            range = try payloadRange(of: entry)
+        } catch {
+            throw .zip(error)
+        }
+
+        // `crc` and `written` stay on the stack: nothing captures them.
+        var crc: UInt = 0
+        var written: UInt64 = 0
+        if entry.method == Method.stored, !entry.isEncrypted {
+            let payload = file.bytes.extracting(range)
+            crc = ZipDecoder.crc32(0, payload)
+            written = UInt64(payload.byteCount)
+            do throws(Failure) { try body(payload) } catch { throw .body(error) }
+        } else {
+            // Unsafe: the payload in the mapping, which `self` (the caller's archive) keeps valid through this call;
+            // the decoder reads it only until `endEntry`, below.
+            let payload = unsafe file.buffer(range)
+            do throws(ZipError) {
+                try unsafe decoder.beginEntry(payload, entry: entry, password: password)
+            } catch {
+                throw .zip(error)
+            }
+            defer { decoder.endEntry() }
+            while true {
+                let next: (chunk: ZipDecoder.Chunk, finished: Bool)
+                do throws(ZipError) {
+                    // Unsafe: a chunk is a pointer into the decoder's buffer. Safe: read below, before the next call.
+                    try unsafe next = decoder.nextChunk(into: 0)
+                } catch {
+                    throw .zip(error)
+                }
+                // Unsafe: a span over the decoder's buffer. Safe: nothing writes it until the next `nextChunk`, and
+                // the span ends with this iteration.
+                let chunk = unsafe RawSpan(_unsafeBytes: next.chunk.bytes)
+                if !chunk.isEmpty {
+                    crc = ZipDecoder.crc32(crc, chunk)
+                    written &+= UInt64(chunk.byteCount)
+                    do throws(Failure) { try body(chunk) } catch { throw .body(error) }
+                }
+                if unsafe next.finished { break }
+            }
+        }
+        do throws(ZipError) {
+            try Self.check(entry, written: written, crc: crc)
+        } catch {
+            throw .zip(error)
+        }
+    }
+
     /// Checks an entry's output size and CRC-32 after its last chunk.
     ///
-    /// - Throws: ``ZipError/sizeMismatch(_:expected:actual:)`` for a stored entry of the wrong size,
-    ///   ``ZipError/corruptData(_:)`` for a compressed one; ``ZipError/crcMismatch(_:expected:actual:)``.
+    /// - Throws: ``ZipError/sizeMismatch(_:expected:actual:)`` for an entry of the wrong size;
+    ///   ``ZipError/crcMismatch(_:expected:actual:)``.
     @inlinable
-    internal static func check(_ entry: ZipEntry, written: UInt64, crc: UInt) throws {
+    internal static func check(_ entry: ZipEntry, written: UInt64, crc: UInt) throws(ZipError) {
         guard written == entry.uncompressedSize else {
-            throw entry.method == Method.stored
-                ? ZipError.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written)
-                : ZipError.corruptData(entry.path)
+            throw .sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written)
         }
         guard crc == UInt(entry.crc32) || !entry.checksCRC else {
-            throw ZipError.crcMismatch(entry.path, expected: entry.crc32, actual: UInt32(truncatingIfNeeded: crc))
+            throw .crcMismatch(entry.path, expected: entry.crc32, actual: UInt32(truncatingIfNeeded: crc))
         }
     }
 
     /// The entry's full decompressed contents, verified.
     ///
-    /// Holds the whole entry in memory; use ``contents(of:using:password:_:)`` to stream large entries.
+    /// Holds the whole entry in memory; use ``contents(of:using:password:_:)-77zt7`` to stream large entries.
     ///
     /// - Parameters:
     ///   - entry: The entry to read.
     ///   - password: The password, for encrypted entries.
     /// - Returns: The decompressed bytes.
-    /// - Throws: The errors of ``contents(of:using:password:_:)``.
-    func contents(of entry: ZipEntry, password: String? = nil) throws -> Data {
+    /// - Throws: The errors of ``contents(of:using:password:_:)-77zt7``.
+    func contents(of entry: ZipEntry, password: String? = nil) throws(ZipError) -> Data {
         var result = Data(capacity: Int(min(entry.uncompressedSize, 1 << 30)))
         try contents(of: entry, password: password) { chunk in
             result.append(copying: chunk)
@@ -642,10 +724,13 @@ public extension ZipArchive {
     }
 
     /// The range of the entry's payload (compressed, possibly encrypted) in the archive file.
-    internal func payloadRange(of entry: ZipEntry) throws -> Range<Int> {
+    ///
+    /// - Throws: The errors of ``payload(of:in:)``.
+    @usableFromInline
+    internal func payloadRange(of entry: ZipEntry) throws(ZipError) -> Range<Int> {
         let archive = file.bytes
         guard let range = try archive.byteOffsets(of: Self.payload(of: entry, in: archive)) else {
-            throw ZipError.truncated("payload for '\(entry.path)'")
+            throw .truncated("payload for '\(entry.path)'")
         }
         return range
     }
@@ -682,13 +767,15 @@ extension BytesError {
     ///
     /// - Parameter what: The structure being read, for the error's message.
     /// - Returns: ``ZipError/truncated(_:)`` for `insufficientData`, ``ZipError/badSignature(_:)`` for
-    ///   `mismatch`, and ``ZipError/corruptData(_:)`` for the rest.
+    ///   `mismatch`, ``ZipError/cancelled`` for `cancelled` (which synchronous reads never throw), and
+    ///   ``ZipError/invalidRecord(_:_:)`` with the error for the rest.
     func zipError(_ what: String) -> ZipError {
         switch self {
         case .insufficientData: .truncated(what)
         case .mismatch: .badSignature(what)
+        case .cancelled: .cancelled
         // The parser doesn't use typed views, writing, or raw-value fields, which throw these.
-        case .misaligned, .insufficientCapacity, .invalidValue, .trailingData, .cancelled: .corruptData(what)
+        case .misaligned, .insufficientCapacity, .invalidValue, .trailingData: .invalidRecord(self, what)
         }
     }
 }

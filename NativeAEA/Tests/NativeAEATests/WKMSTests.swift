@@ -7,7 +7,7 @@ import Testing
 
 /// The strict JSON reader WKMS's auth data is parsed with, and a WKMS request end to end: an archive `aea` encrypts
 /// with the request in its auth data, opened with the key the request wraps.
-@Suite struct WKMSTests {
+@Suite(.diskLifetimes) struct WKMSTests {
     private func members(_ text: String) throws -> [String: String] {
         let bytes = Array(text.utf8)
         return try JSON.stringMembers(bytes.span.bytes)
@@ -98,6 +98,7 @@ import Testing
         #expect(opened == symmetric)
 
         let archive = try AEAArchive(url: url, decryptionKey: key)
+        defer { archive.close() }
         let output = directory.path("image.dmg.out")
         try await archive.decrypt(to: FilePath(output.path))
         #expect(Array(try Data(contentsOf: output)) == contents)

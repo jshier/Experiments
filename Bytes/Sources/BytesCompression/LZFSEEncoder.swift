@@ -53,7 +53,9 @@ public struct LZFSEEncoder: ~Copyable {
 
     /// Encodes `input` as an LZFSE stream, through its `bvx$` end marker, appending it to `output`.
     ///
-    /// ``maximumCompressedSize(forByteCount:)`` bytes of free capacity are always enough.
+    /// Every call starts a new stream: an encoder used before writes what a fresh one would (the match table's old
+    /// entries read as empty), keeping its memory. ``maximumCompressedSize(forByteCount:)`` bytes of free capacity
+    /// are always enough.
     ///
     /// - Parameters:
     ///   - input: All the data.

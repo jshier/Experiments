@@ -39,10 +39,10 @@ import Testing
             }
 
             // Neither says: a failure naming the file.
-            let failure = #expect(throws: ExpansionFailure.self) { _ = try format("Notes.pdf", "%PDF-1.7") }
+            let failure = #expect(throws: ExpansionError.self) { _ = try format("Notes.pdf", "%PDF-1.7") }
             #expect(failure?.description == "“Notes.pdf” isn’t a ZIP, Apple Archive, Apple Encrypted Archive, or XIP archive.")
             // A file that can't be read: the call and the system's reason.
-            let missing = #expect(throws: ExpansionFailure.self) {
+            let missing = #expect(throws: ExpansionError.self) {
                 _ = try ArchiveKind.detect(FilePath(directory.appending(path: "Missing.zip").path))
             }
             #expect(missing?.description == "open “Missing.zip”: No such file or directory")

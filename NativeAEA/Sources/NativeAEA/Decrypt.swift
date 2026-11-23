@@ -15,6 +15,8 @@ extension AEAArchive {
     /// - Parameters:
     ///   - destination: The file to write; replaced if it exists and `overwrite` is set.
     ///   - range: The part of the contents to write (`aea decrypt -range-offset -range-size`), or `nil` for all.
+    ///   - overwrite: Whether an existing file at `destination` is replaced (otherwise it's an error).
+    ///   - options: Decoder threads, buffers, and which checks to run.
     /// - Returns: Counts and timings.
     @concurrent @discardableResult
     public func decrypt(
@@ -27,13 +29,15 @@ extension AEAArchive {
         let end = segments[first...].firstIndex { $0.rawOffset >= wanted.upperBound } ?? segments.count
         let needed = wanted.isEmpty ? first..<first : first..<end
 
-        // Disk's plain output file: created (or, with `overwrite`, truncated), closed when it goes.
+        // Disk's plain output file: created (or, with `overwrite`, truncated), closed after the last write (checked:
+        // a failed close can be the only sign the data didn't reach the disk), or by the `defer` on a failure.
         let output: OutputFile
         do throws(DiskError) {
             output = try OutputFile(destination, replacing: overwrite)
         } catch {
             throw AEAError(error)
         }
+        defer { try? output.close() }
 
         // At least one decoder, and a buffer beyond the one being written (fewer would wait forever).
         let decoders = max(1, options.decodeThreads)
@@ -70,6 +74,11 @@ extension AEAArchive {
             }
         }
         if let failure { throw failure }
+        do throws(DiskError) {
+            try output.close()
+        } catch {
+            throw AEAError(error)
+        }
         var statistics = AEAStatistics()
         statistics.fileBytes = written
         statistics.seconds = MonotonicClock.seconds(since: started)

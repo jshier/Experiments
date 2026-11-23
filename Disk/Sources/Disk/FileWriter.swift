@@ -269,7 +269,7 @@ struct WriterCore: ~Copyable {
     /// writers (`deferred`), only `UF_COMPRESSED`.
     func finish(_ descriptor: Int32, metadata: EntryMetadata, mode final: mode_t, compressed: Bool, deferred: Bool) throws(DiskError) {
         if deferred {
-            if let quarantine = destination.options.quarantine { try quarantine.apply(descriptor, path: pathRef) }
+            try destination.quarantine(descriptor, path: pathRef)
             if compressed {
                 var flags = AttributeList(times: EntryTimes(), owner: nil, mode: nil, flags: UInt32(UF_COMPRESSED))
                 if flags.apply(descriptor) != 0 { throw .system("setattrlist", path: pathRef, code: errno) }

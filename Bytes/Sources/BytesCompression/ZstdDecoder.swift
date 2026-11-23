@@ -95,7 +95,8 @@ public struct ZstdDecoder: ~Copyable {
 
     /// Decodes every frame in `input`, from the start of a stream, straight into `output`'s free capacity.
     ///
-    /// The fastest way to decode: the output is the history, so there's no window and no copying.
+    /// The fastest way to decode: the output is the history, so there's no window and no copying. Every call starts
+    /// a new stream: a decoder used before (by any call) starts over as after ``reset()``, keeping its memory.
     ///
     /// - Parameters:
     ///   - input: One or more frames (skippable frames are skipped), and nothing else.

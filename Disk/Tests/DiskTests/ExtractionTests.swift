@@ -5,11 +5,12 @@ import Darwin
 @testable import Disk
 import DiskTestSupport
 import Foundation
+import Synchronization
 import System
 import Testing
 
 /// The scheduler: every entry kind planned, written by writers, finished after them.
-@Suite struct ExtractionTests {
+@Suite(.diskLifetimes) struct ExtractionTests {
     /// A tree with every kind of entry and metadata item, written through the planner.
     @Test(arguments: [(1, 1), (4, 2), (16, 6)])
     func extractsEveryKindOfEntry(_ writers: Int, _ width: Int) async throws {
@@ -18,6 +19,7 @@ import Testing
         var destinationOptions = DestinationOptions()
         destinationOptions.permissions = .exact
         let destination = try Destination(directory.filePath("out"), options: destinationOptions)
+        defer { destination.close() }
         let files: [[UInt8]] = [
             testBytes(100, seed: 1, compressible: true), testBytes(70_000, seed: 2, compressible: true), [],
             testBytes(5_000, seed: 3, compressible: false), testBytes(2_000_000, seed: 4, compressible: true), Array("ro".utf8),
@@ -80,6 +82,7 @@ import Testing
         var options = ExtractionSettings()
         options.stagingCapacity = 100_000
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         let (report, source) = try await extract(entries, into: destination, options: options, storage: .compressed(.appleArchive), writesPerFile: writes)
         #expect(report.files == entries.count && source.releaseCount == entries.count)
         for (path, bytes) in entries { #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes, "\(path)") }
@@ -96,6 +99,7 @@ import Testing
         let pieces = stride(from: 0, to: size, by: pieceSize).map { Array(bytes[$0..<min(size, $0 + pieceSize)]) }
         let source = ArraySource([], pieces: pieces)
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         var options = ExtractionSettings()
         options.writers = 6
         // Every byte counted, those of pieces bridged into a later piece's job (no chunk ends in them) included.
@@ -122,7 +126,9 @@ import Testing
         #expect(try readItem(at: url).contents == bytes)
         #expect(decmpfsType(url) == (compressible ? 14 : nil))
         // The same file written whole is stored the same.
-        var writer = FileWriter(try Destination(directory.filePath("whole")))
+        let whole = try Destination(directory.filePath("whole"))
+        defer { whole.close() }
+        var writer = FileWriter(whole)
         try withPath("big") { try writer.writeFile($0, contents: bytes.span.bytes, storage: .compressed(.appleArchive)) }
         #expect(decmpfsStoredBytes(url) == decmpfsStoredBytes(directory.path("whole/big")))
     }
@@ -136,6 +142,7 @@ import Testing
         var options = ExtractionSettings()
         options.stopsOnFirstFailure = false
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         // An existing file where one entry goes.
         try FileManager.default.createDirectory(at: directory.path("out"), withIntermediateDirectories: true)
         try Data([9]).write(to: directory.path("out/f3"))
@@ -149,7 +156,6 @@ import Testing
         // The source's own error, as it threw it.
         let decoding = report.failures.first { $0.tag == 7 }?.error
         #expect(decoding == .source(DecodingFailure(file: 7)))
-        #expect(decoding?.sourceError as? DecodingFailure == DecodingFailure(file: 7))
         #expect(report.files == 18)
         #expect(!FileManager.default.fileExists(atPath: directory.path("out/f7").path))
         #expect(try readItem(at: directory.path("out/f3")).contents == [9])
@@ -173,6 +179,7 @@ import Testing
             options.stopsOnFirstFailure = false
             let out = "out-\(name)"
             let destination = try Destination(directory.filePath(out))
+            defer { destination.close() }
             let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 for index in files.indices {
                     _ = try await planFile(&planner, "f\(index)", index: index, size: files[index].count, storage: storage, tag: index)
@@ -196,6 +203,7 @@ import Testing
         let files = (0..<200).map { testBytes(500, seed: UInt64($0), compressible: true) }
         let source = ArraySource(files, failing: 3)
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         let calls = RelaxedCounter()
         do {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
@@ -207,8 +215,8 @@ import Testing
             Issue.record("no error")
         } catch {
             // The source's own error, as it threw it.
-            guard case .disk(.source(let failure)) = error else { Issue.record("\(error)"); return }
-            #expect(failure as? DecodingFailure == DecodingFailure(file: 3))
+            guard case .source(let failure) = error else { Issue.record("\(error)"); return }
+            #expect(failure == DecodingFailure(file: 3))
         }
         // Every file handed to the planner (it stops taking them once stopped) is released once.
         #expect(source.releaseCount == calls.value)
@@ -220,7 +228,8 @@ import Testing
         defer { directory.remove() }
         let source = ArraySource([[1, 2, 3]], writesPerFile: 3)
         let destination = try Destination(directory.filePath("out"))
-        await #expect(throws: ExtractionError<DiskError>.self) {
+        defer { destination.close() }
+        await #expect(throws: ExtractionError<DiskError, DecodingFailure>.self) {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 _ = try await planFile(&planner, "short", index: 0, size: 4)
             }
@@ -235,6 +244,7 @@ import Testing
         defer { directory.remove() }
         let source = ArraySource([[1]])
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         do {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(WalkerError) in
                 _ = try? await planFile(&planner, "one", index: 0, size: 1)
@@ -256,7 +266,7 @@ func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError
     }
 }
 
-@Suite(.bulk) struct ExtractionBulkTests {
+@Suite(.bulk, .diskLifetimes) struct ExtractionBulkTests {
     /// Thousands of files, every writer and width combination, random sizes and storage: the tree matches, every
     /// content released once.
     @Test(arguments: [(1, 1), (2, 1), (8, 4), (24, 6), (32, 12)])
@@ -274,6 +284,7 @@ func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError
         options.queueCapacity = 64
         options.queuePathBytes = 4_096
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         let (report, source) = try await extract(entries, into: destination, options: options, storage: .compressed(.appleArchive), writesPerFile: Int(generator.next() % 3) + 1)
         #expect(report.files == entries.count && source.releaseCount == entries.count)
         for (path, bytes) in entries { #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes) }
@@ -281,7 +292,7 @@ func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError
 }
 
 /// Progress as a bar reads it: bytes and entries together, never going back.
-@Suite struct ProgressTests {
+@Suite(.diskLifetimes) struct ProgressTests {
     /// Each entry weighs 64 KiB against bytes; counts past a total count as the total.
     @Test func weighsEntriesAgainstBytes() {
         let weight = ExtractionProgress.defaultEntryWeight
@@ -318,31 +329,40 @@ func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError
     }
 }
 
-/// Disk's errors and others' cancellations.
-@Suite struct ErrorTests {
-    struct Other: Error, Equatable {}
-    enum Client: Error, CancellationReporting {
-        case cancelled, failed
-        var isCancellation: Bool { self == .cancelled }
+/// Errors composed, not flattened: a source's own error and Disk's stay apart, each as it was thrown.
+@Suite(.diskLifetimes) struct ErrorTests {
+    /// An entry's error is Disk's or the source's; the extraction's adds the plan's own.
+    @Test func composesEntryAndExtractionErrors() {
+        let disk = EntryError<DecodingFailure>.disk(.exists("a"))
+        let source = EntryError<DecodingFailure>.source(DecodingFailure(file: 2))
+        #expect(disk != source && disk == .disk(.exists("a")))
+        #expect(ExtractionError<Never, DecodingFailure>(source) == .source(DecodingFailure(file: 2)))
+        #expect(ExtractionError<Never, DecodingFailure>(disk) == .disk(.exists("a")))
+        #expect("\(EntryFailure(path: "d/f", tag: 1, error: disk))" == "d/f: already exists: a")
     }
 
-    @Test func wrapsAndUnwraps() {
-        #expect(DiskError(wrapping: DiskError.exists("a")) == .exists("a"))
-        #expect(DiskError(wrapping: CancellationError()) == .cancelled)
-        #expect(DiskError(wrapping: Other()) == .source(Other()))
-        #expect(DiskError.source(Other()).unwrapped as? Other == Other())
-        #expect(DiskError.cancelled.unwrapped is CancellationError)
-        #expect(DiskError.exists("a").unwrapped as? DiskError == .exists("a"))
-    }
-
-    @Test func recognizesCancellation() {
-        #expect(DiskError.isCancellation(CancellationError()))
-        #expect(DiskError.isCancellation(DiskError.cancelled))
-        #expect(DiskError.isCancellation(DiskError.source(CancellationError())))
-        #expect(DiskError.isCancellation(DiskError.source(Client.cancelled)))
-        #expect(DiskError.isCancellation(Client.cancelled))
-        #expect(!DiskError.isCancellation(Client.failed))
-        #expect(!DiskError.isCancellation(DiskError.exists("a")))
-        #expect(!DiskError.isCancellation(Other()))
+    /// A planner call after a source's failure stopped the extraction throws `.stopped` (the plan's closure can't
+    /// carry the source's type); the extraction's error is the source's own.
+    @Test func plannerCallsAfterASourceFailureThrowStopped() async throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
+        let source = ArraySource((0..<50).map { [UInt8(truncatingIfNeeded: $0)] }, failing: 0)
+        let seen = Mutex<DiskError?>(nil)
+        await #expect(throws: ExtractionError<DiskError, DecodingFailure>.source(DecodingFailure(file: 0))) {
+            try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+                do throws(DiskError) {
+                    for index in 0..<50 {
+                        _ = try await planFile(&planner, "f\(index)", index: index, size: 1)
+                        try? await Task.sleep(for: .milliseconds(2))
+                    }
+                } catch {
+                    seen.withLock { $0 = error }
+                    throw error
+                }
+            }
+        }
+        #expect(seen.withLock { $0 } == .stopped)
     }
 }

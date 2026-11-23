@@ -68,6 +68,52 @@ public enum Zlib {
         return Array(output[..<Int(stream.total_out)])
     }
 
+    /// A sync flush (`Z_SYNC_FLUSH`): the block ends, and an empty stored block aligns the stream to a byte.
+    public static let syncFlush: Int32 = Z_SYNC_FLUSH
+    /// A full flush (`Z_FULL_FLUSH`): a sync flush that also forgets the history, so what follows decodes alone.
+    public static let fullFlush: Int32 = Z_FULL_FLUSH
+
+    /// zlib's encoding of `data` as one stream, flushed after every `every` bytes of input.
+    ///
+    /// - Parameters:
+    ///   - data: The bytes.
+    ///   - windowBits: zlib's `windowBits`: the container and window size.
+    ///   - level: 0 through 9, or ``defaultLevel``.
+    ///   - every: The input between flushes.
+    ///   - flushes: The flush after each piece, in turn (``syncFlush``, ``fullFlush``); the last piece finishes.
+    /// - Returns: The stream.
+    public static func compress(
+        _ data: [UInt8], windowBits: Int32 = Container.raw.windowBits, level: Int32 = defaultLevel, flushingEvery every: Int,
+        flushes: [Int32]
+    ) -> [UInt8] {
+        var stream = z_stream()
+        precondition(deflateInit2_(&stream, level, Z_DEFLATED, windowBits, 8, Z_DEFAULT_STRATEGY, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK)
+        defer { deflateEnd(&stream) }
+        var output = [UInt8](repeating: 0, count: Int(deflateBound(&stream, uLong(data.count))) + (data.count / every + 1) * 16)
+        var input = data
+        var produced = 0
+        input.withUnsafeMutableBufferPointer { input in
+            output.withUnsafeMutableBufferPointer { output in
+                var offset = 0
+                var piece = 0
+                repeat {
+                    let end = min(offset + every, input.count)
+                    stream.next_in = input.baseAddress.map { $0 + offset }
+                    stream.avail_in = uInt(end - offset)
+                    stream.next_out = output.baseAddress! + produced
+                    stream.avail_out = uInt(output.count - produced)
+                    let flush = end == input.count ? Z_FINISH : flushes[piece % flushes.count]
+                    let status = deflate(&stream, flush)
+                    precondition(status == (flush == Z_FINISH ? Z_STREAM_END : Z_OK) && stream.avail_in == 0)
+                    produced = output.count - Int(stream.avail_out)
+                    offset = end
+                    piece += 1
+                } while offset < input.count
+            }
+        }
+        return Array(output[..<produced])
+    }
+
     /// zlib's decoding of `data`, which must be one whole stream with nothing after it.
     ///
     /// - Parameters:
@@ -94,6 +140,41 @@ public enum Zlib {
                 result += chunk[..<produced]
                 switch status {
                 case Z_STREAM_END: return stream.avail_in == 0 ? result : nil
+                case Z_OK: continue
+                default: return nil // Including Z_BUF_ERROR: truncated.
+                }
+            }
+        }
+    }
+
+    /// zlib's decoding of a gzip file of one member or more (RFC 1952 §2.2), member by member as `gunzip` does: after
+    /// each member's end, `inflateReset` and on with the next.
+    ///
+    /// - Parameter data: The members, end to end, and nothing else.
+    /// - Returns: The members' bytes, or `nil` if a member is invalid or truncated, or bytes after one don't start
+    ///   another.
+    public static func decompressMembers(_ data: [UInt8]) -> [UInt8]? {
+        var stream = z_stream()
+        precondition(inflateInit2_(&stream, Container.gzip.windowBits, ZLIB_VERSION, Int32(MemoryLayout<z_stream>.size)) == Z_OK)
+        defer { inflateEnd(&stream) }
+        var result: [UInt8] = []
+        var chunk = [UInt8](repeating: 0, count: 1 << 16)
+        var input = data
+        return input.withUnsafeMutableBufferPointer { input in
+            stream.next_in = input.baseAddress
+            stream.avail_in = uInt(input.count)
+            while true {
+                let (status, produced) = chunk.withUnsafeMutableBufferPointer { output in
+                    stream.next_out = output.baseAddress
+                    stream.avail_out = uInt(output.count)
+                    let status = inflate(&stream, Z_NO_FLUSH)
+                    return (status, output.count - Int(stream.avail_out))
+                }
+                result += chunk[..<produced]
+                switch status {
+                case Z_STREAM_END:
+                    if stream.avail_in == 0 { return result }
+                    inflateReset(&stream) // Another member.
                 case Z_OK: continue
                 default: return nil // Including Z_BUF_ERROR: truncated.
                 }

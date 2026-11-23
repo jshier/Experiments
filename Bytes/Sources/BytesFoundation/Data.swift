@@ -26,13 +26,4 @@ public extension Data {
         // Unsafe: a pointer to the span's memory. Safe: `Data` only reads it, within the closure.
         bytes.withUnsafeBytes { unsafe append(contentsOf: $0) }
     }
-
-    /// Appends a copy of `bytes`.
-    ///
-    /// - Parameter bytes: The bytes to append.
-    @available(*, deprecated, renamed: "append(copying:)")
-    @inlinable
-    mutating func append(_ bytes: RawSpan) {
-        append(copying: bytes)
-    }
 }

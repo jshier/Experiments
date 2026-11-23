@@ -84,6 +84,8 @@ func decodeStreaming(_ data: [UInt8], format: DeflateFormat, chunk: Int, outputC
         pending.removeFirst(progress.consumed)
         switch progress.status {
         case .finished:
+            // A gzip member's end: another may follow in the input still to come.
+            if pending.isEmpty && offset < data.count { continue }
             return pending.isEmpty && offset == data.count ? .decoded(result) : .failed
         case .needsInput:
             if offset == data.count { return .failed } // Truncated.

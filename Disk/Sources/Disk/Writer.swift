@@ -8,7 +8,7 @@ import Synchronization
 ///
 /// - One write of the whole file (the usual case): written as it is, no copy. Compression runs first, then the file
 ///   system calls, inside the limit.
-/// - Several writes of a file up to ``ExtractionSettings/stagingCapacity``: gathered in the writer's staging buffer, then
+/// - Several writes of a file up to `ExtractionSettings.stagingCapacity` (1 MiB): gathered in the writer's staging buffer, then
 ///   written as one.
 /// - A bigger file (or one of unknown size): streamed, each write written as it comes (or compressed a 64 KiB chunk at
 ///   a time into the resource fork, a batch of 16 chunks per call).
@@ -45,7 +45,15 @@ public struct FileOutput: ~Copyable {
     var mode = Mode.initial
     /// How the file ended up, once done.
     var result = StoredForm.plain
-    var descriptor: Int32 = -1
+    /// The file, while it's open: taken and closed (or abandoned) exactly once, where its writing ends.
+    var file: OwnedDescriptor?
+    /// The file's descriptor, or -1 when none is open.
+    var descriptor: Int32 {
+        switch file {
+        case .some(let open): open.raw
+        case .none: -1
+        }
+    }
     // Streaming compressed:
     var policy: StoragePolicy?
     var forkOffset = 0
@@ -188,9 +196,8 @@ public struct FileOutput: ~Copyable {
 
     /// Closes and removes what a failed file left (and gives back a permit a file written whole still holds).
     mutating func abandon() {
-        if descriptor >= 0 {
-            core.abandon(descriptor, directory: directory, leaf: leaf)
-            descriptor = -1
+        if let open = file.take() {
+            core.abandon(open.release(), directory: directory, leaf: leaf)
         }
         if unfinished != nil {
             unfinished = nil
@@ -206,11 +213,9 @@ public struct FileOutput: ~Copyable {
         defer { leave() }
         do throws(DiskError) {
             try core.finish(descriptor, metadata: metadata, mode: finalMode, compressed: compressed, deferred: deferred)
-            Sys.close(descriptor)
-            descriptor = -1
+            file.take()?.close()
         } catch {
-            core.abandon(descriptor, directory: directory, leaf: leaf)
-            descriptor = -1
+            if let open = file.take() { core.abandon(open.release(), directory: directory, leaf: leaf) }
             throw error
         }
     }
@@ -249,7 +254,7 @@ public struct FileOutput: ~Copyable {
             // Unsafe: `data` to `write`. Safe: the caller's `count` bytes (or `nil`), still valid; `form` is what
             // `prepare` made from them above, its bytes still in the core's output (nothing has used it since).
             unfinished = try unsafe core.write(descriptor, form: form, data: data, count: count)
-            self.descriptor = descriptor
+            file = OwnedDescriptor(adopting: descriptor, kind: .fileBeingWritten)
         } catch {
             core.abandon(descriptor, directory: directory, leaf: leaf)
             leave()
@@ -279,7 +284,7 @@ public struct FileOutput: ~Copyable {
             result = .skipped
             return
         }
-        descriptor = created
+        file = OwnedDescriptor(adopting: created, kind: .fileBeingWritten)
         let chunkCount = (count + Decmpfs.chunkSize - 1) / Decmpfs.chunkSize
         core.reserveTable(chunkCount + 1)
         var forkOffset = (chunkCount + 1) * 4
@@ -330,7 +335,7 @@ public struct FileOutput: ~Copyable {
             result = .skipped
             return
         }
-        descriptor = created
+        file = OwnedDescriptor(adopting: created, kind: .fileBeingWritten)
         if case .compressed(let policy) = storage, let size = expectedSize, size < 1 << 32, policy.codec.types.fork != 0,
            !policy.skips(size: size, first: first.extracting(first: min(first.byteCount, 8))) {
             self.policy = policy
@@ -426,8 +431,7 @@ public struct FileOutput: ~Copyable {
             try core.finish(descriptor, metadata: metadata, mode: finalMode, compressed: false, deferred: deferred)
             result = .plain
         }
-        Sys.close(descriptor)
-        descriptor = -1
+        file.take()?.close()
     }
 }
 
@@ -517,11 +521,15 @@ struct Writer<Source: ContentSource>: ~Copyable {
             storage: job.storage, deferred: job.deferred, stagingCapacity: context.options.stagingCapacity,
             writerIndex: index
         )
-        do throws(DiskError) {
+        do throws(EntryError<Source.Failure>) {
             let started = timings != nil ? MonotonicClock.now : 0
             try await context.source.write(job.contents, to: &output)
             timings?.add(.produce, since: started)
-            try await output.complete()
+            do throws(DiskError) {
+                try await output.complete()
+            } catch {
+                throw .disk(error)
+            }
             context.counters.count(output.result, bytes: output.bytesWritten)
         } catch {
             output.abandon()
@@ -549,7 +557,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
             try await writePiece(job, state)
         } catch {
             state.failTurns()
-            context.fail(error, path: state.pathRef.string, tag: state.tag)
+            context.fail(.disk(error), path: state.pathRef.string, tag: state.tag)
         }
         slot?.add(entries: 0, bytes: job.count + job.bridgedBytes)
         await pieceDone(job.largeFile)
@@ -791,11 +799,11 @@ struct Writer<Source: ContentSource>: ~Copyable {
                 slot?.add(entries: 1, bytes: 0)
             } catch {
                 ok = false
-                context.fail(error, path: state.pathRef.string, tag: state.tag)
+                context.fail(.disk(error), path: state.pathRef.string, tag: state.tag)
             }
             self.core = consume core
         }
-        Sys.close(state.descriptor)
+        state.file.close()
         if !ok {
             // A half-written file is removed.
             // Unsafe: a C string from `leaf` bytes into the slot's path storage, to `unlinkat`. Safe: the planner
@@ -803,7 +811,6 @@ struct Writer<Source: ContentSource>: ~Copyable {
             // storage, and the planner doesn't reuse the slot until its index is released, below.
             _ = unsafe Sys.unlinkat(state.directory, state.path.base.advanced(by: state.leaf).assumingMemoryBound(to: CChar.self), AT_SYMLINK_NOFOLLOW_ANY)
         }
-        state.descriptor = -1
         context.fileSystem.release()
         timings?.add(.largeFileFinish, since: started)
         context.freeLargeFiles.release(index)

@@ -8,7 +8,7 @@ import Testing
 
 /// Cancellation and failure: every part of an operation is a child task of the caller's, so cancelling the caller (or a
 /// decoder failing) ends the whole operation promptly, with every pool buffer back and nothing left waiting.
-@Suite struct CancellationTests {
+@Suite(.diskLifetimes) struct CancellationTests {
     /// How the archive's stream is decoded.
     enum Layout: String, CaseIterable, Sendable, CustomTestStringConvertible {
         /// AEA segments holding an Apple Archive (``SegmentStream``).
@@ -76,6 +76,12 @@ import Testing
         }
     }
 
+    /// Closes what `source(_:_:_:_:held:)` opened (its archive, which the source reads from, stays open until then).
+    private static func close(_ owner: AnyObject) {
+        (owner as? AEAArchive)?.close()
+        (owner as? AppleArchiveFile)?.close()
+    }
+
     private static func buffersInUse(_ source: any ChunkSource) -> Int {
         source.pools.reduce(0) { $0 + $1.buffersInUse }
     }
@@ -105,7 +111,7 @@ import Testing
         options.disk.writers = 4
         options.disk.fileSystemWidth = 2
         let (inner, owner) = try source(layout, url, keys, options.read, held: options.heldBuffers)
-        defer { withExtendedLifetime(owner) {} }
+        defer { Self.close(owner) }
         let settings = options
         let cancelling = CancellingSource(inner, cancelAt: cancelAt)
         let destination = FilePath(directory.path("out").path)
@@ -126,7 +132,7 @@ import Testing
         var options = AEAReadOptions()
         options.decodeThreads = 4
         let (inner, owner) = try source(layout, url, keys, options, held: 0)
-        defer { withExtendedLifetime(owner) {} }
+        defer { Self.close(owner) }
         let listed = RelaxedCounter()
         let error = await Self.inChildTask { () throws(AEAError) in
             // The callback cancels its own task (the listing's) at the 50th entry.
@@ -146,6 +152,7 @@ import Testing
         defer { directory.remove() }
         let (url, keys, _) = try makeArchive(.segments, in: directory)
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         let destination = FilePath(directory.path("out").path)
         let errors = await withTaskGroup(of: AEAError?.self) { group in
             group.cancelAll() // Tasks added from now on start cancelled.
@@ -181,7 +188,9 @@ import Testing
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let (url, keys, _) = try makeArchive(layout, in: directory)
-        let segment = try AEAArchive(url: url, signingKey: keys.signingKey).segments[5]
+        let original = try AEAArchive(url: url, signingKey: keys.signingKey)
+        let segment = original.segments[5]
+        original.close()
         var bytes = try Data(contentsOf: url)
         bytes[segment.fileOffset + 10] ^= 0x40
         let tampered = directory.path("tampered.aea")
@@ -191,7 +200,7 @@ import Testing
         options.read.decodeThreads = 4
         options.disk.writers = 4
         let (inner, owner) = try source(layout, tampered, keys, options.read, held: options.heldBuffers)
-        defer { withExtendedLifetime(owner) {} }
+        defer { Self.close(owner) }
         let settings = options
         let destination = FilePath(directory.path("out").path)
         let error = await Self.inChildTask { () throws(AEAError) in
@@ -203,7 +212,9 @@ import Testing
 
         // Listing too, through the public API.
         await #expect(throws: AEAError.authenticationFailed("segment 5")) {
-            try await AEAArchive(url: tampered, signingKey: keys.signingKey).forEachEntry { _ in }
+            let opened = try AEAArchive(url: tampered, signingKey: keys.signingKey)
+            defer { opened.close() }
+            try await opened.forEachEntry { _ in }
         }
     }
 
@@ -216,6 +227,7 @@ import Testing
         defer { directory.remove() }
         let (url, keys, files) = try makeArchive(layout, in: directory)
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         for decoders in [1, 3] {
             var options = AEAReadOptions()
             options.decodeThreads = decoders

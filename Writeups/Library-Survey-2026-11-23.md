@@ -47,6 +47,15 @@ NativeZipArchive, NativeAEA, Disk, and the Nunarchiver app. Package roles are in
 
 Bugs and correctness gaps first, then API and performance by expected value.
 
+**Status, 2026-11-23 (later): the bugs are fixed** (Disk/RESULTS.md, Bytes/Benchmarks/RESULTS.md, NativeZipArchive's step20):
+
+- **1, the double close:** fixed by design. Descriptors are owned (`OwnedDescriptor`) or shared (`DescriptorSlot`), every owner closes explicitly, and `deinit` only audits. Every Disk, NativeZip, and NativeAEA test checks for drops and open files (`LifetimeChecks`).
+- **2 and 3, codecs:** every whole-buffer call starts a new stream as `reset()` would. Gzip decodes any number of members, in every API, at one member's speed plus about 300 instructions a member. HTTPBytes' content decoder takes concatenated gzip members and zstd frames.
+- **4, quarantine:** `ENOTSUP` counts the item in `unquarantinedItems` instead of failing it.
+- **5, error mappings:** errors are composed (Disk's `EntryError`/`ExtractionError`, NativeZip's typed `ZipError` with `.decoding`/`.disk`/`.cancelled`, `AEAError.incorrectKey`, the app's `ExpansionError`). The libraries' sources name `any Error` in two places only: BytesTesting's lifetime trait (Swift Testing's scope API is untyped) and SocketStream's transfer harness.
+- **SIGBUS on a truncated mapping:** reproduced on FAT and exFAT, not on APFS or HFS+. `MappedFile` maps a private copy there.
+- **Documentation:** the MQTT and SocketStream READMEs, Disk's stale links, and SE-0496's version are fixed, and the deprecated `Data.append(_:)` is gone. Disk, NativeAEA, NativeZip, BytesCompression, and HTTPPayload analyze clean under DocC.
+
 | # | Finding | Tag | Where |
 |---|---|---|---|
 | 1 | **Bug: Disk closes a descriptor twice.** `Destination.init` closes `root` and throws after every stored property is set, then `deinit` closes it again; the second `close` can hit a descriptor another writer now owns. Delete the explicit close; better a `~Copyable` owning descriptor (see 18). | verified (probe `deinit.swift`; lead read the code) | `Disk/Sources/Disk/Destination.swift:135–141`, `178–181` [AR 1.1] |

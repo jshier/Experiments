@@ -10,8 +10,8 @@
 /// struct PoolSource: ContentSource {
 ///     let pool: BufferPool
 ///     struct Contents: Sendable { var buffer: Int32; var offset: Int32; var count: Int32 }
-///     func write(_ contents: Contents, to output: inout FileOutput) async throws(DiskError) {
-///         try await output.write(pool.span(contents))   // the whole file, in place
+///     func write(_ contents: Contents, to output: inout FileOutput) async throws(EntryError<Never>) {
+///         try await EntryError<Never>.fromDisk { () async throws(DiskError) in try await output.write(pool.span(contents)) }
 ///     }
 ///     func release(_ contents: Contents) { pool.release(Int(contents.buffer)) }
 /// }
@@ -19,12 +19,15 @@
 public protocol ContentSource: Sendable {
     /// What a job carries to name a file's contents: a buffer index and range, an entry, a decoder's input.
     associatedtype Contents: Sendable
+    /// The source's own errors (a decoder's, a checksum's), as entries' failures and the extraction's error carry
+    /// them: ``EntryError/source(_:)``, ``ExtractionError/source(_:)``. `Never` for a source that can't fail.
+    associatedtype Failure: Error = Never
 
     /// Gives a writer the file's bytes: in one ``FileOutput/write(_:)`` (most files: written as they are), or
     /// several (decoded a chunk at a time). Runs on the writer, outside the file system limit: decoding here is CPU
-    /// work like compression. A source's own errors go in ``DiskError/source(_:)`` (``DiskError/init(wrapping:)`` makes
-    /// cancellation ``DiskError/cancelled``); a client hands them on with ``DiskError/unwrapped``.
-    func write(_ contents: Contents, to output: inout FileOutput) async throws(DiskError)
+    /// work like compression. The source's own errors are ``EntryError/source(_:)``; the output's
+    /// ``EntryError/disk(_:)`` (``EntryError/fromDisk(_:)`` runs output calls).
+    func write(_ contents: Contents, to output: inout FileOutput) async throws(EntryError<Failure>)
 
     /// The writer is done with `contents`. Called exactly once per scheduled file, whatever happened.
     func release(_ contents: Contents)
@@ -48,11 +51,11 @@ extension ContentSource {
     }
 }
 
-/// A source of large files that arrive in pieces (``Planner/beginLargeFile(_:size:metadata:storage:first:minimumPieceSize:tag:)``):
+/// A source of large files that arrive in pieces (``Planner/beginLargeFile(_:size:metadata:storage:first:minimumPieceSize:attachments:hardLinked:tag:)``):
 /// each piece's bytes stay valid, and are the job's alone, until it's released.
 ///
 /// Writers compress a piece in place, over its own consumed input, so a piece needs no memory of its own; and a
-/// piece in which no 64 KiB chunk ends is held (``retain(_:)``) by the job of the piece that completes the chunk.
+/// piece in which no 64 KiB chunk ends is held (``ContentSource/retain(_:)``) by the job of the piece that completes the chunk.
 ///
 /// A piece source implements ``ContentSource/retain(_:)`` and ``ContentSource/withPiece(_:_:)``.
 public protocol PieceSource: ContentSource {}
@@ -70,7 +73,7 @@ package struct MemorySource: ContentSource, @unchecked Sendable {
 
     /// A source over `count` bytes at `base`.
     ///
-    /// The caller keeps the bytes valid and unchanged until ``Extraction/run(into:source:options:_:)`` returns: an
+    /// The caller keeps the bytes valid and unchanged until ``Extraction/run(into:source:settings:_:)`` returns: an
     /// `@unsafe` entry point, for clients whose bytes are already mapped (measured: no copy into a staging buffer).
     @unsafe
     public init(base: UnsafeRawPointer, count: Int) {
@@ -80,12 +83,12 @@ package struct MemorySource: ContentSource, @unchecked Sendable {
         self.count = count
     }
 
-    public func write(_ contents: Range<Int>, to output: inout FileOutput) async throws(DiskError) {
+    public func write(_ contents: Range<Int>, to output: inout FileOutput) async throws(EntryError<Never>) {
         precondition(contents.lowerBound >= 0 && contents.upperBound <= count, "contents outside the source")
         // Unsafe: a span over raw memory at `base` plus an offset. Safe: within the caller's `count` bytes (checked
         // above), valid for the extraction (the initializer's contract); the span is used only in this call.
         let span = unsafe RawSpan(_unsafeStart: base + contents.lowerBound, byteCount: contents.count)
-        try await output.write(span)
+        do throws(DiskError) { try await output.write(span) } catch { throw .disk(error) }
     }
 
     public func release(_ contents: Range<Int>) {}

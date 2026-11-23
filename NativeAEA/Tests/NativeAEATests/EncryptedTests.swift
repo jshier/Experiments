@@ -7,7 +7,7 @@ import Testing
 
 /// The encrypted profiles (1–5), on archives Apple's `aea` makes at test time: decrypted to a file and compared
 /// with the input, partial ranges, wrong keys, and extraction from an encrypted Apple Archive.
-@Suite struct EncryptedTests {
+@Suite(.diskLifetimes) struct EncryptedTests {
     /// Keys for every profile: a symmetric key, a recipient key pair (SEC1 PEM, as `aea` reads them), a password.
     struct Keys {
         let symmetric: [UInt8]
@@ -79,6 +79,7 @@ import Testing
                 #expect(throws: AEAError.self) { _ = try AEAArchive(url: url, signingKey: givenKey, decryptionKey: key) }
             }
             let archive = try AEAArchive(url: url, signingKey: signed ? givenKey : .certificateChain, decryptionKey: key)
+            defer { archive.close() }
             #expect(archive.isEncrypted)
             #expect(archive.prologue.profile.rawValue == profile)
             #expect((archive.signer != nil) == [2, 4].contains(profile))
@@ -121,6 +122,7 @@ import Testing
         let signingKey: AEASigningKey = profile == 0 ? try keys.signing.signingKey : .certificateChain
         let key: AEADecryptionKey? = profile == 0 ? nil : try keys.decryptionKey(profile)
         let archive = try AEAArchive(url: url, signingKey: signingKey, decryptionKey: key)
+        defer { archive.close() }
         #expect(archive.segments.count == 5)
         let allStored = archive.segments.allSatisfy(\.isStored)
         #expect(allStored)
@@ -139,6 +141,7 @@ import Testing
         let damagedURL = directory.path("damaged-p\(profile).aea")
         try bytes.write(to: damagedURL)
         let damaged = try AEAArchive(url: damagedURL, signingKey: signingKey, decryptionKey: key)
+        defer { damaged.close() }
         for input in SegmentInput.allCases {
             var options = AEAReadOptions()
             options.input = input
@@ -191,7 +194,13 @@ import Testing
         case 3: .recipientPrivateKey(Array(testBytes(32, seed: 9, compressible: false)))
         default: .password(Array("wrong".utf8))
         }
-        #expect(throws: AEAError.self) { _ = try AEAArchive(url: url, decryptionKey: wrong) }
+        if profile == 3 {
+            // Random bytes needn't be a P-256 scalar: a key that doesn't parse fails before any MAC.
+            #expect(throws: AEAError.self) { _ = try AEAArchive(url: url, decryptionKey: wrong) }
+        } else {
+            // What an app asks for the key again on: its own case, not a message to match.
+            #expect(throws: AEAError.incorrectKey("root header")) { _ = try AEAArchive(url: url, decryptionKey: wrong) }
+        }
     }
 
     @Test func extractsAnEncryptedAppleArchive() async throws {
@@ -211,7 +220,9 @@ import Testing
         try writer.write(to: stream)
         let url = try encrypt(stream, profile: 1, keys: keys, in: directory, compression: "lzma")
         let destination = directory.path("out")
-        let statistics = try await AEAArchive(url: url, decryptionKey: .symmetric(keys.symmetric)).extract(to: FilePath(destination.path))
+        let opened = try AEAArchive(url: url, decryptionKey: .symmetric(keys.symmetric))
+        defer { opened.close() }
+        let statistics = try await opened.extract(to: FilePath(destination.path))
         #expect(statistics.unreleasedBuffers == 0)
         for (path, bytes) in files {
             #expect(Array(try Data(contentsOf: destination.appending(path: path))) == bytes, "\(path)")

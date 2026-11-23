@@ -61,6 +61,7 @@ let package = Package(
         ),
         .target(
             name: "DiskTestSupport",
+            dependencies: ["Disk"],
             swiftSettings: commonSettings + [.strictMemorySafety()]
         ),
         .testTarget(

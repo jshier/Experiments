@@ -204,8 +204,9 @@ final class Tree: @unchecked Sendable {
 func extract(
     _ tree: Tree, into path: FilePath, options: ExtractionSettings = .init(), destinationOptions: DestinationOptions = .init(),
     storage: Storage = .plain
-) async throws -> ExtractionReport {
+) async throws -> ExtractionReport<Never> {
     let destination = try Destination(path, options: destinationOptions)
+    defer { destination.close() }
     var blob = ExtendedAttributeBlob()
     for name in ["com.example.one", "com.example.two", "com.example.three"] { blob.append(name: name, value: SampleBytes.text(40, seed: 1).span.bytes) }
     let attributes = blob.bytes

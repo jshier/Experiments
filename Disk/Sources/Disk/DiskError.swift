@@ -27,79 +27,11 @@ public enum DiskError: Error, Sendable, Equatable, CustomStringConvertible {
     case endOfFile(String)
     /// A file read whole (``InputFile/contents(of:maximumCount:)``) is longer than the most the caller accepts.
     case tooLarge(String, limit: Int)
-    /// The source of a file's contents failed (decoding, a checksum): its own error, as it threw it.
-    case source(any Error)
+    /// The extraction already stopped on another entry's failure: what a planner call throws then. The extraction's
+    /// error (``ExtractionError``) is that failure, a source's own included.
+    case stopped
     /// The task was cancelled.
     case cancelled
-
-    /// Equal cases with equal payloads. Sources' errors compare as their own type does when it's `Equatable`, else by
-    /// description.
-    public static func == (lhs: DiskError, rhs: DiskError) -> Bool {
-        switch (lhs, rhs) {
-        case (.unsafePath(let a), .unsafePath(let b)), (.escapesDestination(let a), .escapesDestination(let b)),
-             (.exists(let a), .exists(let b)), (.notADirectory(let a), .notADirectory(let b)), (.refused(let a), .refused(let b)),
-             (.invalidMetadata(let a), .invalidMetadata(let b)), (.endOfFile(let a), .endOfFile(let b)):
-            a == b
-        case (.tooLarge(let a, let limitA), .tooLarge(let b, let limitB)):
-            a == b && limitA == limitB
-        case (.system(let a, let pathA, let errnoA), .system(let b, let pathB, let errnoB)):
-            a == b && pathA == pathB && errnoA == errnoB
-        case (.source(let a), .source(let b)):
-            Self.sourcesEqual(a, b)
-        case (.cancelled, .cancelled):
-            true
-        default:
-            false
-        }
-    }
-
-    private static func sourcesEqual(_ lhs: any Error, _ rhs: any Error) -> Bool {
-        func equal<E: Equatable>(_ lhs: E, _ rhs: any Error) -> Bool { (rhs as? E) == lhs }
-        if let lhs = lhs as? any Equatable { return equal(lhs, rhs) }
-        return String(describing: lhs) == String(describing: rhs)
-    }
-
-    /// The source's error, if this is ``source(_:)``.
-    package var sourceError: (any Error)? {
-        if case .source(let error) = self { error } else { nil }
-    }
-
-    /// Any error as Disk's: a `DiskError` as it is, `CancellationError` as ``cancelled``, anything else as the
-    /// ``source(_:)`` that threw it. What a ``ContentSource`` throws from code that throws other errors.
-    public init(wrapping error: any Error) {
-        switch error {
-        case let error as DiskError: self = error
-        case is CancellationError: self = .cancelled
-        default: self = .source(error)
-        }
-    }
-
-    /// The error a client that throws untyped errors hands on: a ``source(_:)``'s own error, `CancellationError` for
-    /// ``cancelled``, and this error for anything else. The inverse of ``init(wrapping:)``.
-    public var unwrapped: any Error {
-        switch self {
-        case .source(let error): error
-        case .cancelled: CancellationError()
-        default: self
-        }
-    }
-
-    /// Whether `error` says the work was cancelled: `CancellationError`, ``cancelled``, a ``source(_:)`` that does, or
-    /// a ``CancellationReporting`` error (a client's own cancellation case) that says so. One check for a caller that
-    /// meets several packages' errors.
-    public static func isCancellation(_ error: any Error) -> Bool {
-        switch error {
-        case is CancellationError: true
-        case let error as DiskError:
-            switch error {
-            case .cancelled: true
-            case .source(let error): isCancellation(error)
-            default: false
-            }
-        case let error as any CancellationReporting: error.isCancellation
-        default: false
-        }
-    }
 
     public var description: String {
         switch self {
@@ -112,7 +44,7 @@ public enum DiskError: Error, Sendable, Equatable, CustomStringConvertible {
         case .system(let operation, let path, let errno): "\(operation) \(path): \(errno)"
         case .endOfFile(let path): "the file ends before the bytes read: \(path)"
         case .tooLarge(let path, let limit): "larger than \(limit) bytes: \(path)"
-        case .source(let error): "\(error)"
+        case .stopped: "stopped by another entry's failure"
         case .cancelled: "cancelled"
         }
     }
@@ -127,10 +59,4 @@ public enum DiskError: Error, Sendable, Equatable, CustomStringConvertible {
         default: .system(operation, path: path, Errno(rawValue: code))
         }
     }
-}
-
-/// An error with a cancellation case of its own (a client's `.cancelled`), for ``DiskError/isCancellation(_:)``.
-public protocol CancellationReporting: Error {
-    /// Whether this error says the work was cancelled.
-    var isCancellation: Bool { get }
 }

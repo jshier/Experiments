@@ -5,7 +5,7 @@ import Testing
 
 /// What the allocation pass changed: the header parser's typed errors, the key schedule's shared HKDF extract, and the
 /// directory table that allocates nothing until a directory is opened.
-@Suite struct AllocationTests {
+@Suite(.diskLifetimes) struct AllocationTests {
     // MARK: Header errors, now returned as values inside typed throws
 
     /// Parses `bytes` as one header, as the walker does.

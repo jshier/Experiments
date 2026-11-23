@@ -5,7 +5,7 @@ import System
 import Testing
 
 /// Recognizing an archive's format: by its first bytes, then its extension.
-@Suite struct ArchiveKindTests {
+@Suite(.diskLifetimes) struct ArchiveKindTests {
     @Test func kindsByTheirFirstBytes() {
         #expect(ArchiveKind(magic: Array("PK\u{3}\u{4}rest".utf8)) == .zip)
         // An empty ZIP is only its end record; a spanned one starts with a data descriptor's signature.

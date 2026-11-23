@@ -9,7 +9,7 @@ import Testing
 
 /// APFS compression against Apple's tools: `aa extract` on the same files (LZBITMAP byte for byte; LZFSE form and
 /// contents), and `xip --expand`'s rules (LZVN) checked rule by rule (a signed `.xip` can't be made in a test).
-@Suite struct DecmpfsTests {
+@Suite(.diskLifetimes) struct DecmpfsTests {
     /// Writes Apple Archive streams with exactly the fields asked for, including Xcode's `AFT` (what `aa archive` can't
     /// make).
     struct ArchiveStreamWriter {
@@ -79,6 +79,7 @@ import Testing
         try ExternalTool.run("/usr/bin/aa", ["extract", "-i", stream.path, "-d", reference.path])
 
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         let (report, source) = try await extract(files.map { ($0.0, $0.1) }, into: destination, storage: .compressed(policy))
         #expect(source.releaseCount == files.count)
         #expect(report.files == files.count)
@@ -115,6 +116,7 @@ import Testing
             ("short-tail", testBytes(65_536 * 2 + 30, seed: 4, compressible: true)),
         ]
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         let (report, _) = try await extract(files, into: destination, storage: .compressed(.xipExpand))
         #expect(report.inlineFiles == 0)
         let out = directory.path("out")
@@ -140,6 +142,7 @@ import Testing
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let destination = try Destination(directory.filePath("out"))
+        defer { destination.close() }
         var writer = FileWriter(destination)
         let small = [UInt8](repeating: 0x61, count: 20_000) + Array("end".utf8)
         let large = testBytes(200_000, seed: 6, compressible: true)
@@ -164,9 +167,11 @@ import Testing
         options.stagingCapacity = 64 << 10
         let destination = try Destination(directory.filePath("streamed-\(writes)"))
         let (report, source) = try await extract(files, into: destination, options: options, storage: .compressed(.appleArchive), writesPerFile: writes)
+        destination.close()
         #expect(source.releaseCount == 2)
         #expect(report.forkFiles == 1 && report.plainFiles == 1)
         let reference = try Destination(directory.filePath("whole"))
+        defer { reference.close() }
         var writer = FileWriter(reference)
         for (path, bytes) in files {
             try withPath(path) { try writer.writeFile($0, contents: bytes.span.bytes, storage: .compressed(.appleArchive)) }

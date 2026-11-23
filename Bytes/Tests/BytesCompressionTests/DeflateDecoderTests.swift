@@ -117,6 +117,8 @@ import zlib
         }
     }
 
+    /// Raw and zlib streams leave bytes after them alone; in gzip, bytes after a member must start another
+    /// (`GzipMembersTests`).
     @Test func dataAfterTheStreamIsNotConsumed() throws {
         let bytes = Array("trailing data".utf8)
         for format in Self.formats {
@@ -127,11 +129,16 @@ import zlib
             // The span's closure keeps the error type. Swift 6.4.2 miscompiles a typed-throws closure passed to the
             // array's (which rethrows `any Error`): an error thrown through it arrives as garbage.
             var outputSpan = output.mutableSpan
-            let consumed = try outputSpan.withUnsafeMutableBytes { buffer throws(BytesError) in
-                var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
-                return try decoder.decompressAll(input.span.bytes, into: &span)
+            let result: Result<Int, BytesError>
+            do throws(BytesError) {
+                result = .success(try outputSpan.withUnsafeMutableBytes { buffer throws(BytesError) in
+                    var span = OutputRawSpan(buffer: buffer, initializedCount: 0)
+                    return try decoder.decompressAll(input.span.bytes, into: &span)
+                })
+            } catch {
+                result = .failure(error)
             }
-            #expect(consumed == compressed.count)
+            #expect(result == (format == .gzip ? .failure(.invalidValue) : .success(compressed.count)), "\(format)")
         }
     }
 

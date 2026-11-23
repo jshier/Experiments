@@ -60,6 +60,8 @@ public struct LZBitmapDecoder: ~Copyable {
 
     /// Decodes a stream, from its magic through its end chunk, into `output`'s free capacity.
     ///
+    /// Every call starts a new stream: nothing carries over from earlier calls but the decoder's memory.
+    ///
     /// - Parameters:
     ///   - input: The stream, at its start. Bytes after its end chunk are left alone.
     ///   - decodedSize: The size the container says the stream decodes to, if it does: a stream decoding to more

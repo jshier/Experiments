@@ -10,7 +10,7 @@ import Testing
 
 /// The container: prologue, signature, MACs, checksums, segment compressions; checked against archives Apple's
 /// `aea` writes.
-@Suite struct FormatTests {
+@Suite(.diskLifetimes) struct FormatTests {
     /// A small archive of a stream this suite writes, in the given container settings.
     private func archive(
         compression: String = "lzma", blockSize: String = "64k", checksum: String = "sha256",
@@ -35,6 +35,7 @@ import Testing
         let (directory, keys, url, writer) = try archive()
         defer { directory.remove() }
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         #expect(archive.prologue.profile == .signed)
         #expect(archive.rootHeader.rawSize == writer.bytes.count)
         #expect(archive.rootHeader.segmentSize == 65_536)
@@ -54,6 +55,7 @@ import Testing
         let (directory, keys, url, writer) = try archive(compression: compression)
         defer { directory.remove() }
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         var paths: [String] = []
         let statistics = try await archive.forEachEntry { paths.append($0.path) }
         #expect(paths == ["", "folder", "folder/small.txt", "folder/text.txt", "folder/random.bin", "folder/link"])
@@ -66,6 +68,7 @@ import Testing
         let (directory, keys, url, _) = try archive(checksum: checksum)
         defer { directory.remove() }
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         #expect(archive.rootHeader.checksum.byteCount == ["none": 0, "murmur64": 8, "sha256": 32][checksum])
         try await archive.forEachEntry { _ in }
     }
@@ -75,6 +78,7 @@ import Testing
         let (directory, keys, url, _) = try archive(compression: compression, blockSize: blockSize)
         defer { directory.remove() }
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
+        defer { archive.close() }
         // `aea` makes segments at least 16 KiB.
         #expect(archive.rootHeader.segmentSize == (blockSize == "1k" ? 16_384 : 4 << 20))
         let statistics = try await archive.forEachEntry { _ in }
@@ -87,6 +91,7 @@ import Testing
         // Self-signed: not trusted, but usable when asked.
         #expect(throws: AEAError.self) { _ = try AEAArchive(url: url) }
         let archive = try AEAArchive(url: url, signingKey: .untrustedCertificateChain)
+        defer { archive.close() }
         #expect(archive.signer?.subject == "NativeAEA tests")
         #expect(archive.signer?.isTrusted == false)
         #expect(archive.prologue.authDataEntries?.first?.key == AEASignature.certificateChainKey)
@@ -95,6 +100,7 @@ import Testing
         let pem = try String(contentsOf: keys.certificate, encoding: .utf8)
         let root = try X509Certificate.decodePEM(pem)
         let trusted = try AEAArchive(url: url, signingKey: .certificateChainTrusting(root))
+        defer { trusted.close() }
         #expect(trusted.signer?.isTrusted == true)
         #expect(trusted.signer?.publicKey == archive.signer?.publicKey)
     }
@@ -211,6 +217,7 @@ import Testing
         defer { directory.remove() }
         let key = try keys.signingKey
         let archive = try AEAArchive(url: url, signingKey: key)
+        defer { archive.close() }
         let prologue = archive.prologue.byteCount
 
         // In the signed prologue (the root header): the signature fails.
@@ -222,6 +229,7 @@ import Testing
         // In a segment: its MAC fails when it's read.
         let segment = archive.segments[2]
         let tampered = try AEAArchive(url: try corrupt(url, at: segment.fileOffset + 10), signingKey: key)
+        defer { tampered.close() }
         await #expect(throws: AEAError.authenticationFailed("segment 2")) { try await tampered.forEachEntry { _ in } }
         // Without MACs, the checksum (or the decoder) catches it.
         var options = AEAReadOptions()

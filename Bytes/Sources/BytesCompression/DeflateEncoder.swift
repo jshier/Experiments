@@ -88,8 +88,9 @@ public struct DeflateEncoder: ~Copyable {
 
     /// Encodes `input` as one whole stream, appending it to `output`.
     ///
-    /// The encoder must be fresh or ``reset()``. ``maximumCompressedSize(forByteCount:format:)`` bytes of
-    /// free capacity are always enough.
+    /// Every call starts a new stream: an encoder used before (by any call) starts over as after ``reset()``,
+    /// keeping its memory; a fresh or reset one pays nothing for that. ``maximumCompressedSize(forByteCount:format:)``
+    /// bytes of free capacity are always enough.
     ///
     /// - Parameters:
     ///   - input: All the data.
@@ -97,7 +98,8 @@ public struct DeflateEncoder: ~Copyable {
     /// - Throws: ``BytesError/insufficientCapacity`` if the stream doesn't fit (`output` then holds part of
     ///   it).
     public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
-        precondition(!headerWritten, "compressAll needs a fresh or reset encoder")
+        // Only a used encoder resets: the reset clears the match finder's tables, which a fresh one has clear.
+        if headerWritten { reset() }
         writeHeader()
         updateChecksum(input)
         var position = 0

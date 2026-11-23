@@ -11,7 +11,7 @@ import Testing
 // `Tools/test-data fetch`) must decode to the inputs their generators rebuild here; truncated and corrupted payloads
 // must throw, never trap, and never decode to the wrong size. A small encoder below covers what liblzma won't encode
 // (lc + lp above 4). Errors are checked as the zip reader reports them: `unsupportedMethod` for a header it can't
-// read, `corruptData` for everything else.
+// read, `decoding` (the decoder's error), `truncated`, or `sizeMismatch` for everything else (`LZMAOutcome.corrupt`).
 //
 // The output arrives in the decoder's 1 MiB chunks: resuming in steps of other sizes (1 byte to 64 KiB) was tested on
 // the decoder's own type, and is now its codec's own tests' business.
@@ -112,7 +112,7 @@ enum LZMAInputs {
 }
 
 /// Decodes a whole zip LZMA payload with `decoder`, as an entry of `size` bytes whose flag bit 1 is `hasEndMarker`.
-func lzmaDecode(_ payload: [UInt8], size: Int, hasEndMarker: Bool, decoder: inout ZipDecoder) throws -> [UInt8] {
+func lzmaDecode(_ payload: [UInt8], size: Int, hasEndMarker: Bool, decoder: inout ZipDecoder) throws(ZipError) -> [UInt8] {
     var output: [UInt8] = []
     try decoder.decodePayload(
         payload.span.bytes, method: ZipArchive.Method.lzma, uncompressedSize: UInt64(size), hasEndMarker: hasEndMarker
@@ -123,7 +123,7 @@ func lzmaDecode(_ payload: [UInt8], size: Int, hasEndMarker: Bool, decoder: inou
     return output
 }
 
-func lzmaDecode(_ payload: [UInt8], size: Int, hasEndMarker: Bool) throws -> [UInt8] {
+func lzmaDecode(_ payload: [UInt8], size: Int, hasEndMarker: Bool) throws(ZipError) -> [UInt8] {
     var decoder = ZipDecoder()
     return try lzmaDecode(payload, size: size, hasEndMarker: hasEndMarker, decoder: &decoder)
 }
@@ -133,20 +133,21 @@ enum LZMAOutcome: Equatable {
     case decoded([UInt8])
     /// `ZipError.unsupportedMethod`: a zip LZMA header it can't read.
     case unsupported
-    /// `ZipError.corruptData`: an invalid or truncated stream, or one that doesn't decode to the recorded size.
+    /// An invalid or truncated stream (`ZipError.decoding`, or `.truncated` for a cut header), or one that doesn't
+    /// decode to the recorded size (`ZipError.sizeMismatch`).
     case corrupt
     /// Any other error (none is expected).
     case other(String)
 
-    init(_ body: () throws -> [UInt8]) {
-        do {
+    init(_ body: () throws(ZipError) -> [UInt8]) {
+        do throws(ZipError) {
             self = try .decoded(body())
-        } catch ZipError.unsupportedMethod(_, _) {
-            self = .unsupported
-        } catch ZipError.corruptData(_) {
-            self = .corrupt
         } catch {
-            self = .other("\(error)")
+            switch error {
+            case .unsupportedMethod: self = .unsupported
+            case .decoding, .truncated, .sizeMismatch: self = .corrupt
+            default: self = .other("\(error)")
+            }
         }
     }
 
@@ -201,7 +202,7 @@ enum LZMAOutcome: Equatable {
         }
         for name in ["text-nomarker", "one-nomarker", "empty-nomarker", "runs"] {
             let vector = LZMAVector.named(name)
-            let outcome = LZMAOutcome { try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: true) }
+            let outcome = LZMAOutcome { () throws(ZipError) in try lzmaDecode(vector.payload, size: vector.size, hasEndMarker: true) }
             #expect(outcome == .corrupt, "\(name)")
         }
     }
@@ -212,7 +213,7 @@ enum LZMAOutcome: Equatable {
         for name in ["text-marker", "text-nomarker", "records-lc0-lp4-pb0", "sentences-1m-dict4k"] {
             let vector = LZMAVector.named(name)
             for size in [vector.size - 1, vector.size + 1, vector.size / 2] {
-                let outcome = LZMAOutcome { try lzmaDecode(vector.payload, size: size, hasEndMarker: vector.hasEndMarker) }
+                let outcome = LZMAOutcome { () throws(ZipError) in try lzmaDecode(vector.payload, size: size, hasEndMarker: vector.hasEndMarker) }
                 #expect(outcome == .corrupt, "\(name), size \(size)")
             }
         }
@@ -226,7 +227,7 @@ enum LZMAOutcome: Equatable {
         let xz = AppleCompression.encode(text, COMPRESSION_LZMA)
         var decoder = ZipDecoder()
         func decode(_ payload: [UInt8], method: UInt16, size: Int, hasEndMarker: Bool) -> LZMAOutcome {
-            LZMAOutcome {
+            LZMAOutcome { () throws(ZipError) in
                 var output: [UInt8] = []
                 try decoder.decodePayload(payload.span.bytes, method: method, uncompressedSize: UInt64(size), hasEndMarker: hasEndMarker) { chunk in
                     chunk.withUnsafeBytes { output.append(contentsOf: $0) }
@@ -258,7 +259,7 @@ enum LZMAOutcome: Equatable {
         let vector = LZMAVector.named("text-marker")
         let payload = vector.payload
         func outcome(_ payload: [UInt8]) -> LZMAOutcome {
-            LZMAOutcome { try lzmaDecode(payload, size: vector.size, hasEndMarker: true) }
+            LZMAOutcome { () throws(ZipError) in try lzmaDecode(payload, size: vector.size, hasEndMarker: true) }
         }
         var badSize = payload
         badSize[2] = 4
@@ -278,7 +279,7 @@ enum LZMAOutcome: Equatable {
         // After a failed entry, the same decoder decodes the next one.
         var decoder = ZipDecoder()
         for bad in [badSize, badFirstByte, Array(payload.prefix(20))] {
-            #expect(LZMAOutcome { try lzmaDecode(bad, size: vector.size, hasEndMarker: true, decoder: &decoder) }.failed)
+            #expect(LZMAOutcome { () throws(ZipError) in try lzmaDecode(bad, size: vector.size, hasEndMarker: true, decoder: &decoder) }.failed)
             #expect(try lzmaDecode(payload, size: vector.size, hasEndMarker: true, decoder: &decoder) == vector.expected)
         }
     }
@@ -307,21 +308,21 @@ enum LZMAOutcome: Equatable {
         let payload = vector.payload
         var decoder = ZipDecoder()
         for cut in cuts(payload.count).sorted() {
-            let outcome = LZMAOutcome {
+            let outcome = LZMAOutcome { () throws(ZipError) in
                 try lzmaDecode(Array(payload.prefix(cut)), size: vector.size, hasEndMarker: vector.hasEndMarker, decoder: &decoder)
             }
             #expect(outcome == .corrupt, "\(name) cut to \(cut) of \(payload.count) bytes")
         }
     }
 
-    /// Cuts in the header, near the end, and a sample elsewhere: always `corruptData`, never a trap or a short
+    /// Cuts in the header, near the end, and a sample elsewhere: always `.corrupt`, never a trap or a short
     /// success.
     @Test(arguments: Self.truncatedNames)
     func rejectsTruncatedPayloads(_ name: String) {
         Self.checkTruncated(name, cuts: Self.fastCuts)
     }
 
-    /// Changed bytes: decoding throws `corruptData` or produces output of the right size, never traps. With an end
+    /// Changed bytes: decoding is `.corrupt` or produces output of the right size, never traps. With an end
     /// marker, most changes are caught. 25 changes per vector (`LZMADecoderBulkTests` makes 200).
     @Test func survivesCorruptPayloads() {
         Self.checkCorruptPayloads(perVector: 25)
@@ -341,7 +342,7 @@ enum LZMAOutcome: Equatable {
                     let index = 14 + Int(rng.next() % UInt64(payload.count - 14))
                     corrupt[index] ^= UInt8(truncatingIfNeeded: 1 + rng.next() % 255)
                 }
-                let outcome = LZMAOutcome {
+                let outcome = LZMAOutcome { () throws(ZipError) in
                     try lzmaDecode(corrupt, size: vector.size, hasEndMarker: vector.hasEndMarker, decoder: &decoder)
                 }
                 total += 1
@@ -355,7 +356,7 @@ enum LZMAOutcome: Equatable {
         #expect(rejected > total / 2)
     }
 
-    /// Random bytes after valid headers, with every lc/lp/pb byte: no traps, and `corruptData` or the right size.
+    /// Random bytes after valid headers, with every lc/lp/pb byte: no traps, and `.corrupt` or the right size.
     @Test func survivesRandomStreams() {
         var rng = SplitMix64(seed: 5)
         for properties in 0..<225 {
@@ -364,7 +365,7 @@ enum LZMAOutcome: Equatable {
             for hasEndMarker in [false, true] {
                 // A decoder each: resetting a reused one's probabilities (up to 3 million with lc 8 and lp 4) one by
                 // one is slow in debug builds.
-                let outcome = LZMAOutcome { try lzmaDecode(payload, size: 100_000, hasEndMarker: hasEndMarker) }
+                let outcome = LZMAOutcome { () throws(ZipError) in try lzmaDecode(payload, size: 100_000, hasEndMarker: hasEndMarker) }
                 switch outcome {
                 case let .decoded(bytes): #expect(bytes.count == 100_000)
                 case .corrupt: break

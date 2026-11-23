@@ -61,7 +61,9 @@ public struct LZVNEncoder: ~Copyable {
 
     /// Encodes `input` as a raw LZVN stream, ending with the end-of-stream opcode, appending it to `output`.
     ///
-    /// ``maximumCompressedSize(forByteCount:)`` bytes of free capacity are always enough.
+    /// Every call starts a new stream: an encoder used before writes what a fresh one would (the table's old entries
+    /// read as empty), keeping its memory. ``maximumCompressedSize(forByteCount:)`` bytes of free capacity are always
+    /// enough.
     ///
     /// - Parameters:
     ///   - input: All the data.

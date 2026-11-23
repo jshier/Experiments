@@ -35,7 +35,7 @@ public struct Planner<Source: ContentSource>: ~Copyable {
     var specials: [SpecialRecord] = []
     var deferred: [DeferredEntry] = []
     var fixes: [DirectoryFix] = []
-    var report = ExtractionReport()
+    var report = ExtractionReport<Source.Failure>()
     var phases: [ExtractionPhase: Double] = [:]
     /// The blob last appended to: its entry, kind, and where it ended in the arena.
     private var lastBlob: (entry: Int, isACL: Bool, end: Int) = (-1, false, -1)
@@ -109,16 +109,16 @@ public struct Planner<Source: ContentSource>: ~Copyable {
     /// Throws the extraction's stopping failure, if it has one.
     @inline(__always)
     private func checkStopped() throws(DiskError) {
-        if context.isStopped, let failure = context.stoppingFailure { throw failure }
+        if context.isStopped, let failure = context.stoppingDiskFailure { throw failure }
     }
 
     /// An entry failed: stops (throws) or records it, by the options.
     private func entryFailed(_ error: DiskError, tag: Int) throws(DiskError) {
         if context.options.stopsOnFirstFailure {
-            context.fail(error, path: currentPath, tag: tag)
+            context.fail(.disk(error), path: currentPath, tag: tag)
             throw error
         }
-        context.fail(error, path: currentPath, tag: tag)
+        context.fail(.disk(error), path: currentPath, tag: tag)
     }
 
     // Unsafe (both properties below): the path buffer as a C string, which `PathRef` measures (`strlen`); `currentRef`
@@ -233,6 +233,8 @@ public struct Planner<Source: ContentSource>: ~Copyable {
     /// everything else, deepest first.
     ///
     /// - Parameters:
+    ///   - entry: Its path in the destination.
+    ///   - metadata: Its mode, times, flags, and owner.
     ///   - attachments: Extended attributes or an ACL will be added (``addExtendedAttributes(_:to:)``).
     ///   - tag: The caller's tag for failures.
     @discardableResult
@@ -289,10 +291,14 @@ public struct Planner<Source: ContentSource>: ~Copyable {
     /// succeeds.
     ///
     /// - Parameters:
+    ///   - entry: Its path in the destination.
     ///   - size: The file's size, if known (a file of unknown size is streamed, and stored plain).
+    ///   - contents: What the source's ``ContentSource/write(_:to:)`` is given to write it.
+    ///   - metadata: Its mode, times, flags, and owner.
     ///   - storage: Plain, or APFS-compressed by a policy.
     ///   - attachments: Extended attributes or an ACL will be added: the file's mode, times, and flags wait for them.
-    ///   - hardLinked: Other names will be linked to it (``hardLink(_:to:metadata:tag:)``).
+    ///   - hardLinked: Other names will be linked to it (``hardLink(_:to:tag:)``).
+    ///   - tag: The caller's tag for failures.
     @discardableResult
     public mutating func file(
         _ entry: EntryPath, size: Int?, contents: Source.Contents, metadata: EntryMetadata = .init(), storage: Storage = .plain,
@@ -438,12 +444,19 @@ public struct Planner<Source: ContentSource>: ~Copyable {
 
     /// Opens a file whose contents come in pieces (``piece(_:of:at:count:)``), in order, as they arrive: each piece is a
     /// job, so pieces are written (and compressed, in parallel) while later ones are still coming. Suspends while all
-    /// ``ExtractionSettings/largeFileSlots`` are in use.
+    /// large-file slots (`ExtractionSettings.largeFileSlots`, 128) are in use.
     ///
     /// - Parameters:
+    ///   - entry: Its path in the destination.
+    ///   - size: The file's size.
+    ///   - metadata: Its mode, times, flags, and owner.
+    ///   - storage: Plain, or APFS-compressed by a policy.
     ///   - first: The file's first bytes (at least 8, for a policy that skips PNGs).
     ///   - minimumPieceSize: The smallest piece but the last: compressed files need pieces of at least a seventh of a
     ///     64 KiB chunk (a chunk spans at most 8 pieces); smaller ones are stored plain.
+    ///   - attachments: Extended attributes or an ACL will be added: the file's mode, times, and flags wait for them.
+    ///   - hardLinked: Other names will be linked to it (``hardLink(_:to:tag:)``).
+    ///   - tag: The caller's tag for failures.
     public mutating func beginLargeFile(
         _ entry: EntryPath, size: Int, metadata: EntryMetadata = .init(), storage: Storage = .plain, first: RawSpan,
         minimumPieceSize: Int, attachments: Bool = false, hardLinked: Bool = false, tag: Int = 0
@@ -502,7 +515,7 @@ public struct Planner<Source: ContentSource>: ~Copyable {
             // extraction and isn't changed during the call; `createFile` doesn't keep it.
             let descriptor = try unsafe destination.createFile(resolved.directory, name, mode: destination.creationMode(state.mode), path: state.pathRef)
             guard descriptor >= 0 else { throw .exists(currentPath) }
-            state.descriptor = descriptor
+            state.file.adopt(OwnedDescriptor(adopting: descriptor, kind: .largeFile))
         } catch {
             context.freeLargeFiles.release(index)
             try entryFailed(error, tag: tag)
@@ -571,12 +584,11 @@ public struct Planner<Source: ContentSource>: ~Copyable {
         let index = largeFile
         largeFile = -1
         if state.outstanding.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 {
-            Sys.close(state.descriptor)
+            state.file.close()
             // Unsafe: a C string from `leaf` bytes into the slot's path storage, to `unlinkat`. Safe: `beginLargeFile`
             // copied the path there NUL-terminated, with `leaf` where its last component starts; no piece is left
             // (the count just reached 0), so only the planner uses the slot until its index is released, below.
             _ = unsafe Sys.unlinkat(state.directory, state.path.base.advanced(by: state.leaf).assumingMemoryBound(to: CChar.self), AT_SYMLINK_NOFOLLOW_ANY)
-            state.descriptor = -1
             context.freeLargeFiles.release(index)
         }
     }

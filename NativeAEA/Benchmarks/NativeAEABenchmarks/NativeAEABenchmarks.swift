@@ -80,7 +80,21 @@ final class ArchiveFixture: @unchecked Sendable {
         self.isReal = isReal
     }
 
-    lazy var archive: AEAArchive = try! Fixtures.open(url, key: key)
+    private var opened: AEAArchive?
+
+    /// The archive, opened on first use and kept until `close()`.
+    var archive: AEAArchive {
+        if let opened { return opened }
+        let archive = try! Fixtures.open(url, key: key)
+        opened = archive
+        return archive
+    }
+
+    /// Closes the archive if it was opened: a benchmark's teardown.
+    func close() {
+        opened?.close()
+        opened = nil
+    }
 
     /// Segment 0, stored and decoded, and the headers that start in it.
     struct FirstSegment {
@@ -155,7 +169,9 @@ let benchmarks: @Sendable () -> Void = {
 
         Benchmark("Open and verify: \(name)") { benchmark in
             for _ in benchmark.scaledIterations {
-                blackHole(try Fixtures.open(fixture.url, key: fixture.key))
+                let opened = try Fixtures.open(fixture.url, key: fixture.key)
+                blackHole(opened)
+                opened.close()
             }
         }
 
@@ -181,7 +197,8 @@ let benchmarks: @Sendable () -> Void = {
                         precondition(output == segment.decoded)
                         state.decoder = decoder
                         state.output = output
-                    }
+                    },
+                    teardown: { fixture.close() }
                 )
             ) { benchmark in
                 let decoder = state.decoder!
@@ -197,7 +214,7 @@ let benchmarks: @Sendable () -> Void = {
         for kind in SegmentDecoderKind.allCases {
             Benchmark(
                 "Make segment decoder: \(name): \(kind)",
-                configuration: .init(setup: { _ = fixture.archive })
+                configuration: .init(setup: { _ = fixture.archive }, teardown: { fixture.close() })
             ) { benchmark in
                 let archive = fixture.archive
                 benchmark.startMeasurement()
@@ -212,7 +229,7 @@ let benchmarks: @Sendable () -> Void = {
         // would need the segment decoded in every process.)
         Benchmark(
             "Parse headers: \(name) segment 0",
-            configuration: .init(setup: { _ = fixture.firstSegment })
+            configuration: .init(setup: { _ = fixture.firstSegment }, teardown: { fixture.close() })
         ) { benchmark in
             let segment = fixture.firstSegment
             let decoded = segment.decoded
@@ -246,7 +263,8 @@ let benchmarks: @Sendable () -> Void = {
                 warmupIterations: 0,
                 maxDuration: .seconds(10),
                 maxIterations: fixture.isReal ? 1 : 3,
-                setup: { fixture.warmPageCache() }
+                setup: { fixture.warmPageCache() },
+                teardown: { fixture.close() }
             )
         ) { (benchmark: Benchmark) async throws in
             let options = AEAReadOptions()
@@ -273,7 +291,10 @@ let benchmarks: @Sendable () -> Void = {
                         Fixtures.removeOutput()
                         fixture.warmPageCache()
                     },
-                    teardown: { Fixtures.removeOutput() }
+                    teardown: {
+                        fixture.close()
+                        Fixtures.removeOutput()
+                    }
                 )
             ) { (benchmark: Benchmark) async throws in
                 var options = AEAExtractionOptions()

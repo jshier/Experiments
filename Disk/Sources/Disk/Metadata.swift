@@ -442,11 +442,14 @@ public struct Quarantine: Sendable, Hashable {
     }
 
     /// Sets it on an open item.
-    func apply(_ descriptor: Int32, path: PathRef) throws(DiskError) {
+    ///
+    /// - Returns: `nil`, or the `errno` of a failure (the destination decides what a failure means:
+    ///   `Destination.quarantine(_:path:)`).
+    func apply(_ descriptor: Int32) -> Int32? {
         // Unsafe: the value's buffer to `fsetxattr`. Safe: the array's own `count` bytes (or `nil` and 0), valid inside
         // `withUnsafeBytes`, read only during the call; the name is a string constant's C string.
         let result = value.withUnsafeBytes { unsafe Sys.fsetxattr(descriptor, EntryAttributes.quarantine, $0.baseAddress, $0.count, 0) }
-        if result != 0 { throw .system("setxattr quarantine", path: path, code: errno) }
+        return result == 0 ? nil : errno
     }
 }
 
