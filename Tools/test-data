@@ -28,6 +28,29 @@
 #                         against while they were written (lzfse at e634ca5, BSD; libzbitmap at 2fcb080, MIT), as
 #                         source tarballs. Not built by any package now; Bytes' RESULTS-lz4-lzfse.md and
 #                         RESULTS-lzbitmap.md have the comparisons and how to build them again.
+#   hpack-test-case       http2jp/hpack-test-case (MIT): real header sets ("stories") encoded by nghttp2, go-hpack,
+#                         python-hpack, swift-nio-hpack, and others, with and without Huffman coding, plus the raw
+#                         headers. HTTPBytes' HPACK tests and benchmarks.
+#   qifs                  qpackers/qifs: QPACK interop files (QIF text of real HTTP/3 traffic) and their encodings by
+#                         several QPACK implementations at several table sizes. HTTPBytes' QPACK tests and benchmarks.
+#   structured-field-tests  httpwg/structured-field-tests: RFC 9651's test suite (JSON). HTTPBytes' Structured Fields.
+#   picohttpparser, llhttp, ls-hpack, ls-qpack
+#                         C references for HTTPBytes' benchmarks and differential tests (MIT licensed): h2o's
+#                         picohttpparser, llhttp's release v9.4.4 (generated C), LiteSpeed's ls-hpack and ls-qpack
+#                         v2.7.1. HTTPBytes/Benchmarks builds them from here.
+#   llhttp-tests          llhttp's source tree: its markdown test suite (test/request, test/response), malformed and
+#                         smuggling cases for HTTPBytes' HTTP/1 tests.
+#   http-garden           narfindustries/http-garden's TROPHIES.md (GPL-3.0, at b417e80): the payload of every parser bug
+#                         the HTTP Garden found. Fetched here only, never checked in or copied into the repository.
+#   httparse              seanmonstar/httparse's src/lib.rs and tests/uri.rs (MIT/Apache-2.0, at a0fa552): its request
+#                         and response tests and 264 request-target cases.
+#   http-parser           nodejs/http-parser's test.c (MIT, at ec8b5ee): its request and response messages with the
+#                         bodies, keep-alive, and URLs it expects, and its malformed lines.
+#   h2o                   h2o/h2o's source tarball (MIT, at d3e43fc), kept packed: h2o-http1-corpus takes its
+#                         fuzz/http1-corpus from it.
+#   cursed-http           public/cursed-http (MIT): fbparse.h and fbresp.h, SIMD HTTP/1 head parsers (a C reference for
+#                         HTTPBytes' benchmarks), and tests/top1k, real requests and responses from the Tranco top 1,000.
+# Repository snapshots are `*.unpack.tar.gz` files: unpacked into the set's directory (top directory stripped).
 # Generated sets (the generator is run with the output directory as its argument):
 #   swift-help-lz4        swift-binary-parsing's ELF/swift-help compressed with `lz4 -9`, for BinaryParsingComparison's
 #                         LZ4 and ELF workloads (BinaryParsingComparison/TestDataGenerators; needs Homebrew's lz4).
@@ -37,6 +60,25 @@
 #                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma; needs Homebrew's xz).
 #   nativeaea-synthetic   An Apple Archive laid out like Xcode's (sizes, fields, APFS compression), in a signed `aea`
 #                         container with Xcode's settings, for NativeAEA's benchmarks (NativeAEA/Benchmarks/Fixtures).
+#   http-corpus           qifs' real traffic as HTTP/1.1 heads and as QIF, one message set for HTTPBytes' HTTP/1, HPACK,
+#                         and QPACK rows (HTTPBytes/Fixtures/corpus; needs the qifs set fetched first).
+#   llhttp-cases          llhttp's markdown tests as one TSV with llhttp's verdicts, for HTTPBytes' differential HTTP/1 tests
+#                         (HTTPBytes/Fixtures/llhttp; needs the llhttp-tests set fetched first).
+#   cursed-http-cases     cursed-http's conformance/extract.py (MIT; it gathers other suites' request cases) run over
+#                         llhttp-tests, http-garden, picohttpparser, and httparse: one TSV of requests with each suite's
+#                         verdict (none for HTTP Garden's payloads)
+#                         (HTTPBytes/Fixtures/cursed-http; needs python3 and those five sets fetched first).
+#   httparse-cases        httparse's `req!`/`res!` tests and URI tests as one TSV (HTTPBytes/Fixtures/httparse; needs
+#                         the httparse set).
+#   http-parser-cases     http-parser's messages and `test_simple` lines as one TSV (HTTPBytes/Fixtures/http-parser;
+#                         needs the http-parser set).
+#   picohttpparser-cases  picohttpparser's test.c requests, responses, header blocks, and chunked bodies as one TSV
+#                         (HTTPBytes/Fixtures/picohttpparser; needs the picohttpparser set).
+#   h2o-http1-corpus      h2o's HTTP/1 fuzzing corpus, 1,972 request files, and llhttp's verdict on each (a small C driver
+#                         built with Xcode's clang against the llhttp set), for HTTPBytes' H2OCorpusBulkTests
+#                         (HTTPBytes/Fixtures/h2o; needs the h2o and llhttp sets).
+#   http-top1k            cursed-http's tests/top1k as HTTP/1.1 heads (3,533 requests, bodies left out; 2,054 responses)
+#                         for HTTPBytes' HTTP/1 rows (HTTPBytes/Fixtures/top1k; needs the cursed-http set fetched first).
 #
 # To add a set: add lines to DOWNLOADS (set, URL, SHA-256, file name) or a line to GENERATED (set, generator
 # script relative to the repository), and describe it above.
@@ -91,12 +133,34 @@ rfc8448 https://www.rfc-editor.org/rfc/rfc8448.txt 6564d1376d1ec744fc7a9993da15e
 c-references https://github.com/lzfse/lzfse/archive/e634ca58b4821d9f3d560cdc6df5dec02ffc93fd.tar.gz ca98aa6644d44500e3315858daa747ce15bd06d49e3edb12a5458e5525e8ebdb lzfse-e634ca5.tar.gz
 c-references https://github.com/eafer/libzbitmap/archive/2fcb0809f5879697c6f97df8058e9f7b1df96e0d.tar.gz 6ad591404538f0ea2dfcba9037333da6c890cf0085291d628834347f9acdcc24 libzbitmap-2fcb080.tar.gz
 rfc9180 https://raw.githubusercontent.com/cfrg/draft-irtf-cfrg-hpke/5f503c564da00b0687b3de75f1dfbdfc4079ad31/test-vectors.json 61fc662f01996cd06d713dacf5e133167bd309a1f329442d53f1e21a47b3ede6 test-vectors.json
+hpack-test-case https://github.com/http2jp/hpack-test-case/archive/8a1406e7d14bfcb6c046021f13cc15cfb162726d.tar.gz 53355bf708fb890a235b3a679061d116a020818e92caaadbc243f9c91c4c48eb hpack-test-case-8a1406e.unpack.tar.gz
+qifs https://github.com/qpackers/qifs/archive/da52cd936b3e34dac7ac12aa8066fc57676af106.tar.gz 2c0c04bab6ff5b8c93a6a7ce1a4fdda5f6ef158b2e1ad112e7dbca26125f3f47 qifs-da52cd9.unpack.tar.gz
+structured-field-tests https://github.com/httpwg/structured-field-tests/archive/4a4782f8234512af133f6f57c4ca998578b57110.tar.gz 6fabcf493c28a1550d076b423bff2210f5891cad61bcd1bf627a978299b5a8f6 structured-field-tests-4a4782f.unpack.tar.gz
+picohttpparser https://github.com/h2o/picohttpparser/archive/dd573d8fa9264c646a400e96ce9f07dea6f156e4.tar.gz 242e0de712cbaf326a507028101916ab8310b34fd4eef112339c71fcbb02a753 picohttpparser-dd573d8.unpack.tar.gz
+llhttp https://github.com/nodejs/llhttp/archive/816485216511b86459b2e6478190e14c38c14891.tar.gz b7b066789a497396aa6a49394fbe75dc8342bf71a29c5da6ac58c0075f3de3f9 llhttp-release-v9.4.4.unpack.tar.gz
+llhttp-tests https://github.com/nodejs/llhttp/archive/85c5d42cd563d5426a478d32248a45ee81f4b635.tar.gz c6479645e1e74af8476f818859857f5b72df5776112eebfd26351d3a8ce3b3df llhttp-85c5d42.unpack.tar.gz
+ls-hpack https://github.com/litespeedtech/ls-hpack/archive/1e86be72a85e8f72a7f42254a1d97a4eb0bf988f.tar.gz 2ce3cc4bf4352408a11fab5c6ad4a1634c86a45d756871310baa58c4e0a3b720 ls-hpack-1e86be7.unpack.tar.gz
+ls-qpack https://github.com/litespeedtech/ls-qpack/archive/a80aaa1a0292c1bc6c47259b29828a3cf1e67120.tar.gz 86daa11dcaef9a44175e44eb95cb05057dc5d04114098ad86d8cb71613d815d7 ls-qpack-v2.7.1.unpack.tar.gz
+cursed-http https://github.com/public/cursed-http/archive/5e10ca8a31c04868a4c74d8cd901dbad941e03eb.tar.gz 65b6a17d7de90c7249f983eb87512e3b7f8e3df71dd21c58b4769b34f0eaa696 cursed-http-5e10ca8.unpack.tar.gz
+http-garden https://raw.githubusercontent.com/narfindustries/http-garden/b417e806c1b15e8ea0b9312f81a91fbdcbc7a83e/TROPHIES.md 2dd921d89f1b14d977408c568abba66a40c2c6b87a2ebb72bc7573ea516598ea TROPHIES.md
+httparse https://raw.githubusercontent.com/seanmonstar/httparse/a0fa552e4e0fa9a5914a736ef3a556748fef709b/src/lib.rs 0db3bde8cd474b0bc0493fdf1c03a478f9e08b88cbd096fb5407674ed3dfdb36 lib.rs
+httparse https://raw.githubusercontent.com/seanmonstar/httparse/a0fa552e4e0fa9a5914a736ef3a556748fef709b/tests/uri.rs 62664aa2db82b2b24174ef74b7b00b675806608bfcb64763f97b639b62dd3701 uri.rs
+http-parser https://raw.githubusercontent.com/nodejs/http-parser/ec8b5ee63f0e51191ea43bb0c6eac7bfbff3141d/test.c 5fb25742a1bafc286ebf0af35c36b854fdc8152537719d5bd38b81a15e9256f7 test.c
+h2o https://github.com/h2o/h2o/archive/d3e43fcf00c3e6b17826b95d2d362d646185918a.tar.gz 23706494c2ad840ff4786c4d18fd8438e369399afc98e5f6038c42cca71cf838 h2o-d3e43fc.tar.gz
 "
 GENERATED="
 swift-help-lz4 BinaryParsingComparison/TestDataGenerators/make-swift-help-lz4.sh
 nativezip-formats NativeZipArchive/Tests/NativeZipTests/Fixtures/formats/make-fixtures.sh
 nativezip-lzma NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma/make-lzma-vectors.sh
 nativeaea-synthetic NativeAEA/Benchmarks/Fixtures/make-archive.sh
+http-corpus HTTPBytes/Fixtures/corpus/make-corpus.sh
+llhttp-cases HTTPBytes/Fixtures/llhttp/make-cases.sh
+cursed-http-cases HTTPBytes/Fixtures/cursed-http/make-cases.sh
+httparse-cases HTTPBytes/Fixtures/httparse/make-cases.sh
+http-parser-cases HTTPBytes/Fixtures/http-parser/make-cases.sh
+picohttpparser-cases HTTPBytes/Fixtures/picohttpparser/make-cases.sh
+h2o-http1-corpus HTTPBytes/Fixtures/h2o/make-corpus.sh
+http-top1k HTTPBytes/Fixtures/top1k/make-top1k.sh
 "
 STAMP=".generator"
 
@@ -121,17 +185,30 @@ fetch_downloads() {
         [[ -n "$set" ]] || continue
         grep -qx "$set" <<< "$wanted" || continue
         target="$ROOT/$set/$file"
-        [[ -f "$target" && "$(sha256 "$target")" == "$sum" ]] && continue
-        in_testdata "$ROOT/$set"; in_testdata "$target"; in_testdata "$target.partial"
-        mkdir -p "$ROOT/$set"
-        note "Downloading $set/$file"
-        if ! curl -fsSL --retry 3 -o "$target.partial" "$url"; then
-            rm -f "$target.partial"; note "error: download of $url failed"; failed=1; continue
+        if ! [[ -f "$target" && "$(sha256 "$target")" == "$sum" ]]; then
+            in_testdata "$ROOT/$set"; in_testdata "$target"; in_testdata "$target.partial"
+            mkdir -p "$ROOT/$set"
+            note "Downloading $set/$file"
+            if ! curl -fsSL --retry 3 -o "$target.partial" "$url"; then
+                rm -f "$target.partial"; note "error: download of $url failed"; failed=1; continue
+            fi
+            if [[ "$(sha256 "$target.partial")" != "$sum" ]]; then
+                rm -f "$target.partial"; note "error: $set/$file doesn't match its SHA-256"; failed=1; continue
+            fi
+            mv "$target.partial" "$target"
         fi
-        if [[ "$(sha256 "$target.partial")" != "$sum" ]]; then
-            rm -f "$target.partial"; note "error: $set/$file doesn't match its SHA-256"; failed=1; continue
+        # `*.unpack.tar.gz`: a repository snapshot, unpacked into the set's directory (its top directory stripped),
+        # once per checksum.
+        if [[ "$file" == *.unpack.tar.gz ]]; then
+            local marker="$ROOT/$set/.unpacked-$sum"
+            [[ -f "$marker" ]] && continue
+            in_testdata "$marker"
+            note "Unpacking $set/$file"
+            if ! tar -xzf "$target" -C "$ROOT/$set" --strip-components=1; then
+                note "error: $set/$file didn't unpack"; failed=1; continue
+            fi
+            touch "$marker"
         fi
-        mv "$target.partial" "$target"
     done <<< "$DOWNLOADS"
     return "$failed"
 }

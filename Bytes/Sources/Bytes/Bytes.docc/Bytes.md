@@ -79,7 +79,8 @@ Beyond the types below, `Bytes` extends the standard library (DocC can't link th
 `withFreeCapacity(byteCount:_:)` on `OutputRawSpan`; `copyBytes(from:toByteOffset:)` and
 `copyBytes(within:toByteOffset:)` on `MutableRawSpan` and `MutableSpan<UInt8>`; `hasPrefix`, `hasSuffix`,
 `bytesEqual`, `containsByte(where:)`, `firstByteOffset(where:)`, `firstByteOffset(of:from:)`, `commonPrefixLength(at:and:from:maxLength:)`,
-and its unchecked form `unsafeCommonPrefixLength` on `RawSpan`; `UTF8Span(validating:excluding:)`; and bit
+and its unchecked form `unsafeCommonPrefixLength` on `RawSpan`; `byteBlock(at:)` and `byteBlock(at:padding:)` on `RawSpan`
+(see ``ByteBlock``); `UTF8Span(validating:excluding:)`; and bit
 helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bits(from:upTo:)`,
 `bits(from:count:)`, `keepingLowBits(_:)`, `lowBitMask(_:)`, `signedBits(_:as:)`, and `matches(_:mask:)`.
 
@@ -180,6 +181,7 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 
 - ``ByteLanes``
 - ``ByteMatches``
+- ``ByteBlock``
 - ``ByteLanes/matching(in:)``
 - ``ByteLanes/asciiDigits``
 - ``ByteLanes/lookup(in:)-(SIMD16<UInt8>)``

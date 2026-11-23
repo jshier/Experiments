@@ -134,6 +134,29 @@ static void interactive(void) { pthread_set_qos_class_self_np(QOS_CLASS_USER_INT
 #define v_sha512h_T V16("sha512h q\\r, q20, v21.2d")
 #define v_sha1c_L "sha1c q0, s20, v21.4s"
 #define v_sha1c_T V16("sha1c q\\r, s20, v21.4s")
+// Mask packing (structural indexes): shift-right-insert, narrowing shift, pairwise add, unsigned compare.
+#define v_sri_L "sri v0.16b, v20.16b, #1"
+#define v_sri_T V16("sri v\\r\\().16b, v20.16b, #1")
+#define v_shrn_L "shrn v0.8b, v0.8h, #4"
+#define v_shrn_T V16("shrn v\\r\\().8b, v\\r\\().8h, #4")
+#define v_addp_L "addp v0.16b, v0.16b, v20.16b"
+#define v_addp_T V16("addp v\\r\\().16b, v\\r\\().16b, v20.16b")
+#define v_cmhs_L "cmhs v0.16b, v0.16b, v20.16b"
+#define v_cmhs_T V16("cmhs v\\r\\().16b, v\\r\\().16b, v20.16b")
+// 64-byte loads from the stack (L1): no chain, so both columns are throughput (the latency column is 1 ÷ per_cycle
+// with one destination group reused). `ld4` de-interleaves (lane i of register j is byte 4i + j); `ld1` x4 doesn't.
+#define LD4(R0, R1, R2, R3) "ld4 {v" #R0 ".16b, v" #R1 ".16b, v" #R2 ".16b, v" #R3 ".16b}, [sp]\n"
+#define LD1X4(R0, R1, R2, R3) "ld1 {v" #R0 ".16b, v" #R1 ".16b, v" #R2 ".16b, v" #R3 ".16b}, [sp]\n"
+#define m_ld4_L LD4(0, 1, 2, 3)
+#define m_ld4_T LD4(0, 1, 2, 3) LD4(4, 5, 6, 7) LD4(8, 9, 10, 11) LD4(12, 13, 14, 15) \
+    LD4(0, 1, 2, 3) LD4(4, 5, 6, 7) LD4(8, 9, 10, 11) LD4(12, 13, 14, 15) \
+    LD4(0, 1, 2, 3) LD4(4, 5, 6, 7) LD4(8, 9, 10, 11) LD4(12, 13, 14, 15) \
+    LD4(0, 1, 2, 3) LD4(4, 5, 6, 7) LD4(8, 9, 10, 11) LD4(12, 13, 14, 15)
+#define m_ld1x4_L LD1X4(0, 1, 2, 3)
+#define m_ld1x4_T LD1X4(0, 1, 2, 3) LD1X4(4, 5, 6, 7) LD1X4(8, 9, 10, 11) LD1X4(12, 13, 14, 15) \
+    LD1X4(0, 1, 2, 3) LD1X4(4, 5, 6, 7) LD1X4(8, 9, 10, 11) LD1X4(12, 13, 14, 15) \
+    LD1X4(0, 1, 2, 3) LD1X4(4, 5, 6, 7) LD1X4(8, 9, 10, 11) LD1X4(12, 13, 14, 15) \
+    LD1X4(0, 1, 2, 3) LD1X4(4, 5, 6, 7) LD1X4(8, 9, 10, 11) LD1X4(12, 13, 14, 15)
 
 #define INSNS(X) \
     X(s_add, "add (scalar)", 1, 1) X(s_mul, "mul (scalar)", 1, 1) X(s_crc32x, "crc32x", 1, 1) \
@@ -146,7 +169,9 @@ static void interactive(void) { pthread_set_qos_class_self_np(QOS_CLASS_USER_INT
     X(v_usra, "usra.2d", 0, 1) X(v_mul, "mul.4s", 0, 1) X(v_umull, "umull.2d", 0, 1) X(v_udot, "udot.4s", 0, 1) \
     X(v_fmla, "fmla.4s", 0, 1) X(v_pmull, "pmull", 0, 1) X(v_pmull2, "pmull2", 0, 1) X(v_aese, "aese", 0, 1) \
     X(v_aesmc, "aesmc", 0, 1) X(v_aesround, "aese+aesmc pair", 0, 2) X(v_sha256h, "sha256h", 0, 1) \
-    X(v_sha512h, "sha512h", 0, 1) X(v_sha1c, "sha1c", 0, 1)
+    X(v_sha512h, "sha512h", 0, 1) X(v_sha1c, "sha1c", 0, 1) \
+    X(v_sri, "sri.16b", 0, 1) X(v_shrn, "shrn.8b", 0, 1) X(v_addp, "addp.16b", 0, 1) X(v_cmhs, "cmhs.16b", 0, 1) \
+    X(m_ld4, "ld4 (64 B, no chain)", 0, 1) X(m_ld1x4, "ld1 x4 (64 B, no chain)", 0, 1)
 
 #define DEFINE(ID, NAME, SCALAR, PER) LATENCY_LOOP(ID)
 INSNS(DEFINE)

@@ -19,12 +19,16 @@ conversions.
 | Project | What it does | What it stresses |
 |---|---|---|
 | MQTT | MQTT 5 packets: zero-copy frames, per-type parse and write | Small records, many fields, enum dispatch |
-| NativeZipArchive | ZIP (stored, DEFLATE, Deflate64, bzip2, LZMA, xz, Zstandard; ZipCrypto and WinZip AES), `nunzip` | File-system limits, parallel extraction, DEFLATE |
+| NativeZipArchive | ZIP (stored, DEFLATE, Deflate64, bzip2, LZMA, xz, Zstandard, every one decoded by Bytes' streaming decoders; ZipCrypto and WinZip AES), `nunzip` | File-system limits, parallel extraction, DEFLATE |
 | NativeAEA | Apple Encrypted Archives, Apple Archives, Xcode's `.xip` | Decode pipelines, crypto, APFS behavior |
+| Disk | Writing extracted trees, shared by NativeAEA and NativeZipArchive: contained creation, staging and publishing as Archive Utility does, APFS compression, metadata in one call, progress | The file system's limits, matching an Apple tool item by item |
+| Nunarchiver | A macOS app replacing Archive Utility for `.zip`, `.aea`, `.aar`, `.xip`, built on the three packages above | The app's own traps: background quality of service, coverage counters |
 | SocketStream | MQTT over sockets, optionally compressed and encrypted | Concurrency, executors, buffers |
 | BinaryParsingComparison | Bytes against swift-binary-parsing on the same formats | Honest comparison of two designs |
+| HTTPBytes | HTTP/1.1, HTTP/2, and HTTP/3 framing, HPACK and QPACK, Structured Field Values, content codings | Branch-bound scanning of short lines, tables and hash chains, allocation gates, differential testing |
 
-<!-- src: AGENTS.md "Repository" table, rows MQTT, SocketStream, NativeZipArchive, NativeAEA, BinaryParsingComparison -->
+<!-- src: AGENTS.md "Repository" table, rows MQTT, SocketStream, NativeZipArchive, NativeAEA, Disk, Nunarchiver, BinaryParsingComparison -->
+<!-- src: AGENTS.md "Repository" table, HTTPBytes row; HTTPBytes/WRITEUP.md "What's in the package" -->
 
 **Headline results.** Every figure is on the machine described below, release builds, medians:
 
@@ -46,6 +50,11 @@ conversions.
 - Parsing MQTT PUBLISH packets as views of the input, not copies, is 8.6x faster on one core than conventional parsing
   into `[UInt8]` and `String`, and 18.6x on all cores.
   <!-- src: MQTT/Benchmarks/RESULTS.md 2026-11-19 "The views against the conventional code" (M3, d2-final's code: 8.6x one core, 18.6x all cores; supersedes the older 5.5x) -->
+- HTTPBytes (HTTP framing in Swift, on the M1 Max) parses 401 real request heads in 35 µs: 2.6x picohttpparser and llhttp
+  (92 and 89 µs) and level with cursed-http, a C parser built on the same design (38 µs). Its HPACK encoder is 16x NIOHPACK's
+  (89 against 1,422 µs) and 2.7x cursed-http's, its QPACK encoder 7x ls-qpack's, and every per-message path allocates
+  nothing.
+  <!-- src: HTTPBytes/Benchmarks baseline final-1, "Time (wall clock)" rows "HTTP/1 request heads (401 requests, 232 KB)" (HTTPBytes 35, picohttpparser 92, llhttp 89, cursed-http 38), "HPACK encode (401 requests)" (HTTPBytes 89, cursed-http 244, NIOHPACK 1,422), "QPACK encode (401 requests, 4,096 table)" (107 against ls-qpack 751); ratios 92/35 = 2.6, 1,422/89 = 16, 244/89 = 2.7, 751/107 = 7.0; the zero-malloc gates: every `Allocations:` row of final-1 but Body_chunked_gzip (see Part III section 12) -->
 
 **How to read this document.** It is organized by concept rather than by chronology. Each technique follows the
 same shape: the problem, why the CPU or compiler behaves that way, the technique, a small example, the measured effect,
@@ -64,8 +73,12 @@ compiler limitations, and further reading.
 **The machine and the measurements.** Unless a section says otherwise, numbers come from an Apple M3 Ultra (24
 performance and 8 efficiency cores, about 4.05 GHz maximum performance-core clock, 256 GB of LPDDR5-6400), macOS 27.2.1,
 Xcode 27.3, Swift 6.4.2 and, for the later measurements (all of the 2026-11-20 ones), 6.4.4, release builds. A second machine, an Apple M1 Max
-(8 performance and 2 efficiency cores, about 3.23 GHz), is used where a section says so.
-<!-- src: Bytes/Benchmarks/RESULTS.md lines 14-26 (machine table; "Xcode 27.3's Swift 6.4.4"); "2026-11-20, M3 Ultra" (macOS 27.2.1, Xcode 27.3, Swift 6.4.4); Tools/probes/results/M3-Ultra-2026-11-20/machine.tsv; Bytes/OPTIMIZATION.md (old) intro ("Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 and later measurements)") -->
+(8 performance and 2 efficiency cores, about 3.23 GHz), is used where a section says so; the work of 2026-11-22 (every
+zip method decoded in Swift, the decoder cleanups, the second cleanup pass) was measured on it, in interleaved rounds on an otherwise idle machine, and its
+rows are labeled "M1 Max" and are not comparable with the M3 Ultra's. The HTTPBytes case study (Part III, [section 12](#12-case-study-httpbytes)) was
+measured entirely on the M1 Max, against references run on it in the same session.
+<!-- src: HTTPBytes/RESULTS.md header (M1 Max, 8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4 / Xcode 27.3); HTTPBytes/WRITEUP.md header -->
+<!-- src: Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip (2026-11-22, M1 Max; …)", "Cleanups after the unification (2026-11-22, M1 Max; …)", "The second cleanup pass (2026-11-22, late, M1 Max; …)"; NativeZipArchive/Benchmarks/RESULTS.md step17 ("Measured on the M1 Max (not comparable with the M3 Ultra rows above)"); Bytes/Benchmarks/RESULTS.md lines 14-26 (machine table; "Xcode 27.3's Swift 6.4.4"); "2026-11-20, M3 Ultra" (macOS 27.2.1, Xcode 27.3, Swift 6.4.4); Tools/probes/results/M3-Ultra-2026-11-20/machine.tsv; Bytes/OPTIMIZATION.md (old) intro ("Swift 6.4.2 (Xcode 27.3; 6.4.4 for the 2026-11-17 and later measurements)") -->
 Timings are medians from [package-benchmark](https://github.com/ordo-one/package-benchmark). "GB/s" is bytes processed
 per second, and "x% faster" means x% less time unless it says "throughput". Where a number was taken while other jobs
 loaded the machine, the text says so, and the claim rests on instruction counts, which do not depend on load.
@@ -107,7 +120,8 @@ loaded the machine, the text says so, and the claim rests on instruction counts,
   - [9. Crypto](#9-crypto)
   - [10. Parallelism](#10-parallelism)
   - [11. Techniques in the projects built on Bytes](#11-techniques-in-the-projects-built-on-bytes)
-  - [12. Measuring honestly](#12-measuring-honestly)
+  - [12. Case study: HTTPBytes](#12-case-study-httpbytes)
+  - [13. Measuring honestly](#13-measuring-honestly)
 - [Part IV. Concurrency and further reading](#part-iv-concurrency-and-further-reading)
   - [1. Swift concurrency for performance, from first principles](#1-swift-concurrency-for-performance-from-first-principles)
   - [2. SocketStream: what the PR toolchain's I/O interfaces made possible](#2-socketstream-what-the-pr-toolchains-io-interfaces-made-possible)
@@ -1260,12 +1274,14 @@ The framework's **process model** shapes how benchmarks must be written: it star
 benchmarks and again for *each* benchmark, and every start runs the whole `benchmarks` closure. That closure should only
 register. Fixtures (the input data a benchmark works on) are made lazily in a benchmark's `setup:` (which runs only in
 that benchmark's process, unmeasured).
-Part III (["Measuring honestly"](#12-measuring-honestly)) gives what eager fixtures cost and the other rules for the measured loop.
+Part III (["Measuring honestly"](#13-measuring-honestly)) gives what eager fixtures cost and the other rules for the measured loop.
 <!-- src: AGENTS.md "A benchmark costs a few seconds at most" bullet (process model) -->
 
 Two practical rules: every plugin invocation costs about 25 s of build, so batch filters into one invocation, and
-`--filter` must match the whole benchmark name.
-<!-- src: AGENTS.md "Benchmarks" bullets "Every plugin invocation costs about 25 s", "--filter must match the whole benchmark name" -->
+`--filter` must match the whole benchmark name. And it prints "Build complete!" for its own tool, then builds the benchmark
+targets: an edit made after that line broke a queued baseline's build, so queue every "before" baseline before the first
+edit, and do not touch a package (or what it depends on) until the first result table prints.
+<!-- src: AGENTS.md "Benchmarks" bullets "Every plugin invocation costs about 25 s", "--filter must match the whole benchmark name"; "One implementation each" lesson "package-benchmark prints 'Build complete!' for its tool, then builds the benchmark targets" -->
 
 #### 5.3 Allocation gates
 
@@ -1277,6 +1293,31 @@ calls) costs about 10% on large transfers and biases comparisons with libraries 
 ["Malloc counting biases comparisons with libraries"](#malloc-counting-biases-comparisons-with-libraries)), so allocation and timing benchmarks are kept separate. It also traps on thread exit, so benchmarks that start threads cannot
 count mallocs; count them in single-threaded ones.
 <!-- src: AGENTS.md "Allocations: package-benchmark's malloc counter with a Thresholds/ file at 0 is the gate"; "The malloc interposer costs ~10%" bullet; "package-benchmark's malloc interposer traps on thread exit"; Bytes/Benchmarks/RESULTS.md "Benchmark coverage pass (2026-11-19)" ("the timed configurations no longer count mallocs (the interposer biased comparisons with libraries that allocate per call") -->
+
+Instruments' Allocations is not always enough to find a source, and the reason is worth knowing. Its export lists only the
+allocations *still live* at the end of the recording, and the callers of allocations made before it attached read
+"<Call stack limit reached>". Anything allocated and freed again, such as a heap box per item or a temporary array,
+shows up only in the counts by size class, never with a caller. Two methods find those. LLDB breakpoints on
+`swift_slowAlloc`, `malloc`, `malloc_type_malloc`, `calloc`, and `realloc`, each running `bt 14; continue`, on the
+`-debuggable` release binary, then grouped by the first stack frame in the program's own code (an allocation through
+`swift_slowAlloc` stops twice, so a `malloc` stop whose caller is `swift_slowAlloc` is dropped). Or **`Tools/allocations
+--history`**, which runs the program under LLDB with **malloc stack logging in full mode** (`MallocStackLoggingNoCompact`:
+every event recorded with its stack, where the default lite mode keeps only live allocations), stops at `exit`, dumps the
+events with `malloc_history -allEvents`, and groups every allocation by the innermost frame of the program's own image.
+Full mode changes what it measures: libobjc then gives each autorelease pool push a fresh 4 KiB page, and Swift
+Concurrency pushes a pool per job on Darwin, so those pages, which a normal run does not allocate, are left out and
+counted separately. Use full mode to find *where* allocations come from, and a benchmark's malloc counter or a
+breakpoint count to say *how many* there are.
+The first use traced a whole NativeAEA extraction (30,363 entries, 189 segments, about 40 s under the debugger): 7,364
+heap allocations in the process, none per file, and the two that grew with the data were both found this way (Part III,
+["Technique 9"](#technique-9-a-var-pointer-borrowed-by-spans-is-heap-boxed)).
+<!-- src: Tools/allocations --help (Instruments' export lists live allocations only; "<Call stack limit reached>"; --history, MallocStackLoggingNoCompact, malloc_history -allEvents, autorelease pool pages left out); NativeAEA/RESULTS.md "2026-11-22, evening: allocations in an extraction, traced" "Method" and "What it found" (the breakpoint list and `bt 14; continue`; 189 segments, 30,363 entries, "about 40 s under the debugger"; "7,364 heap allocations in the whole process … none per file") -->
+
+**`Tools/untracked`** is the other process-level trap this repository met. A session started from a downloaded terminal
+is tracked by the kernel, which then owns `com.apple.provenance` on everything the session creates, so a test that
+restores that attribute never reads back its own value; `Tools/untracked -- COMMAND` runs the command as a `launchctl`
+job outside the tracked process tree.
+<!-- src: AGENTS.md "Tools/untracked"; NativeZipArchive/Benchmarks/RESULTS.md "2026-11-21 (later)" parenthetical (2026-11-22) ("in a session macOS tracks, the kernel puts it on everything made, references included") -->
 
 #### 5.4 Interleaved A/B runs
 
@@ -1348,8 +1389,9 @@ toolchains, and tools.
   pair it with `Tools/runtime-count`.
   <!-- src: AGENTS.md "Tools/tasks" -->
 - **`Tools/allocations`** uses Instruments' Allocations (counts by size class, then by responsible caller) when a malloc
-  threshold fails.
-  <!-- src: AGENTS.md "Tools/allocations" -->
+  threshold fails. It sees only allocations still live at the end; `--history` runs the program under LLDB with malloc
+  stack logging in full mode to find the ones freed again ([section 5.3](#53-allocation-gates)).
+  <!-- src: AGENTS.md "Tools/allocations"; Tools/allocations --help -->
 - **`Tools/bench-table`** puts baselines side by side with change, units normalized (counts unscaled, times in µs).
   <!-- src: AGENTS.md "Tools/bench-table" -->
 - **`Tools/socket-ceiling`** measures the kernel's local-socket throughput with blocking C sockets on plain threads, the
@@ -1392,7 +1434,7 @@ Named bit fields passed it; a `BitPattern` literal passed it only after both its
 
 **Track every change across every package.** Bytes' clients each keep a benchmark baseline. A change that helped the
 library's own benchmarks moved a client by 10%, and one move of code between modules cost 1.3–1.7% on small Brotli streams
-where nothing else changed. Neither shows up if only the edited code is benchmarked. Part III (["Measuring honestly"](#12-measuring-honestly)) returns
+where nothing else changed. Neither shows up if only the edited code is benchmarked. Part III (["Measuring honestly"](#13-measuring-honestly)) returns
 to this.
 <!-- src: Bytes/OPTIMIZATION.md (old) §2 "Track every change across every package" -->
 
@@ -2245,6 +2287,47 @@ Design decisions, each measured:
 `position` and `rewind(to:)` undo one unit (a code and its extra bits) when the input ran out partway. `withBitBuffer { }` on
 a `BytesReader` runs a body with a buffer at the cursor and moves the cursor past what it consumed.
 
+`BitBuffer` checks what it must (its slow refill, its overrun). A decoder whose loop *proves* its bounds once per round
+can do without those checks, and DEFLATE's does: its fast loop keeps a private `FastBits`, libdeflate's bit buffer on
+two locals. The buffer is a `UInt64`, and the valid-bit count is kept in the low 6 bits of an `Int` whose higher bits are
+allowed to hold garbage, so consuming a table entry is two subtractions of the whole raw entry, with no masking of its
+count first (bits 6 and up of the entry cannot change the low 6 bits of the difference):
+
+```swift
+// DeflateDecoder.swift, FastBits (the loop's own buffer): refill and consume, unchecked.
+let word = unsafe input.unsafeLoadUnaligned(fromUncheckedByteOffset: next, as: UInt64.self)
+buffer |= UInt64(littleEndian: word) &<< UInt64(truncatingIfNeeded: left)
+next &+= 7 &- ((left &>> 3) & 7)
+left |= 56
+// …
+buffer &>>= UInt64(entry.raw)          // shift by the entry's low 6 bits
+left &-= Int(entry.raw)                // subtract the whole entry; only the low 6 bits of `left` are read back
+```
+<!-- src: Bytes/Sources/BytesCompression/DeflateDecoder.swift `FastBits.refill` and `FastBits.consume` (doc comment: "`left`'s low 6 bits count the valid bits in `buffer`, and its higher bits are garbage, because consuming an entry subtracts the whole raw entry rather than masking its count first") -->
+
+It is a struct with mutating methods, not nested functions over captured variables, which can stay in memory behind access
+checks (Part III, ["Keep hot state in registers"](#1-keep-hot-state-in-registers)).
+
+**Backward bitstreams.** Zstandard's and LZFSE's entropy-coded streams are written to be read *backward*: from the last
+byte, whose highest set bit marks the end, toward the first, most significant bit first (RFC 8878 §4.1). Their readers
+hold a 64-bit container loaded from the current position and a count of bits used from its top. Both decoders read a field
+the same way, and the one function is shared (it is internal to `BytesCompression`):
+
+```swift
+// ZstdEntropy.swift: the next `count` bits (0 through 56) of `container`, whose top `consumed` bits are used.
+let value = ((container &<< UInt64(truncatingIfNeeded: consumed)) &>> 1) &>> UInt64(truncatingIfNeeded: 63 &- count)
+consumed &+= count
+```
+
+The two-step shift is the point. One shift right by `64 − count` would be a shift by 64 when `count` is 0, which Swift's
+`&>>` masks to a shift by 0 and returns the whole container. Shifting right by 1 first, then by `63 − count`, makes a
+zero-bit read give 0 and read nothing, with no branch.
+<!-- src: Bytes/Sources/BytesCompression/ZstdEntropy.swift `BackwardBits.read` and doc comment ("0 reads nothing and gives 0: the value is shifted right by 1, then by `63 − count`, so no shift is by 64"); Bytes/Sources/BytesCompression/LZFSEDecoder.swift line 449 (the LZFSE caller) -->
+Zstandard and LZFSE each had their own copy of this reader until the second cleanup pass (2026-11-22, M1 Max); moving both
+to one function left the touched rows' instructions unchanged at the table's resolution (LZFSE decode of the 1.6 KB JSON
+file: 9,471 to 9,535 instructions, +0.7%).
+<!-- src: Bytes/Benchmarks/RESULTS.md "The second cleanup pass (2026-11-22, late, M1 Max; baselines lend-old → lend-new, …)" bullet "One copy each" and the paragraph "Lending and dedups (lend-old → lend-new)": "LZFSE decode: the 1.6 KB JSON +0.7%, 9,471 → 9,535" -->
+
 #### `BitWriter`: the encoder's counterpart
 
 ```swift
@@ -2361,7 +2444,7 @@ Three questions about a `ByteMatches`, in increasing cost:
 
 - `any`: are there any matches? The two 64-bit halves ORed, with no reduction across lanes.
 - `firstIndex`: which lane is first? From `nibbleMask`.
-- `bitmask`: all matching lanes, one bit each (`UInt16`).
+- `bitmask`: all matching lanes, one bit each (`UInt16`). (For 64 lanes at once, see [`ByteBlock`](#byteblock-64-bytes-tested-into-one-mask) below.)
 
 The last two are a good place to *read* assembly, because the design changed the instruction count. Here is the shipped
 `nibbleMask` getter, from the release object (`objdump -d --symbolize-operands`), with a comment per line:
@@ -2450,6 +2533,71 @@ while offset >= 0 {
 Finding a 4-byte signature 64 KB back (a zip file's end-of-directory record, the worst case) takes 2.3 µs and 51 K
 instructions, against 34 µs and 788 K for a `RawSpan.load` at every offset, 15x faster. The loop is about 9 instructions per 16
 offsets. <!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): BytesBenchmarks rows "Search 64 KB backwards: lastByteOffset(of:)" 2,293 ns / 50,655 instructions and ": RawSpan.load per offset" 33,983 ns / 788,479; "Assembly findings" ("16 candidate offsets per ~9 instructions") -->
+
+#### `ByteBlock`: 64 bytes tested into one mask
+
+A scan that finds the next delimiter, then the next, pays a branch at each exit, and short items make those exits
+unpredictable (Part III, [section 12](#12-case-study-httpbytes) measures it: 50% more cycles for 18% fewer instructions).
+The alternative is a **structural index**: test a whole block of bytes at once, keep one bit per byte in an integer, and
+find delimiters by counting zero bits, as `firstIndex` does for 16 lanes. `ByteBlock` is that for 64 bytes (a cache
+line, and four `ByteLanes`).<!-- src: Bytes/Sources/Bytes/ByteBlock.swift doc comment; HTTPBytes/RESULTS.md "The design, from three prototypes" (A 0.93 cycles/B at 2.62 instructions/B, B 0.62 at 3.18) -->
+
+```swift
+// An HTTP head: line ends and colons, a block at a time (the example in ByteBlock's doc comment).
+let block = head.byteBlock(at: offset)
+let lineEnds = block.mask { $0.matching(0x0A) }                 // bit i set where byte offset + i is LF
+let colons   = block.mask { $0.matching(UInt8(ascii: ":")) }
+var ends = lineEnds
+while ends != 0 { let end = ends.trailingZeroBitCount; … ends &= ends &- 1 }   // each delimiter, no per-byte branch
+```
+<!-- src: Bytes/Sources/Bytes/ByteBlock.swift doc comment (the first three lines); the loop is the standard trailingZeroBitCount walk, shown for the idea -->
+
+`mask(_:)` runs the test on each of the four vectors and gathers the four `ByteMatches` into a `UInt64`, byte `i` in bit
+`i`. `ByteBlock.gather(_:_:_:_:)` is the gather alone, for a caller that tests the four vectors itself. On NEON the gather
+is `bytes_movemask64` in `CBytesNEON`: each lane (all ones where it matched) ANDed with its weight within its byte (1, 2,
+4 … 128, repeated), then three rounds of pairwise adds (`addp`) sum the weights into the bits of one 64-bit
+value:<!-- src: Bytes/Sources/CBytesNEON/include/CBytesNEON.h bytes_movemask64 (vandq_u8 with weights, vpaddq_u8 tree, vgetq_lane_u64) -->
+
+```c
+uint8x16_t ma = vandq_u8(a, weights), mb = vandq_u8(b, weights), mc = vandq_u8(c, weights), md = vandq_u8(d, weights);
+uint8x16_t sum = vpaddq_u8(vpaddq_u8(ma, mb), vpaddq_u8(mc, md));
+sum = vpaddq_u8(sum, sum);                 // the low 64 bits are the mask
+return vgetq_lane_u64(vreinterpretq_u64_u8(sum), 0);
+```
+<!-- src: Bytes/Sources/CBytesNEON/include/CBytesNEON.h bytes_movemask64 NEON branch, lines 184-188 (variable names shortened) -->
+
+That is 4 `and`, 4 `addp`, and one `fmov` to a general register: eight vector instructions and a move for 64 lanes,
+against the sixteen scalar instructions and two multiplies of one `bitmask` above, four times over.<!-- src: disassembly of the farStop loop (Tools/loops HTTPBytes/.build/agent-tools/HTTP1.o 'farStop' --body: 4 and.16b, 4 addp.16b, 1 fmov); the bitmask listing above in this section -->
+It wants lanes that are all ones or all zeros, as a comparison leaves them. `ByteMatches` keeps only each lane's high bit,
+so `gather` spreads it with one `sshr`, which LLVM drops when the lanes come from a comparison. Doing the spread in Swift,
+where LLVM can see through it, took the gather from 12 vector instructions to 8 and a move.<!-- src: Bytes/Sources/Bytes/ByteBlock.swift `fullLanes` doc comment; HTTPBytes/RESULTS.md "ByteBlock stays in byte order (Bytes): bytes_movemask64 now takes full lanes … 8 vector instructions and a move, instead of 12" -->
+Without NEON (the `Portable` and no-C builds, [section 15](#15-builds-and-traits-optimized-portable-and-no-c)), the
+gather is four `bitmask`s shifted into place, which is slower but gives the same mask.<!-- src: Bytes/Sources/Bytes/ByteBlock.swift `gather` (the #else branch: UInt64(first.bitmask) | UInt64(second.bitmask) << 16 | …) -->
+
+Two loaders get a block from a span:
+
+- `RawSpan.byteBlock(at:)` checks once that the 64 bytes lie inside the span (`offset >= 0 && offset <= byteCount - 64`),
+  then loads them as four unchecked 16-byte vectors.
+- `RawSpan.byteBlock(at:padding:)` is for the last, partial block. It copies the bytes that remain into 64 bytes of stack
+  filled with `padding`, in 16-, 8-, or 4-byte words (the last overlapping), not by `memcpy`: for a few dozen bytes the call
+  cost more than the copy. Choose a padding byte that every test treats as a stop, so a walk over the masks ends at the
+  data's end. A span of 64 bytes or more can skip the copy: test the block that ends at the span's end and shift its mask
+  into place, setting the bits past the end.<!-- src: Bytes/Sources/Bytes/ByteBlock.swift byteBlock(at:) and byteBlock(at:padding:) doc comments and bodies; HTTPBytes/RESULTS.md "A partial last block is copied inline in 16-, 8-, or 4-byte words (memcpy and a byte loop before)" -->
+
+```swift
+// For a span of 64 bytes or more, the block at `block` that runs past the end: the last 64 bytes, shifted into place.
+let mask = bytes.byteBlock(at: count - 64).mask(test) >> UInt64(block - (count - 64)) | ~0 << UInt64(count - block)
+```
+<!-- src: Bytes/Sources/Bytes/ByteBlock.swift byteBlock(at:padding:) doc comment, and HTTPBytes/Sources/HTTP1/HeadScanner.swift blockMask(_:at:_:) (the same expression with `last` and the shifts) -->
+
+**Measured, and when to use it.** On 401 real HTTP request heads (an M1 Max), a parser that walks 64-byte masks with `ctz`
+ran 0.62 cycles a byte in its prototype; the same strategy with 16-byte nibble masks in Swift alone, 0.87; scans from each
+delimiter to the next, 0.93; picohttpparser, 1.23.<!-- src: HTTPBytes/RESULTS.md "The design, from three prototypes" table and "With 16-byte nibble masks in Swift alone, B fell to 0.87 cycles/B" -->
+Use it when a format has short items with several delimiters each, and the walk can use one mask for many items. Do not use
+it for one long scan (`firstByteOffset(where:)` stops at the first match without building 64 lanes), and do not classify
+blocks ahead of need: masks built for five blocks at a time, or kept in a ring of eight, made 38-byte heads 55 → 86 and
+55 → 92 cycles, because short inputs end inside the first block. How a library gets from this API to a competitive parser,
+and what else it took, is [section 12 of Part III](#12-case-study-httpbytes).<!-- src: HTTPBytes/RESULTS.md "Tried and not kept (cycles per head)" table rows 1 and 2 (tiny 55 → 86, 55 → 92) -->
 
 #### `commonPrefixLength`: match extension
 
@@ -2723,8 +2871,46 @@ let total = input.withLentBytes { bytes in                 // bytes: LentBytes (
 <!-- src: Bytes/Sources/Bytes/Lending.swift header comment (adapted) -->
 
 `RawSpan.withLentBytes(_:)` lends read-only input. `OutputRawSpan.withLentFreeCapacity(_:)` lends output capacity,
-uninitialized, and counts as initialized only the prefix the body reports writing. The `LentBytes` and `LentMutableBytes`
-types are marked `@unsafe`. The `BytesAsync` module has `async` forms, in which `await` guarantees that the work finishes. <!-- src: Bytes/Sources/Bytes/Lending.swift; Bytes/Sources/BytesAsync/Lending.swift -->
+uninitialized, and counts as initialized only the prefix the body reports writing. The third form,
+`MutableRawSpan.withLentBytes(_:)`, lends *initialized* memory to read and write in place, as a `LentMutableSpan`: the
+rule is one thread per byte at a time. The `LentBytes`, `LentMutableBytes`, and `LentMutableSpan` types are marked
+`@unsafe`. The `BytesAsync` module has `async` forms, in which `await` guarantees that the work finishes. <!-- src: Bytes/Sources/Bytes/Lending.swift; Bytes/Sources/BytesAsync/Lending.swift -->
+
+The third form replaced two hand-written copies of the same job. TLS sealing's `ParallelRecords` (lanes sealing records from the input into their places in the output) and scrypt's `ScryptMemory` (lanes each working in a table of its own in the caller's scratch memory) each wrapped a pointer in
+an `@unchecked Sendable` struct; both are gone, and the rows they touched (TLS sealing of 4 MB with both ciphers on 1, 4,
+and 8 lanes; scrypt at N = 2¹⁴) kept their instruction counts at the table's resolution (13 M and 36–37 M for the TLS rows,
+194–196 M for scrypt, M1 Max).
+<!-- src: Bytes/Sources/BytesCrypto/TLSRecord.swift lines 593–594 (`input.withLentBytes`, `output.withLentBytes`; the old `ParallelRecords`, `git show 10c3fda:Bytes/Sources/BytesCrypto/TLSRecord.swift` line 617); Bytes/Sources/BytesCrypto/Scrypt.swift (uses `scratch.withLentBytes`; the old `ScryptMemory` struct, `git show 10c3fda:Bytes/Sources/BytesCrypto/Scrypt.swift`); Bytes/Benchmarks/RESULTS.md "The second cleanup pass (2026-11-22, late, M1 Max; …)" bullet "LentMutableSpan and MutableRawSpan.withLentBytes" and the paragraph "Lending and dedups (lend-old → lend-new)": "TLS seal 4 MB, both ciphers, 1/4/8 lanes: 13 M and 36–37 M; scrypt N=2^14: 194–196 M" -->
+
+#### `RawStorage`: memory made once, pages given back
+
+A span cannot outlive a call, so a buffer that does (a decoder's read buffer, a pool's storage, a writer's scratch), and
+that several tasks share by reference, each using its own range, needs an owner. **`RawStorage`** is that owner: one
+allocation, page-aligned by default (or 16-byte-aligned for small tables and paths, from malloc's small blocks with no
+padding), shared by reference, freed once, in `deinit`. `base` is a pointer and nothing synchronizes its users, which is
+by design: the object is immutable, and who writes which bytes is its owner's rule.
+
+```swift
+let scratch = RawStorage(byteCount: 16 << 20)
+scratch.reuse(count)                                   // take back the pages `giveBack` released
+// Unsafe: `count` bytes of the storage, which `scratch` keeps alive.
+let read = unsafe pread(descriptor, scratch.base, count, offset)
+scratch.giveBack(count)                                // release the pages past the floor
+```
+<!-- src: Bytes/Sources/Bytes/RawStorage.swift doc comment (the example) -->
+
+A buffer sized for the largest item stays resident at that size: a decoder's 16 MiB read buffer, used mostly for small
+blocks, keeps every page it has ever touched. `giveBack(_:)` calls `madvise(MADV_FREE_REUSABLE)` on the pages past a
+2 MiB **resident floor** (the footprint drops at once; the kernel takes the pages only when it needs memory), and
+`reuse(_:)` calls `MADV_FREE_REUSE` before the next use. Up to the floor neither calls anything: the test is inlined, and
+only the `madvise` itself is out of line. On Xcode's archives the floor of 2 MiB took extraction's peak footprint from 1,398
+to 1,228 MB for the `.xip` and 1,597 to 1,363 MB for the `.aea`, with system time unchanged; floors of 0 and 1 MiB saved
+15–35 MB more and cost 0.1 s of system time, and 4 and 8 MiB saved less.
+<!-- src: Bytes/Sources/Bytes/RawStorage.swift `residentFloor` doc comment ("Measured on Xcode's archives: 2 MiB took extraction's peak footprint from 1,398 to 1,228 MB (xip) and 1,597 to 1,363 MB (.aea) with system time unchanged; 0 and 1 MiB saved 15–35 MB more and cost 0.1 s of system time; 4 and 8 MiB saved less"); Bytes/Benchmarks/RESULTS.md "2026-11-21, the waiting primitives and RawStorage" table row `RawStorage` -->
+Disk and NativeAEA had each written this class (160 lines, the same word for word) before it moved into Bytes; moving it
+changed no client's mallocs or file-system calls ([section 11](#11-async-bytesasync) has the check).
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-21, the waiting primitives and RawStorage, from Disk, NativeAEA, and NativeZip" first paragraph ("Disk and NativeAEA each had the same Continuation/suspend, WaiterQueue, and RawStorage (160 lines, word for word)") -->
+
 
 ### 10. Pipelines: `ByteTransform`, `Pipeline`, and why composition costs nothing
 
@@ -2874,6 +3060,91 @@ is incomplete (an encoder writes no trailer, the decoder writes nothing), and th
 already delivered everything returns normally. The stop flag is an `Atomic<Bool>`, read with relaxed ordering when a
 worker claims its next chunk, so the synchronous forms' instruction counts did not change. <!-- src: Bytes/Sources/BytesAsync/ParallelCodecs.swift header comment; Bytes/Benchmarks/RESULTS.md "Cleanup and improvements (2026-11-19)" Merge-time changes -->
 
+#### Waiting primitives: one implementation each
+
+Disk, NativeAEA, and NativeZip each had to make tasks wait: for a free buffer, a job, room in a queue, a file-system
+permit. Two of them had written the same 160 lines word for word, and the third had its own hand-rolled version. The
+primitives are now in `BytesAsync` once, and all three packages use them:
+
+| Primitive | What it does |
+|---|---|
+| `Continuation<T>`, `withContinuation(_:)` | a suspended task, resumed exactly once: a `CheckedContinuation` in debug builds, an `UnsafeContinuation` (no allocation per wait) in release |
+| `WaiterQueue<Element>` | a first-in, first-out ring for waiters, storage reserved up front, growing (doubling) only past its capacity; unsynchronized, for state inside its owner's lock |
+| `AsyncLimiter` | at most *n* tasks in a section; each permit returned goes to the task that has waited longest |
+| `AsyncIndexPool` | a fixed set of indexes (slots of a table, buffers of a pool) handed out one at a time; the last released is the first handed out, since its memory is the warmest |
+| `AsyncLatch` | a countdown a task waits on |
+| `AsyncQueue<Element>` | a bounded queue between tasks; an element pushed while a consumer waits goes straight to it |
+| `AsyncHandoff<Element>` | a rendezvous of one producer and one consumer |
+<!-- src: Bytes/Sources/BytesAsync/Waiting.swift (Continuation, withContinuation, WaiterQueue doc comments); AsyncLimits.swift (AsyncLimiter, AsyncIndexPool, AsyncLatch doc comments); AsyncQueue.swift (AsyncQueue, AsyncHandoff doc comments); Bytes/Benchmarks/RESULTS.md "2026-11-21, the waiting primitives and RawStorage" table -->
+
+Every one follows the pattern in `Waiting.swift`'s header, which is [Part IV](#16-continuations-checked-and-unsafe)'s
+rule for waits made concrete:
+
+1. A synchronous fast path under the lock: take what is there and return without suspending.
+2. No lost wake-ups: the slow path stores its continuation in the same critical section that checks again, and the side
+   that would wake it looks for a waiter under the same lock.
+3. Resume outside the lock, after removing the waiter from its queue under it, exactly once; closing a primitive resumes
+   every waiter it holds.
+
+```swift
+let fileSystem = AsyncLimiter(6)          // at most 6 tasks in the kernel's file creation at once
+await fileSystem.acquire()
+defer { fileSystem.release() }
+
+let jobs = AsyncQueue<Job>(capacity: 64, waiters: workers)
+for job in work { await jobs.push(job) }              // producer; each worker: while let job = await jobs.pop() { run(job) }
+jobs.close()
+```
+<!-- src: Bytes/Sources/BytesAsync/AsyncLimits.swift AsyncLimiter doc comment; AsyncQueue.swift AsyncQueue doc comment (adapted); Waiting.swift header comment -->
+
+The move cost nothing, because of how the types are declared: each is `@frozen` or keeps `@usableFromInline` state and has
+`@inlinable` methods, so each client compiles its own specialized copy. The check is `Tools/calls --target Disk Disk '.*'
+--callee 'BytesAsync|swift_getGenericMetadata' --sum`: it finds `specialized WaiterQueue.append` and `AsyncLimiter.acquire()`
+emitted inside Disk, and no call into BytesAsync's unspecialized generics. In the clients' benchmarks, mallocs and
+file-system calls were identical in every row, and instructions stayed within the rows' spread; the new calls are
+`RawStorage`'s metadata accessor (where a buffer is allocated, once per writer or decoder) and its out-of-line `advise`.
+Two things stayed where they were, because each has one user or its own layout: Disk's write queue (jobs plus a ring of path
+bytes, producers woken at a low-water mark) and NativeAEA's segment buffer pool (carry regions, reference counts).
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-21, the waiting primitives and RawStorage" bullets "How they stay free across modules" and "Not moved"; Disk/RESULTS.md "2026-11-21: the last cleanup" section 1 (the `Tools/calls` check; "Not moved") -->
+
+Two traps came with the move. SocketStream's PR toolchain warned that the queue's and the handoff's decision enums "cannot be
+returned" from `Mutex.withLock` (region isolation), which Xcode's compiler had accepted; the enums are `Sendable` now,
+so build new BytesAsync API with the PR toolchain too. And the sync/async overload trap of [Part
+IV](#5-limitations-and-compiler-bugs-met-in-concurrency-and-nearby) holds across modules: Disk cannot call BytesAsync's
+`RawSpan.withLentBytes` with a closure that names its error type, because Bytes' synchronous method of the same name is then
+ambiguous, so its writers keep a two-line helper.
+<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-21, the waiting primitives and RawStorage" bullets "A PR-toolchain-only warning" and "Not moved" (Disk's `withUnsafeBytesAsync`); AGENTS.md "Build new Bytes API with SocketStream's PR toolchain as well" -->
+
+#### Counting, time, and priority
+
+Waits need counters, and an `Atomic` cannot be copied, so an array or a closure cannot hold one. **`RelaxedCounter`** is
+a class around `Atomic<Int>` with relaxed ordering: statistics (calls made, bytes written, nanoseconds waited) and the next
+index of a work queue, `claim(below:)`, which gives each of 0 through *n* − 1 to exactly one caller. Relaxed means it says
+nothing about other memory, so a reference count whose last release frees a buffer uses the `atomic` property with the
+ordering it needs.
+
+```swift
+let next = RelaxedCounter()
+// In each worker:
+while let index = next.claim(below: items.count) { process(items[index]) }
+```
+<!-- src: Bytes/Sources/BytesAsync/Counting.swift RelaxedCounter doc comment -->
+
+**`RelaxedCounters`** is *N* of them in one allocation (a `ManagedBuffer` of `Atomic<Int>`, wrapped in an `@unchecked
+Sendable` struct, because `ManagedBuffer` is explicitly not `Sendable` and a subclass declaring it warns). Disk's writer
+timings (11 kinds) and syscall counters, and NativeAEA's buffer reference counts, had been arrays of `RelaxedCounter`
+objects: one allocation for each plus one for the array. As one `RelaxedCounters`, Disk's extractions make 11 fewer mallocs
+each (a single writer 83 to 72, 20,000 files 145 to 134), and NativeAEA's, 30 to 36 fewer (M1 Max, two interleaved rounds).
+<!-- src: Bytes/Sources/BytesAsync/Counting.swift RelaxedCounters doc comment and `Storage`; Disk/RESULTS.md "2026-11-22, late: access by usage, typed timing keys, one allocation for counters" table row "Mallocs, every extraction row" (single writer 83 → 72, 20,000 files 145 → 134); NativeAEA/RESULTS.md "2026-11-22, late: …" table row "Extract: synthetic" (mallocs 377–486 → 341–454, −30 to −36: the pool's counters and Disk's 11); AGENTS.md "ManagedBuffer is explicitly not Sendable" -->
+
+`MonotonicClock` reads `CLOCK_UPTIME_RAW` in nanoseconds (it does not jump with the wall clock or advance while the machine
+sleeps), for timings. And **`withPriority(_:operation:)`** runs work in a child task at a priority of its own, because a
+program's main task is not where its work should run: an async `main` runs at priority 21, not user-initiated, and a GUI
+app with no frontmost window can have its work scheduled at background quality of service, on the efficiency cores. It is
+one task group with one child, so it keeps the caller's cancellation and task-locals and passes the error type through.
+The effect in the app is in Part III, ["Nunarchiver"](#nunarchiver-the-app-and-its-two-traps).
+<!-- src: Bytes/Sources/BytesAsync/Counting.swift MonotonicClock; Bytes/Sources/BytesAsync/Offloading.swift `withPriority` doc comment ("a command-line tool's main task (which runs at the default priority, not user-initiated) or a GUI app that may be in the background (where its work would run at background QoS, on the efficiency cores)"); NativeAEA/ARCHITECTURE.md §1 and NativeAEA/RESULTS.md "What mattered" ("the async main task is at 21") -->
+
 ### 12. Codec and crypto entry points
 
 This section is about the *shape* of the codec and crypto APIs: what you call, what you must provide, and what they promise
@@ -2884,16 +3155,17 @@ codec"](#8-algorithms-and-data-structures-codec-by-codec)).
 
 | Format | Types | Direction |
 |---|---|---|
-| DEFLATE, zlib, gzip | `DeflateEncoder(format:level:)`, `DeflateDecoder(format:)` (`DeflateFormat`: `.raw`, `.zlib`, `.gzip`) | both |
+| DEFLATE, zlib, gzip, Deflate64 | `DeflateEncoder(format:level:)`, `DeflateDecoder(format:)` (`DeflateFormat`: `.raw`, `.zlib`, `.gzip`), `DeflateDecoder(variant:)` (`DeflateVariant`: `.deflate`, `.deflate64`, raw only) | both (Deflate64 decode only) |
 | Brotli | `BrotliEncoder(quality:windowBits:)`, `BrotliDecoder` | both |
 | Zstandard | `ZstdDecoder`, `ZstdFrameHeader`, `XXHash64` | decode |
 | LZ4 | `LZ4Decoder` (`decompressRaw`, `decompressFramed`) | decode |
-| LZMA, LZMA2, `.xz` | `LZMA2Decoder` (`decompressLZMA2`, `decompressLZMA`, `decompressLZMAFile`, `decompressXZ`), `CRC64` | decode |
-| bzip2 | `BZip2Decoder` | decode |
+| LZMA, LZMA2, `.xz` | whole output: `LZMA2Decoder` (`decompressLZMA2`, `decompressLZMA`, `decompressLZMAFile`, `decompressXZ`); streaming: `LZMADecoder` (raw LZMA1), `XZDecoder`; `CRC64` | decode |
+| bzip2 | `BZip2Decoder` (`decompressAll`, and streaming `decompress(_:into:)`) | decode |
 | Apple's LZFSE, LZVN, LZBITMAP, LZRAVEN | `LZFSEDecoder`/`LZFSEEncoder`, `LZVNDecoder`/`LZVNEncoder`, `LZBitmapDecoder`/`LZBitmapEncoder`, `LZRAVENDecoder` | LZFSE, LZVN, LZBITMAP both; LZRAVEN decode |
 | parallel | `ParallelDeflateEncoder`, `ParallelDeflateDecoder`, `ParallelBrotliEncoder` | the parallel forms of the above |
+| any of the above that decodes | `Decompressor`, `DecompressionFormat` | decode |
 
-<!-- src: Bytes/Sources/BytesCompression/*.swift public types (grep of `^public struct`); AGENTS.md Repository table (BytesCompression row) -->
+<!-- src: Bytes/Sources/BytesCompression/*.swift public types (grep of `^public struct`); Deflate.swift `DeflateVariant`; DeflateDecoder.swift `init(variant:)`; LZMAStreaming.swift `LZMADecoder`; XZDecoder.swift `XZDecoder`; BZip2Streaming.swift `decompress(_:into:)`; Decompressor.swift `DecompressionFormat`; AGENTS.md Repository table (BytesCompression row) -->
 
 #### One shot, streaming, and parallel
 
@@ -2908,6 +3180,15 @@ Every codec has the same shapes, borrowed from zlib:
   (`consumed`, `produced`, a status); input can be split anywhere, and the streaming forms keep a window of their own
   (32 KB of history for DEFLATE, a window that wraps for Zstandard). The DEFLATE and Brotli encoders and decoders are also
   `ByteTransform`s (and `ResettableByteTransform`s), so they drop into a `Pipeline`. <!-- src: Bytes/Sources/BytesCompression/DeflateEncoder.swift, DeflateDecoder.swift, Transforms.swift; ZstdDecoder.swift -->
+  The LZMA, xz, and bzip2 decoders stream too (below), and so does DEFLATE *into the caller's own buffers*:
+  `decompress(_:into:historyCount:)` decodes after `historyCount` bytes of history that the caller keeps at the front of
+  its buffer (at least `historySize`: 32 KB, or 64 KB for Deflate64), so the decoder keeps no window of its own and
+  copies nothing out of one. A caller with two 1 MB buffers moves the last window's worth of output to the front of the
+  next one between calls; in 1 MB chunks it ran within 0.5% of the instructions of one call for the whole stream, and
+  the benchmark rows for the history form read the same as `decompressAll`. <!-- src: Bytes/Sources/BytesCompression/DeflateDecoder.swift `decompress(_:into:historyCount:)` doc comment ("In 1 MB chunks … within 0.5% of the instructions of one call for the whole stream"); Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip (2026-11-22, M1 Max; …)" table row "Inflate … history 1 MB (new, dickens, x-ray, Main.css)": "same as `decompressAll`", 0 -->
+- **Decoders that streamed by their window, not their loop.** LZMA, xz, and bzip2 decoded only into a whole output buffer
+  (the output was their history). Making them streaming kept their decode loops and changed what is around them; see
+  [section 8](#8-algorithms-and-data-structures-codec-by-codec).
 - **Parallel.** `ParallelDeflateEncoder(format:level:chunkSize:lanes:independentChunks:)` compresses `chunkSize`-byte chunks
   (256 KB by default, at most 512 KB; a one-shot call over a large input cuts up to four chunks per lane, none under 64 KB)
   on `lanes` lanes at once. `lanes` is usually every core (the streaming form, one chunk per lane a round, wants the
@@ -2961,6 +3242,37 @@ allocates nothing; the other form allocates exactly that one buffer per call. <!
 The allocation behavior is *gated*. Workloads that should not allocate are also registered as `Allocations:` benchmarks
 (one per workload, or one gate for a group of them), which count `malloc` calls against static threshold files. Every
 threshold is zero but one: a `for`-`in` over a `let` reader, held at 1. <!-- src: Bytes/Benchmarks/RESULTS.md "Allocation checks"; "Benchmark coverage pass (2026-11-19)" (gates combined into `Allocations:Read_all_workloads` and others; `Read: for-in Bytes (UInt8)` kept alone at threshold 1); AGENTS.md Lessons "Allocations: package-benchmark's malloc counter with a Thresholds/ file at 0 is the gate" -->
+
+#### One decoder over every format: `Decompressor`
+
+A client that chooses its format at run time (an archive reader meeting one method after another, an encrypted archive's
+segments in several codecs) should not write a `switch` over twelve formats and keep a decoder of each alive.
+**`Decompressor`** is that switch, written once. A `DecompressionFormat` names the stream (`.deflate(.raw)`, `.deflate64`,
+`.brotli`, `.zstd`, `.bzip2`, `.lzma(properties, uncompressedSize:, sizeHint:)`, `.xz(sizeHint:)`, `.lzfse`, `.lzvn`,
+`.lz4(framed:)`, `.lzbitmap`, `.lzraven`), carrying what the container records about it; `reset(for:)` starts a stream.
+
+```swift
+var decompressor = Decompressor()                                      // no state yet
+try decompressor.reset(for: .xz(sizeHint: entry.uncompressedSize))     // zip's method 95: this format's state is made now
+let progress = try decompressor.decompress(payload, into: &output)     // a ByteTransform-style streaming call
+
+try decompressor.reset(for: .lzfse)                                    // whole buffers only: no streaming form
+let consumed = try decompressor.decompressAll(segment, into: &output, decodedSize: rawSize)
+```
+<!-- src: Bytes/Sources/BytesCompression/Decompressor.swift `DecompressionFormat` and `Decompressor` doc comments (examples adapted) -->
+
+Three properties make it cost nothing beyond a `switch`. Each format's state is made on that format's first stream and
+kept, so a client decoding many entries allocates nothing after each format's first (the `Allocations:Decompressor_every_format`
+gate reads 0). Each call goes to the format's own decoder, `DeflateDecoder`, `BZip2Decoder`, `XZDecoder`, and so on, so
+their loops are the ones the codec sections measure. And the state a format does not need is not built: LZMA and xz state
+made on the first *streaming* call means a whole-buffer decode no longer builds two probability models. `isStreamable` says
+which formats decode in pieces (DEFLATE, Deflate64, Brotli, Zstandard, bzip2, LZMA, xz) and which only whole (Apple's LZ
+formats and LZ4); `historySize` is non-nil for the two DEFLATE variants, whose callers keep the history.
+The streaming xz row through `Decompressor` ran 618 M instructions, the same as the `XZDecoder` row it wraps.
+<!-- src: Bytes/Sources/BytesCompression/Decompressor.swift (`isStreamable`, `historySize`, "Each call goes to the format's own decoder … after one `switch`: their loops are unchanged"); Bytes/Benchmarks/RESULTS.md "Cleanups after the unification (2026-11-22, M1 Max; …)" bullet "Decompressor/DecompressionFormat" ("`Decompressor xz -6 dickens: 1 MiB out` (618 M, the same as `LZMA stream xz -6 dickens: 1 MiB out`) and `Allocations:Decompressor_every_format` (0)") -->
+
+NativeZipArchive's `ZipDecoder` drives one `Decompressor` for every zip method, and NativeAEA's segments decode through one
+(Part III, ["NativeZipArchive"](#nativeziparchive-the-kernel-is-the-limit) and ["NativeAEA"](#nativeaea-a-decode-pipeline-against-a-file-system)).
 
 #### Crypto
 
@@ -3403,6 +3715,12 @@ instructions and seeing stack accesses (`ldr`/`str` with an `sp` base) where reg
   function, so the call took the writer by address and the writer lived in memory for the whole loop. Splitting the
   decoder into small functions that each hold their cursors as locals, with the guaranteed `@inline(always)` ([section
   5](#5-inlining-and-specialization)), was the largest of the changes that took it from 2x slower than zlib to faster.<!-- src: OPTIMIZATION-old.md "5." paragraph on @inline(__always) and "DEFLATE: from 2x slower than zlib to faster" -->
+- **An `inout` span's base address.** The second DEFLATE rewrite ([section 2](#2-remove-the-checks-the-compiler-cannot-prove-away))
+  takes the output span `inout`, and through that parameter LLVM could not tell that the stores did not change the
+  span's base address, so it loaded the base from memory before every store. Rebinding the output to a local
+  (`var buffer = output._mutatingExtracting(0..<output.byteCount)`) before the loop puts the base in a register. The same
+  loop keeps its bit buffer as a struct with mutating methods (`FastBits`), and calls its rare cases as static functions,
+  for the reasons above.<!-- src: Bytes/Sources/BytesCompression/DeflateDecoder.swift `decodeSymbols` ("The output as a local: through the `inout` parameter, its base address was loaded from memory before every store (the stores might change it, as far as LLVM can tell)") and `FastBits` doc comment ("A struct with mutating methods rather than nested functions over captured variables, which can stay in memory behind access checks") -->
 
 #### Cursor design: a constant bit offset
 
@@ -3521,6 +3839,57 @@ which were the bottleneck. Removing work that is not the bottleneck does not mak
   MQTT's PUBLISH encoding 0.8% (5,132 K to 5,173 K). `precondition(raw <= mask)` and an unmasked store folds both away
   when the enum's raw values are visible: once the precondition has run, the mask cannot change the value, and the
   optimizer knows it.<!-- src: OPTIMIZATION-old.md "11." "Store a checked value unmasked"; "What tracking caught" table row 1 -->
+
+#### A limit per round instead of a check per symbol
+
+A decoder's fast loop reads input and writes output at every symbol, and each checked access (a refill, a store, a match
+copy) costs 2–3 instructions: 12 to 20 in a match. The checks cannot fold, because the amount of input a symbol consumes
+depends on the data. But a *bound* on it does not: a DEFLATE iteration consumes at most 16 bits for each byte it writes (a
+literal is at most 15 bits, a match of 3 or more at most 48; Deflate64's longer matches make it 20). So the input left
+after the iteration is at least what it was, less 16 bits per output byte, and a limit on the *output* guarantees the
+input. The loop computes that limit in rounds:
+
+```swift
+// DeflateDecoder.decodeSymbols (shortened): only `out` is compared in the inner loop.
+rounds: while true {
+    let inputLeft = inputBits &- bits.position &- fastInputBits
+    guard inputLeft >= 0 else { break rounds }
+    let limit = min(roomLimit, out &+ (deflate64 ? (inputLeft &* 3) &>> 6 : inputLeft &>> 4))
+    guard out <= limit else { break rounds }
+    fast: while out <= limit {
+        // At least 32 bytes of input and `fastRoom` bytes of output remain at the top of each iteration,
+        // so every refill load and every store below is unchecked.
+        …
+    }
+}
+```
+<!-- src: Bytes/Sources/BytesCompression/DeflateDecoder.swift `decodeSymbols` lines 774–799 (comment and code; "Deflate64: `* 3 / 64`, shifts rather than a division by 20, whose constant took a register"; "checked accesses … cost 2–3 instructions each, 12–20 a match") -->
+
+A round takes a few instructions and a call to the function has a few dozen to a few hundred, so the check moved out of
+the loop costs nothing measurable. The price is a proof, and it lives in comments next to each unchecked access: the
+iteration's refills load 8 bytes at most 20 bytes past its starting bit (93 bits consumed, then 63 buffered), and it
+writes at most three literals, or two and a match of up to 258 bytes plus the copy's 32-byte overrun. Deflate64's
+division by 20 became shifts (`* 3 >> 6`) because the divisor's magic constant took a register for the whole loop. A rare
+case that could break the bound (Deflate64's length symbol 285, up to 65,538 bytes) is flagged in the table entry so only
+that symbol pays for a room check, and a match that does not fit leaves the fast loop for the careful one.
+
+The table entries help in the same way. `HuffmanEntry` is a 32-bit value whose *flags* (literal, exceptional, subtable,
+end of block) answer each question with one test-bit-and-branch (`tbnz`), where a `kind` field needs a compare, and its
+fields are read as named `BitField`s rather than range subscripts (the range subscripts cost 3–5% more instructions).
+
+Measured on the M1 Max (instructions, exact): the first change, the per-round output limit with named fields and
+Deflate64 support, cut 8.3–8.8% from inflating dickens, samba, x-ray, and xml (141, 174, 205, and 24 M to 129, 159, 187,
+and 22 M). The rewrite of the loop on locals (libdeflate's design, with its own match copy) cut 35.8–39.5% more (dickens,
+samba, x-ray, xml: 129, 159, 187, 22 M to 78, 102, 120, 14 M), with time −5 to −9% (dickens unchanged at 11.0 ms). The
+decoder now runs fewer instructions than libdeflate's (dickens 78 M against 94 M, 0.83x; 0.68–0.78x zlib's) and takes the
+same time on dickens and samba (11 and 15 ms), 4–6% behind on x-ray, xml, and Main.js. The instruction cut is large and
+the time cut small because the loop is bound by load latency and mispredictions (`Tools/counters`), not by instruction
+count, which is [section 7](#7-branches-and-data-dependent-work)'s warning again: for a loop like this, judge by cycles.
+<!-- src: Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip (2026-11-22, M1 Max; …)" table (rows "Inflate dickens / samba / x-ray / xml: Bytes" 141 / 174 / 205 / 24 M → 129 / 159 / 187 / 22 M, −8.3 to −8.8%) and bullet "The decode loop also got faster for every stream: the per-symbol input check became an output limit worked out in rounds"; "Cleanups after the unification (2026-11-22, M1 Max; …)" table row "Inflate dickens / samba / x-ray / xml" (129 / 159 / 187 / 22 M → 78 / 102 / 120 / 14 M, −35.8 to −39.5%, "dickens 11.0 → 11.0 ms; others −5 to −9%") and the paragraph "Against the references in the same run: DEFLATE now runs fewer instructions than libdeflate (dickens 78 M against 94 M, 0.83x …) and 0.68–0.78x zlib's, and its time matches libdeflate's on dickens and samba (11 and 15 ms), 4–6% behind on x-ray, xml, and Main.js"; Bytes/Sources/BytesCompression/Deflate.swift `HuffmanEntry` comment ("Read with the range subscripts instead, the decode loop ran 3–5% more instructions (2026-11-22)") and flags; "decide with one `tbnz`" from the same RESULTS bullet -->
+
+The other side of this technique is in the same code: a *failed* proof has to fail safely. The fast loop stops where
+the proof ends (`.nearEnd`), and the careful loop, which checks everything and is resumable, takes over for the last bytes
+of input and the last of the output's room.
 
 #### Overflow checks
 
@@ -4059,6 +4428,10 @@ inline and specialize it; it does not make them do so. Two attributes force inli
   was the limit; [section 7](#7-branches-and-data-dependent-work)).<!-- src: Bytes/Benchmarks/RESULTS.md "LZMA ... How it got there" step 2 (87.3 vs 93.5 ins/B seg0) -->
 - **LZRAVEN's coder** had 10 calls left in the decode loop with `@inline(__always)`; `@inline(always)` inlined them,
   and `start()` had to be inlined too, or its `inout` call kept the coder in memory through the loop.<!-- src: Bytes/Benchmarks/RESULTS-lzraven.md "Lessons" last bullet -->
+- **DEFLATE's match copy, in the rewritten fast loop** (2026-11-22). `copyMatch` throws and takes the output span `inout`,
+  and as `@inline(__always)` it stayed a call inside the large loop; `@inline(always)` inlined it. The loop's small helpers
+  (`store`, `refill`, `consume`) are `@inline(__always)`; the guaranteed form went only to the one that was a call. After
+  growing a loop, check it with `Tools/calls … --callee` and the helper's name.<!-- src: Bytes/Sources/BytesCompression/DeflateDecoder.swift `copyMatch` (`@inline(always)`, line 965) beside `store`, `FastBits` methods (`@inline(__always)`); AGENTS.md "Codegen traps met there: an `@inline(__always)` throwing helper taking an `inout MutableRawSpan` stayed a call in a large loop (`@inline(always)` inlined it …)" (AGENTS.md gives a −10% → −35% figure; no RESULTS file records it, so it is not repeated here) -->
 - **A new `BytesWriter` initializer**, only `@inlinable`, was called out of line from NativeZip's decode function (789 to
   891 instructions, the writer returned through memory). Anything a hot function calls once per entry, initializers
   included, should be `@inline(__always)`; check with `Tools/calls … --callee init` after adding API.<!-- src: AGENTS.md "`@inlinable` doesn't mean inlined" -->
@@ -4079,6 +4452,20 @@ for the rest. With both in one function the inliner gave up on the fast one; spl
 instructions, and Brotli's decoder got 10–30% faster with its own fast path.<!-- src: OPTIMIZATION-old.md "Compression: DEFLATE and Brotli" item 2 -->
 The Zstandard decoder's careful path is out of line for the same reason.<!-- src: OPTIMIZATION-old.md "Zstandard: faster than libzstd" -->
 Check a hot loop's size with `Tools/loops` before and after any addition.<!-- src: AGENTS.md "Rare paths stay out of line" last sentence -->
+
+#### Forcing has a ceiling: the inliner's caller limit
+
+`@inline(always)` is a guarantee for each call, but the SIL performance inliner also has a limit on how large a
+*caller* may grow. A parse loop with every per-field function forced inline outgrew it, after which the inliner stopped
+inlining ordinary functions into the loop, including `RawSpan.byteCount`, a two-instruction getter. It stayed a call,
+three times per field, and each call clobbered the vector registers that held the name scan's lookup tables. Moving the
+once-per-head target scan (a block-mask loop with its partial-block cases) out of line brought the loop back under the
+limit: HTTP request heads went from 335 to 306 cycles, and heads of 1-byte fields from 520 to 429 (instructions on the
+request corpus, 1,584 to 1,308).<!-- src: HTTPBytes/RESULTS.md "2026-11-23: HTTP/1 heads against cursed-http" step table rows 3 and 4 (req 335 → 306 (1,584 → 1,308 instructions), f1 520 → 429), and the closing paragraph "The inliner's limit is worth knowing beyond this parser" (whose own prose says −5% and −16%) -->
+After forcing inlining into a large function, look at its disassembly for a `bl` to something trivial (or run `Tools/calls`
+with `--callee` naming the getter). The remedy is the opposite of the force: take the rare or once-per-call part out of
+the loop, as "Rare paths stay out of line" above does. The full case, with the rest of the parser's seven steps, is
+[section 12](#12-case-study-httpbytes).
 
 #### Specialize on a constant, as a copy
 
@@ -4211,6 +4598,9 @@ entry, it was back to within 5% of before. In NativeAEA, a writer's three `decmp
 1.9 MB zeroed) and a decoder's inflate window (160 KiB) are made on first use: about −35 MB. Mutation works through `x!.mutate()`, but reading
 `x!.property` consumes the optional; borrow it with `switch x { case let .some(y): … }` (SE-0432). A benchmark that makes
 its decoder inside the measured closure then counts that setup as per-iteration mallocs.<!-- src: OPTIMIZATION-old.md "11." "Make rarely used ~Copyable members on first use"; NativeAEA/RESULTS.md "Encoders and decoders made on first use"; AGENTS.md "~Copyable members made on first use" -->
+`Decompressor` ([Part II](#one-decoder-over-every-format-decompressor)) applies the rule to every format: each decoder is made
+on its format's first stream, and raw LZMA's and xz's state on the first *streaming* call, so a whole-buffer decode builds
+no streaming window.<!-- src: Bytes/Sources/BytesCompression/Decompressor.swift (each format's state "made on its first stream, then kept"); Bytes/Benchmarks/RESULTS.md "Cleanups after the unification (2026-11-22, M1 Max; …)" bullet "Decompressor/DecompressionFormat" ("LZMA and xz state made on the first streaming call (a whole-buffer decode no longer builds two probability models)") -->
 
 #### Technique 6: no lazy globals on the hot path
 
@@ -4232,7 +4622,7 @@ literal tables cost 64-byte checksums +10.7% until the inner update was `@inline
 −3.3% against the lazy tables), and CRC-64's literal table lost outright (+1.0%) against
 the lazy table, whose `swift_once` check is one load per call. Measure after removing a lazy global. And in a benchmark, a lazy global read in the loop calls `swift_once` →
 `dispatch_once_f` (about 36 instructions) on every check for tens of milliseconds after first use, which made Bytes'
-3-byte rows bimodal (78 K and 104 K instructions): capture fixtures as locals ([section 12](#12-measuring-honestly)).<!-- src: AGENTS.md "A table that becomes a compile-time constant can make LLVM rematerialize"; Bytes/Benchmarks/RESULTS.md "Cleanup and improvements" "CRC-64's table as a literal" and table row "CRC-32 tables, 64 B"; AGENTS.md "No lazy globals inside a measured loop" -->
+3-byte rows bimodal (78 K and 104 K instructions): capture fixtures as locals ([section 13](#13-measuring-honestly)).<!-- src: AGENTS.md "A table that becomes a compile-time constant can make LLVM rematerialize"; Bytes/Benchmarks/RESULTS.md "Cleanup and improvements" "CRC-64's table as a literal" and table row "CRC-32 tables, 64 B"; AGENTS.md "No lazy globals inside a measured loop" -->
 
 #### Technique 7: waits that do not allocate
 
@@ -4249,12 +4639,47 @@ Per-entry strings are the other source: NativeAEA's verify without `-l` built 1�
 structs with resilient fields (`Date?`) copy through value witnesses (`swift_cvw_initWithCopyImpl` in profiles): jobs that
 are queued, sorted, and handed between tasks are cheaper as final classes.<!-- src: NativeAEA/RESULTS.md "Per-entry allocations"; AGENTS.md "Payload structs with resilient fields" -->
 
+#### Technique 9: a `var` pointer borrowed by spans is heap-boxed
+
+NativeAEA's segment decoder had a local `var stored: UnsafeRawBufferPointer`, assigned in an `if` and an `else` and then
+borrowed by the `RawSpan`s the checks and the codec take. The compiler gave the variable a heap box: a 32-byte
+`swift_allocObject` for every segment (185 of the 189 in the test archive: one per segment, none per file).
+The fix is to make each one a constant set exactly once on every path, which needs no box:
+
+```swift
+// NativeAEA/SegmentStream.swift, the fixed form: constants, each set once on every path.
+let read: UnsafeRawBufferPointer
+if let mapping {
+    unsafe read = mapping.buffer(segment.fileOffset..<segment.fileOffset + segment.compressedSize)
+} else {
+    …
+    unsafe read = UnsafeRawBufferPointer(destination)
+}
+let stored: UnsafeRawBufferPointer
+if archive.isEncrypted { …; unsafe stored = UnsafeRawBufferPointer(target) } else { unsafe stored = read }
+```
+<!-- src: NativeAEA/Sources/NativeAEA/SegmentStream.swift lines 304–341 (the code and its comment: "a `var` here, assigned in branches and borrowed by the spans below, was boxed on the heap (one allocation per segment)"); NativeAEA/RESULTS.md "2026-11-22, evening: allocations in an extraction, traced" "What it found" bullet 1 ("A heap box per segment (185 of 189) in `SegmentStream.decode`: a 32-byte `swift_allocObject`") -->
+
+Instruments did not find it: its callers for allocations that are freed again are missing (Part I, ["Allocation
+gates"](#53-allocation-gates)). The LLDB breakpoints did, grouped by the first frame in the program's own code. The same
+trace found a second per-piece cost in Disk (two arrays for each large file piece whose first compressed chunk starts in the
+piece before; the bridge now holds its first part inline), and removing both took the extraction's malloc count from 822
+and 815 (two rounds) to 476 (−42%) with instructions unchanged at 401 G and peak memory the same (1,454 to 1,458 MB; M1
+Max, the synthetic archive). Static detection works too: `Tools/calls … --callee swift_allocObject` on the hot function lists the box.
+The whole process made 7,364 heap allocations; every one over 1 MB is a buffer made once.
+
+The same box was met again in HTTPBytes' QPACK decoder, in the literal field's decode: a name pointer assigned in
+branches and borrowed by a span, one allocation per literal field. The zero-malloc gate failed, and as constants set once on
+each path, static-table decoding of 401 requests went from 5.2 M to 2.5 M instructions (5,190 K to 2,505 K, −52%).
+Section 12 ([the QPACK part](#qpack-share-the-core-let-the-caller-hold-the-blocked-streams)) has the code.<!-- src: HTTPBytes/RESULTS.md QPACK "What moved the numbers" table (static: first version 5,190 K; "The literal step's name as lets set once per path" 2,505 K) and AGENTS.md "HTTPBytes as a whole" ("A var pointer assigned in branches and borrowed by a span is heap-boxed again (QPACK's literal decode: one allocation per field, 5.2 M → 2.5 M instructions as lets)"); HTTPBytes/Sources/HTTP3/QPACKDecoder.swift literal(...) -->
+<!-- src: NativeAEA/RESULTS.md "2026-11-22, evening: allocations in an extraction, traced" "What it found" bullet 2 and the table (row "Extract: archived": "822, 815 → 476 (−42%)", "401 G, unchanged", "1,454 → 1,458 MB"; "7,364 heap allocations in the whole process"; "Every allocation over 1 MB is a buffer, made once"); Disk/RESULTS.md "2026-11-22, evening: bridges without allocations"; AGENTS.md "A local `var` pointer assigned in branches and borrowed by spans was heap-boxed" (the `Tools/calls` check) -->
+
 #### When not to
 
 Zero allocation is a gate rather than a goal in itself. Parallel codecs allocate their thread pool's bookkeeping per call
 (`concurrentPerform` 11 mallocs on 8 lanes and 27 on 24, a task group 34 and 98); the compression itself allocates
 nothing.<!-- src: OPTIMIZATION-old.md "Compression: DEFLATE and Brotli" (thread pools allocate a few dozen small blocks per call); RESULTS.md "Parallel compression: a chunk scheduler" Allocation bullet -->
-And the counting itself has a cost: allocation benchmarks are kept separate from timing ones ([section 12](#12-measuring-honestly)).<!-- src: AGENTS.md "The malloc interposer costs ~10%" and "package-benchmark's malloc interposer traps on thread exit" -->
+And the counting itself has a cost: allocation benchmarks are kept separate from timing ones ([section 13](#13-measuring-honestly)).<!-- src: AGENTS.md "The malloc interposer costs ~10%" and "package-benchmark's malloc interposer traps on thread exit" -->
 
 ### 7. Branches and data-dependent work
 
@@ -4309,6 +4734,49 @@ register; and the normalization shift is chosen alongside it. Normalization stay
 branchless form measured 2–10% slower.<!-- src: Bytes/Benchmarks/RESULTS.md LZMA "How it got there" last paragraph; AGENTS.md "The normalization branch predicts well" -->
 The final decoder is faster than both references on every input: 1.11–1.29x Compression and 1.22–1.68x liblzma 5.8.4
 (about 200 MB/s on Xcode's segments, which were the use case).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "LZMA decode -6 {dickens, mozilla, samba, x-ray, xml}" and "LZMA decode Apple seg{0, 60, 255}", Bytes against Compression (1.112 seg60 to 1.290 x-ray) and liblzma (1.218 seg60 to 1.683 xml); the 200 MB/s is from Bytes/Benchmarks/RESULTS.md LZMA "Results" and is not in the new run -->
+
+**Two more steps off the chain (2026-11-22, M1 Max).** The table stopped at "children loaded ahead". Two later changes
+went further, and both *add* instructions. First, a matched literal (the byte after a match, whose bits are decoded under
+the probabilities of the byte at the match's distance) forms the next step's four candidate probability indexes *two bits
+ahead*, for both outcomes of the current bit, and selects among them by the decoded bit, so the next step's loads start
+one select after the bit rather than a few operations later:
+
+```swift
+// LZMACore.swift matchedStep (shortened): candidates for the bit after the next, formed before this bit is decoded.
+let index00 = matched0 & offsetAfter0 &+ node
+let index01 = matched0 & offsetAfter1 &+ node &+ 1
+let index10 = matched1 & offsetAfter0 &+ node &+ 2
+let index11 = matched1 & offsetAfter1 &+ node &+ 3
+let (one, difference) = step(p)             // decode this bit
+p = one ? p1 : p0                           // p0, p1: loaded last step, both candidates
+index0 = one ? index10 : index00            // the next step's two candidates, selected by the bit
+index1 = one ? index11 : index01
+```
+<!-- src: Bytes/Sources/BytesCompression/LZMACore.swift `matchedStep` lines 279–309 and its doc comment ("The candidates for the bit after the next are formed for both outcomes of this bit, before it's decoded, and selected by it: their loads, in the next step, then start one select after this bit, off the chain from one bit to the next") -->
+
+Second, in the plain trees the next node is chosen by the comparison (`node = one ? node1 : node0`), which LLVM turns into
+`cset` and `bfi`, rather than built from the borrow in `difference` (`mvn` and `extr`): the source comment records 2–4%
+fewer cycles on four of the Silesia files and no change on x-ray, with more instructions, and the mechanism is not known.
+Together, measured with the agent's driver (cycles per byte from `proc_pid_rusage` around each decode), the two changes cut
+1.8–4.1% of the cycles on every file (x-ray 56.74 to 55.10 cycles per byte, −2.9%) while instructions *rose* 5.0–9.8%:
+
+| Row (M1 Max) | Instructions old → new | Time old → new |
+|---|---|---|
+| LZMA decode -6 x-ray (8.1 MB) | 1.46 → 1.61 G (+9.8%) | 150 → 144 ms (−4.0%), 148 → 144 ms (−2.7%) |
+| LZMA decode -6 mozilla (48.8 MB) | 3.71 → 3.94 G (+6.5%) | 451 → 431 ms, 446 → 431 ms |
+| LZMA decode -6 samba (20.6 MB) | 974 M → 1.03 G (+5.4%) | 118 → 111 ms, 116 → 113 ms |
+| `Decompressor xz -6 dickens: 1 MiB out` | 618 → 649 M (+5.0%) | −6.9% / −5.6% |
+<!-- src: Bytes/Benchmarks/RESULTS.md "The second cleanup pass (2026-11-22, late, M1 Max; baselines lend-old → lend-new, pass2-old-{1,2} → pass2-new-{1,2})" bullet "LZMA's matched literal and tree steps" ("−1.8 to −4.1% on every file (x-ray 56.74 → 55.10, −2.9%)") and its `pass2` table (rows "LZMA decode -6 x-ray (8.1 MB)", "mozilla (48.8 MB)", "samba (20.6 MB)", "Decompressor xz -6 dickens: 1 MiB out"; times p50 round 1 / round 2); Bytes/Sources/BytesCompression/LZMACore.swift `treeStep` comment ("2–4% fewer cycles on Silesia's dickens, mozilla, samba, and xml, no change on x-ray, though more instructions (2026-11-22)") -->
+
+Branchless normalization, tried once more in the same pass, cost +4 to +12% on x-ray and was not kept, as before. Against
+the references in the same run, x-ray runs 1.26x liblzma's instructions at 0.74x its time (144 against 195 ms), and mozilla
+1.09x its instructions at 0.73x its time. The one row that got slower, x-ray streamed with 64 KiB of input per call
+(+1.4% and +2.0%), spends more of its time in the careful path near each input's end, which these changes do not speed up.
+The lesson is the section's, a step further: *fewer instructions can be slower*, and an instruction count on a range coder
+is not the cost, so decide by cycles. The same day's change of NativeZip's xz from Compression's stream to Bytes' decoder
+shows it from the other side: 7.6% more instructions, and 29% less time (32 MB text, M1 Max, instructions 1,257 M to 1,352 M,
+207 to 148 ms).
+<!-- src: Bytes/Benchmarks/RESULTS.md same "second cleanup pass" section: bullet ("Branchless normalization was tried again and cost +4 to +12% on x-ray; not kept"), paragraphs "Against the references in the same run: x-ray now 1.26x liblzma's instructions at 0.74x its time (144 against 195 ms) …; mozilla 1.09x liblzma's instructions, 0.73x its time" and "The one row that got slower, x-ray streamed with 64 KiB of input per call" (table row +1.4 / +2.0%); NativeZipArchive/Benchmarks/RESULTS.md step17 table row "Inflate + CRC 32 MB text: xz" (instructions 1,257 M → 1,352 M, +7.6%; time 207 → 148 ms, −29%; old was Compression's `COMPRESSION_LZMA` stream, new is `XZDecoder`) and the sentence "xz runs more instructions than Compression's liblzma and is still 29% faster" -->
 
 #### Find what the load is waiting on
 
@@ -4406,6 +4874,23 @@ the 32 quarter-round steps form one chain. A `SIMD4<UInt32>` implementation of S
 (16.5 ms against 49.2 ms for N = 2¹⁴, r = 8). Each vector step is four dependent instructions of 2–3 cycles; the scalar
 step is `add` plus `eor ..., ror #k`, two. Threads supply the independent work when p > 1 (4.1x on four lanes).<!-- src: Bytes/Benchmarks/RESULTS-scrypt-x509.md "Salsa20/8: scalar beats vector here" and "Against OpenSSL" -->
 
+#### Short scans mispredict: fewer instructions, more cycles
+
+A scanner that finds each delimiter by a short scan from the previous one (a 16-byte test at a time) runs fewer
+instructions than one that classifies 64-byte blocks into masks and walks them with `ctz`, and it is slower. On 401 real
+HTTP request heads (580 bytes each; lines of 15 to 40 bytes) the per-line scans ran 2.62 instructions a byte at 0.93
+cycles; the block masks 3.18 at 0.62. A short scan's exit lands somewhere different on every line, so the exit branch
+mispredicts, and a mispredict costs more cycles than the instructions it saves; the mask walk replaces those exits with a
+`ctz` of a value computed without branching (the structural index, [section 7 of Part II](#byteblock-64-bytes-tested-into-one-mask)).<!-- src: HTTPBytes/RESULTS.md "The design, from three prototypes" table (A 2.62 instr/B, 0.93 cycles/B; B 3.18, 0.62) and "A runs fewer instructions and more cycles: its many short scans (header lines are 15–40 bytes) mispredict" -->
+
+The same shape recurred twice more in that parser. Packing a block's mask with `ld4` and shift-right-inserts (5 instructions,
+cursed-http's choice) took 5% fewer instructions than four plain loads and pairwise adds, and 5 to 16% more cycles: the
+mask is on the walk's critical path, and `ld4` delivers 64 bytes in 2 cycles against 1.33 for four plain loads
+(`Tools/cpu-probe insn ld4`) with more latency. And classifying blocks ahead of need, to avoid a branch when a line crosses
+a block, cost the heads that end in their first block (38-byte heads 55 → 86 cycles).<!-- src: HTTPBytes/RESULTS.md "ByteBlock stays in byte order (Bytes)" bullet ("5% fewer instructions and 5–16% more cycles"; "ld4 loads 64 bytes in 2 cycles against 1.33 for four plain loads"), and "Tried and not kept" row 1 (tiny 55 → 86) -->
+Judge scanning code by `Tools/counters`' discarded-cycles share, not its instruction count; [section 12](#12-case-study-httpbytes)
+has the full account.
+
 #### CRC braids and folds
 
 Fewer instructions could not shorten the table CRC's chain (slicing-by-8: each lookup feeds the next), but more chains
@@ -4455,6 +4940,31 @@ same benchmark process.
    separate static function ([section 5](#5-inlining-and-specialization)).<!-- src: OPTIMIZATION-old.md DEFLATE item 5; Bytes/Benchmarks/RESULTS.md "Follow-ups: short-distance back-references"; AGENTS.md "Rare paths stay out of line" -->
 6. **Named fields in the table entries.** The decode loop went from 246 to 236 instructions, and NativeZip's inflate plus
    CRC ran 2.5–2.8% fewer instructions.<!-- src: OPTIMIZATION-old.md DEFLATE item 6 -->
+7. **A fast loop on locals, bounded once per round** (2026-11-22, M1 Max). libdeflate's decode loop, rewritten in Swift:
+   the input and output positions and the bit buffer in locals, unchecked refills, stores, and its own match copy, table
+   entries whose flags decide with one `tbnz`, and every bound proven once per round in the comments instead of checked
+   per symbol ([Part III, section 2](#a-limit-per-round-instead-of-a-check-per-symbol) has the technique). It cut instructions
+   by 36–40% on the Silesia files (dickens 129 M to 78 M), below libdeflate's, but time by only 5–9%.<!-- src: Bytes/Benchmarks/RESULTS.md "Cleanups after the unification (2026-11-22, M1 Max; …)" table row "Inflate dickens / samba / x-ray / xml" (−35.8 to −39.5%; time "dickens 11.0 → 11.0 ms; others −5 to −9%") -->
+
+**Deflate64 and decoding into the caller's buffers.** `DeflateDecoder(variant: .deflate64)` decodes PKWARE's Deflate64
+(zip method 9): a 64 KB window, length symbol 285 as base 3 with 16 extra bits (matches of 3 to 65,538 bytes, where
+DEFLATE's 285 is exactly 258), and distance codes 30 and 31 with 14 extra bits each. It is the same decoder with its own
+`@inline(never)` copy of the symbol loop over one `@inline(__always)` body taking a constant `deflate64`, so DEFLATE's loop
+does not carry the longer matches' extra refill and room check (and no `merged` function folded the copies back:
+[section 5](#5-inlining-and-specialization)). Deflate64 rows run within 0.2% of DEFLATE's instructions on the same inputs
+(the first measurement: 188 M against 187 M on x-ray, 1,971 K against 1,970 K on Main.css), and after the fast loop of item 7
+both fell together (120 M and 1,230 K).
+<!-- src: Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip (2026-11-22, M1 Max; …)" first bullet (DeflateVariant, "its own `@inline(never)` copy of the symbol loop over one `@inline(__always)` body (no `merged` function)") and table row "Inflate64 x-ray, Main.css (new)" ("188 M, 1,971 K … within 0.2% of Inflate"; Inflate x-ray 187 M, Main.css 1,970 K); "Cleanups after the unification" table row "Inflate64 Main.css, x-ray" (1,970 K, 188 M → 1,230 K, 120 M); Bytes/Sources/BytesCompression/Deflate.swift `DeflateVariant` doc comment -->
+A caveat about the NativeZip benchmark of it: its Deflate64 fixture is `text.zip`'s DEFLATE stream marked method 9, which has
+no 258-byte match, so it decodes the same either way and proves the method's plumbing, not its long matches.
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step17 ("the Deflate64 fixture is `text.zip`'s DEFLATE stream marked method 9: it has no 258-byte match, so it decodes the same either way") -->
+
+`decompress(_:into:historyCount:)` decodes after `historyCount` bytes of history in the *caller's* buffer: the decoder keeps
+no window of its own, and the caller moves the last window's worth of output to the front of the next buffer between calls
+(Part II, ["One shot, streaming, and parallel"](#one-shot-streaming-and-parallel)). NativeZip decodes an entry into two 1 MB
+buffers this way (a large entry writes one while the other is decoded into), with no copy out of a window.
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step17 first bullet ("`DeflateDecoder(variant:)` and its new `decompress(_:into:historyCount:)`, which decodes straight into ZipDecoder's two buffers after the history copied to their front") -->
+
 
 *Truncated input looks like data.* A bit reader's zeros past the end can decode as a valid but wrong symbol: DEFLATE's
 code-length code 16 at index 0 ("repeat the previous length") threw `invalidValue` when the input ended 8 bytes into a
@@ -4554,6 +5064,46 @@ GB/s, taking 2–13% of instructions off the Silesia rows.<!-- src: Bytes/Benchm
 bzip2's CRC (CRC-32's polynomial, most significant bit first) has its own slicing-by-8 tables and reuses CRC-32's `pmull`
 folding helper (`bytes_crc_fold`) with non-reflected constants on byte-reversed blocks; it costs 0.2% of the time in
 profiles.<!-- src: Bytes/Benchmarks/RESULTS-bzip2.md API -->
+
+**Streaming: a window, not a new loop** (2026-11-22, M1 Max). `LZMA2Decoder` decodes into the caller's whole output, which
+is its own dictionary. A zip entry or a stream of unknown size needs output in pieces with bounded memory, and the obvious
+way, a circular window, would add a wrap check to every match and every matched literal in the fast loop. Instead
+`LZMADecoder` (raw LZMA1) and `XZDecoder` run *the same decode loops* into a flat window the decoder owns, copied out as
+the caller has room. When the window is full and everything in it delivered, the last dictionary's worth of bytes slides to
+the front, by a multiple of 64 so positions keep their low bits, which `lp` and `pb` select probabilities by. The window is
+the dictionary plus *room*: as large as the dictionary up to 4 MiB (`LZMAWindow.defaultRoomLimit`), each slide moving the
+dictionary once per room's worth of output, allocated once at its final size when the stream starts, and not zeroed (the
+loops read only bytes they wrote), so a large dictionary on a small stream makes resident only the pages the output
+reaches. The room limit was measured: with `xz -6`'s 8 MiB dictionary, 4 MiB makes a 12 MiB window instead of 16 for 0.3–0.4%
+more instructions on streams longer than the window (samba, 20.6 MB), where 2 MiB cost 0.9–1.0% and 1 MiB 1.8%.
+<!-- src: Bytes/Sources/BytesCompression/LZMAStreaming.swift header comment and `LZMAWindow.defaultRoomLimit` doc comment ("4 MiB: for `xz -6`'s 8 MiB dictionary a 12 MiB window instead of 16, for 0.3–0.4% more instructions on streams past the window (samba, 20.6 MB; none below it). 2 MiB cost 0.9–1.0%, 1 MiB 1.8% (2026-11-22, M1 Max)") -->
+
+Input split anywhere is the other half. The fast loop runs while more than a margin of input remains, the careful loop while
+more than a smaller margin do (no symbol reads more than 20 bytes), and below that each symbol is first decoded *without effect* (the approach
+of `LzmaDec.c`'s `LzmaDec_TryDummy`): if its input is not all there, the decoder stops at the symbol's start and asks for
+more, needing at most 20 bytes to progress. An xz stream goes an LZMA2 chunk (up to 65,542 bytes) at a time. All three
+streaming decoders are `ResettableByteTransform`s, and errors latch until `reset`.
+<!-- src: Bytes/Sources/BytesCompression/LZMAStreaming.swift header comment ("Input split anywhere works for raw LZMA …" and `LZMADecoder.maximumUnitByteCount` 20); XZDecoder.swift `maximumUnitByteCount` (6 + 65,536); Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip (2026-11-22, M1 Max; …)" bullets "LZMADecoder … and XZDecoder" and "All three conform to `ResettableByteTransform`; errors latch until `reset`" -->
+
+The price was small. Whole-buffer LZMA decoding moved −0.1 to −0.2% in instructions (shared helpers); streaming 1 MiB of
+output ran within 0.1–0.8% of the whole decode. The cost is memory, and it was cut in a second step: the first version grew
+the window by doubling to dictionary plus an equal room, so peak resident memory for a 32 MB entry rose from 26 to 58 MB
+(xz) and 35 to 52 MB (LZMA); with the room capped, the window allocated once, and not zeroed, those entries peaked at 30–33
+MB, with six fewer mallocs per decode stream (8 to 2). NativeZip's xz extraction went from Compression's decoder to this
+one at 7.6% more instructions and 29% less time ([section 7](#7-branches-and-data-dependent-work) has the numbers).
+<!-- src: Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip" table rows "LZMA decode -6 (5 Silesia files): Bytes" (−0.1 to −0.2%) and "LZMA stream raw / xz, 1 MiB out (new)" (within 0.1–0.8% of whole); "Cleanups after the unification" bullet "LZMA and xz: one window allocation, made once and not zeroed, its room capped at 4 MiB" and paragraph "The LZMA window's memory shows in NativeZip's rows … 58–60 → 30–33 MB, LZMA 52–54 → 30–33 MB, six fewer mallocs per decode stream (8 → 2 …)"; NativeZipArchive/Benchmarks/RESULTS.md step17 final paragraph ("peak resident memory for the one-entry rows went 26 → 58 MB (xz) and 35 → 52 MB (LZMA)") -->
+
+**bzip2 streams the same way**: only the run expansion is made resumable. A block decodes into the workspace, as before, and
+its run expansion then writes straight into the caller's output and can stop anywhere, mid-run included (a block can expand
+far past its 900 KB). Symbol decoding pauses within 20 bits of the input's end, and a block's tables are read again if they
+run past it, so input can split anywhere with at most a block's tables, 32 KB, left unconsumed. Streaming cost +0.2–0.5% in
+instructions against the whole-output decode (+2.4% on a 1.6 KB input). Replacing libbz2 in NativeZip with it cut the 32 MB
+text entry's instructions 39.6% and its time from 465 to 111 ms (M1 Max), and a later tightening of the run expansion took
+another 1.7–9.7% off four of the Silesia files.
+<!-- src: Bytes/Benchmarks/RESULTS.md "Streaming decoders for NativeZip (2026-11-22, M1 Max; …)" bullet "BZip2Decoder.decompress(_:into:)" and table row "BZip2 … streaming 1 MiB (new)" ("+0.2–0.5% of whole (1.6 KB: +2.4%)"); NativeZipArchive/Benchmarks/RESULTS.md step17 table row "Inflate + CRC 32 MB text: bzip2" (2,540 M → 1,534 M, −39.6%; 465 → 111 ms); Bytes/Benchmarks/RESULTS.md "Cleanups after the unification" table row "BZip2 decode -9 mozilla / samba / JSON 119 KB / xml" (−9.7 / −3.5 / −2.8 / −1.7%) -->
+
+The rule these three share: **a whole-output decoder becomes a streaming one by its window, not its loop.** The loops that had been made fast
+stayed as they were, and each streaming path wraps them with the minimum that resuming needs.
 
 #### LZ4
 
@@ -4911,7 +5461,7 @@ In general, parallelism helps only the stage that is the bottleneck, and the nex
 
 scrypt's `p` ROMix calls run on `concurrentPerform` lanes with a table per lane (p = 4, N = 2¹⁴: 58 ms on one lane, 17 ms
 on four, 3.4x, with the same 775 M instructions).<!-- src: Bytes/Benchmarks/RESULTS.md "2026-11-20, M3 Ultra" (baseline m3-final): CompressionBenchmarks rows "scrypt N=2^14 r=8 p=4: Bytes, 1 lanes / 4 lanes" 58,359,807 / 17,055,743 ns, 774,574,128 / 774,606,459 instructions; Bytes/Benchmarks/RESULTS-scrypt-x509.md "scrypt" and "Against OpenSSL" -->
-Many-core memory-bound reads and many-archive extraction are in sections [11](#11-techniques-in-the-projects-built-on-bytes) and [12](#12-measuring-honestly).
+Many-core memory-bound reads and many-archive extraction are in sections [11](#11-techniques-in-the-projects-built-on-bytes) and [13](#13-measuring-honestly).
 
 #### When not to
 
@@ -4923,8 +5473,10 @@ sequentially only when the first segment fails or no split point exists. And fil
 ### 11. Techniques in the projects built on Bytes
 
 The libraries above are used by four projects whose job is not a codec but a *workload*: packets, archives, extraction.
-Each found its own limits. (SocketStream, the fifth, is about concurrency and sockets: Part IV (["SocketStream: what the PR
-toolchain's I/O interfaces made possible"](#2-socketstream-what-the-pr-toolchains-io-interfaces-made-possible)).)
+Each found its own limits. Two more sections cover what the archive projects share: Disk, the file-system layer under both,
+and Nunarchiver, the app on top. (SocketStream, the fifth, is about concurrency and sockets: Part IV (["SocketStream: what the PR
+toolchain's I/O interfaces made possible"](#2-socketstream-what-the-pr-toolchains-io-interfaces-made-possible)). HTTPBytes,
+the sixth, is a whole protocol family written from scratch on Bytes, and has [a section of its own](#12-case-study-httpbytes).)
 
 #### MQTT: views, per-type dispatch, and not decoding twice
 
@@ -5058,14 +5610,44 @@ Directory parsing also recovered the cost of richer entries. `ZipEntry` stores t
 and permissions as a `UInt16`, with `modificationDate` and `posixPermissions` computed and the time conversion out of
 line: parsing 2,000 entries went from 6,062 K to 4,297 K instructions (−29%), 342 to 189 µs.<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step16 "Parsing" -->
 
-**Deflate64** is the same `Inflater` in a second mode (a 64 KB window, length symbol 285 with 16 extra bits, distance codes
-30 and 31), with its own `@inline(never)` copy of the symbol loop, which refills between the length and the distance, so
-DEFLATE's fast loop is untouched.<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step15 "Formats" Deflate64 bullet -->
+**Every method in Swift** (2026-11-22, M1 Max). The first versions decoded DEFLATE and Deflate64 with the package's own
+`Inflater`, bzip2 with libbz2, LZMA with its own decoder, and xz with Compression's stream. All of them are gone: every
+method now decodes with Bytes' streaming decoders, driven by one `Decompressor`, and neither the library nor `nunzip`
+links zlib, Compression, or libbz2 (the tests and benchmarks keep them as references). Entries up to 1 MiB decode whole;
+DEFLATE and Deflate64 decode into the two 1 MB buffers after the history copied to their front
+(`decompress(_:into:historyCount:)`); the rest stream. Measured with the old and new code interleaved on the M1 Max (32 MB
+text entry, instructions and time):
 
-**Streamed decryption.** Encrypted entries decrypt in 256 KB pieces into a staging buffer as the decompressor takes input
-(except Deflate64 and LZMA, whose decoders read their whole input and still decrypt into one buffer). AES checks the whole
-payload's MAC before any output (WinZip's specification requires it). The staging buffer and decoder are made on the first
-encrypted entry ([section 6](#6-allocation-free-code)).<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step16 "Streamed decryption"; OPTIMIZATION-old.md "AES-GCM and TLS 1.3 in Swift" last paragraph -->
+| Method | Instructions old → new | Time old → new |
+|---|---|---|
+| bzip2 (libbz2 → `BZip2Decoder`) | 2,540 M → 1,534 M (−39.6%) | 465 → 111 ms (−76%) |
+| LZMA (own decoder → `LZMADecoder`) | 1,481 M → 1,334 M (−9.9%) | 178 → 146 ms (−18%) |
+| xz (Compression → `XZDecoder`) | 1,257 M → 1,352 M (+7.6%) | 207 → 148 ms (−29%) |
+| Deflate64 (`Inflater` → `DeflateDecoder`) | 240 M → 237 M (−1.2%) | 19 → 19 ms |
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md "step17 (2026-11-22): every method in Swift (baselines zipnative-old-{1,2} → zipnative-new-{1,2}, M1 Max)" table rows "Inflate + CRC 32 MB text: bzip2 / LZMA / xz / Deflate64" (instructions, change, time, two rounds averaged) and the bullets above it -->
+
+The next step, the DEFLATE fast loop of [section 8](#8-algorithms-and-data-structures-codec-by-codec), took the 32 MB text
+entry from 236 M to 147 M instructions (−37.7%), the 2,000 small files' inflate from 232 M to 162 M (−30.2%), and extracting
+eight 64 MB archives with one pool from 4.14–4.23 G to 2.78–2.80 G instructions (−33%; 141 to 91 ms, a parallel row, ±20%).
+DEFLATE in NativeZip now runs fewer instructions than zlib in the same harness on text (147 M against 218 M) and more on
+raster (116 M against 91 M, where zlib's long-run path is cheaper), and is faster on both (16 against 18 ms, and 11 against
+13 ms).
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md "step18 (2026-11-22): one `Decompressor`, the cleanups" table rows "Inflate + CRC 32 MB text: Bytes" (236 M → 147 M, −37.7%), "Inflate + CRC 2,000 small files: Bytes" (232 M → 162 M, −30.2%), "Extract 8 archives of 64 MB text (one pool)" (4,140–4,230 M → 2,780–2,800 M, −32.9 / −33.8%; "141 → 91 / 94 → 89 ms (parallel: ±20%)") and the paragraph "DEFLATE in NativeZip now runs fewer instructions than zlib …" -->
+
+**Streamed decryption.** Encrypted entries of every method now decrypt in 256 KB pieces into a staging buffer as the decoder
+takes its input (Deflate64 and LZMA used to be decrypted whole first): every decoder takes input split anywhere, which is
+what made it possible. AES checks the whole payload's MAC before any output (WinZip's specification requires it). The
+staging buffer and decoder are made on the first encrypted entry ([section 6](#6-allocation-free-code)). ZipCrypto's cipher
+updates its key registers through `CRC32.updateRegister`, one byte step of CRC-32 that is the CPU's `crc32b` instruction
+on ARM64 and a table lookup elsewhere (ZipCrypto's key schedule is a byte-at-a-time CRC): against the old cipher in one round during the work, instructions fell 40.6% on a stored entry and
+16.9% on a deflated one.
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step17 bullet "Encrypted entries of every method now stream through the 256 KB staging buffer (Deflate64 and LZMA used to be decrypted whole first): every decoder takes input split anywhere"; step18 paragraph "Against a run of the old cipher during the work (instructions, one round), `CRC32.updateRegister` cut ZipCrypto stored 40.6% and deflated 16.9%" and "ZipCrypto's cipher updates through `CRC32.updateRegister`"; Bytes/Sources/Bytes/CRC32.swift `updateRegister` (`Builtin.int_aarch64_crc32b` under `HardwareCRC`); NativeZipArchive/Benchmarks/RESULTS.md step16 "Streamed decryption" (the MAC rule) -->
+
+**One decoder per method makes the memory a number.** The streaming LZMA window is the cost of the method (Part III,
+["LZMA, LZMA2, and `.xz`"](#lzma-lzma2-and-xz)): the 32 MB xz entry's peak resident memory went from 26 to 58 MB with the
+first streaming decoder, and to 30–33 MB with the capped window (an extraction of many large xz entries holds about one
+window per writer decoding one).
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md step17 last paragraph ("peak resident memory for the one-entry rows went 26 → 58 MB (xz) … Per writer, so an extraction of many large xz entries holds about 16 MiB per writer decoding one") and step18 "Memory:" paragraph ("52–60 MB to 30–33 MB") -->
 
 #### NativeAEA: a decode pipeline against a file system
 
@@ -5075,8 +5657,8 @@ pipeline (ARCHITECTURE.md) has five stages:<!-- src: NativeAEA/RESULTS.md "The p
 1. **Open**: the signature, certificate chain, and header MACs are checked, giving a table of segments with their
    checksums, MACs, and keys.
 2. **Decode**: one task per core takes a free buffer from a fixed pool, then the next segment (in *that order*). It reads
-   the segment, checks its MAC, decrypts, decodes (LZMA2, LZFSE, LZBITMAP, LZ4, LZRAVEN, zlib), checks its checksum (SHA-256
-   or Murmur64, whichever the archive names), and publishes it.
+   the segment, checks its MAC, decrypts, decodes (LZMA2, LZFSE, LZVN, LZBITMAP, LZ4, LZRAVEN, zlib, all through one
+   `Decompressor`), checks its checksum (SHA-256 or Murmur64, whichever the archive names), and publishes it.
 3. **Walk**: one task takes segments in order and parses headers *in place*.
 4. **Write**: writer tasks compress (64 KiB chunks: LZBITMAP for `.aea`, LZVN for `.xip`) outside a limiter, then make the
    file inside it, at most 6 at once.
@@ -5159,6 +5741,174 @@ byte for byte, compressed bytes included, which depends on the encoder technique
 to structured concurrency kept wall time within a few percent (10.30 to 10.01 s for the xip, 9.39 to 9.64 s for the aea;
 Part IV, ["NativeAEA: from threads to structured concurrency"](#3-nativeaea-from-threads-to-structured-concurrency)).<!-- src: NativeAEA/RESULTS.md xip section and APFS compression section "Timing" tables; "structured Swift concurrency" table -->
 
+**Every format in Swift, every read through Disk** (2026-11-22, M1 Max). The first versions could decode segments with
+Compression as well as with Bytes. The system decoders are gone (`import Compression`, the backend option, and the
+`--decoder` flag with them): every segment codec decodes with BytesCompression, WKMS's authentication-data JSON is read by a
+strict reader on Bytes (an object of string members, every escape, surrogate pairs) instead of `JSONDecoder`, and an audit
+found no other system parser (XAR and xip metadata use the package's XML scanner, PEM and DER BytesCrypto, Base64
+BytesBase64). Every file read goes through Disk's `InputFile` (below), replacing the readers' own descriptor loops. Nothing
+measurable changed, which was the point, since Bytes had been the default decoder: listing the synthetic archive 260 G
+instructions before and after, extraction 401.5 G to 401 G, `Decode segment 0` 1,132 M instructions before and after.
+<!-- src: NativeAEA/RESULTS.md "2026-11-22: every format in Swift, every file through Disk (baselines aeanative-old-{1,2} → aeanative-new-{1,2}, M1 Max)" bullets and table (rows "List (decode, verify, parse): synthetic" 260 G → 260 G; "Extract: synthetic: archived" 401.5 G → 401 G; "Decode segment 0" 1,132 M / 929 M unchanged) and "Nothing measurable changed, which is the point: the formats were already decoded by Bytes by default" -->
+
+**Read or map the archive?** The decoders read segments with `pread` by default (`--input read`) rather than from a
+mapping, because a mapping turns a file truncated while it is being read into `SIGBUS` for the whole process (the app
+expands several archives at once), and the mapping gains no time: five alternating rounds extracting the synthetic archive
+took 5.59–5.82 s reading and 5.67–5.88 s mapped (means 5.71 and 5.74). The footprint differs, 541–544 MB reading against
+488–489 MB mapped, because each decoder's read buffer stays resident up to `RawStorage`'s 2 MiB floor, where mapped pages
+are clean and file-backed and outside the footprint.
+<!-- src: NativeAEA/RESULTS.md "2026-11-22, late: Disk's settings inside the options, `ArchiveKind`, input by reads (…)" paragraph "`--input read` against `mapped`" (five alternating rounds, `/usr/bin/time -l`; "read 5.59–5.82 s, mapped 5.67–5.88 s (means 5.71 and 5.74); peak memory footprint read 541–544 MB, mapped 488–489 MB (−53 MB). The default stays `read`: no time to gain, and a mapping turns a file truncated while it's read into SIGBUS for the whole process") -->
+
+#### Disk: the file system's limits, in one place
+
+NativeZip and NativeAEA each wrote extracted trees to disk, and each learned the same things about APFS. **Disk** is
+where they now live once: `Extraction.run(into:source:settings:_:)` takes a *planner* (the serial part: names, parents,
+collisions, links) and a *content source* (the bytes of each file, or pieces of a large one), and runs *writers* that
+create files outside a limiter on file-system calls. A client supplies the decoding; Disk supplies everything below the
+`open`. (Measured on the M3 Ultra under load, so times are indicative and call counts firm, except where a section says M1
+Max.)
+<!-- src: AGENTS.md "Repository" table, Disk row; Disk/RESULTS.md header ("Every time below was taken under load … instruction, call, and allocation counts are the firm numbers") -->
+
+**Count the calls per entry, and make each one necessary.** A plain file with times costs 4 calls: `openat`, `pwrite`,
+`fsetattrlist`, `close` (2,000 files: 8,029 calls, which is 4 × 2,000 plus 20 directories plus 9). One `fsetattrlist` sets
+the mode, the times, and the flags together and *keeps* the times even with `UF_COMPRESSED`, where a separate
+`fchflags(UF_COMPRESSED)` sets the modification time to now. On a probe over 2,000 files, `fchmod` + `fchflags` +
+`fsetattrlist` took 173 ms, 12,000 syscalls, and 2.48 G instructions; one `fsetattrlist` took 159 ms (−8%), 8,005
+syscalls, and 2.14 G (−14%). A call is skipped when nothing differs from what `open` made, and `fchflags` alone is used
+when flags are all there is. Disk counts its
+own calls under a `SyscallCounting` trait, and the count per entry is the number to watch for a regression: the framework's
+`.syscalls` metric also counts the allocator and the runtime (113,000 against Disk's 80,000 for 20,000 files).
+<!-- src: Disk/RESULTS.md "2026-11-20: the package" "Calls per entry" table, the paragraph "The raw-call probe (single thread, 2,000 files, mode + flags + times)" and "package-benchmark's `.syscalls` …"; the "Kernel semantics checked first" table row on one `fsetattrlist` with `UF_COMPRESSED`; "2026-11-20 (follow-ups)" §3 "`fchflags` for flags alone" (the `.aea` row: 125,890 `fsetattrlist` calls became 112,922 `fchflags` and 12,968 `fsetattrlist`, −12 G instructions, −1.3%) -->
+
+**Contained creation is nearly free.** Every path-taking call carries `O_NOFOLLOW_ANY` and `O_RESOLVE_BENEATH` (or the `AT_`,
+`FSOPT_`, and `RENAME_` forms), so an entry cannot escape the destination through a symbolic link or `..`. Measured on
+20,000 small files, the default and a build without `O_RESOLVE_BENEATH` read the same (508 and 486 ms against 489 and
+489 ms, 21 G instructions each); keeping a descriptor for each directory instead of paths cost nothing at 200 directories
+and 3% on Xcode's 30,000 (NativeAEA). What does cost is the quarantine attribute, one `fsetxattr` per entry: 13–17%.
+<!-- src: Disk/RESULTS.md "2026-11-20: the package" "Kernel semantics checked first" (the flags) and "Options, interleaved (`ab-1`, `ab-2` …)" table and bullets ("`O_RESOLVE_BENEATH` is free within noise", "Directory descriptors cost nothing measurable here (200 directories); NativeAEA measured +3% on Xcode's 30,000", "The quarantine costs 13–17%") -->
+
+**Width is a measurement, and it is not the core count.** With 24 writers and 20,000 files of 1–8 KB, wall time falls
+from 1,491 ms at width 1 to 499 ms at width 6, then rises to 618 ms at 12, while CPU time keeps growing from 1.55 s to
+5.47 s: past the peak the extra threads only add contention inside APFS. Disk's defaults are writers equal to the
+performance cores and a file-system width of the performance cores divided by 4, clamped to 2 through 6. CPU work
+(compressing) runs outside the limiter, which is why more writers than the width help at all (Part III, ["NativeAEA"](#nativeaea-a-decode-pipeline-against-a-file-system)).
+<!-- src: Disk/RESULTS.md "Writers and the file-system width" tables (20,000 files, 24 writers: wall 1,491 / 848 / 526 / 499 / 522 / 618 / 612 ms at widths 1 / 2 / 4 / 6 / 8 / 12 / 16, CPU 1.55 to 5.47 s) and "**Chosen:** writers = performance cores (24 here), width = performance cores / 4, from 2 to 6" -->
+
+**Lazy at the right grain.** A one-file extraction made 963 mallocs and took 510 µs, because each of 24 writers allocated
+its scratch (output, table, chunk, and staging buffers, encoders) at its first job. Making each buffer when it is first
+*used* (a writer of plain files makes none) cut it to 193 mallocs, 2.7 M instructions (from 11 M), and about 190 µs. The
+first attempt, lazy only for the writer's core, made the 2,000-file row slower (57, 56, 53 ms against 49, 48, 48 ms
+interleaved): 24 writers each mapping 2.3 MB at the start of a 48 ms extraction. The job ring is allocated uninitialized,
+slots initialized by `push` and moved out by `pop`, because initializing its 16,384 slots had been 8 M instructions.
+<!-- src: Disk/RESULTS.md "2026-11-20 (follow-ups)" §4 "Nothing made that isn't used" (table: "One file: 32 KB | 11 M → 2.7 M | 963 → 193"; "The one-file extraction's wall time went from 510 to about 190 µs"; the paragraph "First, only the core was lazy … 57/56/53 ms against 49/48/48 ms … 24 writers each allocating 2.3 MB"; "initializing 16,384 slots was the 8 M instructions") -->
+
+**Wake the planner at a low-water mark.** A planner waiting for room in the job queue was resumed by every pop, so a full
+queue meant a wake-up per file. Now it resumes when the queue is down to half its jobs and half its path bytes and refills
+it in one run: with 24 writers and 20,000 files its waits fell from 1,990 to 1, and with one writer the process's context
+switches from 4,103 to 96 (and 7,000 fewer syscalls). A small queue then costs the same as the default one.
+<!-- src: Disk/RESULTS.md "2026-11-20 (follow-ups)" §5 "The planner woken at a low-water mark" tables ("24 writers (default queue, 16,384 jobs) | 1,990 → 1"; "1 writer … | 4,103 → 96 | 87 K → 80 K") and "so a small queue now costs the same as the default one" -->
+
+**Large files: `pwrite`, in pieces.** For one 1 GB file from memory, a single `pwrite`, 8 MiB `pwrite`s, with `F_PREALLOCATE`, with
+`F_NOCACHE`, and `DispatchIO` all took 118–145 ms at best and 156 ms at the median (about 6.9 GB/s into the page cache);
+`mmap` plus a copy took 210 and 280 ms and 3.0 G instructions against 0.5 G. `F_NOCACHE` saved 38% of the CPU at no gain in time but
+leaves the file out of the cache, which the next reader pays for. A large *compressed* file written whole is compressed
+by one writer (1 GB of LZBITMAP: 2.6 s, about 400 MB/s); in pieces, writers compress them in parallel.
+<!-- src: Disk/RESULTS.md "macOS APIs for large files (probes: one 1 GB file from memory, p0 / p50 of 3)" table and the paragraphs after it ("All bound by the same rate (about 6.9 GB/s at p50, into the page cache)"; "`F_NOCACHE` saves 38% of the CPU at no gain in time but leaves the file out of the cache"; "1 GB of LZBITMAP 2.6 s (16,384 chunks at about 400 MB/s)") -->
+
+**Progress that costs nothing.** `ExtractionProgress` is polled by a client's timer. Each worker counts in a slot of its own,
+one relaxed add per entry (and per piece of a large file), the slot padded to 128 bytes so no two share a cache line, and
+reading sums the slots. For 2,000 small files on one writer, 1.912 and 1.966 G instructions without it and 1.939 and
+1.907 G with it: no difference beyond the spread. A progress *fraction* has its own trap. By bytes alone, a `.xip`'s hard
+links, symbolic links, and directories write no bytes, so the bar sits full while a third of the expansion remains; by
+entries alone it stalls on a large file. `read(entryWeight:)` counts each entry as 64 KiB beside the bytes, roughly what
+one costs (Xcode's archives: about 30,000 entries a second where contents are written at 1.5 to 2.5 GB a second), and
+never returns less than an earlier reading. An app's throughput readout is the counter's gain over the last few ticks of
+its poll timer: no clock reads, a sample every tick even when nothing changed (so a stalled rate falls to zero), and a
+statement of what the bytes are (here: file contents written, before APFS compression).
+<!-- src: Disk/RESULTS.md "Progress (`ExtractionProgress`)" (2,000 files, single writer: "without 1.912 G / 1.966 G instructions … with 1.939 G / 1.907 G"); Disk/Sources/Disk/Progress.swift doc comments (slots padded to 128 bytes; `defaultEntryWeight` 65_536 "Roughly what making one costs (Xcode's archives on an M3 Ultra: about 30,000 entries a second where contents are written at 1.5 to 2.5 GB a second)"; "Bytes alone leave out the work that writes none: a `.xip`'s hard links (a third of Xcode's expansion, during which a bar by bytes sat full)"; "never going back"; AGENTS.md "Throughput in a polled UI is the counter's gain over the last n ticks of the poll timer" for the readout) -->
+
+**One type for each way of touching a file.** `MappedFile` (the archive being read), `InputFile` (reads at offsets, and small
+whole files such as keys), and `OutputFile` (one file at the caller's path) replaced three private copies of the same
+descriptor loops: NativeZip's `MappedFile` and NativeAEA's `RawMapping` were one type twice, and NativeAEA's decryption to a
+file looped over `pwrite` as Disk's `OutputFile` does. `InputFile` opens with `O_CLOEXEC`, takes its size from `fstat`,
+`pread`s in a loop with `EINTR` retried and a short read at the end reported as `.endOfFile`, and reads a small file with
+`read(2)` to the end so FIFOs and `/dev/stdin` work (a key file given as `/dev/stdin`). Moving the readers changed the data
+path's `pread`s not at all; verifying a `pbz` archive went from 23 to 24 `pread`s (the magic-number sniff, once a `read`),
+from 2 `lseek`s to none, and from 8 `open`s to 6.
+<!-- src: Disk/RESULTS.md "2026-11-22: `InputFile`, the read side" and "2026-11-21: the last cleanup" §2 ("NativeZip's `MappedFile` and NativeAEA's `RawMapping` were one type twice; NativeAEA's decryption to a file opened its output and looped over `pwrite`"); NativeAEA/RESULTS.md "2026-11-22: every format in Swift, every file through Disk" bullet "Every read through Disk" ("`pread` 23 → 24 (the magic sniff, was a `read`), `lseek` 2 → 0, `open` 8 → 6; the data path's reads unchanged") -->
+
+**Matching Archive Utility, item by item.** Nunarchiver has to leave on disk what Archive Utility would, so the comparison
+was made with the real tool. Each archive was copied into a directory of its own and given a download's quarantine; Archive
+Utility expanded one copy (`open -W -a "Archive Utility"`) and Nunarchiver the other; both trees went through one manifest
+tool (path, type, mode, flags, owner, size, modification time to the nanosecond, hard-link group, link target, SHA-256 of the
+contents, every extended attribute with its size and SHA-256, and the ACL as text), and `diff` read the difference. What it
+showed, none of it written down anywhere before:
+
+- One top-level item is moved out under its own name, several go in a folder named after the archive; the folder is mode
+  0700 unless the archive has an entry for its root.
+- AppleDouble entries are *merged* into their items, `._NAME` beside the item or under `__MACOSX`: extended attributes
+  (directories too), Finder info, the resource fork, and the ACL. Symbolic links get their archived times; ZIP names are
+  written decomposed (`Ü` as `U` and U+0308); a ZIP's setuid bit is dropped; everything is quarantined, the folder too,
+  except a `.xip`'s contents.
+- **An output can be an accident of a tool's pass order, and the decision is whether to copy it.** Archive Utility restores a
+  `.xip`'s directory times *before* it writes the files, so writing into a directory resets its time and only directories
+  holding nothing but directories keep theirs: 1,877 of Xcode's 30,068. Nunarchiver restores all of them, a documented
+  option, and that is the one deliberate difference (28,191 directory times).
+- A directory cannot have a resource fork (`fsetxattr("com.apple.ResourceFork")` on one fails with `EPERM`): `ditto` warns
+  and goes on, Archive Utility refuses the archive, and Disk leaves it out and sets the entry's other attributes.
+
+Every ZIP, `.aar`, and the Xcode `.aea` then matched in every item. The method has a rule that cost nothing to learn once:
+**a GUI tool's failures are dialogs on the user's screen.** Archive Utility's alerts block `open -W` until someone clicks,
+nothing in a session without Screen Recording or Accessibility can dismiss them, and its reason is in the log (`log show
+--predicate 'process == "ArchiveService"'`: "Main key derivation failed", "Couldn't read the header of the entry"). So run it
+only on archives it should accept, add one feature at a time to a known-good one, and never bisect a failing archive by running it
+again. Two archives it did refuse (an `.aea` signed without a certificate chain; ZIPs with `._` files that are not AppleDouble) Nunarchiver
+expands.
+<!-- src: Disk/RESULTS.md "2026-11-21 (later): publishing as Archive Utility does, measured against it" "The comparison" (the method paragraph; "What Archive Utility does, as measured" bullets; "A `.xip`'s directory times are set before the files are written, so only directories holding nothing but directories keep them: 1,877 of Xcode's 30,068 … Nunarchiver restores all 30,068 … the 28,191 where Archive Utility has the extraction's time are the one deliberate difference"; the table "What Archive Utility couldn't expand (each a dialog on the user's screen; none rerun)"); NativeZipArchive/Benchmarks/RESULTS.md "2026-11-21 (later)" last paragraph before the table ("A resource fork for a directory is left out (`setxattr` refuses it with `EPERM` …) Archive Utility refuses an archive with such entries outright"; AGENTS.md "A GUI tool's failures are dialogs on the user's screen" for the log predicate) -->
+
+Merging AppleDouble in NativeZip is done *in the planner*, not in a walk afterwards. One scan of the entry names finds
+candidates (a last component starting `._`, 26 bytes to 64 MB), and an archive with none pays only that scan; with
+candidates, a table of the archive's files and directories by name pairs each with its item, the entry is decoded, parsed,
+and kept as extended-attribute and ACL blobs, and the item is planned with the blobs attached, to be set by Disk's deferred
+pass in the file-system lanes. On 2,000 small files each with one attribute (4,001 entries, 2,000 of them AppleDouble),
+`nunzip` took 57 ms without the AppleDouble entries and 84 ms with them merged, where `ditto -x -k` took 1,100 ms (hyperfine,
+five runs, loaded machine). The same lesson holds for the quarantine: one `fsetxattr` on the open file in the writers beat
+a second traversal of the tree on one thread, which had added 0.7 s to an expansion of 0.65 s.
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md "2026-11-21 (later): AppleDouble merged, links' times, decomposed names" "How AppleDouble entries are merged" and the table after "Merging itself, outside the suite (`nunzip`, hyperfine, 5 runs, loaded machine)" (57 ms, 84 ms, 1,100 ms); "2026-11-21: a quarantine option …" paragraph ("walked the tree afterwards on one thread (+0.7 s on an 8,060-entry archive that expanded in 0.65 s)") -->
+
+**Access follows usage.** No package here is stable, so a public symbol is only what another package or the app uses.
+Disk's public surface was narrowed by listing its symbols from a symbol graph (`swift build --target Disk -Xswiftc
+-emit-symbol-graph …`, then `jq` on `accessLevel`), looking for each name in NativeAEA's, NativeZip's, and the app's
+sources, and then letting the compiler judge what a name search could not (initializers, enum cases, and types used only
+implicitly: `settings.permissions = .exact` names no type). 26 symbols became `package` (what Disk's own tests and benchmarks
+use), 12 `internal`, and one dead method was removed; six types a search marked unused stayed public because clients use
+them without naming them. Nothing about the speed changed (the rows moved within their spread), which is the point of doing
+it with the compiler as the arbiter.
+<!-- src: Disk/RESULTS.md "2026-11-22, late: access by usage, typed timings, one allocation for counters" first bullet ("26 symbols to `package` …, 12 to `internal`, and `Destination.setExtendedAttributes` removed … Six types a name search marked unused stayed public") and its table; AGENTS.md "Access control follows usage, not API stability" and "Narrowing a module's public surface by usage" -->
+
+#### Nunarchiver: the app and its two traps
+
+Nunarchiver replaces Archive Utility for `.zip`, `.aea`, `.aar`, and `.xip`, expanding next to the archive through Disk's
+staging and showing a progress window that polls `ExtractionProgress`. Most of its record is interface; two traps are
+performance ones, and both made the same code in the app minutes slow where the command-line tool took seconds.
+
+- **A GUI app with no frontmost window runs its work at background quality of service.** Every thread sat at priority 4, on
+  the efficiency cores only: Xcode's `.xip` took minutes where `nunarchiver` took 10 s. The fix is two lines: start the work
+  in a child task at `.userInitiated` (`withPriority(.userInitiated)`, in [Part II](#counting-time-and-priority)), and hold
+  `ProcessInfo.beginActivity([.userInitiated, .idleSystemSleepDisabled], …)` while any expansion runs, which opts out of
+  App Nap and idle sleep. `ps -M -p PID` shows the thread priorities.
+- **Xcode's autogenerated scheme can instrument Release builds for code coverage, packages included.** The result is a
+  counter increment (`adrp`, `ldr`, `add`, `str`) in the codecs' loops, three times as long, and 24 threads sharing the
+  counters. `-enableCodeCoverage NO` applies only to `test`, so the project commits a shared scheme with coverage off and its
+  build script fails if any built binary has a `__llvm_prf_cnts` section (`otool -l APP | grep __llvm_prf_cnts`). When an
+  app is slower than its command-line tool, compare the hot loops with `Tools/loops` on both binaries.
+<!-- src: Nunarchiver/Nunarchiver/LiveArchiveExpander.swift comments (the `withPriority(.userInitiated)` call: "a GUI app in the background (no window yet, not frontmost) otherwise ran its writers at background QoS, every thread at priority 4 on the efficiency cores (Xcode's xip: minutes instead of 10 s)"; `beginActivity` with `[.userInitiated, .idleSystemSleepDisabled]`); Nunarchiver/build.sh header comment ("Xcode 27's autogenerated scheme instrumented every target, packages included, in Release too (the codecs' loops 3x longer, Xcode's xip minutes instead of seconds)"; the `__llvm_prf_cnts` check) and Nunarchiver.xcodeproj/xcshareddata/xcschemes/Nunarchiver.xcscheme (`codeCoverageEnabled = "NO"`); AGENTS.md "The Disk package and the Nunarchiver app" bullets (the `counter` instruction sequence; 24 threads sharing counters; `ps -M -p PID`) -->
+
+A new Xcode project's templates set `SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor`, which makes every type in the target
+main-actor-isolated unless it says otherwise; the project sets it to `nonisolated` (Xcode 27's project file is JSON, so check
+each target in the file for one still set to `MainActor`).
+<!-- src: Nunarchiver/Nunarchiver.xcodeproj/project.xcproj lines 117, 164, 234 (`"SWIFT_DEFAULT_ACTOR_ISOLATION": "nonisolated"`); AGENTS.md "New Xcode projects (and targets added to them) turn off the MainActor default" -->
+
 #### BinaryParsingComparison: what porting swift-binary-parsing taught
 
 BinaryParsingComparison ports Apple's `swift-binary-parsing` examples (ELF, PNG, PCAPNG, binary property lists, QOI, LZ4,
@@ -5219,7 +5969,444 @@ slowed both libraries, and Bytes more, because its bit offset and bit order, in 
 What swift-binary-parsing could take from Bytes, per the comparison: advance with `&+=` after the bounds check, make
 `sliceSpan(byteCount: Int)` non-generic so slices inline, read odd widths from overlapping loads, and share a throw path.<!-- src: BinaryParsingComparison/RESULTS.md "What swift-binary-parsing could take from Bytes" -->
 
-### 12. Measuring honestly
+### 12. Case study: HTTPBytes
+
+The sections so far take a technique and show where it paid. This one runs the other way: a new protocol family, from
+nothing, using only what Bytes already offers, and what each step of that work taught. `HTTPBytes` is HTTP/1.1, HTTP/2,
+and HTTP/3 framing, HPACK and QPACK field compression, Structured Field Values, and content codings (gzip, deflate,
+Brotli, Zstandard), in six library products of about 13,300 lines, with 207 tests in about 7,000 more. It has no NIO,
+no C, and no Foundation, and every per-message path allocates nothing after setup.<!-- src: HTTPBytes/WRITEUP.md "What's in the package" (13,300 lines, 207 tests in about 7,000 lines; no NIO, no C, no Foundation in the library); HTTPBytes/Benchmarks baseline final-1, every `Allocations:` row: Malloc (total) 0 except Body_chunked_gzip (see "Content codings" below) -->
+
+**Every number in this section is from an Apple M1 Max** (8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4
+from Xcode 27.3), not the M3 Ultra of the rest of the document: the work was done on that machine. Its one core runs
+about 1.3x slower than an M3 Ultra core ([section 13](#13-measuring-honestly) gives the comparison), so compare the
+ratios against the references, which were measured on the same machine in the same run, not the absolute times.
+Benchmarks are in their own package (`HTTPBytes/Benchmarks`), so the library never builds the C references. The saved
+baseline is `final-1`; the step-by-step record is `HTTPBytes/RESULTS.md`.<!-- src: HTTPBytes/RESULTS.md header (M1 Max, 8 performance and 2 efficiency cores, macOS 27.2, Swift 6.4 / Xcode 27.3; "Benchmarks are in their own package"); HTTPBytes/WRITEUP.md header (baseline final-1); Bytes/OPTIMIZATION.md "The second machine" (M1 Max core 1.31x as long as an M3 Ultra core) -->
+
+The references are the C parsers and compressors people actually use, built the same way as the Swift code (`-O3`,
+`NDEBUG`, from pinned sources): **picohttpparser** and **llhttp** for HTTP/1, **cursed-http** (a C library that uses the
+design below and claims to beat picohttpparser everywhere), **ls-hpack** and **ls-qpack** for field compression, and, in
+Swift, **NIOHPACK**, **swift-http-types**, and **swift-http-structured-headers**. The corpora are real: 401 request
+heads (580 bytes on average) and 383 response heads (953 bytes) taken from HTTP/3 traffic, and cursed-http's 3,533
+requests and 2,054 responses from a browser loading the top 1,000 sites.<!-- src: HTTPBytes/RESULTS.md header (corpus: 401 requests, 580 B average; 383 responses, 953 B average) and "2026-11-23: HTTP/1 heads against cursed-http" (top-1k: 3,533 requests, 2,054 response heads); HTTPBytes/WRITEUP.md "How it was measured" (references built the same way) -->
+
+#### Prototype the scanning strategy before the API
+
+A parser's speed is decided by how it finds delimiters, and that decision is expensive to reverse once an API sits on
+it. So three throwaway parsers ran on the 401 real request heads first, measured with the processor's own instruction
+and cycle counters (`proc_pid_rusage`):<!-- src: HTTPBytes/RESULTS.md "The design, from three prototypes (PLAN.md, phase 0.5)" -->
+
+| Strategy | ns per head | instructions per byte | cycles per byte |
+|---|---|---|---|
+| A. Scan each line for its delimiters (16-byte `firstByteOffset` tests) | 168 | **2.62** | 0.93 |
+| B. **Structural index**: classify 64-byte blocks into bitmasks once, walk them with `ctz` | **112** | 3.18 | **0.62** |
+| picohttpparser (scalar on ARM: its fast path is SSE4.2) | 225 | 7.81 | 1.23 |
+| llhttp (a generated state machine) | 220 | 6.55 | 1.20 |
+<!-- src: HTTPBytes/RESULTS.md "The design, from three prototypes" table (rows A, B, picohttpparser, llhttp); same numbers in HTTPBytes/PLAN.md "Phase 0.5" Result -->
+
+A ran 18% fewer instructions than B (2.62 against 3.18) and 50% more cycles (0.93 against 0.62). The reason is
+[branch misprediction](#15-branches-prediction-and-mispredicts). Header lines are 15 to 40 bytes, and a scan of that
+length exits at a different place on each line, so the scan's exit branch mispredicts. B turns "where
+does this line end" into a bit scan of a mask that was built without any data-dependent branch, so the work that
+varies, finding the next set bit, is a `ctz`, not a loop. A judge that counted instructions would have picked the
+wrong design; this is [section 7](#7-branches-and-data-dependent-work)'s rule (judge by cycles) applied before there was
+any code to regret.<!-- src: HTTPBytes/RESULTS.md "The design, from three prototypes" ("A runs fewer instructions and more cycles: its many short scans (header lines are 15–40 bytes) mispredict"); the 18% and 50% are 2.62/3.18 and 0.93/0.62 from the table above -->
+
+The prototype also settled something that was not a speed question: B keeps only the current block's masks, because the
+walk only moves forward. A parser that holds offsets and one 64-byte mask needs no memory per message, and can stop
+anywhere and resume, which made the streaming API (events for the request line, each field, and the head's end)
+free.<!-- src: HTTPBytes/RESULTS.md "A field line is then…" ("The walk only moves forward, so the parser keeps the current block's masks, not an index: no memory per head"); HTTPBytes/WRITEUP.md "API shape" (streaming events) -->
+
+#### The structural index, walked with `ctz`
+
+A **structural index** (simdjson's idea) is a set of bitmasks, one bit per input byte, marking the bytes that matter: the
+delimiters. Classify 64 bytes at once into a 64-bit mask, and every question about those bytes becomes integer
+arithmetic on one register. For an HTTP head two masks suffice:
+
+- **stops**: control characters (a tab included) and DEL. A field value ends at the first stop, which must be CR then LF.
+- **non-token bytes**: the first one in a field name must be the colon, so the name needs no other check.
+
+A field line is then two bit scans. Here is the walk's core, simplified from `HeadScanner.nextStop(_:from:)`; the mask is
+shifted so that bit 0 is the line's first byte, and the first set bit is the line's end:
+
+```swift
+// Simplified from HTTPBytes' HeadScanner.nextStop. `stops` is the current 64-byte block's mask: bit i = byte blockStart + i.
+let bits = stops &>> UInt64(start & 63)                       // the line starts at bit 0
+if bits != 0 { return start &+ bits.trailingZeroBitCount }     // the line's end: no loop, no per-byte branch
+// A line that runs past its block takes a loop of its own, out of line (farStop).
+```
+<!-- src: HTTPBytes/Sources/HTTP1/HeadScanner.swift nextStop(_:from:) (simplified: the block bookkeeping and the clamp to the byte count are left out) -->
+
+Swift's SIMD cannot express the 64-byte movemask this needs: NEON has no `pmovmskb`, and the equivalent is a reduction
+tree. So Bytes gained [`ByteBlock`](#byteblock-64-bytes-tested-into-one-mask) (Part II, section 7), with the reduction
+in the `CBytesNEON` C module and a portable fallback. Here is the loop that finds the end of a line crossing block
+boundaries (`farStop`), from the release object, with a comment on each group of lines:
+
+```asm
+farStop loop:                         ; one 64-byte block per iteration; 29 instructions
+    tbnz   x2, #0x3f, <L8>            ; the `byteBlock` precondition (offset >= 0): never taken here
+    add    x8, x0, x2                 ; the block's address
+    ldp    q3, q4, [x8]               ; bytes 0-31 (two 16-byte loads in one instruction)
+    ldp    q5, q6, [x8, #0x20]        ; bytes 32-63
+    cmhi.16b v7, v0, v3               ; the test: byte < 0x20 (v0 holds 0x20 in every lane) ...
+    cmeq.16b v3, v3, v1               ; ... or byte == 0x7F (v1 holds 0x7F) ...
+    orr.16b  v3, v7, v3               ; ... three instructions per 16 bytes, twelve in all
+    ...                               ; the same three for q4, q5, q6
+    and.16b  v3, v3, v2               ; AND each lane with its bit weight (1, 2, 4 ... 128, twice per vector)
+    ...                               ; four of these, one per vector
+    addp.16b v3, v3, v4               ; pairwise adds sum the weighted lanes: three rounds
+    addp.16b v4, v5, v6               ;   (a lane's bit lands in its byte position)
+    addp.16b v3, v3, v4
+    addp.16b v3, v3, v3
+    fmov   x8, d3                     ; the 64-bit mask, in a general register
+    cbnz   x8, <L3>                   ; any stop in the block? then done
+    add    x2, x2, #0x40              ; next block
+    cmp    x9, x2
+    b.ge   <L0>
+```
+<!-- src: Tools/loops HTTPBytes/.build/agent-tools/HTTP1.o 'farStop' --body (release object, 2026-11-23; 29 instructions, depth 0, vector128: 4 addp.16b, 4 and.16b, 4 cmeq.16b, 4 cmhi.16b, 4 orr.16b, 2 add, 2 ldp, 1 b.ge, 1 cbnz, 1 cmp, 1 fmov, 1 tbnz; listing abbreviated by repeating-groups); the test's 12 vector operations per 64 bytes: HTTPBytes/Sources/HTTPBytes/Method.swift controlOrDelete doc ("On 64-byte blocks, 12 vector operations instead of 20") -->
+
+Sixty-four bytes of classification take 12 vector instructions, the reduction 8 more and a move: 21 instructions, a third of
+an instruction per byte, with no branch until the answer is known.<!-- src: the farStop listing above: 4 cmhi + 4 cmeq + 4 orr = 12, 4 and + 4 addp = 8, 1 fmov; 21 divided by 64 bytes = 0.33 -->
+
+#### From the prototype to a library: inlining, memory, unchecked loads
+
+The first library version, with events and a field-name lookup per field, ran 1.12 cycles a byte against the
+prototype's 0.62. The algorithm was the same; the gap was the compiler's treatment of the code, which is
+[section 1](#1-keep-hot-state-in-registers) and [section 5](#5-inlining-and-specialization) again:
+
+| Change | ns per head | instructions per byte | cycles per byte |
+|---|---|---|---|
+| First library version (events, name lookup per field) | 202 | 6.69 | 1.12 |
+| Scanner `next` and `fieldLine` `@inline(always)` (they were calls) | 202 | 5.78 | 1.09 |
+| *(lookup switched off, to measure it)* | 187 | 4.73 | 1.00 |
+| `next(in:)` `@inline(always)` into the caller's loop | 180 | 3.88 | 0.96 |
+| Mask building a **static function returning values** | 153 | 3.71 | 0.84 |
+| Unchecked byte loads where the offset is proven in range | 150 | 3.43 | 0.80 |
+| *(lookup back on)* | 165 | 4.51 | 0.88 |
+| Field-name hash on two 8-byte words | 157 | 4.17 | 0.84 |
+<!-- src: HTTPBytes/RESULTS.md "Getting the library to the prototype's speed" table (all eight rows, in order; rows 3 to 6 were measured with the name lookup off, so the 1.12 and 0.84 endpoints are the two with it on) -->
+
+The largest single step is the mask builder. As an out-of-line `mutating` method it made the whole scanner (its block
+offset, mask, and limits) live in memory for the entire parse loop. As a `static` function taking the bytes and returning
+the mask, the scanner stays in registers: 0.96 to 0.84 cycles a byte. Forcing that function itself inline made it worse
+(0.98), because the `mutating` wrapper around it was then what stayed out of line. This is the lesson of
+[section 1](#1-keep-hot-state-in-registers) again: a call that can mutate a struct's state makes the compiler keep that struct in memory.<!-- src: HTTPBytes/RESULTS.md same table rows 4 and 5, and "Forcing the mask builder itself inline made it worse (0.98): the mutating wrapper around it was then left out of line" -->
+
+#### Seven steps past cursed-http
+
+With the library at 0.84 cycles a byte (picohttpparser: 1.23), the target became cursed-http, a C
+parser on the same design. Its README claims it beats picohttpparser everywhere. It parsed the request corpus in 275
+cycles a head; HTTPBytes was at 491. Seven steps, measured in cycles per head with instruction counts beside the ones
+that matter (`req`: 401 requests; `resp`: 383 responses; `tiny`: 38-byte requests; `f1` and `f128`: 20 fields of 1 or
+128 bytes):<!-- src: HTTPBytes/RESULTS.md "2026-11-23: HTTP/1 heads against cursed-http (baseline http1-opt)" step table: Start row (req 491), cursed-http row (req 275); cursed-http's README claim: same section, first paragraph -->
+
+| Step | req | resp | tiny | f1 | f128 |
+|---|---|---|---|---|---|
+| Start | 491 (2,407 instr.) | 807 | 107 | 774 | 1,714 |
+| 1. Walk reorganized: find a line's end first; the name from one 16-byte nibble mask; methods and `HTTP/1.x` as word compares | 367 | 643 | 68 | 563 | 1,355 |
+| 2. Exact (slow) paths take and return values; the walk inlined | 333 | 590 | 61 | 495 | 1,221 |
+| 3. Known names looked up only when asked | 335 | 529 | 62 | 520 | 1,363 |
+| 4. The target scan moved out of line | 306 | – | 55 | 429 | – |
+| 5. Line stops are just controls or DEL | 279 | 447 | 55 | 406 | 913 |
+| 6. The target scan also builds the first block's stop mask | 274 | 448 | 50 | 366 | 912 |
+| 7. Masks from four plain loads, not `ld4` | **258** | **426** | **52** | **365** | **788** |
+| cursed-http | 275 | 366 | 47 | 353 | 1,028 |
+| picohttpparser | 711 | 1,055 | 62 | 651 | 2,590 |
+<!-- src: HTTPBytes/RESULTS.md "2026-11-23: HTTP/1 heads against cursed-http" step table, rows Start, 1 to 7, cursed-http, picohttpparser (columns req, resp, tiny, f1, f128; the instruction count in the Start row is the table's (2,407)); step descriptions condensed from the same rows -->
+
+What each step was, in terms the earlier sections taught:
+
+1. **Reorder the work so lines overlap.** Find the line's end first, from the stop mask, then parse the name and value
+   inside it. The next line's start then depends only on the masks, not on this line's name and value, so
+   consecutive lines overlap in the out-of-order window ([section 7](#7-branches-and-data-dependent-work)'s "break the
+   chain"). The common cases are single compares: `GET `, `PUT `, `POST`, `HEAD`, and `HTTP/1.x` CR LF are 4- and 8-byte
+   word compares; anything unusual goes to an exact, stateless function out of line.
+2. **Slow paths take and return values.** Every piece left out of line as a `mutating` method had kept the parser in
+   memory (the same trap, again).
+5. **A line stop is a control or DEL**: two compares and an OR (12 vector operations for 64 bytes, instead of 20 for
+   "controls except tab"). A tab, which a value may contain, is rare, so it is checked where the walk stops, not
+   classified.
+7. **Pack the masks with plain loads and pairwise adds.** cursed-http loads 64 bytes with `ld4` and packs the mask with
+   shift-right-inserts: 5 instructions, 5% fewer than the `addp` tree. Here it ran 5 to 16% more cycles. The mask is on the
+   walk's critical path (each block's mask gates the next line), and `ld4` delivers 64 bytes in 2 cycles against 1.33 for
+   four plain loads (`Tools/cpu-probe insn ld4`), with more latency. Fewer instructions, slower: the same shape as
+   the per-line scans.<!-- src: HTTPBytes/RESULTS.md "What was kept and why" bullet "ByteBlock stays in byte order (Bytes)" ("5% fewer instructions and 5–16% more cycles"; "ld4 loads 64 bytes in 2 cycles against 1.33 for four plain loads (Tools/cpu-probe insn ld4, new rows)") and step 5's description in the step table -->
+
+Where it ended, in cycles per head, with the same inputs for every parser:
+
+| Corpus | HTTPBytes | cursed-http | picohttpparser | llhttp |
+|---|---|---|---|---|
+| 401 requests (580 B) | **258** | 275 | 711 | 698 |
+| 383 responses (953 B) | 426 | **366** | 1,055 | 1,058 |
+| top-1k requests (1,162 B) | **665** | 724 | 1,579 | 1,566 |
+| top-1k responses (2,004 B) | 1,028 | **912** | 2,447 | 2,128 |
+| 20 fields of 128 B | **788** | 1,028 | 2,590 | 1,525 |
+| tiny requests (38 B) | 52 | **47** | 62 | 158 |
+<!-- src: HTTPBytes/RESULTS.md "2026-11-23: HTTP/1 heads against cursed-http" "Final, per head (ns, cycles)" table, cycle halves of rows 401 requests, 383 responses, top-1k requests, top-1k responses, 20 fields of 128 B, tiny requests (38 B) -->
+
+HTTPBytes is 2.1 to 2.8x as fast as picohttpparser and llhttp on every real corpus, and ahead of cursed-http on requests
+(6% on the 401 requests, 8% on top-1k) and on long fields (23% at 128 bytes). It is behind on responses (13 to 16% more cycles; 16 to 18% more time).
+CPU Counters say why: 42% of HTTPBytes' cycles on top-1k responses are discarded work against cursed-http's 33%, and
+57% of those heads' bytes sit in lines of 256 bytes or more. cursed-http's response parser classifies four blocks ahead,
+so a line that crosses blocks takes no branch. HTTPBytes built two batched versions of its own, and both cost more than they
+saved, as the next table shows.<!-- src: HTTPBytes/RESULTS.md same section, paragraph after "The benchmark package" table ("HTTPBytes is 2.1–2.8x as fast as picohttpparser and llhttp on every real corpus … ahead of cursed-http on requests (6% on http-corpus, 8% on top-1k) and long fields (23% at 128 B) … behind it on responses (14–17%)"; this section uses the recomputed figures: cycles 426/366 and 1,028/912 (+16%, +13%), final-1 times 53/45 and 682/587 (+18%, +16%); "42% of HTTPBytes' cycles on top-1k responses in discarded work against cursed-http's 33%"; "57% of those heads' bytes are in lines of 256 bytes or more") -->
+
+**Measured and rejected** (cycles per head; each was built, measured, and removed):
+
+| Idea | Effect |
+|---|---|
+| Stop masks for 5 blocks at a time, a 64-bit window across two (cursed-http's response idea) | req 279 → 312; tiny 55 → 86; f128 913 → 1,382 |
+| A ring of 8 blocks' masks, 4 tested ahead | req 279 → 350; f128 913 → 1,414 |
+| The first 32 bytes of a name without a branch on which half ends it | f1 365 → 388; f128 788 → 913 |
+| The stop-mask builder inlined into the walk | req 333 → 347 (the loop's size again) |
+<!-- src: HTTPBytes/RESULTS.md "Tried and not kept (cycles per head)" table, rows 1, 2, 3, 4 -->
+
+The batched versions classify blocks past a short head's end and test long lines again: cost paid by every head, benefit
+only for long lines. A technique from a library that wins on its own corpus is a hypothesis about yours.
+
+#### The inliner's caller limit
+
+Step 4 deserves its own paragraph, because the cause generalizes. With every per-field function `@inline(always)`, the
+parse loop grew past the **SIL performance inliner's caller limit**: once a function is large enough, the inliner stops
+inlining anything into it, including functions that are trivially cheap. `RawSpan.byteCount`, a two-instruction getter,
+stayed a call, three times per field, and each call clobbered the vector registers that held the name scan's tables. Moving
+the once-per-head target scan (a block-mask loop and its partial-block cases) out of line brought the loop back under the
+limit: request heads 335 to 306 cycles, 1-byte fields 520 to 429.<!-- src: HTTPBytes/RESULTS.md step table rows 3 and 4 (req 335 → 306, f1 520 → 429; instruction counts 1,584 → 1,308 for req), and "The inliner's limit is worth knowing beyond this parser" paragraph; note the prose there says −5% and −16%, the table's own rows give −9% and −18% -->
+After forcing inlining into a hot function, look at its disassembly for a `bl` to a trivial getter (or `Tools/calls` with
+`--callee` for the getter's name). The fix is the opposite of the force: take the rare or once-per-call part out of the loop.
+
+#### Field names: look up lazily, hash two words
+
+About 120 field names are well known (every name in the HPACK and QPACK static tables, the pseudo-headers, and the
+common others), and a parser that knows which one it has can compare an index instead of bytes. The first design looked
+every name up while parsing. That cost 300 to 400 instructions per request head, a fifth of the parse, for callers
+that never ask. Now the parsed view carries the name's bytes and a "not looked up" marker, and `knownName` does the lookup when
+read. A caller who reads it for every field pays 44 cycles a head (258 to 302 cycles on the request corpus); one who does
+not pays nothing.<!-- src: HTTPBytes/RESULTS.md "What was kept and why" first bullet ("Looking every name up while parsing cost 300–400 instructions a request head, a fifth of the parse"; "reading knownName for every field now costs 44 cycles a head (http-corpus requests; 162 on top-1k requests)") and "Final, per head" table (401 requests: 258 and known names 302); HTTPBytes/Benchmarks final-1 rows "HTTP/1 request heads (401 requests, 232 KB)": HTTPBytes 492 K instr., known names 650 K -->
+
+The lookup is a **perfect hash**: a hash function chosen, by a generator, so that no two of the known names share a slot,
+and a lookup is one hash, one table load, and a comparison, with no probing. The key is the name's length and two
+8-byte words taken from fixed offsets (the first and last 8 bytes, overlapping below 16; the first and last 4 for names
+of 4 to 7 bytes), each ORed with `0x20` to fold case. Case folding by `| 0x20` is exact for token characters (letters
+change case; digits, `-`, and the rest already have the bit set), which a parsed name always is. The slot holds the
+name's two words precomputed, so the comparison is two XORs and an OR, and the length is checked in the same test.<!-- src: HTTPBytes/Sources/HTTPBytes/FieldName.swift init?(caseInsensitive:) doc comment and `words(_:)`, `lookUp(_:)` -->
+
+Two details cost real cycles. First, the loads. A first version chose the load pattern with a branch on the length class
+(1 to 3, 4 to 7, 8 and more bytes), and `Host`, `Accept`, and `Connection` alternate between the classes, so the branch
+mispredicted whenever consecutive names changed class: 38 cycles a head. Four 4-byte loads at selected offsets, paired by a
+select, are branch-free ([section 7](#7-branches-and-data-dependent-work)'s "do not branch on what the data decides").
+Second, the tables are generated Swift literals (so they are statically initialized, with no `swift_once`), and the
+names' bytes that spans must reference forever are `StaticString` literals. A `static let` `InlineArray` looked
+equivalent, but reading it may produce a temporary copy, and a span overridden to be immortal then points at dead stack:
+the last names read as garbage until a test caught it.<!-- src: HTTPBytes/RESULTS.md "The lookup's words without branches" bullet (38 cycles a head: 367 against 329 without); HTTPBytes/Sources/HTTPBytes/FieldName.swift `words(_:)` doc comment; AGENTS.md "HTTPBytes as a whole" bullet "A static let InlineArray can't back an immortal span" -->
+
+An owned `HTTPFieldStore` keeps each field's known-name index next to its offsets, so finding a header by name is a scan of
+one-byte indexes, 16 lanes at a time. Three thousand lookups take 8.1 µs, 172 K instructions, against 634 µs and 10 M
+for swift-http-types' `HTTPFields`.<!-- src: HTTPBytes/Benchmarks baseline final-1 rows "Fields: 3,000 lookups by name: HTTPBytes HTTPFieldStore" (Time 8.127 µs, Instructions 172,000) and ": swift-http-types HTTPFields" (634 µs, 10,000,000) -->
+
+#### HPACK: a multi-symbol Huffman table, contiguous tables, cached validation
+
+HPACK (RFC 7541) compresses HTTP/2 fields with a static table, a dynamic table of recently seen fields, and a Huffman
+code for strings. Two thirds of decoding is the Huffman loop.<!-- src: HTTPBytes/RESULTS.md "2026-11-23: HPACK" "Profile of the decoder (requests): the Huffman loop 66% of samples" -->
+
+- **A 14-bit multi-symbol table.** A second prototype race (nghttp2's 4-bit state machine, ls-hpack's 16-bit
+  multi-symbol table, a 10- to 12-bit table with a second level) chose a 16,384-entry table of 32-bit entries, where an
+  entry decodes one or two symbols; a code longer than 14 bits is decoded canonically, out of line. The input is read as if it continued with ones forever:
+  EOS's prefix is ones, so the last symbols need no separate path and the loop has no end-of-input test. NUL, CR, and LF
+  are flagged in bit 24 of an entry and ORed as the loop runs, so the decoded value needs no second scan for the bytes
+  HTTP forbids.<!-- src: HTTPBytes/Sources/HTTPBytes/Huffman/HPACKHuffman.swift header comment (14-bit multi-symbol table, 16,384 UInt32 entries, up to 2 symbols an entry, input read as ones, codes longer than 14 bits decoded canonically out of line) and forbiddenFlag; HTTPBytes/PLAN.md "Phase 0.5" item 2 (the three candidates); HTTPBytes/RESULTS.md HPACK section ("NUL, LF, CR flagged by the Huffman table (bit 24 of an entry, ORed per lookup: cursed-http's idea)") -->
+- **Contiguous, insertion-numbered tables.** The dynamic table keeps its entries in a byte store twice its size; an entry
+  that would straddle the end goes to the start, so every entry is one span. Entries are numbered by insertion, so
+  nothing is renumbered when the oldest is evicted. The encoder finds entries through two hash chains (name and value;
+  name alone) linked by insertion number: a chain ends at the first number older than the oldest live entry, so an
+  eviction costs nothing and nothing walks a stale chain.<!-- src: HTTPBytes/RESULTS.md HPACK section "Design notes" (dynamic tables keep entries contiguous in a byte store twice the table's size … entries numbered by insertion … two hash chains … a chain ends at the first number older than the oldest entry) -->
+- **Static entries by address, in the coder's own memory.** Reaching the generated static tables and `lowercaseBytes`
+  from another module had been a call per field (`Tools/calls` showed it): the coder now holds pointers. Decoding 1,124 K
+  to 992 K instructions for the 401 requests (−12%), encoding 1,980 K to 1,615 K (−18%).<!-- src: HTTPBytes/RESULTS.md HPACK "What it took" table rows "First version" (decode 1,124 K, encode 1,980 K) and "Static table entries as addresses in coder-owned memory" (992 K, 1,615 K) -->
+- **Validation is cached, not repeated.** Checking a field's characters once per literal and storing the verdict with the
+  dynamic entry took validation's cost from 43% of decoding to 8% (decoding and validating the responses, 2,408 K to
+  1,974 K).<!-- src: HTTPBytes/RESULTS.md HPACK "What it took" table row 3 ("decoding and validating the responses: 1,974 K, against 2,408 K before, when validation added 43% to decoding; now 8%") -->
+
+Against the others on the 401 requests (`final-1`: HTTPBytes 1,113 K instructions to decode and 1,708 K to encode, cursed-http 1,558 K and 2,978 K, ls-hpack 2,150 K and 3,281 K, NIOHPACK 5,796 K and 19 M), decoding runs 28 to 30% fewer instructions than cursed-http; encoding is 2.5 to 2.7x as fast as cursed-http and 14 to
+16x as fast as NIOHPACK. ls-hpack allocates 139 to 2,933 times per row and NIOHPACK 1,102 to 2,416 per decoding row;
+HTTPBytes allocates nothing. Part of the encoder's lead is policy, which the table hides: it follows nghttp2's (leave
+`:path`, `content-length`, and date-like fields out of the table; never index short cookies and credentials), so its
+requests come out 15% smaller than ls-hpack's and NIOHPACK's, which index everything.<!-- src: HTTPBytes/WRITEUP.md "HPACK" and "Results at a glance" bullets (28–30% fewer instructions; 2.5–2.7x cursed-http, 14–16x NIOHPACK), checked against HTTPBytes/Benchmarks baseline final-1 rows "HPACK decode (401 requests)", "HPACK decode (383 responses)", "HPACK encode (401 requests)", "HPACK encode (383 responses)" for HTTPBytes, cursed-http, ls-hpack, NIOHPACK (Instructions and Time (wall clock); e.g. encode 401: 244/89 = 2.7, 1,422/89 = 16); HTTPBytes/RESULTS.md HPACK table (ls-hpack 937–2,933 and 139–1,565 mallocs per row, NIOHPACK 1,102–2,416) and "The encoders' indexing policies differ" paragraph (51,813 B against 61,097 B for the requests) -->
+
+#### QPACK: share the core, let the caller hold the blocked streams
+
+QPACK (RFC 9204) is HPACK redesigned for HTTP/3, where streams can arrive out of order: a field section can reference a
+table entry that has not arrived yet, so the decoder can have a stream **blocked**. Three decisions mattered.
+
+**One table design for both.** HPACK's dynamic table, static entries, hash chains, and validator moved into the core
+module and serve QPACK too; QPACK's absolute index is the insertion number, which HPACK's table already was. HPACK
+measured within 0.4% after the move on every row but one.<!-- src: HTTPBytes/RESULTS.md QPACK "Design notes" first bullet ("Shared with HPACK, moved to the core … QPACK's absolute index is the insertion number … within ±0.4% on every row but decode-and-validate of the requests, +2.0%") -->
+
+**Blocked streams are held by the caller, not copied.** `begin(_:stream:)` returns `false` for a section whose Required
+Insert Count is past the inserts received, and records the stream (two words each, up to the blocked-streams setting).
+`nextUnblockedStream()` names it once the encoder stream catches up. RFC 9204 forbids releasing a blocked request stream's
+flow control, so its bytes are still in the caller's receive buffer, and a pool of held sections would be a second
+copy of them. Design the API around who already owns the bytes.<!-- src: HTTPBytes/RESULTS.md QPACK "Blocked streams are held by the caller, not copied" bullet; HTTPBytes/Sources/HTTP3/QPACKDecoder.swift doc comment (begin(_:stream:), nextUnblockedStream()) -->
+
+**Insert on the second sighting.** In HPACK an insertion is free: the literal carries the value once either way. In
+QPACK the value also goes on the encoder stream, so inserting a one-off response value costs bytes and can evict an entry
+that would have been used. Inserting a field only the second time it is seen (ls-qpack's idea, a direct-mapped history of
+field hashes) made 383 responses 16% smaller (74,097 to 62,241 bytes) at the cost of 4% on requests (52,874 to
+55,074), where the first sighting of a repeated field is now a literal.<!-- src: HTTPBytes/RESULTS.md QPACK "The encoder's automatic policy is HPACK's … plus one rule" paragraph (383 responses 74,097 → 62,241 B (−16%), 401 requests 52,874 → 55,074 B (+4%)) -->
+
+**A heap box found by a zero-malloc gate.** The QPACK malloc gate failed: one allocation per literal field. The code in
+question named a field's name pointer in one of several branches and borrowed it with a span afterwards:
+
+```swift
+// The shape that was boxed (illustrative): a `var` assigned in branches, then borrowed by a span.
+var name: UnsafeRawPointer
+if nameReference == 3 { name = decodedString.address } else { name = entry.name }
+let span = RawSpan(_unsafeStart: name, byteCount: nameCount)     // the borrow makes `name` a heap box
+```
+
+Written as constants set once on every path (the real code, after the fix), the box disappeared:
+
+```swift
+// HTTPBytes QPACKDecoder.literal: "Constants set once on every path: a `var` assigned in branches and borrowed by a span
+// was heap-boxed (a `swift_allocObject` per literal)".
+let name: UnsafeRawPointer
+let nameCount: Int
+if nameReference == 3 { unsafe name = address; nameCount = string.count /* … */ } else { /* … */ unsafe name = entry.name }
+```
+
+Static-table decoding of the 401 requests went from 5,190 K to 2,505 K instructions (−52%), and with the literal step
+forced inline, 2,333 K. NativeAEA had met the same box in `SegmentStream` ([Technique 9](#technique-9-a-var-pointer-borrowed-by-spans-is-heap-boxed) of section 6, one per segment), and the lesson was already
+in AGENTS.md; it was met again because the gate, not memory, is what catches it.
+Before the box was found, a head-to-head of the Huffman decoders on the corpus' 9,502 strings had HTTPBytes at 282 µs a
+pass against cursed-http's 454, which told the author the gap was elsewhere: measure the parts before blaming the
+obvious one.<!-- src: HTTPBytes/RESULTS.md QPACK "What moved the numbers" table (static: first version 5,190 K; literal step as lets 2,505 K; @inline(always) 2,333 K) and the paragraph "Before the box was found, a head-to-head of the Huffman decoders on the corpus' 9,502 strings (a throwaway driver) showed HTTPBytes' at 282 µs a pass against cursed-http's hh_decode_f at 454"; HTTPBytes/Sources/HTTP3/QPACKDecoder.swift literal(...) lines 660–668 (the real constants); AGENTS.md "HTTPBytes as a whole" bullet "A var pointer assigned in branches and borrowed by a span is heap-boxed again"; NativeAEA/RESULTS.md SegmentStream box -->
+
+Encoding with a table is 7.0 to 8.3x as fast as ls-qpack (401 requests: 107 µs, 2,089 K instructions against 751 µs, 9,273 K), and decoding 1.4x as fast as cursed-http in time (120 µs against 171). ls-qpack still compresses responses 15% better (it uses Duplicate
+instructions and a draining index, which this encoder does not).<!-- src: HTTPBytes/Benchmarks baseline final-1 rows "QPACK encode (401 requests, 4,096 table)" (HTTPBytes 107 µs, 2,089 K; ls-qpack 751 µs, 9,273 K), "QPACK encode (383 responses, 4,096 table)" (142 µs; ls-qpack 1,180), "QPACK decode (401 requests, 4,096 table)" (120 µs; cursed-http 171); ratios 751/107 = 7.0, 1,180/142 = 8.3, 171/120 = 1.4; HTTPBytes/RESULTS.md QPACK "ls-qpack still compresses responses 15% better" -->
+
+#### Structured Fields as iterators
+
+RFC 9651's Structured Field Values (the format of `Priority`, `Cache-Status`, and many new headers) are normally parsed
+into a value tree: a dictionary of items, parameters, and inner lists, each a Swift value with its own storage. HTTPBytes
+walks the bytes instead. `HTTPStructuredDictionary` and `HTTPStructuredList` are `~Escapable` iterators whose `next()`
+parses and validates one member and returns it as a view: strings and byte sequences as spans (unescaped or
+Base64-decoded on request), integers and decimals as values. Nothing is built, so nothing is allocated, and a caller who
+wants only one key reads to it and stops (`lastValue(forKey:)`).<!-- src: HTTPBytes/Sources/HTTPBytes/StructuredFields.swift HTTPStructuredDictionary (next(), lastValue(forKey:), ~Escapable) and HTTPStructuredList; HTTPBytes/WRITEUP.md "Structured Fields and Priority" -->
+
+```swift
+var dictionary = HTTPStructuredDictionary(fieldValue)
+while let member = try dictionary.next() { … member.key, member.value … }   // views of fieldValue's bytes
+```
+
+Parsing 1,000 seven-member dictionaries takes 196 µs and 3.7 M instructions, against swift-http-structured-headers'
+22,000 µs and 368 M (112x, with 208,000 mallocs); 1,000 five-member lists 137 µs against 14,000; 1,000 `Priority`
+fields 23 µs against 3,011 (131x). All 1,607 parse cases and 553 serialization cases of the httpwg suite pass. The
+general lesson is [section 11](#11-techniques-in-the-projects-built-on-bytes)'s MQTT result again: a parser whose
+output is views of its input beats one whose output is values, by the cost of building those values.<!-- src: HTTPBytes/Benchmarks baseline final-1 rows "Structured Fields: 1,000 dictionaries (7 members)" (HTTPBytes 196 µs, 3,664,000 instr.; swift-http-structured-headers 22,000 µs, 368,000,000, 208,000 mallocs), "1,000 lists (5 members)" (137 vs 14,000 µs), "1,000 Priority fields" (23 vs 3,011 µs); ratios 22,000/196 = 112, 3,011/23 = 131; HTTPBytes/WRITEUP.md "Structured Fields and Priority" (1,607 parse cases and 553 serialization cases) -->
+
+#### Content codings: chunk slices straight in, a carry buffer, reset per body
+
+`HTTPContentDecoder` undoes `Content-Encoding` (gzip, deflate, br, zstd; two stacked at most) on BytesCompression's streaming
+decoders. Three design points:
+
+- **Input in any pieces, each passed once.** A chunked body's data is not contiguous: size lines sit between the
+  chunks. HTTPBytes' chunked cursor hands out slices of the input (data is never copied), and each slice goes straight
+  into the decoder. When a codec stops short at a slice's end (a Huffman symbol cut in half), the unconsumed tail is
+  kept in a carry buffer (132 KiB, made the first time it is needed) and the next slice continues from it. The common case,
+  a slice decoded to its end, copies nothing. A 1 MB gzip body arriving as 4 KB chunks decodes in 530 µs against 526 µs
+  whole: the framing and the carry add 0.8%. System zlib decodes the same body whole in 627 µs.<!-- src: HTTPBytes/Sources/HTTPPayload/ContentCoding.swift HTTPContentDecoder doc comment and `carryCapacity` (132 << 10); HTTPBytes/Benchmarks baseline final-1 rows "Body 1 MB text, gzip, chunked in 4 KB" (530 µs), ", whole: HTTPBytes content decoder" (526 µs), ", whole: zlib (system)" (627 µs); HTTPBytes/RESULTS.md final-1 section ("The chunked path adds 0.8% to decoding the body") -->
+- **Stacked codings through one middle buffer**, 64 KiB, made once. `finish()` checks every stage, because an outer stream can
+  be cut short after the inner one happened to end.
+- **Reset per body, not made per body.** A connection keeps one decoder and calls `reset(contentEncoding:)` for each
+  body, which keeps each codec's state (DEFLATE's window and tables) and the buffers. The `final-1` gate read 6 mallocs per body because the benchmark made a new
+  decoder for each; the decoder's state is made with it. After adding `reset`, a reused decoder allocates nothing after the first body of each
+  coding, and a fresh decoder per body costs 5 allocations against 1 MB of output. This is the
+  [workspace](#6-allocation-free-code) pattern of section 6, applied to a per-connection object: allocate at connection
+  start, reset at message start.<!-- src: HTTPBytes/Benchmarks baseline final-1 row "Allocations:Body_chunked_gzip" (Malloc 6); HTTPBytes/RESULTS.md final-1 section "Allocations" paragraph ("A fresh decoder per body costs 5 allocations against 1 MB of output"; "a connection's decoder reset per body allocates nothing after the first body of each coding (gate 0 …)"); the post-reset gate of 0 is in HTTPBytes/RESULTS.md and WRITEUP.md, not in the final-1 baseline -->
+
+#### Correctness: other implementations' suites, exactly accounted for
+
+Protocol code fails on inputs nobody wrote a test for. Three things found most of what testing did not.
+
+**Import other implementations' test suites as differential tests, with an exact table of differences.** llhttp's markdown suite
+(258 cases), Go's `net/http` tables, h11, httparse (305 cases), http-parser (101), picohttpparser (94), cursed-http's
+(300), HTTP Garden and PortSwigger's request-smuggling permutations, and h2o's fuzz corpus (1,972 inputs) are generated
+into `TestData` by checked-in scripts and run through HTTPBytes' parsers; the outcome is compared with each suite's
+verdict. Every deliberate disagreement is a row in a `differences` table with its reason (extension methods are tokens,
+RTSP and HTTP/0.9 are not HTTP/1.1, a transfer coding other than `chunked` gets 501, obsolete line folding is rejected).
+The tables are exact: an entry that stops differing fails the test, and so does a `withKnownIssue` that stops recording,
+so a difference cannot silently become a bug or a fix. The suites found 11 real gaps (raw UTF-8 request targets, an empty
+`Transfer-Encoding`, the chunk-extension grammar and its limits, CONNECT with a body, `100-continue` in HTTP/1.0, and
+others).<!-- src: HTTPBytes/WRITEUP.md "Correctness" "Other implementations' test suites" table and prose (258, 305, 101, 94, 300, 1,972; "The suites found 11 real gaps"); AGENTS.md "HTTPBytes as a whole" bullet "Import other implementations' test suites as differential tests, with a table of deliberate differences" -->
+
+**An old-versus-new differential during optimization.** For the seven steps above, the previous parser was compiled as a
+second module in the measuring harness, and both were run on 1.6 million inputs: corpus heads and their mutations, whole
+and fed 1, 7, and 64 bytes at a time, under four option sets, comparing every event and error. It ran in 9 seconds, and it caught a scan that skipped a block on
+its first run, something no corpus test noticed. An optimization pass over parsing code that does not carry its
+predecessor along is flying blind.<!-- src: HTTPBytes/RESULTS.md "2026-11-23: HTTP/1 heads against cursed-http" intro ("an old-versus-new differential (the previous HTTP1 sources as a second module: events and errors equal on 1.6 million inputs, corpus heads and their mutations, whole and fed 1, 7, and 64 bytes at a time, under four option sets)"); AGENTS.md "HTTP/1 heads against cursed-http" bullet ("1.6 M inputs in 9 s … found a scan that skipped a block on its first run") -->
+
+**Adversarial review by an agent given the code, not the conclusions.** Two review passes found 15 confirmed defects, each of
+which became a probe package reproducing it and then a regression test: an HTTP/2 field converted to HTTP/1 through an
+unchecked store append (CR LF injection); `Content-Length: ,` slipping past the CL+TE smuggling check; trailers, leading empty
+lines, and CONTINUATION frames with no limits; a QPACK Section Acknowledgment that could be dropped and would freeze the
+peer's table; and quadratic re-scans when input arrives a byte at a time, in four places (HTTP/1 partial lines, chunk
+trailers, QPACK encoder-stream literals, and a stacked content decoder's stalled buffer, which looped forever). Every
+incremental parser now has a test fed one byte at a time with a time limit.<!-- src: HTTPBytes/WRITEUP.md "Adversarial reviews" (15 confirmed defects; the four quadratic re-scans; "Every incremental parser now has a test fed a byte at a time with a time limit"); AGENTS.md "HTTPBytes as a whole" bullets "An adversarial review agent given the code, not the conclusions" and "Every incremental parser needs a 'fed a byte at a time' test with a time limit" -->
+
+A lesson of a different kind came from strictness. Validating request targets against RFC 3986 rejected 52 of the 401
+real browser requests (Facebook's `?filter[0]=` has raw brackets in the query) and cost 15% to 69% in cycles, so it is
+an option and off by default. Measure a validator against real traffic before making it the default.<!-- src: HTTPBytes/RESULTS.md "Request-target validation is an option, off by default" bullet (http-corpus requests 236 → 272 cycles (+15%), top-1k requests 657 → 1,113 (+69%); "it rejects real traffic: 52 of http-corpus's 401 requests") -->
+
+#### The whole result
+
+Per iteration, p50, from the `final-1` baseline. References are the same machine in the same run.
+
+| Workload | HTTPBytes | Fastest other | Others |
+|---|---|---|---|
+| HTTP/1: 401 real request heads (232 KB) | **35 µs** | cursed-http 38 µs | picohttpparser 92, llhttp 89 |
+| HTTP/1: top-1k, 3,533 request heads (4.1 MB) | **761 µs** | cursed-http 806 | picohttpparser 1,773, llhttp 1,744 |
+| HTTP/1: 383 real response heads (365 KB) | 53 µs | **cursed-http 45** | picohttpparser 127, llhttp 131 |
+| HTTP/1: 20 fields of 128 B, 1,000 heads | **254 µs** | cursed-http 322 | llhttp 485, picohttpparser 806 |
+| HTTP/1 heads into owned fields (401) | **111 µs, 0 mallocs** | | swift-http-types `HTTPFields` 604 µs, 3,669 mallocs |
+| 3,000 field lookups by name | **8.1 µs** | | `HTTPFields` 634 µs |
+| HPACK decode, 401 requests | **132 µs** | cursed-http 162 | ls-hpack 228, NIOHPACK 552 |
+| HPACK encode, 401 requests | **89 µs** | ls-hpack 239 | cursed-http 244, NIOHPACK 1,422 |
+| QPACK decode, 401 requests, 4 KB table | **120 µs** | cursed-http 171 | ls-qpack 235 |
+| QPACK encode, 401 requests, 4 KB table | **107 µs** | cursed-http 238 | ls-qpack 751 |
+| Structured Fields, 1,000 dictionaries | **196 µs** | | swift-http-structured-headers 22,000 µs |
+| 1 MB gzip body, chunked in 4 KB, decoded | **530 µs** | | system zlib, whole body, 627 µs |
+<!-- src: HTTPBytes/Benchmarks baseline final-1 (final-1.tsv), "Time (wall clock)" rows: "HTTP/1 request heads (401 requests, 232 KB)" (HTTPBytes 35, cursed-http 38, picohttpparser 92, llhttp 89), "(top-1k, 3,533 requests, 4.1 MB)" (761, 806, 1,773, 1,744), "HTTP/1 response heads (383 responses, 365 KB)" (53, 45, 127, 131), "(1,000 × 20 fields of 128 B)" (254, 322, 485 llhttp, 806 picohttpparser), "HTTP/1 requests into owned fields (401 requests)" (111 µs, 0 mallocs; HTTPFields 604 µs, 3,669 mallocs), "Fields: 3,000 lookups by name" (8.127, 634), "HPACK decode (401 requests)" (132, 162, 228, 552), "HPACK encode (401 requests)" (89, 239 ls-hpack, 244 cursed-http, 1,422), "QPACK decode (401 requests, 4,096 table)" (120, 171, 235), "QPACK encode (401 requests, 4,096 table)" (107, 238, 751), "Structured Fields: 1,000 dictionaries (7 members)" (196, 22,000), "Body 1 MB text, gzip, chunked in 4 KB" (530) and "gzip, whole: zlib (system)" (627) -->
+
+Where HTTPBytes is behind: HTTP/1 responses (13 to 16% more cycles than cursed-http, from the mispredictions above) and
+tiny heads given only their own bytes (10 to 55% behind, because cursed-http's contract lets it read 64 bytes past the end
+of its input and HTTPBytes copies the partial last block instead: a safe API against an unsafe one).<!-- src: HTTPBytes/WRITEUP.md "Open items" (responses 13–16% more cycles than cursed-http; tiny heads 10–55% behind, cursed-http reads 64 bytes past the input; HTTPBytes copies the partial block); HTTPBytes/RESULTS.md final table rows "tiny requests (38 B)" and "… alone" (23.9 ns, 73 cycles against 15.5, 47) -->
+
+#### What generalizes
+
+- **Prototype the strategy on the real corpus, and judge by cycles.** An hour of three throwaway parsers chose the design
+  that every later step built on, and the winner ran more instructions than the loser.<!-- src: AGENTS.md "HTTPBytes as a whole" bullet "Prototype the scanning strategy before the API" ("decided the design in an hour"); table above -->
+- **A mask per block is a general parser shape**, not an HTTP one: classify 64 bytes into one register, then use
+  integer arithmetic. `ByteBlock` is the Bytes API for it.
+- **The gap between a prototype and a library is the compiler.** Inlining, a static function instead of a `mutating` one, and
+  unchecked loads where the offset is proven were 1.12 to 0.84 cycles a byte.
+- **Past a certain size, force-inlining stops working.** Take the rare part out of the loop, then check the loop for `bl`.
+- **Fewer instructions on the critical path can lose.** `ld4` packing, batched masks, and per-line scans each ran fewer
+  instructions and more cycles.
+- **Make the expensive lookup lazy** when most callers do not need it, and make it branch-free when they do.
+- **A zero-malloc gate finds the heap box.** It also forces the structure (workspaces, `reset`) that keeps the
+  per-message path clean.
+- **Let the owner of the bytes keep them** (QPACK's blocked streams), and let a parser's output be views of them.
+- **Other implementations' tests, a differential against your own previous code, and an adversarial reader** found what the
+  author's tests did not, and an exact table of differences keeps the first of these honest.
+
+**When not to follow it.** The index classifies a whole 64-byte block before it knows how much of it will be used, so work past a
+short head's end is wasted: the batched variants (masks for 5 blocks at a time; a ring of 8) made 38-byte heads 55 → 86 and 55 → 92
+cycles. Tiny heads are also where HTTPBytes is slowest against C parsers that skip the partial-block copy, and a library that
+must not read past its input pays that copy. And a technique tuned on one corpus is tuned to it: measure on your own inputs.<!-- src: HTTPBytes/RESULTS.md "Tried and not kept" table (tiny 55 → 86 and 55 → 92); HTTPBytes/WRITEUP.md "Open items" (tiny heads) -->
+
+### 13. Measuring honestly
 
 Every number in this document comes from a benchmark, and every benchmark can lie. These are the ways the measurements here
 nearly did, and the rules that came out of each.
@@ -5282,6 +6469,56 @@ Compare instruction counts across two builds of a harness with care: identical c
 instructions per iteration between them.<!-- src: Bytes/Benchmarks/RESULTS.md "Adler-32 with UDOT" table; AGENTS.md "Old and new code in one benchmark run" -->
 Benchmark sizes that are all multiples of a kernel's block size hide its remainder path: include odd sizes (Base64's
 16-byte-remainder sizes hid a 42% short-input improvement).<!-- src: AGENTS.md "Benchmark sizes that are all multiples of a kernel's block size" -->
+
+#### The machine's state is part of the measurement
+
+Rows that go through the kernel read the *machine*, and three of this period's regressions that were not regressions came
+from it.
+
+- **A nearly full volume.** With the disk at 98% full, and `mediaanalysisd` and `corespotlightd` each using a core, every 32 MB
+  extraction read 7–8 M more instructions (the kernel's allocation, on every codec: the writing side), and the eight-archive
+  row ran 3–5x slower. It looked like the regression of the change under test. An interleaved control, the current tree with
+  only that change reverted, read 174–177 M against 174–175 M for the current tree; after freeing 20 GB (39 GiB free) the rows
+  were as before. Check `df` before believing a file-system row, and remove scratch trees (copies of the repository with their
+  `.build`s are 2–5 GB each) once merged.
+- **Probes that move with the kernel's state.** Disk's 1 GB single-file rows read −8% to +27% in instructions and 0.3x to 2.4x in
+  time between two trees, *including the probes*, which are raw `pwrite` and `DispatchIO` calls in the benchmark itself,
+  unchanged between the trees. The rows measure the page cache and APFS allocation after a gigabyte written per sample, with
+  the new side always running after the old. Judge them within one process only.
+- **Row names are shared with the repository.** `ab-old-*` and `ab-new-*` are tracked baselines in several packages, and
+  `baseline update` overwrites them silently. Name a session's baselines after the work (`zipnative-old-1`), and check
+  `git status` for modified `results.json` files after a run. And `Tools/bench-table` prints three significant digits, too
+  coarse for a change of 0.3%: read exact p50s from an unslimmed `results.json` before slimming, or compare the codegen
+  (identical object code settles it).
+<!-- src: NativeAEA/RESULTS.md "2026-11-22, evening: allocations in an extraction, traced" paragraph "A full disk looks like a regression" ("NativeZip's rows run right after read +7–8 M instructions per 32 MB extraction (every codec, so the writing side) and the 8-archive row 3–5x slower. The volume was 98% full, with `mediaanalysisd` and `corespotlightd` each using a core. With 20 GB of this session's scratch trees removed (39 GiB free), an interleaved control … read 174–177 M against 174–175 M"); Disk/RESULTS.md "2026-11-22, later: the cleanups" bullet "1 GB single files" ("instructions −8 to +27% and times 0.3x–2.4x in either direction, in the probes too, which are raw `pwrite`/DispatchIO calls in the benchmark itself, unchanged between the trees … Judge them only within one process"); AGENTS.md "Baseline names are shared with the repository" and "`bench-table` prints 3 significant digits" (lessons; no RESULTS file) -->
+
+#### A benchmark that sums results measures failures
+
+HTTPBytes' first HTTP/1 baseline read 3.4x picohttpparser, which was too good. The request line's limit check compared the
+whole remaining buffer against the 64 KiB head limit, and the corpus (232 KB) always had more than that after a head, so
+every parse threw `headTooLarge` at once. The benchmark summed its results and never looked at them. Now every
+benchmark's `setup:` checks that every item succeeded (the parsers' exact lengths, each field byte for byte against the
+encoder's input), never a sum or a count. A speedup that is too large is a suspect: look at what was computed.<!-- src: HTTPBytes/RESULTS.md "A bad first baseline" (http1-1: "the request line checked the whole remaining buffer against the 64 KiB head limit … the benchmark summed results without checking them"; "every benchmark's setup now checks that every head parses"); HTTPBytes/WRITEUP.md "How it was measured" ("The first HTTP/1 baseline read 3.4x picohttpparser") -->
+
+#### Compare against your previous code, as a differential
+
+For an optimization pass over a parser, compile the previous sources as a second module in the measuring harness and compare
+every output, not just the final state. HTTPBytes' seven steps past cursed-http ran against its predecessor on 1.6 million
+inputs (corpus heads and their mutations, whole and fed 1, 7, and 64 bytes at a time, under four option sets), comparing
+every event and error: 9 seconds, and the first run caught a scan that skipped a block, which no corpus test noticed.<!-- src: HTTPBytes/RESULTS.md "2026-11-23: HTTP/1 heads against cursed-http" intro (the old-versus-new differential; events and errors equal on 1.6 million inputs); AGENTS.md "HTTP/1 heads against cursed-http" last bullet ("1.6 M inputs in 9 s … found a scan that skipped a block on its first run") -->
+
+#### Import other implementations' test suites, with an exact table of differences
+
+The test cases of llhttp (258), Go's `net/http`, h11, httparse (305), http-parser (101), picohttpparser (94), cursed-http
+(300), HTTP Garden, PortSwigger's request-smuggling permutations, and h2o's fuzz corpus (1,972 inputs) are run through the
+library, and each outcome is compared with the suite's verdict. Every deliberate disagreement is an entry in a `differences`
+table with its reason, and an entry that stops differing fails the test (as does a `withKnownIssue` that stops
+recording), so the table stays exact and a difference cannot turn into a bug unseen. The suites found 11 real gaps that the
+library's own tests had not, among them raw UTF-8 request targets, an empty `Transfer-Encoding`, the chunk-extension
+grammar, and CONNECT with a body.<!-- src: HTTPBytes/WRITEUP.md "Correctness" "Other implementations' test suites" table (258, 305, 101, 94, 300, 1,972) and "The suites found 11 real gaps"; AGENTS.md "HTTPBytes as a whole" bullet "Import other implementations' test suites as differential tests, with a table of deliberate differences" -->
+An adversarial review by an agent given the code and not the conclusions found 15 more, among them CR LF injection
+through an unchecked append and a smuggling check that `Content-Length: ,` slipped past; each became a probe package, then a
+regression test.<!-- src: HTTPBytes/WRITEUP.md "Adversarial reviews" (15 confirmed defects) -->
 
 #### Several agents at once
 
@@ -5536,8 +6773,8 @@ An `async` function can wait for something that is not itself `async` (a callbac
 signal) with a **continuation**: `withCheckedContinuation` or `withUnsafeContinuation` suspends the task and hands you a
 value to call `resume` on exactly once. The **checked** form verifies that, at the price of an allocation per wait;
 the **unsafe** form does not check and does not allocate. In code that waits about once per file, that allocation is
-worth avoiding. NativeAEA's primitives use `UnsafeContinuation` in release builds (inside a `@safe` wrapper,
-`Continuation`) and `CheckedContinuation` in debug builds, where the check is worth the allocation.
+worth avoiding. BytesAsync's primitives (which began as NativeAEA's) use `UnsafeContinuation` in release builds (inside a
+`@safe` wrapper, `Continuation`) and `CheckedContinuation` in debug builds, where the check is worth the allocation.
 <!-- src: NativeAEA/ARCHITECTURE.md §9 "The primitives": "Release builds use UnsafeContinuation ... debug builds use CheckedContinuation ... (it allocates a canary per wait, so release builds don't use it: writers wait for the file system about once per file)"; AGENTS.md Lessons "A CheckedContinuation allocates per wait" -->
 BytesAsync's Dispatch hop does the same, with a comment stating why it is safe: "resumed exactly once, by the block,
 after `work` returns".
@@ -5919,9 +7156,14 @@ room in a queue, a file system permit, a large-file slot, a fork's turn, a decod
 a synchronous fast path under the lock, no lost wake-ups, one waiter per event resumed outside the lock, waiter storage
 reserved up front (so the steady state allocates nothing), and closing resumes everyone.
 <!-- src: NativeAEA/ARCHITECTURE.md §9 "The primitives" -->
-`Synchronization`'s `Mutex` (SE-0433) and `Atomic` (SE-0410) hold the state; `AtomicCounter`, a class around `Atomic`,
-exists so that arrays can hold one reference count per buffer.
-<!-- src: NativeAEA/ARCHITECTURE.md §9 primitive table (Mutex, Atomic<Int>, AtomicCounter); SE-0433 mutex, SE-0410 atomics -->
+`Synchronization`'s `Mutex` (SE-0433) and `Atomic` (SE-0410) hold the state. These primitives began as NativeAEA's own
+(and Disk's, nearly word for word); since 2026-11-21 they are `BytesAsync`'s `Continuation`, `WaiterQueue`, `AsyncLimiter`,
+`AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, and `AsyncHandoff`, one implementation shared by NativeAEA, Disk, and
+NativeZip (Part II, ["Waiting primitives: one implementation each"](#waiting-primitives-one-implementation-each)). NativeAEA's
+`JobQueue` became `AsyncQueue` with its unused wait-time counter dropped; the per-buffer reference counts, once an array of
+`AtomicCounter` objects (a class around `Atomic`, so that arrays could hold one), are one `RelaxedCounters`, which saved the
+pool 30–36 mallocs an extraction.
+<!-- src: NativeAEA/ARCHITECTURE.md §9 primitive table (Mutex, Atomic<Int>); SE-0433 mutex, SE-0410 atomics; Bytes/Benchmarks/RESULTS.md "2026-11-21, the waiting primitives and RawStorage" table (JobQueue → AsyncQueue "its unused wait-time counter dropped"); NativeAEA/RESULTS.md "2026-11-22, late: …" ("The segment pool's reference counts are one `RelaxedCounters` instead of one `RelaxedCounter` object per buffer"; mallocs −30 to −36: "the pool's counters and Disk's 11") -->
 
 In concrete terms, a released buffer, permit, or slot index "goes straight to the task that has waited longest"; a pushed job goes to a waiting consumer; a publish resumes the consumer only if it waits for that
 index. Waking everyone happens only on close or failure.
@@ -5977,8 +7219,9 @@ state the decoders are suspended on a full buffer pool, so they are not competin
 The general lesson, from AGENTS.md: "Measure before adding an executor."
 <!-- src: AGENTS.md Lessons "CPU-bound tasks filling the cooperative pool didn't starve the others ... Measure before adding an executor" -->
 
-The CLI is the one place priority is set: its async `main` task is at priority 21, so `run()` starts one child at
-`.userInitiated`, the quality of service the old threads had.
+The entry points are the one place priority is set: an async `main` task is at priority 21, so `run()` starts one child at
+`.userInitiated`, the quality of service the old threads had. That is now `BytesAsync`'s `withPriority(_:operation:)`, which
+the app uses too (Part III, ["Nunarchiver"](#nunarchiver-the-app-and-its-two-traps)).
 <!-- src: NativeAEA/ARCHITECTURE.md §1; NativeAEA/RESULTS.md "What mattered" ("the async main task is at 21, the old threads were user-initiated") -->
 
 #### 3.4 One cancellation handler, and cancellation that releases everything
@@ -6009,12 +7252,12 @@ Failure follows the same path: the first error wins, is stored under the stream'
 #### 4.1 NativeZipArchive: pools, queues, and the kernel's limit
 
 NativeZipArchive's concurrency is a worker pool. `forEachConcurrently` starts up to `maxConcurrency` child tasks of a
-`withThrowingDiscardingTaskGroup`, each with its own decoder, and a lock-free `WorkQueue` hands out indexes with an atomic
-increment (`Atomic<Int>`, relaxed ordering). Items are sorted largest first (longest-processing-time scheduling), so
+`withThrowingDiscardingTaskGroup`, each with its own decoder, and a `RelaxedCounter` hands out indexes with an atomic
+increment (`claim(below:)`: relaxed ordering, no lock; it replaced a `WorkQueue` type of NativeZip's own). Items are sorted largest first (longest-processing-time scheduling), so
 a big entry does not start last and leave the other workers idle. With one worker or one item, everything runs inline,
 in order, with no task overhead. If the body throws, the group cancels the others, which stop claiming; items already
 started finish. Cancelling the caller does the same.
-<!-- src: NativeZipArchive/Sources/NativeZip/Concurrency.swift `WorkQueue` and `forEachConcurrently` doc comment -->
+<!-- src: NativeZipArchive/Sources/NativeZip/Concurrency.swift `forEachConcurrently` doc comment and body (`let next = RelaxedCounter()`, `next.claim(below:)`); NativeZipArchive/Benchmarks/RESULTS.md step18 ("`RelaxedCounter`") -->
 The function is `nonisolated(nonsending)`, so the inline path runs on the caller's executor, and the body is a
 `@concurrent @Sendable` closure.
 <!-- src: Concurrency.swift doc comment and signature -->
@@ -6035,8 +7278,11 @@ metadata, deepest level first, each level in parallel.
 <!-- src: NativeZipArchive/Benchmarks/RESULTS.md step15 "Parallelism" bullets -->
 
 **A pipelined write for large entries.** `ZipDecoder.decodePipelined` keeps two 1 MB buffers: chunk N is written in a
-child task while chunk N+1 inflates, for deflated entries of 4 MB or more.
-<!-- src: NativeZipArchive/Benchmarks/RESULTS.md "step3" bullet on inflatePipelined (the function is now `decodePipelined`: NativeZipArchive/Sources/NativeZip/ZipDecoder.swift) -->
+child task while chunk N+1 inflates, for deflated entries of 4 MB or more. The decoder and the writing task meet in an
+`AsyncHandoff<ZipDecoder.Chunk>`: the decoder's `send` returns once the consumer has finished the previous chunk and taken
+the new one, so the two buffers alternate with nothing allocated per chunk. (NativeZip's own `ChunkHandoff`, 137 lines
+on raw `UnsafeContinuation`s, became that type, and the 8-archive row's instructions did not move: 4.17 G before and after.)
+<!-- src: NativeZipArchive/Benchmarks/RESULTS.md "step3" bullet on inflatePipelined (the function is now `decodePipelined`: NativeZipArchive/Sources/NativeZip/ZipDecoder.swift); ZipDecoder.swift lines 507–510 (`typealias ChunkHandoff = AsyncHandoff<ZipDecoder.Chunk>` and its doc comment); NativeZipArchive/Benchmarks/RESULTS.md "2026-11-21: a quarantine option; the mapping and the handoff shared" table row "`ChunkHandoff` (137 lines on raw `UnsafeContinuation`s)" (Extract 8 archives of 64 MB 4.17 → 4.17 G) -->
 Parallel writes to one file gain nothing, because the kernel serializes them (Part III, ["NativeZipArchive: the kernel
 is the limit"](#nativeziparchive-the-kernel-is-the-limit)).
 <!-- src: NativeZipArchive/Benchmarks/RESULTS.md step15 "One large stored file (1 GB)" bullet -->
@@ -6104,14 +7350,17 @@ by number only; the reproducers are kept outside the repository.
 | **Leased buffers are unimplemented on `PThreadTaskExecutor`** | The closure-based `read { }`/`write { }` that would encode into a platform buffer cannot run | Encode into your own batch and write it |
 | **A plain `nonisolated` async function checks the executor on entry and after each call** | 2.5 `swift_task_switch` per socket operation | `nonisolated(nonsending)` |
 | **A `throws(E)` closure passed to an untyped generic `rethrows` API** (`Array.withUnsafeMutableBytes`) throws the wrong error, silently; with a `Void` or tuple result the compiler crashes. Report 25, swiftlang/swift#90291 | A `BytesError` printed `()` | `array.withOutputRawSpan { }` or `array.mutableSpan.withUnsafeMutableBytes` |
-| **A sync method and an `async` overload of one name taking a `throws(E)` closure are ambiguous** from async code | Does not compile | Different names (`fill`, `receive`) |
+| **A sync method and an `async` overload of one name taking a `throws(E)` closure are ambiguous** from async code, across modules too (Disk against BytesAsync's `withLentBytes`) | Does not compile | Different names (`fill`, `receive`), or a two-line helper in the client |
+| **`ManagedBuffer` is explicitly not `Sendable`** | A subclass declaring `@unchecked Sendable` warns ("inherits an unavailable Sendable conformance") | Keep the subclass internal and wrap it in an `@unchecked Sendable` struct (`RelaxedCounters`) |
+| **An enum returned from `Mutex.withLock` that is not `Sendable`** | Region-isolation warning ("result … cannot be returned") from the PR toolchain, none from Xcode's compiler | Make the type `Sendable`; build new BytesAsync API with both compilers |
+| **Swift Testing's `#expect` cannot read a `~Copyable` value's property**, nor take a `~Escapable` value | Does not compile | Bind the property (or the span's result) to a `let` first |
 | **`do { } catch` around a typed-throws call boxes the error** (`swift_allocError`) | An allocation per thrown error | `do throws(E) { }` |
 | **A span of a global `let` from another file** is rejected ("lifetime-dependent value escapes its scope") when files compile separately, as in debug builds; accepted with whole-module optimization | Debug builds fail, release builds pass | Bind the global to a local first |
 | **Spans cannot be captured through two closures**, nor borrowed from a property while another property is mutated in a closure | Does not compile | Pass both as parameters to a `static` function |
 | **`package-benchmark`'s malloc interposer traps on thread exit** (`count_free` calling `calloc` in `_pthread_tsd_cleanup`) | Benchmarks that start threads cannot count mallocs | Count mallocs in single-threaded benchmarks |
 | **The malloc interposer costs about 10% on large transfers** | Transfer bandwidth skewed | Keep allocation and timing benchmarks separate |
 | **Shared mutable state the walker reads to decide reference handoffs** (a writer cleared a large file's fork type) | A buffer reference leaked, and `DispatchSemaphore` trapped at deinit | Keep the decider's own copy |
-<!-- src: SocketStream/RESULTS.md "Notes on swift-platform-executors" and "Receiver fix" (close on error paths; the trap text is quoted there); AGENTS.md Lessons (rethrows bug #90291 report 25; "do throws(E)"; sync/async overload ambiguity "hence fill and receive"; span-of-global; two-closure spans; malloc interposer thread-exit trap; "Shared mutable state the walker reads to decide reference handoffs is a leak"); SocketStream/RESULTS.md "The transfers themselves aren't measured with the malloc interposer ... cost large-packet transfers about 10%" -->
+<!-- src: SocketStream/RESULTS.md "Notes on swift-platform-executors" and "Receiver fix" (close on error paths; the trap text is quoted there); Bytes/Benchmarks/RESULTS.md "2026-11-21, the waiting primitives and RawStorage" bullets "Not moved" (Disk's `withUnsafeBytesAsync`) and "A PR-toolchain-only warning"; Bytes/Sources/BytesAsync/Counting.swift (`RelaxedCounters` comment on `ManagedBuffer`); AGENTS.md "`ManagedBuffer` is explicitly not `Sendable`", "Spans and Swift Testing" and "`#expect` can't read a `~Copyable` value's property" (lessons, no RESULTS file); AGENTS.md Lessons (rethrows bug #90291 report 25; "do throws(E)"; sync/async overload ambiguity "hence fill and receive"; span-of-global; two-closure spans; malloc interposer thread-exit trap; "Shared mutable state the walker reads to decide reference handoffs is a leak"); SocketStream/RESULTS.md "The transfers themselves aren't measured with the malloc interposer ... cost large-packet transfers about 10%" -->
 
 Two process-level traps are not compiler bugs but still cost time. The first `URLSession` request to a new domain, and
 any `open` on a file in `~/Downloads`, `Desktop`, or `Documents`, wait on a macOS privacy prompt that the user may not
@@ -6268,6 +7517,9 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **All or nothing (read semantics)**: a read that throws consumes nothing, so a streaming parser can retry when more data
   arrives; `position` and `rewind(to:)`, or `atomically { … }`, undo a sequence of reads.
 - **`any` (existential)**: a box holding a value of unknown type plus its witness table; calls through it are dynamic.
+- **AppleDouble**: the format macOS uses to carry a file's extended attributes, Finder info, resource fork, and ACL in a
+  separate `._NAME` entry (beside the item or under `__MACOSX`) in archives that cannot hold them; Archive Utility and
+  NativeZip *merge* such an entry into its item when extracting.
 - **ARC (automatic reference counting)**: Swift's retain/release counting for class instances, closures, and array storage.
 - **ASCII tag**: a byte group built from text, such as `Byte4(ascii: "IHDR")`; inlined, it folds to the same hex constant
   as writing the bytes by hand.
@@ -6280,6 +7532,9 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **Attached macro**: a macro that adds members and conformances to a type you declare by generating ordinary Swift at
   compile time in a compiler plugin (`@BitFields`, `@BinaryRecord`); the generated code is as fast as hand-written code
   when it is inlined.
+- **Backward bitstream (`BackwardBits`)**: Zstandard's and LZFSE's bit order, read from the last byte toward the first,
+  most significant bit first, through a 64-bit container and a count of bits used from its top; one shared field read
+  shifts right by 1, then by `63 − count`, so a zero-bit read needs no branch.
 - **Bit buffer (`BitBuffer`)**: up to 64 bits of input held in one integer and refilled 8 bytes at a time, for entropy
   decoders. It never throws while decoding: past the end it fills with zeros, and the error surfaces at `finish()` or
   through `isOverrun`.
@@ -6287,6 +7542,8 @@ Each term is bold where the text first defines it; this list collects the terms 
   fields of any bit width at any bit position, carrying a bit offset (and, in the writer, the partly written byte).
 - **Bit-field extract and insert (`ubfx`, `bfi`)**: take a run of bits out of a register, or put one into a register,
   in one instruction.
+- **Block mask (`ByteBlock`)**: 64 bytes tested into one 64-bit integer, byte `i` in bit `i`, made from four `ByteLanes` tests;
+  on NEON, `bytes_movemask64` (four `and`, four `addp`, one move). The building block of a structural index.
 - **Bounds check**: a test that an index or offset is within a buffer, with a trap or throw if not.
 - **Braided CRC**: zlib's table-driven CRC that runs five independent CRCs over interleaved 8-byte words and combines them
   in the last block, which works because a CRC is linear; it turns a latency chain into load-bound work.
@@ -6312,6 +7569,9 @@ Each term is bold where the text first defines it; this list collects the terms 
   matching lane set.
 - **Cache, cache line**: small fast memories between the core and main memory; filled in fixed blocks (128 bytes on Apple
   silicon).
+- **Caller limit (the SIL inliner's)**: the size past which the SIL performance inliner stops inlining into a function, even
+  trivial callees; a loop of `@inline(always)` code can reach it, after which small getters stay calls. The remedy is to take
+  a rare part out of the loop.
 - **Cancellation handler**: `withTaskCancellationHandler` runs a closure, synchronously, in whoever cancels the task.
   NativeAEA uses one per operation, which closes its pools and queues so every waiter wakes.
 - **Canonical Huffman code**: a Huffman code defined by the length of each symbol's code, which the format transmits; the
@@ -6336,6 +7596,9 @@ Each term is bold where the text first defines it; this list collects the terms 
   never on the caller's actor (SE-0461). Its parameters and result cross an isolation boundary, so they must be `Sendable`
   or `sending`. It suits heavy synchronous work that should stay off an actor.
 - **Conditional select (`csel`)**: pick one of two registers by the condition flags, with no branch.
+- **Content coding**: how an HTTP message body is compressed (`Content-Encoding`: gzip, deflate, br, zstd). HTTPBytes'
+  decoder takes a chunked body's data slice by slice, keeping a codec's unconsumed tail in a carry buffer, and is reset for
+  each body instead of made.
 - **Continuation, checked continuation, unsafe continuation**: a value an `async` function gets from
   `withCheckedContinuation` or `withUnsafeContinuation` to wait for something that is not `async`; it must be resumed
   exactly once. The checked form verifies that at the price of an allocation per wait; the unsafe form neither checks nor
@@ -6359,10 +7622,18 @@ Each term is bold where the text first defines it; this list collects the terms 
   and `minimumOutputCapacity` (least free output it needs); `Pipeline` sizes its buffer from them.
 - **`decmpfs`**: APFS's transparent file compression: a resource fork, a `com.apple.decmpfs` extended attribute (a 16-byte
   header, data inline when small), and the `UF_COMPRESSED` flag, in chunks of 64 KiB.
+- **`Decompressor`, `DecompressionFormat`**: one decoder over every format Bytes decodes, with each format's state made on
+  its first stream and kept; `reset(for:)` names the format (carrying what its container records), and `decompress` or
+  `decompressAll` decodes.
+- **Deflate64**: PKWARE's variant of DEFLATE (zip method 9) with a 64 KB window, matches of up to 65,538 bytes, and two more
+  distance codes; `DeflateDecoder(variant: .deflate64)`.
 - **Dependency chain**: instructions that each need the previous one's result, so they cannot overlap; it runs at one
   step's latency per link however wide the CPU is.
 - **Descriptor (`BitFlag`, `BitField`, `BitPattern`)**: a bit-level field declared once and used by name: one bit as a
   `Bool`, adjacent bits as a value, or fixed bits checked at once (`0`, `1`, `?` free, `_` between groups).
+- **Differential test**: running two implementations on the same inputs and comparing every output: another library's
+  test suite (with a table of deliberate differences), or the previous version of the code as a second module. A difference
+  that stops occurring fails the test, so the table stays exact.
 - **Discarded cycles**: the share of cycles whose work was thrown away after mispredictions, as `Tools/counters`'
   `bottlenecks` mode reports it beside useful, front-end, and back-end cycles.
 - **Discarding task group**: a task group made with `withDiscardingTaskGroup` (SE-0381) for child tasks whose results are
@@ -6387,6 +7658,10 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **Flush (`TransformFlush`)**: what a pipeline stage is asked to do with its input: `.none` (transform as it sees fit),
   `.flush` (end the output on a boundary the next stage can use in full), or `.finish` (no more input).
 - **FSE (finite state entropy)**: a table-based ANS entropy coder, used by Zstandard's sequence tables and by LZFSE.
+- **Full mode (malloc stack logging)**: `MallocStackLoggingNoCompact`, which records every allocation and free with its
+  stack (the default, lite mode, keeps only live allocations); `Tools/allocations --history` reads it with
+  `malloc_history -allEvents` to find allocations that were freed again. It makes libobjc allocate a page per autorelease
+  pool push, which the tool leaves out and counts.
 - **Function merging**: LLVM folding identical functions into one, and, in Swift's pipeline, functions that differ only in
   constants into one `merged …` function that takes them as a parameter. It can undo a specialization; it also proves two
   forms compile to identical code.
@@ -6409,6 +7684,9 @@ Each term is bold where the text first defines it; this list collects the terms 
   positions, which LLVM compiles to one shuffle (a single-register `tbl`), to pack and unpack 3- to 7-byte groups with no C.
 - **Hop**: a `swift_task_switch` that finds the task on the wrong executor: the runtime enqueues a job on the right one, the
   thread goes back to the pool, and the task continues later, usually on another thread with cold caches.
+- **HPACK**: HTTP/2's field compression (RFC 7541): a 61-entry static table, a dynamic table of recent fields, and a Huffman
+  code for strings. HTTPBytes decodes Huffman with a 14-bit table whose entries decode one or two symbols, keeps dynamic
+  entries contiguous and numbered by insertion, and caches each entry's validation.
 - **Independent chains**: separate dependency chains interleaved in one loop so their latencies overlap: eight ChaCha20
   blocks at once in place of four, eight CRC fold accumulators, eight `udot` accumulators for Adler-32's weighted sum, and a
   byte sum started from zero in each step so that no step waits on the one before.
@@ -6451,14 +7729,18 @@ Each term is bold where the text first defines it; this list collects the terms 
   others deinterleave or interleave 3–4 registers as they move (`ld2`/`st2` do 2).
 - **LEB128**: the variable-length integer of MQTT, Protocol Buffers, WebAssembly, and DWARF: 7 bits per byte, least
   significant group first, with the high bit set on every byte but the last.
-- **Lending (`LentBytes`)**: handing a span's memory to other threads or child tasks as a `Sendable` pointer
-  (`withLentBytes`, `withLentFreeCapacity`), through scoped functions whose rule is that the work using it must finish
+- **Lending (`LentBytes`, `LentMutableBytes`, `LentMutableSpan`)**: handing a span's memory to other threads or child tasks
+  as a `Sendable` pointer (`withLentBytes`, `withLentFreeCapacity`; initialized memory to read and write in place with
+  `MutableRawSpan.withLentBytes`), through scoped functions whose rule is that the work using it must finish
   before the function returns; the async forms guarantee that with `await`.
 - **Lifetime annotation (`@_lifetime`)**: the declaration of what a returned non-escapable value depends on, which lets a
   function return a span. `@_lifetime(copy data)`: the result inherits the lifetime of `data`, itself non-escapable (a
   span parameter), so it lives as long as the memory `data` views. `@_lifetime(borrow x)`: the result borrows `x` itself
   (an array, a buffer that owns its memory) and is valid only while `x` is. "Copy" refers to the dependence, never to
   bytes.
+- **Limit per round (output limit)**: a decode loop's way to check bounds once per round instead of once per symbol: when each
+  iteration consumes at most *k* bits of input per byte of output it writes, a limit on the output (recomputed each round
+  from the input left) guarantees the input, so the loop's loads and stores are unchecked.
 - **LLVM IR**: the lower-level representation SIL is turned into, where LLVM's general passes run.
 - **Longest-processing-time scheduling**: sorting work items largest first, so a big item does not start last and leave
   the other workers idle (NativeZipArchive's worker pool).
@@ -6475,6 +7757,9 @@ Each term is bold where the text first defines it; this list collects the terms 
   for match finders that prove their bounds.
 - **Montgomery multiplication**: the modular multiplication of Bytes' elliptic-curve and RSA code, computed row by row;
   parsing an RSA key computes R² mod n for it.
+- **Multi-symbol Huffman table**: a decoding table indexed by the next *k* bits whose entries hold up to two decoded symbols and
+  the bits they used, so one lookup can emit two symbols; codes longer than *k* bits go to a slower path. HPACK's decoder
+  uses 14 bits (16,384 four-byte entries).
 - **`Mutex`**: the `Synchronization` module's lock (SE-0433); NativeAEA's waits are `Mutex` state plus a continuation.
 - **NAF (non-adjacent form)**: a signed-digit representation of a scalar that needs fewer additions, used for ECDSA
   verification's multiplications.
@@ -6501,6 +7786,9 @@ Each term is bold where the text first defines it; this list collects the terms 
   needs room past the end (`copyOverrun`, 32 bytes, for back-reference copies).
 - **Package trait**: an optional feature a package's users switch on or off (SE-0450); Bytes uses them to choose its C
   modules and builds.
+- **Perfect hash**: a hash function chosen, by a generator, so that no two keys of a fixed set share a slot: a lookup is one
+  hash, one load, and one comparison, with no probing. HTTPBytes' known field names (about 120) are looked up from the name's
+  length and two 8-byte words.
 - **Pipeline stage (`ByteTransform`)**: a transform from input spans into an output span that reports what it consumed and
   produced, as zlib's `deflate` and `inflate` do; stages compose with `then` into a `Pipeline` that specializes to one
   function.
@@ -6512,6 +7800,16 @@ Each term is bold where the text first defines it; this list collects the terms 
   whole registration closure.
 - **`PThreadTaskExecutor`**: swift-platform-executors' task executor that owns its threads, with an I/O backend; SocketStream
   runs its senders and receivers on it.
+- **Quarantine (`com.apple.quarantine`)**: the extended attribute macOS puts on downloaded files, which Archive Utility copies
+  from the archive onto everything it extracts; Disk sets it on each file while it is open, one `fsetxattr` per entry
+  (13–17% more instructions on small files).
+  <!-- src: Disk/RESULTS.md "2026-11-20: the package" "Options, interleaved" bullet "The quarantine costs 13–17%" -->
+- **`RawStorage`, resident floor**: memory allocated once and shared by reference (a decoder's read buffer, a pool's
+  storage); `giveBack` returns the pages past a 2 MiB resident floor to the kernel (`MADV_FREE_REUSABLE`) after each use and
+  `reuse` takes them back before the next.
+- **QPACK**: HTTP/3's field compression (RFC 9204): HPACK redesigned for streams that arrive out of order. A field section can
+  name a table entry that has not arrived (a **blocked stream**); HTTPBytes' decoder records the stream and the caller, which
+  already holds its bytes, decodes it when `nextUnblockedStream()` names it.
 - **rANS**: the ANS entropy coder of LZRAVEN's literals; its decoder interleaves eight states, and its refill branches stay
   branches because their mispredictions are off the critical path.
 - **Record (`BinaryParsable`, `BinaryWritable`, `FixedSizeBinary`)**: a fixed run of fields read or written in one call;
@@ -6523,6 +7821,11 @@ Each term is bold where the text first defines it; this list collects the terms 
   unchecked, and the slow refill near the end takes and returns values.
 - **Register, register file**: a storage slot inside the core, the only place it computes; ARM64 has 31 general-purpose and
   32 vector registers.
+- **`RelaxedCounter`, `RelaxedCounters`**: `BytesAsync`'s counters with relaxed atomic ordering, for statistics and for
+  claiming the next index of a work queue (`claim(below:)`); `RelaxedCounters` holds *N* of them in one allocation.
+- **Request smuggling**: attacking a chain of HTTP servers that disagree about where a message ends (Content-Length against
+  chunked, obsolete line folding, a comma in a length). A parser's framing rules are tested against other implementations'
+  smuggling suites, with every deliberate difference listed.
 - **`resumeSynchronously`**: the PR toolchain's continuation call that swift-platform-executors uses to resume a suspended
   socket operation directly from the event loop, on the thread where it suspended.
 - **Root table, subtable**: `HuffmanTable`'s layout: a table indexed by the next `rootBits` bits (10 by default), in which
@@ -6564,9 +7867,16 @@ Each term is bold where the text first defines it; this list collects the terms 
   instructions.
 - **Store-to-load forwarding**: passing a stored value directly to a load of the same address, without waiting for the
   cache; still several cycles, which can sit on a loop's critical path.
+- **Streaming window**: the buffer a streaming LZMA or xz decoder owns (a flat window of the dictionary plus room, slid to
+  its front when full), so the decode loops run unchanged into it and the caller receives output as it has room.
 - **Strict memory safety**: the Swift mode requiring `unsafe` on every use of an unsafe construct.
+- **Structural index**: one bit per input byte marking the bytes that matter (delimiters), built a block at a time with SIMD
+  tests and walked with `trailingZeroBitCount` instead of a scan from delimiter to delimiter (simdjson's idea). HTTPBytes
+  keeps only the current 64-byte block's mask, so a head parser needs no memory per message.
 - **Structured concurrency**: child tasks that cannot outlive the scope that created them (SE-0304: task groups, `async
   let`); the runtime knows the tree and propagates cancellation and priority escalation down it.
+- **Structured Field Values**: HTTP's typed header syntax (RFC 9651): items, lists, dictionaries, parameters. HTTPBytes parses
+  them with `~Escapable` iterators whose members are views of the field's bytes, so nothing is built or allocated.
 - **Suspension point**: an `await` where the task may give up its thread; an `await` of something already ready does not
   suspend and costs only a call.
 - **SWAR (SIMD within a register)**: ordinary 64-bit integer operations on eight packed byte fields at once, as in reading
@@ -6601,6 +7911,9 @@ Each term is bold where the text first defines it; this list collects the terms 
 - **`usra`, `ushr`, `shl`**: vector shifts; `usra` shifts right and accumulates.
 - **Vectorization, auto-vectorization**: turning a loop that handles one element per iteration into one that handles
   several (16 bytes on ARM64) with vector instructions; auto-vectorization is the compiler doing it.
+- **Waiting primitives**: `BytesAsync`'s `Continuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`,
+  `AsyncQueue`, and `AsyncHandoff`: `Mutex` state plus continuations, with a synchronous fast path, no lost wake-ups, and
+  resumption outside the lock.
 - **Worker pool**: a fixed number of child tasks that each take the next item from a shared queue
   (NativeZipArchive's `forEachConcurrently`).
 - **Workspace (caller-supplied scratch)**: scratch memory an algorithm needs, allocated once by the codec or passed in by

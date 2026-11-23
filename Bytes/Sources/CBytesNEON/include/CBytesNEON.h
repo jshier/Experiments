@@ -168,4 +168,34 @@ BYTES_INLINE bytes_u8x16x4 bytes_interleave4(bytes_u8x16 a, bytes_u8x16 b, bytes
     return result;
 }
 
+/// One bit per lane of four 16-lane match vectors whose lanes are all ones or all zeros (as comparisons leave them;
+/// `ByteBlock.gather` spreads `ByteMatches`' high bits first, a shift LLVM drops for comparison results): lane i of `a`
+/// in bit i, of `b` in bit 16 + i, of `c` in 32 + i, of `d` in 48 + i. On NEON, each lane ANDed with its bit within a
+/// byte and summed by three rounds of pairwise adds (`addp`): 9 vector instructions for 64 lanes, against four
+/// `ByteMatches.bitmask`s' dozen scalar ones each.
+///
+/// Measured against cursed-http's packing (an `ld4` de-interleaving load, then three shift-right-inserts and a narrowing
+/// shift: 5 instructions; HTTPBytes/RESULTS.md, 2026-11-23): on HTTP/1 heads, where a block's mask is on the walk's
+/// critical path, the `ld4` (2 cycles of load throughput for 64 bytes against 1.33 for four plain loads, and longer
+/// latency) cost 4–14% more cycles than this despite 5% fewer instructions.
+BYTES_INLINE uint64_t bytes_movemask64(bytes_u8x16 a, bytes_u8x16 b, bytes_u8x16 c, bytes_u8x16 d) {
+#if defined(BYTES_NEON)
+    const uint8x16_t weights = { 1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128 };
+    uint8x16_t ma = vandq_u8((uint8x16_t)a, weights), mb = vandq_u8((uint8x16_t)b, weights);
+    uint8x16_t mc = vandq_u8((uint8x16_t)c, weights), md = vandq_u8((uint8x16_t)d, weights);
+    uint8x16_t sum = vpaddq_u8(vpaddq_u8(ma, mb), vpaddq_u8(mc, md));
+    sum = vpaddq_u8(sum, sum);
+    return vgetq_lane_u64(vreinterpretq_u64_u8(sum), 0);
+#else
+    uint64_t mask = 0;
+    for (int lane = 0; lane < 16; lane++) {
+        mask |= (uint64_t)(a[lane] >> 7) << lane;
+        mask |= (uint64_t)(b[lane] >> 7) << (16 + lane);
+        mask |= (uint64_t)(c[lane] >> 7) << (32 + lane);
+        mask |= (uint64_t)(d[lane] >> 7) << (48 + lane);
+    }
+    return mask;
+#endif
+}
+
 #endif
