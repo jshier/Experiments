@@ -138,7 +138,7 @@ func extract(
     storage: Storage = .plain, writesPerFile: Int = 1, metadata: EntryMetadata = .init()
 ) async throws -> (ExtractionReport, ArraySource) {
     let source = ArraySource(entries.map(\.bytes), writesPerFile: writesPerFile)
-    let report = try await Extraction.run(into: destination, source: source, options: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+    let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
         for (index, entry) in entries.enumerated() {
             _ = try await planFile(&planner, entry.path, index: index, size: entry.bytes.count, metadata: metadata, storage: storage)
         }

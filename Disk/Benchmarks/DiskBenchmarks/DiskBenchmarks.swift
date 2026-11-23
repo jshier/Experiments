@@ -140,7 +140,7 @@ let benchmarks: @Sendable () -> Void = {
         let source = PieceWriter(base: UnsafeRawPointer(tree.contents.baseAddress!), count: tree.byteCount, piece: 8 << 20)
         try await measure(benchmark, "streamed") { path in
             let destination = try Destination(path)
-            return try await Extraction.run(into: destination, source: source, options: streamed) { (planner: inout Planner<PieceWriter>) throws(DiskError) in
+            return try await Extraction.run(into: destination, source: source, settings: streamed) { (planner: inout Planner<PieceWriter>) throws(DiskError) in
                 let name = Array("large.bin".utf8)
                 try await planner.file(try EntryPath(validating: name.span.bytes), size: tree.byteCount, contents: 0)
             }

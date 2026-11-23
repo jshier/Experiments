@@ -60,7 +60,7 @@ public enum DiskError: Error, Sendable, Equatable, CustomStringConvertible {
     }
 
     /// The source's error, if this is ``source(_:)``.
-    public var sourceError: (any Error)? {
+    package var sourceError: (any Error)? {
         if case .source(let error) = self { error } else { nil }
     }
 

@@ -75,7 +75,7 @@ Beyond the types below, `Bytes` extends the standard library (DocC can't link th
 `MutableRawSpan`); `[UInt8](hexadecimal:)` and `String(hexadecimal:uppercase:)` for hexadecimal text;
 `String(utf8Capacity:writing:)`, which passes an ``AlignedBytesWriter``;
 `withBytesWriter`, `withAlignedBytesWriter`, and `withBytesWriter(mode:_:)` on `OutputSpan` and `OutputRawSpan`;
-`withLentBytes(_:)` on `RawSpan` and `withLentFreeCapacity(_:)` on `OutputRawSpan` (see ``LentBytes``); `append(copying:)` and
+`withLentBytes(_:)` on `RawSpan` and `MutableRawSpan`, and `withLentFreeCapacity(_:)` on `OutputRawSpan` (see ``LentBytes``); `append(copying:)` and
 `withFreeCapacity(byteCount:_:)` on `OutputRawSpan`; `copyBytes(from:toByteOffset:)` and
 `copyBytes(within:toByteOffset:)` on `MutableRawSpan` and `MutableSpan<UInt8>`; `hasPrefix`, `hasSuffix`,
 `bytesEqual`, `containsByte(where:)`, `firstByteOffset(where:)`, `firstByteOffset(of:from:)`, `commonPrefixLength(at:and:from:maxLength:)`,
@@ -191,6 +191,7 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``ByteBuffer``
 - ``RawStorage``
 - ``LentBytes``
+- ``LentMutableSpan``
 - ``LentMutableBytes``
 
 ### Decoders, encoders, and checksums

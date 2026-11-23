@@ -91,6 +91,19 @@ struct ZstdWorkspace: ~Copyable {
 
 // MARK: - Backward bitstreams
 
+/// What Zstandard's and LZFSE's backward bitstreams (``ZstdReverseBits``, ``LZFSEReverseBits``) share: a 64-bit
+/// container read from its most significant bits down.
+enum BackwardBits {
+    /// The next `count` bits, 0 through 56, of `container`, whose top `consumed` bits are used; counts them as used.
+    /// 0 reads nothing and gives 0: the value is shifted right by 1, then by `63 − count`, so no shift is by 64.
+    @inline(__always)
+    static func read(_ count: Int, from container: UInt64, consumed: inout Int) -> Int {
+        let value = ((container &<< UInt64(truncatingIfNeeded: consumed)) &>> 1) &>> UInt64(truncatingIfNeeded: 63 &- count)
+        consumed &+= count
+        return Int(truncatingIfNeeded: value)
+    }
+}
+
 /// A bitstream read backward (RFC 8878, 4.1): from its last byte, whose highest set bit marks the end,
 /// toward its first, most significant bits first. As libzstd's `BIT_DStream_t`: a 64-bit container loaded
 /// little-endian from `position`, with `consumed` bits used from its top.
@@ -156,9 +169,7 @@ struct ZstdReverseBits {
     /// The next `count` bits, 0 through 56 (0 reads nothing and gives 0).
     @inline(__always)
     mutating func read(_ count: Int) -> Int {
-        let value = ((container &<< UInt64(truncatingIfNeeded: consumed)) &>> 1) &>> UInt64(truncatingIfNeeded: 63 &- count)
-        consumed &+= count
-        return Int(truncatingIfNeeded: value)
+        BackwardBits.read(count, from: container, consumed: &consumed)
     }
 
     /// The next `count` bits, 1 through 56.

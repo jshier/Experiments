@@ -587,19 +587,19 @@ extension TLSRecordProtection {
         precondition(input.byteCount >= count &* content && output.byteCount >= count &* size, "Not enough input or room")
         precondition(sequence &+ UInt64(count) < recordLimit, "The batch would reach the key's record limit")
         let template = self
-        // Unsafe: raw pointers into the input and output, shared by the lanes. Safe: each lane reads and writes only
-        // its own records' ranges (disjoint, within the bounds checked above), and `concurrentPerform` returns once
-        // every lane is done, inside the closures that lend the pointers.
-        input.withUnsafeBytes { source in
-            output.withUnsafeMutableBytes { target in
-                let memory = unsafe ParallelRecords(source: source.baseAddress!, target: target.baseAddress!)
+        // Unsafe: the input and output lent to the lanes as pointers. Safe: each lane reads and writes only its own
+        // records' ranges (disjoint, within the bounds checked above), and `concurrentPerform` returns once every lane
+        // is done, inside the closures that lend them.
+        unsafe input.withLentBytes { source in
+            unsafe output.withLentBytes { target in
                 DispatchQueue.concurrentPerform(iterations: min(lanes, count)) { lane in
+                    let (input, output) = unsafe (source.buffer.baseAddress!, target.buffer.baseAddress!)
                     var record = lane
                     while record < count {
                         var protection = template
                         protection.sequence &+= UInt64(record)
-                        let plaintext = unsafe RawSpan(_unsafeStart: memory.source + record &* content, byteCount: content)
-                        var destination = unsafe MutableRawSpan(_unsafeStart: memory.target + record &* size, byteCount: size)
+                        let plaintext = unsafe RawSpan(_unsafeStart: input + record &* content, byteCount: content)
+                        var destination = unsafe MutableRawSpan(_unsafeStart: output + record &* size, byteCount: size)
                         // Can't throw: the sequence stays below the limit (checked above).
                         _ = try! protection.seal(plaintext, type: .applicationData, padding: padding, into: &destination)
                         record &+= lanes
@@ -609,12 +609,4 @@ extension TLSRecordProtection {
         }
         sequence &+= UInt64(count)
     }
-}
-
-/// The input and output of a parallel seal, shared by its lanes. Unsafe: raw pointers; see
-/// ``TLSRecordProtection/sealInParallel(_:count:padding:lanes:into:)`` for why the sharing is safe.
-@unsafe
-struct ParallelRecords: @unchecked Sendable {
-    let source: UnsafeRawPointer
-    let target: UnsafeMutableRawPointer
 }

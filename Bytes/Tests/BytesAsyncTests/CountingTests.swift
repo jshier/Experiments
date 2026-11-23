@@ -20,6 +20,24 @@ import Testing
         #expect(RelaxedCounter(-3).value == -3)
     }
 
+    /// Several counters in one allocation: each counts on its own from many threads, copies share them, and other
+    /// orderings go through `withAtomic`.
+    @Test func countersAddFromThreads() {
+        let counters = RelaxedCounters(count: 5, value: 3)
+        #expect(counters.count == 5)
+        #expect((0..<5).allSatisfy { counters.value(at: $0) == 3 })
+        let copy = counters
+        DispatchQueue.concurrentPerform(iterations: 8) { lane in
+            for _ in 0..<1_000 { copy.add(at: lane % 5) }
+        }
+        // Lanes 0–7 over 5 counters: indexes 0, 1, 2 get two lanes each, 3 and 4 one.
+        #expect((0..<5).map { counters.value(at: $0) } == [2_003, 2_003, 2_003, 1_003, 1_003])
+        counters.store(1, at: 4)
+        #expect(counters.withAtomic(at: 4) { $0.subtract(1, ordering: .acquiringAndReleasing).newValue } == 0)
+        #expect(counters.add(-3, at: 0) == 2_000)
+        #expect(RelaxedCounters(count: 0).count == 0)
+    }
+
     /// Every index below the limit is claimed exactly once, across threads, then `nil` for everyone.
     @Test(arguments: [0, 1, 37, 1_000]) func claimsEachIndexOnce(limit: Int) {
         let counter = RelaxedCounter()

@@ -36,7 +36,7 @@ public struct Planner<Source: ContentSource>: ~Copyable {
     var deferred: [DeferredEntry] = []
     var fixes: [DirectoryFix] = []
     var report = ExtractionReport()
-    var phases: [String: Double] = [:]
+    var phases: [ExtractionPhase: Double] = [:]
     /// The blob last appended to: its entry, kind, and where it ended in the arena.
     private var lastBlob: (entry: Int, isACL: Bool, end: Int) = (-1, false, -1)
     // The large file being planned.

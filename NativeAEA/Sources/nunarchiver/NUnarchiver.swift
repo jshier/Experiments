@@ -62,10 +62,10 @@ struct NUnarchiver: AsyncParsableCommand {
     var decodeThreads = ProcessInfo.processInfo.activeProcessorCount
 
     @Option(name: .long, help: "Writers in file system calls at once (default: a quarter of the performance cores, 2 to 6).")
-    var fileSystemWidth = AEAExtractionOptions().fileSystemWidth
+    var fileSystemWidth = DiskDefaults.fileSystemWidth
 
     @Option(name: .long, help: "Writers (tasks) compressing and writing files (default: one per performance core).")
-    var writerThreads = AEAExtractionOptions().writerThreads
+    var writerThreads = DiskDefaults.writers
 
     @Flag(name: .long, help: "Show the extraction's progress on standard error.")
     var progress = false
@@ -115,18 +115,20 @@ struct NUnarchiver: AsyncParsableCommand {
     }
 
     private func work() async throws {
-        // An Apple Archive file (`aa archive`'s output, plain or `pbz`), not in an AEA container.
-        // Its first bytes (up to 4; none for an empty or unreadable file, which the AEA reader then reports).
-        let magic: [UInt8]? = (try? InputFile(FilePath(archive))).flatMap { file in
-            (try? file.read(at: 0, count: min(4, file.count))).flatMap { $0.isEmpty ? nil : $0 }
-        }
-        if magic == Array("xar!".utf8) {
+        // By the first bytes, else the extension. A file that's neither, or can't be read, goes to the AEA reader, which
+        // reports why.
+        switch (try? ArchiveKind(detecting: FilePath(archive))) ?? nil {
+        case .xip:
             try await runXIP()
             return
-        }
-        if let magic, magic != Array("AEA1".utf8) {
+        case .appleArchive:
+            // An Apple Archive file (`aa archive`'s output, plain or `pbz`), not in an AEA container.
             try await runAppleArchive()
             return
+        case .zip:
+            throw ValidationError("\(archive) is a ZIP archive: use nunzip.")
+        case .appleEncryptedArchive, nil:
+            break
         }
         let key: AEASigningKey = if let signPub {
             try AEASigningKey.publicKey(contentsOf: FilePath(signPub))
@@ -232,16 +234,16 @@ struct NUnarchiver: AsyncParsableCommand {
     private func extracting(_ read: AEAReadOptions, _ extract: (AEAExtractionOptions) async throws -> AEAStatistics) async throws -> AEAStatistics {
         var options = AEAExtractionOptions()
         options.read = read
-        options.writerThreads = writerThreads
-        options.fileSystemWidth = fileSystemWidth
+        options.disk.writers = writerThreads
+        options.disk.fileSystemWidth = fileSystemWidth
+        options.disk.collectsTimings = verbose
         options.diskCompression = diskCompression
         options.overwrite = overwrite
         options.relativeToParents = relativeToParents
-        options.copyQuarantine = !noQuarantine
-        options.collectsTimings = verbose
+        options.copiesQuarantine = !noQuarantine
         guard progress else { return try await extract(options) }
         let counters = ExtractionProgress()
-        options.progress = counters
+        options.disk.progress = counters
         let reporter = Task {
             func show(_ end: String) {
                 // Bytes and entries together (each entry as 64 KiB), never going back: the fraction moves through a

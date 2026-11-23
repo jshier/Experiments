@@ -1,66 +1,26 @@
-import Darwin
 import Disk
 import NativeAEA
 import NativeZip
 import System
 
-/// The archive formats Nunarchiver expands, recognized by their first bytes (then by extension).
-enum ArchiveFormat: Equatable {
-    /// `.zip`: NativeZip.
-    case zip
-    /// `.aea`: NativeAEA's `AEAArchive`.
-    case appleEncryptedArchive
-    /// `.aar`, `.yaa`, plain or `pbz`-compressed: NativeAEA's `AppleArchiveFile`.
-    case appleArchive
-    /// `.xip`: NativeAEA's `XIPArchive`.
-    case xip
-
-    /// The format of the file at `archive`: by its first bytes, else by its extension.
+/// The archive formats Nunarchiver expands: NativeAEA's `ArchiveKind` (`.zip` for NativeZip; `.aea`, `.aar`/`.yaa`, and
+/// `.xip` for NativeAEA), recognized by their first bytes, then by extension.
+extension ArchiveKind {
+    /// The kind of the file at `archive`, for the app's alerts.
     ///
     /// - Throws: ``ExpansionFailure/system(call:path:code:)`` if the file can't be read,
-    ///   ``ExpansionFailure/unrecognizedFormat(_:)`` if neither says.
-    init(detecting archive: FilePath) throws {
-        if let format = try ArchiveFormat(magic: Self.head(of: archive)) {
-            self = format
-            return
+    ///   ``ExpansionFailure/unrecognizedFormat(_:)`` if neither its first bytes nor its extension says.
+    static func detect(_ archive: FilePath) throws -> ArchiveKind {
+        let kind: ArchiveKind?
+        do throws(AEAError) {
+            kind = try ArchiveKind(detecting: archive)
+        } catch {
+            // Disk's call and `errno`, with the archive's own path (the alert names the file, not Disk's path).
+            if case .disk(.system(let call, _, let code)) = error { throw ExpansionFailure.system(call: call, path: archive, code: code.rawValue) }
+            throw error
         }
-        switch archive.extension?.lowercased() {
-        case "zip": self = .zip
-        case "aea": self = .appleEncryptedArchive
-        case "aar", "yaa": self = .appleArchive
-        case "xip": self = .xip
-        default: throw ExpansionFailure.unrecognizedFormat(archive.lastComponent?.string ?? archive.string)
-        }
-    }
-
-    /// The format a file starting with `magic` is in, or `nil` if its first bytes are no archive's.
-    init?(magic: [UInt8]) {
-        func starts(_ prefix: String) -> Bool { magic.starts(with: prefix.utf8) }
-        if starts("PK\u{3}\u{4}") || starts("PK\u{5}\u{6}") || starts("PK\u{7}\u{8}") {
-            self = .zip
-        } else if starts("AEA1") {
-            self = .appleEncryptedArchive
-        } else if starts("xar!") {
-            self = .xip
-        } else if starts("AA01") || starts("YAA1") || starts("pbz") {
-            self = .appleArchive
-        } else {
-            return nil
-        }
-    }
-
-    /// The first 8 bytes of `archive` (fewer, if it's shorter).
-    private static func head(of archive: FilePath) throws -> [UInt8] {
-        // Unsafe: `open` takes a C string. Safe: the path's own, bridged for the call and not kept.
-        let descriptor = unsafe Darwin.open(archive.string, O_RDONLY | O_CLOEXEC)
-        guard descriptor >= 0 else { throw ExpansionFailure.system(call: "open", path: archive, code: errno) }
-        defer { close(descriptor) }
-        var bytes = [UInt8](repeating: 0, count: 8)
-        // Unsafe: `read` writes through a pointer. Safe: it's the array's own storage, valid inside the closure, and
-        // `read` writes at most the count it's given, the storage's.
-        let count = bytes.withUnsafeMutableBytes { unsafe read(descriptor, $0.baseAddress, $0.count) }
-        guard count >= 0 else { throw ExpansionFailure.system(call: "read", path: archive, code: errno) }
-        return Array(bytes.prefix(count))
+        guard let kind else { throw ExpansionFailure.unrecognizedFormat(archive.lastComponent?.string ?? archive.string) }
+        return kind
     }
 
     /// Opens `archive` with the format's adapter and what the user has entered.

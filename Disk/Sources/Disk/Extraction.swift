@@ -4,7 +4,7 @@ import Darwin
 import Synchronization
 import System
 
-/// Settings for ``Extraction/run(into:source:options:_:)``.
+/// Settings for ``Extraction/run(into:source:settings:_:)``.
 public struct ExtractionSettings: Sendable {
     public init() {}
 
@@ -15,16 +15,16 @@ public struct ExtractionSettings: Sendable {
     /// work runs outside this limit and the calls inside it. Also the width of the passes after the writers.
     public var fileSystemWidth = DiskDefaults.fileSystemWidth
     /// Jobs queued ahead of the writers (back-pressure on the planner): with the source's buffers, it bounds memory.
-    public var queueCapacity = 16_384
+    package var queueCapacity = 16_384
     /// Bytes of queued jobs' paths.
-    public var queuePathBytes = 4 << 20
+    package var queuePathBytes = 4 << 20
     /// The largest file a writer gathers from several writes before writing it (bigger ones stream): its staging
     /// buffer's size. Pages past 2 MiB are given back after each use.
-    public var stagingCapacity = 1 << 20
+    package var stagingCapacity = 1 << 20
     /// Large files (``Planner/beginLargeFile(_:size:metadata:storage:first:minimumPieceSize:tag:)``) open at once: a
     /// file's slot is held until its last piece is written, which waits behind the queue (NativeAEA: 4 slots left its
     /// walker waiting 6 of 9 seconds; 128 none).
-    public var largeFileSlots = 128
+    var largeFileSlots = 128
     /// Stop at the first entry that fails (and throw it), or record failures and go on
     /// (``ExtractionReport/failures``). Cancellation always stops.
     public var stopsOnFirstFailure = true
@@ -57,21 +57,40 @@ public struct ExtractionReport: Sendable {
     /// Bytes of file contents (before compression).
     public var fileBytes = 0
     /// Files stored plain, inline, and in resource forks.
-    public var plainFiles = 0
-    public var inlineFiles = 0
-    public var forkFiles = 0
+    package var plainFiles = 0
+    package var inlineFiles = 0
+    package var forkFiles = 0
     /// With ``ExtractionSettings/stopsOnFirstFailure`` off: the entries that failed, in the order they failed.
     public var failures: [EntryFailure] = []
     public var seconds = 0.0
-    /// Seconds per phase after the planner: `writers` (waiting for them), `hardLinks`, `specialFiles`,
-    /// `symbolicLinks`, `deferred`, `directories`; and `planning`.
-    public var phaseSeconds: [String: Double] = [:]
+    /// Seconds per phase: the planning, then each pass after the writers that ran.
+    public var phaseSeconds: [ExtractionPhase: Double] = [:]
     /// Writers' seconds by kind of work, summed over writers (``ExtractionSettings/collectsTimings``).
-    public var writerSeconds: [String: Double] = [:]
+    public var writerSeconds: [WriterWork: Double] = [:]
     /// Seconds the planner waited for room in the queue.
     public var plannerWaitSeconds = 0.0
     /// Times the planner waited for room in the queue (each one a suspension and a wake-up).
-    public var plannerWaits = 0
+    package var plannerWaits = 0
+}
+
+/// A part of an extraction, timed in ``ExtractionReport/phaseSeconds``.
+public enum ExtractionPhase: Sendable, Hashable, CaseIterable {
+    /// The plan (the caller's walk): directories made, files queued, the rest recorded. The writers run alongside.
+    case planning
+    /// The passes after the writers, in the order they run.
+    case hardLinks, specialFiles, symbolicLinks, deferred, directories
+}
+
+/// A kind of writer work, timed in ``ExtractionReport/writerSeconds`` (with ``ExtractionSettings/collectsTimings``).
+public enum WriterWork: Int, Sendable, Hashable, CaseIterable {
+    /// Waiting: for a job, then for a file-system permit.
+    case wait
+    /// Compressing a file's chunks (outside the file-system limit), and producing its bytes from the source.
+    case compress, produce
+    /// The file-system calls: `openat`, data `pwrite`s, the resource fork, metadata, `close`.
+    case open, data, fork, finish, close
+    /// Large files: writing a piece, waiting for its turn at the fork, and finishing the file.
+    case piece, turn, largeFileFinish
 }
 
 /// An extraction's failure: the disk's, or the plan's own (its walker's error).
@@ -136,15 +155,15 @@ public enum Extraction {
     ///   with `plan`'s own error.
     @concurrent @discardableResult
     public static func run<Source: ContentSource, PlanFailure: Error>(
-        into destination: Destination, source: Source, options: ExtractionSettings = .init(),
+        into destination: Destination, source: Source, settings: ExtractionSettings = .init(),
         _ plan: (inout Planner<Source>) async throws(PlanFailure) -> Void
     ) async throws(ExtractionError<PlanFailure>) -> ExtractionReport {
         let started = MonotonicClock.now
-        if options.writers > 0, destination.options.directoryResolution == .descriptors { DiskDefaults.raiseDescriptorLimit() }
-        let context = ExtractionContext(destination: destination, source: source, options: options)
+        if settings.writers > 0, destination.options.directoryResolution == .descriptors { DiskDefaults.raiseDescriptorLimit() }
+        let context = ExtractionContext(destination: destination, source: source, options: settings)
         var planner = Planner(context)
         var planFailure: PlanFailure?
-        let writers = max(1, options.writers)
+        let writers = max(1, settings.writers)
         let writersDone = AsyncLatch(count: writers)
         await withTaskCancellationHandler {
             await withDiscardingTaskGroup { group in
@@ -168,7 +187,7 @@ public enum Extraction {
                 }
                 await planner.abandonOpenFile()
                 context.queue.close()
-                planner.phases["planning"] = MonotonicClock.seconds(since: planStarted)
+                planner.phases[.planning] = MonotonicClock.seconds(since: planStarted)
                 await writersDone.wait()
             }
         } onCancel: {
@@ -230,22 +249,19 @@ final class WriterCounters: Sendable {
 
 /// Nanoseconds per kind of writer work (with ``ExtractionSettings/collectsTimings``).
 final class WorkTimings: Sendable {
-    enum Kind: Int, CaseIterable {
-        case wait, compress, produce, open, data, fork, finish, close, piece, turn, largeFileFinish
-    }
-
-    private let counters = (0..<Kind.allCases.count).map { _ in RelaxedCounter() }
+    /// One counter per kind, in one allocation.
+    private let counters = RelaxedCounters(count: WriterWork.allCases.count)
 
     @inline(__always)
-    func add(_ kind: Kind, since start: Int) {
-        counters[kind.rawValue].add(MonotonicClock.nanoseconds(since: start))
+    func add(_ kind: WriterWork, since start: Int) {
+        counters.add(MonotonicClock.nanoseconds(since: start), at: kind.rawValue)
     }
 
-    var seconds: [String: Double] {
-        var result: [String: Double] = [:]
-        for kind in Kind.allCases {
-            let value = counters[kind.rawValue].value
-            if value > 0 { result["\(kind)"] = Double(value) / 1e9 }
+    var seconds: [WriterWork: Double] {
+        var result: [WriterWork: Double] = [:]
+        for kind in WriterWork.allCases {
+            let value = counters.value(at: kind.rawValue)
+            if value > 0 { result[kind] = Double(value) / 1e9 }
         }
         return result
     }

@@ -47,7 +47,7 @@ extension Planner {
     /// The passes after the writers: hard links, special files, symbolic links, deferred metadata, directories.
     mutating func finish() async throws(DiskError) {
         var phaseStarted = MonotonicClock.now
-        func phase(_ name: String, _ phases: inout [String: Double]) {
+        func phase(_ name: ExtractionPhase, _ phases: inout [ExtractionPhase: Double]) {
             let now = MonotonicClock.now
             phases[name] = Double(now - phaseStarted) / 1e9
             phaseStarted = now
@@ -64,15 +64,15 @@ extension Planner {
         defer { withExtendedLifetime(arena) {} }
         do {
             try await hardLinkPass(shared, width: width, progress: progress)
-            phase("hardLinks", &phases)
+            phase(.hardLinks, &phases)
             try specialPass(shared, progress: progress)
-            phase("specialFiles", &phases)
+            phase(.specialFiles, &phases)
             try await linkPass(shared, width: width, progress: progress)
-            phase("symbolicLinks", &phases)
+            phase(.symbolicLinks, &phases)
             try await deferredPass(shared, width: width)
-            phase("deferred", &phases)
+            phase(.deferred, &phases)
             try await directoryPass(shared, width: width)
-            phase("directories", &phases)
+            phase(.directories, &phases)
         }
     }
 

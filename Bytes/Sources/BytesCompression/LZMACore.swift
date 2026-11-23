@@ -21,10 +21,10 @@ internal import Bytes
 // Speed comes from the chain from one bit to the next, since a literal's eight bits each depend on the last.
 // Bits of trees (literals, lengths, distance slots and low bits) are decoded with conditional selects, and
 // each bit's probability is picked from its parent's two children, loaded together while the parent decodes
-// (a matched literal loads both candidates); the normalization after a bit is folded into the next, compared
-// against a threshold in a register. Decisions that repeat (literal or match, which kind of match) keep
-// branches, as `LzmaDec.c` does. The literal trees are written out, and the loop is specialized for lc 3,
-// lp 0, pb 2.
+// (a matched literal loads both candidates, whose indices are selected a bit ahead); the normalization after a
+// bit is folded into the next, compared against a threshold in a register. Decisions that repeat (literal or
+// match, which kind of match) keep branches, as `LzmaDec.c` does. The literal trees are written out, and the
+// loop is specialized for lc 3, lp 0, pb 2.
 
 /// The probability model's layout: offsets, in 16-bit probabilities, into the decoder's workspace.
 enum LZMAProbabilities {
@@ -227,51 +227,85 @@ struct LZMARangeDecoder {
     /// its bits, each uses the probabilities for that bit of it (0x100 + 0x100 * bit + node); after they
     /// differ, the plain tree's. Both candidates for the next bit's probability are loaded while a bit is
     /// decoded, as in `literal`.
+    ///
+    /// - Returns: The byte, in the low 8 bits.
     @inline(always)
     mutating func matchedLiteral(_ base: Int, matchByte: Int) -> Int {
-        // `matched` is 0x100 while the bits agree, 0 after; `next` is the match byte's next bit, as 0x100 or 0.
-        let shifted = matchByte &<< 1
-        let next = shifted & 0x100
         // Unsafe: probability loads and stores. Safe: `base` starts a literal context's 0x300 probabilities;
-        // indices are `matched & next` (0 or 0x100) plus `matched` (0 or 0x100) plus a node below 0x200.
-        let index = base &+ next &+ 0x100 &+ 1
-        var state = (symbol: 1, matched: 0x100, shifted: shifted, next: next, index: index, p: UInt32(unsafe probabilities[index]))
-        matchedStep(base, &state)
-        matchedStep(base, &state)
-        matchedStep(base, &state)
-        matchedStep(base, &state)
-        matchedStep(base, &state)
-        matchedStep(base, &state)
-        matchedStep(base, &state)
-        matchedStep(base, &state)
+        // an index is an offset (0, 0x100, or 0x200) plus a node below 0x100, or, for the candidates loaded
+        // during the last bit, an offset of 0 or 0x100 plus a node below 0x200: below 0x300.
+        let literals = unsafe probabilities + base
+        let first = Self.matchedOffset(matchByte, 0) &+ 1
+        let second = Self.matchedOffset(matchByte, 1)
+        let firstBit = Self.matchBit(matchByte, 0)
+        var state = (
+            matched: -1, index0: second & ~firstBit &+ 2, index1: second & firstBit &+ 3, index: first,
+            p: UInt32(unsafe literals[first])
+        )
+        unsafe matchedStep(literals, base, matchByte, 0, &state)
+        unsafe matchedStep(literals, base, matchByte, 1, &state)
+        unsafe matchedStep(literals, base, matchByte, 2, &state)
+        unsafe matchedStep(literals, base, matchByte, 3, &state)
+        unsafe matchedStep(literals, base, matchByte, 4, &state)
+        unsafe matchedStep(literals, base, matchByte, 5, &state)
+        unsafe matchedStep(literals, base, matchByte, 6, &state)
+        unsafe matchedStep(literals, base, matchByte, 7, &state)
         finishSteps()
-        return state.symbol
+        // The index after the last bit: an offset (a multiple of 0x100) plus 0x100 + the byte.
+        return state.index
     }
 
-    /// One bit of `matchedLiteral`.
+    /// Bit `bit` of `matchByte` (0 the most significant, 0 past the last) as a mask: all ones or 0.
+    @inline(always)
+    static func matchBit(_ matchByte: Int, _ bit: Int) -> Int {
+        bit > 7 ? 0 : 0 &- ((matchByte &>> (7 &- bit)) & 1)
+    }
+
+    /// The offset of bit `bit`'s probabilities while the bits agree: 0x100 + 0x100 * the match bit.
+    @inline(always)
+    static func matchedOffset(_ matchByte: Int, _ bit: Int) -> Int {
+        0x100 &+ ((matchByte &<< (bit &+ 1)) & 0x100)
+    }
+
+    /// Bit `bit` of `matchedLiteral`. `matched` is all ones while the decoded bits agree with the match byte's,
+    /// 0 after; `index` is this bit's index (an offset, a multiple of 0x100, plus the node, below 0x100), and
+    /// `index0` and `index1` the next bit's candidates, after a 0 and a 1.
+    ///
+    /// The candidates for the bit after the next are formed for both outcomes of this bit, before it's
+    /// decoded, and selected by it: their loads, in the next step, then start one select after this bit,
+    /// off the chain from one bit to the next. (Formed after the select, the index of a matched literal is
+    /// a few operations more than a plain one's, and its loads were late for the multiply.)
     @inline(always)
     mutating func matchedStep(
-        _ base: Int, _ state: inout (symbol: Int, matched: Int, shifted: Int, next: Int, index: Int, p: UInt32)
+        _ literals: UnsafeMutablePointer<UInt16>, _ base: Int, _ matchByte: Int, _ bit: Int,
+        _ state: inout (matched: Int, index0: Int, index1: Int, index: Int, p: UInt32)
     ) {
-        var (symbol, matched, shifted, next, index, p) = state
-        // The next bit's candidates: after a 0 (agreeing if the match bit was 0) or a 1.
-        shifted &<<= 1
-        let following = shifted & 0x100
-        let matched0 = matched & (next ^ 0x100)
-        let matched1 = matched & next
-        let index0 = base &+ (matched0 & following) &+ matched0 &+ symbol &<< 1
-        let index1 = base &+ (matched1 & following) &+ matched1 &+ symbol &<< 1 &+ 1
-        let p0 = UInt32(unsafe probabilities[index0])
-        let p1 = UInt32(unsafe probabilities[index1])
+        var (matched, index0, index1, index, p) = state
+        // Unsafe and safe as `matchedLiteral`.
+        let p0 = UInt32(unsafe literals[index0])
+        let p1 = UInt32(unsafe literals[index1])
+        // After this bit (0 or 1) and the next (0 or 1): the offsets while the bits agree, then the indices.
+        let matchBit = Self.matchBit(matchByte, bit)
+        let nextBit = Self.matchBit(matchByte, bit &+ 1)
+        let offset = Self.matchedOffset(matchByte, bit &+ 2)
+        let offsetAfter0 = offset & ~nextBit
+        let offsetAfter1 = offset & nextBit
+        let matched0 = matched & ~matchBit
+        let matched1 = matched & matchBit
+        let node = (index & 0xFF) &<< 2
+        let index00 = matched0 & offsetAfter0 &+ node
+        let index01 = matched0 & offsetAfter1 &+ node &+ 1
+        let index10 = matched1 & offsetAfter0 &+ node &+ 2
+        let index11 = matched1 & offsetAfter1 &+ node &+ 3
 
         let (one, difference) = step(p)
-        adapt(index, p, difference)
-        symbol = symbol &<< 1 | (Int(truncatingIfNeeded: difference &>> 63) ^ 1)
+        adapt(base &+ index, p, difference)
         p = one ? p1 : p0
         index = one ? index1 : index0
+        index0 = one ? index10 : index00
+        index1 = one ? index11 : index01
         matched = one ? matched1 : matched0
-        next = following
-        state = (symbol, matched, shifted, next, index, p)
+        state = (matched, index0, index1, index, p)
     }
 
     /// `normalize` with conditional selects, reading the next byte whether it's needed or not: only where
@@ -327,9 +361,14 @@ struct LZMARangeDecoder {
     mutating func treeStep(_ raw: UnsafeRawPointer, _ base: Int, _ node: inout Int, _ p: inout UInt32) {
         // Unsafe: the children's load. Safe: as `tree`.
         let children = unsafe raw.loadUnaligned(fromByteOffset: node &<< 2, as: UInt32.self)
+        // The child selected by the comparison (LLVM: `cset` and `bfi`) rather than built from the borrow in
+        // `difference` (`mvn` and `extr`): 2–4% fewer cycles on Silesia's dickens, mozilla, samba, and xml, no
+        // change on x-ray, though more instructions (2026-11-22).
+        let node0 = node &<< 1
+        let node1 = node0 | 1
         let (one, difference) = step(p)
         adapt(base &+ node, p, difference)
-        node = node &<< 1 | (Int(truncatingIfNeeded: difference &>> 63) ^ 1)
+        node = one ? node1 : node0
         p = one ? children &>> 16 : children & 0xFFFF
     }
 

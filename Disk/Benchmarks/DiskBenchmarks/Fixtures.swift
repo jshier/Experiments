@@ -211,7 +211,7 @@ func extract(
     let attributes = blob.bytes
     // Archived files have times: every file gets one (one `fsetattrlist` with the mode).
     let times = EntryTimes(modification: Timestamp(seconds: 1_700_000_000))
-    return try await Extraction.run(into: destination, source: tree.source, options: options) { (planner: inout Planner<MemorySource>) throws(DiskError) in
+    return try await Extraction.run(into: destination, source: tree.source, settings: options) { (planner: inout Planner<MemorySource>) throws(DiskError) in
         var tokens: [EntryToken] = []
         let hasLinks = tree.entries.contains { $0.kind == .hardLink }
         if hasLinks { tokens = Array(repeating: .none, count: tree.entries.count) }

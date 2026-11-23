@@ -17,7 +17,7 @@ as it works; the few that own memory (``ByteBuffer``, ``Pipeline``) allocate onc
 | Encode entropy-coded bits | ``BitWriter`` |
 | Hold bytes between a producer and a consumer | ``ByteBuffer`` |
 | Stream bytes through stages (compress, encrypt) | ``ByteTransform``, ``Pipeline``, ``FusedPipeline`` (and `AsyncByteTransform` in `BytesAsync`) |
-| Share spans with other threads for one call | ``LentBytes``, ``LentMutableBytes`` |
+| Share spans with other threads for one call | ``LentBytes``, ``LentMutableSpan``, ``LentMutableBytes`` |
 | Memory made once and shared by reference (worker scratch, pools, read buffers) | ``RawStorage`` |
 | Make tasks wait without blocking threads | `Continuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, `AsyncHandoff` in `BytesAsync` |
 | Test 16 bytes at once | ``ByteLanes``, ``ByteMatches`` |
@@ -256,10 +256,11 @@ bit first, the order of the codecs that use it.
   `ByteBuffer.receive` fills a buffer from a read that suspends. The parallel codecs have `async` entry points
   too (as child tasks of a task group, `compressAllConcurrently(_:into:)`, or on a Dispatch queue,
   `compressAll(_:into:on:)`), which stop early when their task is cancelled (`BytesError.cancelled`).
-- ``LentBytes`` and ``LentMutableBytes`` carry a span's memory to other threads for the length of one
-  call (`withLentBytes`, `withLentFreeCapacity`): a span can't be captured by a task, so parallel work over
-  a caller's input and output is lent it as a `Sendable` pointer, valid until the lending call returns (which
-  the work must finish before).
+- ``LentBytes``, ``LentMutableSpan``, and ``LentMutableBytes`` carry a span's memory to other threads for the
+  length of one call (`withLentBytes` on `RawSpan` and `MutableRawSpan`, `withLentFreeCapacity`): a span can't be
+  captured by a task, so parallel work over a caller's input, memory it reads and rewrites in place (scrypt's
+  scratch), and output is lent it as a `Sendable` pointer, valid until the lending call returns (which the work must
+  finish before).
 - ``RunningChecksum`` is what ``CRC32`` and ``Adler32`` share: update over pieces, and combine checksums of
   pieces computed separately.
 

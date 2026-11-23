@@ -41,8 +41,10 @@ public final class RawStorage: @unchecked Sendable {
 
     /// Allocates `byteCount` bytes (at least 1), uninitialized.
     ///
-    /// - Parameter alignment: Page-aligned by default, for large buffers (whose pages can be given back); ``small``
-    ///   for small ones.
+    /// - Parameters:
+    ///   - byteCount: The bytes to allocate; 0 allocates 1.
+    ///   - alignment: Page-aligned by default, for large buffers (whose pages can be given back); ``small`` for small
+    ///     ones.
     @inlinable
     public init(byteCount: Int, alignment: Int = RawStorage.pageSize) {
         self.byteCount = max(byteCount, 1)

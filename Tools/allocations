@@ -4,10 +4,21 @@
 # threshold (mallocCountTotal) says something allocates and you need to know what.
 #
 # usage: Tools/allocations [--top N] [--timeout SECONDS] [--keep FILE.trace] -- PROGRAM [ARGS...]
+#        Tools/allocations --history [--top N] [--timeout SECONDS] [--keep FILE.txt] -- PROGRAM [ARGS...]
 #
 # Output: the busiest size classes/types (count, bytes), then the top responsible callers (count, caller,
 # library), tab-separated, under "== categories" and "== callers" headers. Compare two workload sizes to
 # separate per-iteration allocations from fixed ones.
+#
+# Instruments' export lists only allocations still live at the end ("Allocations List"), and its callers for
+# allocations made before it attached read "<Call stack limit reached>": anything allocated and freed again (a
+# per-item box, a temporary array) shows up only in the category counts, never with a caller. --history finds those:
+# it runs PROGRAM under LLDB with malloc stack logging in full mode (MallocStackLoggingNoCompact), stops at `exit`,
+# dumps every event with `malloc_history -allEvents`, and groups the allocations by the innermost frame in PROGRAM's
+# own image ("== callers (count, bytes, frame)"; frames in system libraries only: "[outside] FRAME (LIBRARY)").
+# Full mode changes what libobjc does: every autorelease pool push gets a fresh 4 KiB page, and Swift Concurrency
+# pushes one per job on Darwin, so those pages (absent from a normal run) are left out and counted on stderr. Use
+# --history for where allocations come from; count them with the default mode or a benchmark's malloc counter.
 #
 # Two hurdles, handled:
 # - Allocations attaches to the process, which needs the `get-task-allow` entitlement; SwiftPM release builds
@@ -19,12 +30,13 @@ source "$(dirname "$0")/lib/common.sh"
 have yq || die "needs yq: brew install yq"
 have jq || die "needs jq: brew install jq"
 
-top=15 timeout=120 keep=
+top=15 timeout=120 keep= history=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --top) top="$2"; shift ;;
         --timeout) timeout="$2"; shift ;;
         --keep) keep="$2"; shift ;;
+        --history) history=1 ;;
         -h|--help) usage ;;
         --) shift; break ;;
         *) die "unknown option $1" ;;
@@ -34,6 +46,61 @@ done
 [[ $# -ge 1 ]] || usage 2
 scratch_dir
 program="$(debuggable "$1")"; shift
+
+if [[ $history == 1 ]]; then
+    events="${keep:-$SCRATCH/history.txt}"
+    rm -f "$events"
+    # The program's arguments go on LLDB's command line after it (`lldb -- PROGRAM ARGS`): no quoting for LLDB.
+    # `platform shell` runs its command without a shell (a redirect would be arguments): `/bin/sh -c` does it.
+    cat > "$SCRATCH/history.lldb" <<EOF
+settings set target.env-vars MallocStackLoggingNoCompact=1
+breakpoint set -n exit
+run
+platform shell -- /bin/sh -c "malloc_history '$(basename "$program")' -allEvents > '$events' 2>&1"
+kill
+quit
+EOF
+    note "running $(basename "$program") with full malloc stack logging…"
+    status=0
+    with_timeout "$timeout" lldb --batch -s "$SCRATCH/history.lldb" -- "$program" "$@" > "$SCRATCH/lldb.log" 2>&1 || status=$?
+    [[ $status == 124 ]] && fail "the program didn't reach exit in ${timeout}s (--timeout), or LLDB is waiting on a prompt: $AUTH_HINT"
+    grep -q '^ALLOC' "$events" 2>/dev/null || { tail -5 "$SCRATCH/lldb.log" >&2; die "no allocation history: did the program reach exit?"; }
+    image="$(basename "$program")"
+    IMAGE="$image" TOP="$top" perl -ne '
+        BEGIN { $image = $ENV{IMAGE} }
+        $frees++ if /^FREE/;
+        next unless /^ALLOC/;
+        if (/objc_autoreleasePoolPush/) { $pool++; next }
+        my ($size) = /\[size=(\d+)\]/;
+        my @frames = split / \| /;
+        # The innermost frame in the image that is the program'"'"'s own code: specializations of the standard library'"'"'s
+        # collections and the runtime'"'"'s helpers (array growth, metadata) are skipped to reach their caller.
+        my ($site, $first);
+        for my $frame (reverse @frames) {
+            next unless $frame =~ /\(\Q$image\E\) (.*)$/;
+            my $name = $1;
+            $first //= $name;
+            next if $name =~ /^(specialized )?(_[A-Z]\w*|__swift_\w+|_allocateUninitialized|(Collection|Sequence|Array|ContiguousArray|Dictionary|Set|String|_ArrayProtocol|RangeReplaceableCollection)[.<]|outlined |merged |type metadata|lazy protocol witness|protocol witness for (Sequence|Collection|IteratorProtocol))/;
+            $site = $name; last;
+        }
+        $site //= $first;
+        unless (defined $site) {
+            for my $frame (reverse @frames) {
+                next if $frame =~ /\((libsystem_malloc|libswiftCore)\.dylib\) (_?malloc|_?calloc|_?realloc|swift_(slowAlloc|allocObject)|_malloc_zone|_swift)/;
+                $frame =~ s/^\s*0x[0-9a-f]+ //; $site = "[outside] $frame"; last;
+            }
+        }
+        $site //= "[unknown]";
+        $site =~ s/\s+\S+\.swift:\d+(:\d+)?\s*$//; $site =~ s/\s+$//;
+        $count{$site}++; $bytes{$site} += $size; $total++;
+        END {
+            printf STDERR "%d allocations, %d frees; %d autorelease pool pages left out (full-mode stack logging makes them)\n", $total, $frees, $pool;
+            print "== callers (count, bytes, frame)\n";
+            my @sites = sort { $count{$b} <=> $count{$a} } keys %count;
+            for my $site (@sites[0 .. ($#sites < $ENV{TOP} - 1 ? $#sites : $ENV{TOP} - 1)]) { print "$count{$site}\t$bytes{$site}\t$site\n" }
+        }' "$events" | demangle
+    exit 0
+fi
 
 trace="${keep:-$SCRATCH/run.trace}"
 rm -rf "$trace"

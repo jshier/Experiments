@@ -266,7 +266,7 @@ let benchmarks: @Sendable () -> Void = {
         configuration.metrics = extractionMetrics
         Benchmark(name, configuration: configuration) { benchmark in
             let archive = try ZipArchive(url: url)
-            var options = NativeZip.ExtractionOptions()
+            var options = NativeZip.ZipExtractionOptions()
             if let maxConcurrency { options.maxConcurrency = maxConcurrency }
             // Polled by nobody: the cost of counting (one relaxed add per file, or per chunk of a streamed one).
             if progress { options.progress = ExtractionProgress() }
@@ -373,7 +373,7 @@ let benchmarks: @Sendable () -> Void = {
     for (suffix, progress, quarantined) in [("", false, false), (", progress", true, false), (", quarantined", false, true)] {
         Benchmark("Extract 20,000 small files\(suffix)", configuration: whole) { benchmark in
             let archive = try ZipArchive(url: Fixtures.smallFiles20k)
-            var options = NativeZip.ExtractionOptions()
+            var options = NativeZip.ZipExtractionOptions()
             if progress { options.progress = ExtractionProgress() }
             // The quarantine is the destination's (opened here, as `extract(to:)` opens its own).
             var destinationOptions = DestinationOptions()

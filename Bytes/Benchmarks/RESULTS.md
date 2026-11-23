@@ -3201,3 +3201,46 @@ instruction count. bzip2 is 0.48–0.59x libbz2's instructions; LZMA 0.98–1.14
 The LZMA window's memory shows in NativeZip's rows (Bytes' compression rows don't record it): peak resident memory
 for a 32 MB xz entry 58–60 → 30–33 MB, LZMA 52–54 → 30–33 MB, six fewer mallocs per decode stream (8 → 2 per `Inflate +
 CRC` row) at no instruction cost. Every allocation gate reads 0.
+
+## The second cleanup pass (2026-11-22, late, M1 Max; baselines `lend-old` → `lend-new`, `pass2-old-{1,2}` → `pass2-new-{1,2}`)
+
+HEAD (425420e) against the working tree. `lend-*` are one round over the rows the lending and dedup changes touch (TLS
+sealing, scrypt, RSA, LZFSE, zstd); `pass2-*` are two interleaved rounds of `CompressionBenchmarks`' LZMA and
+`Decompressor` rows, run beside Disk's, NativeAEA's, and NativeZip's suites on an otherwise idle machine.
+
+- **`LentMutableSpan` and `MutableRawSpan.withLentBytes`** (`Lending.swift`): initialized memory lent to parallel
+  workers to read and write in place, beside `LentMutableBytes` (free capacity, uninitialized). TLS sealing's
+  `ParallelRecords` and scrypt's `ScryptMemory`, each a hand-written pointer wrapper for the same job, are gone.
+- **One copy each:** RSA's limb parsing (`RSALimbs.read<let n: Int>`, which `RSAModulus.read` duplicated), and the
+  backward bit reader that Zstandard and LZFSE both had (`BackwardBits.read(_:from:consumed:)` in `ZstdEntropy.swift`).
+- **`RelaxedCounters`** (BytesAsync, `Counting.swift`): N relaxed atomic counters in one allocation (a `ManagedBuffer` of
+  `Atomic<Int>`, wrapped in an `@unchecked Sendable` struct because `ManagedBuffer` isn't `Sendable`). Disk's writer
+  timings and syscall counters and NativeAEA's buffer references used an array of `RelaxedCounter` objects: one
+  allocation each, plus the array (Disk's and NativeAEA's RESULTS.md, same date).
+- **LZMA's matched literal and tree steps** (`LZMACore.swift`, an agent's work): the matched literal forms the next
+  step's four candidate probability indexes two bits ahead and picks between them by the decoded bit, so the next loads
+  start one select after it; tree steps pick the child by the comparison (`one ? node1 : node0`) rather than from the
+  borrow. The agent's driver, cycles per byte from `proc_pid_rusage` around each decode: −1.8 to −4.1% on every file
+  (x-ray 56.74 → 55.10, −2.9%). Branchless normalization was tried again and cost +4 to +12% on x-ray; not kept.
+
+Lending and dedups (`lend-old` → `lend-new`): instructions unchanged at the table's resolution on every touched row
+(TLS seal 4 MB, both ciphers, 1/4/8 lanes: 13 M and 36–37 M; scrypt N=2^14: 194–196 M; RSA parse and verify; LZFSE
+decode: the 1.6 KB JSON +0.7%, 9,471 → 9,535); times within ±6% both ways (one round).
+
+LZMA (`pass2`, instructions exact in both rounds, times p50 round 1 / round 2):
+
+| Row | Instructions old → new | Time old → new |
+|---|---|---|
+| LZMA decode -6 x-ray (8.1 MB) | 1.46 → 1.61 G (+9.8%) | 150 → 144 / 148 → 144 ms (−4.0 / −2.7%) |
+| LZMA decode -6 mozilla (48.8 MB) | 3.71 → 3.94 G (+6.5%) | 451 → 431 / 446 → 431 ms (−4.4 / −3.4%) |
+| LZMA decode -6 samba (20.6 MB) | 974 M → 1.03 G (+5.4%) | 118 → 111 / 116 → 113 ms (−5.9 / −2.6%) |
+| LZMA decode -6 dickens (9.7 MB) | 616 → 647 M (+5.0%) | 68 → 67 / 75 → 67 ms |
+| LZMA decode -6 xml (5.1 MB) | 122 → 129 M (+5.7%) | 14 ms, both |
+| LZMA/xz streaming, 1 MiB out and whole | +4.9 to +9.9% | −1.5 to −6.5% (xml 0 to −6.7%) |
+| LZMA/xz streaming x-ray, 64 KiB in | +9.8% | +1.4 / +2.0% (raw), 0 (xz) |
+| `Decompressor xz -6 dickens: 1 MiB out` | 618 → 649 M (+5.0%) | −6.9 / −5.6% |
+
+Against the references in the same run: x-ray now 1.26x liblzma's instructions at 0.74x its time (144 against 195 ms)
+and 0.80x Compression's time (179 ms); mozilla 1.09x liblzma's instructions, 0.73x its time. The one row that got
+slower, x-ray streamed with 64 KiB of input per call, spends more of its time in the careful path near each input's
+end, which the change doesn't speed up.

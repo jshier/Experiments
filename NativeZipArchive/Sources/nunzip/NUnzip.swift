@@ -313,7 +313,7 @@ struct NUnzip: AsyncParsableCommand {
         let canPrompt = isatty(STDIN_FILENO) != 0
 
         // Archives are planned in order (opened, listed, asked about) while their files are being written.
-        let failures: [ExtractionFailure]
+        let failures: [ZipExtractionFailure]
         do {
             failures = try await ZipExtractor.extract(into: destination, maxConcurrency: jobs) { extractor in
                 for (index, path) in paths.enumerated() {
@@ -327,12 +327,12 @@ struct NUnzip: AsyncParsableCommand {
                     }
                     archiveIndex[zip.url] = index
 
-                    var options = ExtractionOptions()
+                    var options = ZipExtractionOptions()
                     options.junkPaths = junkPaths
-                    options.restoreTimestamps = noTimestamps < 2
-                    options.restoreDirectoryTimestamps = noTimestamps < 1
-                    options.restoreOwnership = restoreOwner
-                    options.keepSetIDBits = keepSetID
+                    options.restoresTimestamps = noTimestamps < 2
+                    options.restoresDirectoryTimestamps = noTimestamps < 1
+                    options.restoresOwnership = restoreOwner
+                    options.keepsSpecialBits = keepSetID
                     options.lowercaseNames = lowercase >= 2 ? .all : lowercase == 1 ? .fromUppercaseHosts : .none
                     options.password = password(for: zip, entries: selected, at: path)
                     options.update = switch update {

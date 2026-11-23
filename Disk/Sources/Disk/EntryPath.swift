@@ -47,7 +47,7 @@ public struct EntryPath: ~Escapable {
     }
 
     /// Whether this is the destination itself.
-    public var isRoot: Bool { bytes.isEmpty }
+    var isRoot: Bool { bytes.isEmpty }
 
     /// The path as a string, for messages (allocates).
     public var description: String { Self.string(bytes) }

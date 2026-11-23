@@ -81,7 +81,7 @@ import Testing
         let source = try Self.makeTree(in: directory.url)
         let archive = directory.path("tree.zip")
         try ExternalTool.run("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", source.path, archive.path])
-        var options = ExtractionOptions()
+        var options = ZipExtractionOptions()
         options.mergesAppleDouble = false
         try await ZipArchive(url: archive).extract(to: FilePath(directory.path("out").path), options: options)
         let tree = try readTree(directory.path("out"), including: Self.parts)
@@ -101,7 +101,7 @@ import Testing
         // A real AppleDouble file's bytes: `ditto`'s, extracted unmerged.
         let source = try Self.makeTree(in: directory.url)
         try ExternalTool.run("/usr/bin/ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", source.path, directory.path("tree.zip").path])
-        var raw = ExtractionOptions()
+        var raw = ZipExtractionOptions()
         raw.mergesAppleDouble = false
         try await ZipArchive(url: directory.path("tree.zip")).extract(to: FilePath(directory.path("raw").path), options: raw)
         let appleDouble = try Data(contentsOf: directory.path("raw/__MACOSX/Tree/._attrs.txt"))
@@ -210,8 +210,8 @@ import Testing
         // 2019-12-11: the link's own time (`-h`), not its target's.
         try ExternalTool.run("/usr/bin/touch", ["-h", "-t", "201912111009.08", source.appending(path: "link").path])
         try ExternalTool.run("/usr/bin/zip", ["-qry", directory.path("links.zip").path, "."], in: source)
-        var options = ExtractionOptions()
-        options.restoreLinkTimestamps = restores
+        var options = ZipExtractionOptions()
+        options.restoresLinkTimestamps = restores
         try await ZipArchive(url: directory.path("links.zip")).extract(to: FilePath(directory.path("out").path), options: options)
         let extracted = try readItem(at: directory.path("out/link"), including: .modification)
         let original = try readItem(at: source.appending(path: "link"), including: .modification)

@@ -45,7 +45,7 @@ import Testing
             let destination = directory.path("out-\(threads)")
             var options = AEAExtractionOptions()
             options.read.decodeThreads = threads
-            options.writerThreads = threads
+            options.disk.writers = threads
             let statistics = try await file.extract(to: FilePath(destination.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
             #expect(try readTree(destination, including: .entries) == readTree(source, including: .entries), "\(threads) threads")
@@ -67,7 +67,7 @@ import Testing
             let destination = directory.path("out-\(threads)")
             var options = AEAExtractionOptions()
             options.read.decodeThreads = threads
-            options.writerThreads = threads
+            options.disk.writers = threads
             let statistics = try await archive.extract(to: FilePath(destination.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
             #expect(try readTree(destination, including: .entries) == readTree(source, including: .entries), "\(threads) threads")
@@ -105,7 +105,7 @@ import Testing
         for threads in [1, 8] {
             var options = AEAExtractionOptions()
             options.read.decodeThreads = threads
-            options.writerThreads = threads
+            options.disk.writers = threads
             await #expect(throws: AEAError.self) { try await file.extract(to: FilePath(directory.path("out-\(threads)").path), options: options) }
             let url = try makeAEA(corrupt, keys: keys, in: directory, compression: "copy", blockSize: "100k")
             await #expect(throws: AEAError.self) {

@@ -72,7 +72,10 @@ let package = Package(
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
             ],
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")]
+            swiftSettings: [
+                .swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes"),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ]
         ),
         .executableTarget(
             name: "NativeAEABenchmarks",
@@ -88,7 +91,10 @@ let package = Package(
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/NativeAEABenchmarks",
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")],
+            swiftSettings: [
+                .swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes"),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ],
             plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
         ),
     ]

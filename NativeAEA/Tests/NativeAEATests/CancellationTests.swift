@@ -102,9 +102,9 @@ import Testing
         let (url, keys, _) = try makeArchive(layout, in: directory)
         var options = AEAExtractionOptions()
         options.read.decodeThreads = 4
-        options.writerThreads = 4
-        options.fileSystemWidth = 2
-        let (inner, owner) = try source(layout, url, keys, options.read, held: options.writerThreads)
+        options.disk.writers = 4
+        options.disk.fileSystemWidth = 2
+        let (inner, owner) = try source(layout, url, keys, options.read, held: options.heldBuffers)
         defer { withExtendedLifetime(owner) {} }
         let settings = options
         let cancelling = CancellingSource(inner, cancelAt: cancelAt)
@@ -189,8 +189,8 @@ import Testing
 
         var options = AEAExtractionOptions()
         options.read.decodeThreads = 4
-        options.writerThreads = 4
-        let (inner, owner) = try source(layout, tampered, keys, options.read, held: options.writerThreads)
+        options.disk.writers = 4
+        let (inner, owner) = try source(layout, tampered, keys, options.read, held: options.heldBuffers)
         defer { withExtendedLifetime(owner) {} }
         let settings = options
         let destination = FilePath(directory.path("out").path)

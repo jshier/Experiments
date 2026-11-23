@@ -2,6 +2,7 @@ import BytesAsync
 import Darwin
 import Disk
 import Foundation
+import NativeAEA
 import OSLog
 import Synchronization
 import System
@@ -134,7 +135,7 @@ enum Expander {
     /// On failure or cancellation the staging directory is removed: nothing appears beside the archive.
     @concurrent
     static func expand(_ archive: FilePath, credentials: ArchiveCredentials, progress: ExtractionProgress) async throws -> URL {
-        let format = try ArchiveFormat(detecting: archive)
+        let format = try ArchiveKind.detect(archive)
         let folder = archive.removingLastComponent().appending(folderName(for: archive))
         let opened = try format.open(archive, credentials: credentials)
         // The archive's quarantine on everything expanded, the folder included, as Archive Utility leaves them; a

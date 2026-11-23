@@ -15,21 +15,26 @@ import System
 /// list too) and links, as for Apple archives. (Until NativeZip took it, a single-threaded walk here set it afterwards:
 /// +0.7 s on an archive of 8,060 entries that expanded in 0.65 s.)
 enum ZipAdapter {
-    /// Opens the archive; an encrypted one without a password asks for it (before anything is staged).
+    /// Opens the archive; an encrypted one asks for a password, or for another one if it doesn't open the first
+    /// encrypted entry (its check bytes, or AES's verification value: no decryption), all before anything is staged.
     ///
     /// - Returns: The archive, and the password to extract it with (`nil` for one that isn't encrypted).
     static func open(_ archive: FilePath, credentials: ArchiveCredentials) throws -> (ZipArchive, password: String?) {
         let zip = try ZipArchive(url: URL(filePath: archive.string))
         let password = credentials[.password]
-        if password == nil, zip.entries.contains(where: \.isEncrypted) { throw CredentialRequest(kind: .password) }
+        guard let encrypted = zip.entries.first(where: \.isEncrypted) else { return (zip, password) }
+        guard let password else { throw CredentialRequest(kind: .password) }
+        // As nunzip checks before it extracts. Entries may use different passwords: one that fails later still asks
+        // again (`extract`), discarding what was staged.
+        guard zip.passwordMatches(password, for: encrypted) else { throw CredentialRequest(kind: .password, isRetry: true) }
         return (zip, password)
     }
 
     static func extract(_ zip: ZipArchive, password: String?, into staging: Destination, progress: ExtractionProgress) async throws {
-        var options = ExtractionOptions()
+        var options = ZipExtractionOptions()
         options.password = password
         options.progress = progress
-        options.restoreLinkTimestamps = true
+        options.restoresLinkTimestamps = true
         options.decomposesNames = true
         do {
             try await zip.extract(into: staging, options: options)

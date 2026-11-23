@@ -60,7 +60,7 @@ public protocol PieceSource: ContentSource {}
 /// Contents already in memory for the whole extraction (a mapped file, arrays the caller keeps): ranges of one
 /// buffer, nothing released.
 @safe
-public struct MemorySource: ContentSource, @unchecked Sendable {
+package struct MemorySource: ContentSource, @unchecked Sendable {
     /// The bytes, at a stable address the caller keeps for the whole extraction.
     let base: UnsafeRawPointer
     let count: Int

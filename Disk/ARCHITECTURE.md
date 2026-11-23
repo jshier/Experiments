@@ -163,7 +163,7 @@ sequenceDiagram
     P->>K: hard links, special files, symbolic links, deferred metadata, directories (lanes of width)
 ```
 
-`Extraction.run(into:source:options:_:)` is `@concurrent`; everything inside is `nonisolated(nonsending)`. It starts the
+`Extraction.run(into:source:settings:_:)` is `@concurrent`; everything inside is `nonisolated(nonsending)`. It starts the
 writers in a `DiscardingTaskGroup`, runs the plan closure on the calling task, closes the queue, waits for the writers,
 then runs the passes after them. One `withTaskCancellationHandler` around the group is the operation's only
 cancellation handler.

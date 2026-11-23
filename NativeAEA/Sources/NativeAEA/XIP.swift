@@ -271,8 +271,8 @@ public final class XIPArchive: Sendable {
     }
 
     /// Extracts the archive beneath `destination`, as `xip --expand` does; see ``AEAArchive/extract(to:options:)``.
-    /// Apple's expansion copies no quarantine attribute, so ``AEAExtractionOptions/copyQuarantine`` is ignored.
-    /// ``AEAExtractionOptions/progress`` starts from the cpio stream's size in the xip's `Metadata` as its estimate of the
+    /// Apple's expansion copies no quarantine attribute, so ``AEAExtractionOptions/copiesQuarantine`` is ignored.
+    /// The progress (``AEAExtractionOptions/disk``) starts from the cpio stream's size in the xip's `Metadata` as its estimate of the
     /// bytes (`Content`'s stored size without it).
     ///
     /// With ``AEAReadOptions/verifyChecksums``, the content's SHA-1 (from the TOC) is checked by a child task while
@@ -280,7 +280,7 @@ public final class XIPArchive: Sendable {
     @concurrent @discardableResult
     public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
         var options = options
-        options.copyQuarantine = false
+        options.copiesQuarantine = false
         return try await extract(opened: Extractor.open(destination, options: options, archivePath: path, quarantinesDestination: false), options: options)
     }
 
@@ -298,7 +298,7 @@ public final class XIPArchive: Sendable {
         // If the extraction throws, leaving the scope cancels the check (and waits for it).
         async let mismatch = check?.run()
         let statistics = try await Extractor.extract(
-            source(options.read, heldBeyondDecoding: options.writerThreads), format: .cpio, into: target, options: options,
+            source(options.read, heldBeyondDecoding: options.heldBuffers), format: .cpio, into: target, options: options,
             expectedBytes: metadata?.uncompressedSize ?? contentSize
         )
         if let failure = await mismatch { throw failure }

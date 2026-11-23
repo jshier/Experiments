@@ -59,7 +59,7 @@ public enum DiskCodec: Sendable, Hashable, CaseIterable {
 /// NativeAEA/RESULTS.md): ``appleArchive`` is `aa extract`'s, ``xipExpand`` is `xip --expand`'s.
 public struct StoragePolicy: Sendable, Hashable {
     /// When a compressed file is worth its fork.
-    public enum Rule: Sendable, Hashable {
+    package enum Rule: Sendable, Hashable {
         /// The fork under `percent` of the file's bytes (`aa extract`: 93).
         case bytes(percent: Int)
         /// The fork's 4 KiB blocks at most `numerator / denominator` of the file's (`xip --expand`: 4/5).
@@ -77,15 +77,15 @@ public struct StoragePolicy: Sendable, Hashable {
 
     public var codec: DiskCodec
     /// Whether a one-chunk file may go inline, in the attribute (at most 3,584 bytes with its header).
-    public var allowsInline: Bool
+    var allowsInline: Bool
     /// Files smaller than this stay plain.
-    public var minimumSize: Int
+    var minimumSize: Int
     /// PNG files stay plain, however well they compress (`xip --expand`).
-    public var skipsPNG: Bool
-    public var rule: Rule
+    var skipsPNG: Bool
+    package var rule: Rule
     public var room: Room
 
-    public init(codec: DiskCodec, allowsInline: Bool, minimumSize: Int = 0, skipsPNG: Bool = false, rule: Rule, room: Room) {
+    init(codec: DiskCodec, allowsInline: Bool, minimumSize: Int = 0, skipsPNG: Bool = false, rule: Rule, room: Room) {
         self.codec = codec
         self.allowsInline = allowsInline && codec != .lzvn
         self.minimumSize = minimumSize
@@ -114,7 +114,7 @@ public struct StoragePolicy: Sendable, Hashable {
     )
 
     /// zlib (type 3), inline only: small files that compress below 93%.
-    public static let zlibInline = StoragePolicy(codec: .zlib, allowsInline: true, rule: .bytes(percent: 93), room: .wholeChunk)
+    package static let zlibInline = StoragePolicy(codec: .zlib, allowsInline: true, rule: .bytes(percent: 93), room: .wholeChunk)
 
     /// The policy for an archive's `decmpfs` type (`AFT`): `aa extract`'s rules for its codec.
     public static func forArchivedType(_ type: UInt32) -> StoragePolicy? {

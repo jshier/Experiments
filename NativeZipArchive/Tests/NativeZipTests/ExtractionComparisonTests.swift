@@ -1,5 +1,5 @@
 import BytesTestSupport
-// Only what's needed: Disk has an `ExtractionOptions` of its own.
+// Only what's needed: Disk has an `ZipExtractionOptions` of its own.
 import class Disk.ExtractionProgress
 import enum Disk.DiskError
 import DiskTestSupport
@@ -66,10 +66,10 @@ import Testing
         let reference = temporary.url.appending(path: "unzip")
         try ExternalTool.run("/usr/bin/unzip", ["-q"] + flags + [archive.path, "-d", reference.path], in: temporary.url)
 
-        var options = ExtractionOptions()
-        options.keepSetIDBits = flags.contains("-K")
+        var options = ZipExtractionOptions()
+        options.keepsSpecialBits = flags.contains("-K")
         options.lowercaseNames = flags.contains("-LL") ? .all : .none
-        options.restoreOwnership = flags.contains("-X")
+        options.restoresOwnership = flags.contains("-X")
         let output = temporary.url.appending(path: "native")
         try await ZipArchive(url: archive).extract(to: FilePath(output.path), options: options)
 
@@ -114,7 +114,7 @@ import Testing
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
         let progress = ExtractionProgress()
-        var options = ExtractionOptions()
+        var options = ZipExtractionOptions()
         options.overwrite = .never
         options.progress = progress
         try await Self.fixture("duplicates.zip").extract(to: FilePath(temporary.url.path), options: options)

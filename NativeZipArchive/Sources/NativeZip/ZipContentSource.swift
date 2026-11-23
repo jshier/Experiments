@@ -30,7 +30,7 @@ final class ArchiveJob: Sendable {
 /// - The size and CRC-32 are checked after the file's last bytes are written: Disk finishes a file only once `write`
 ///   returns, so a damaged entry's file is removed when this throws.
 ///
-/// Failures are thrown as ``DiskError/source(_:)`` carrying the error itself, which ``ExtractionFailure/error`` and the
+/// Failures are thrown as ``DiskError/source(_:)`` carrying the error itself, which ``ZipExtractionFailure/error`` and the
 /// extraction's throw unwrap.
 struct ZipContentSource: ContentSource {
     struct Contents: Sendable {

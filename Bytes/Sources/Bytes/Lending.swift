@@ -60,6 +60,28 @@ public struct LentMutableBytes: @unchecked Sendable {
     }
 }
 
+/// Bytes lent to other threads to read and write in place: a mutable span's memory as a `Sendable` pointer, from
+/// `MutableRawSpan.withLentBytes(_:)`.
+///
+/// Unlike ``LentMutableBytes`` (an output's free capacity: uninitialized, only to be written), this memory is
+/// initialized: work may read it as well as write it.
+///
+/// Unsafe: it's a pointer, valid only until the lending call returns. Use it only in work that ends before then, and
+/// give each byte one thread at a time: no byte written by one thread while another reads or writes it.
+@unsafe @frozen
+public struct LentMutableSpan: @unchecked Sendable {
+    /// The memory.
+    public let buffer: UnsafeMutableRawBufferPointer
+
+    /// Lends `buffer`.
+    ///
+    /// - Parameter buffer: Initialized memory that stays valid for as long as the value is used.
+    @inlinable
+    public init(buffer: UnsafeMutableRawBufferPointer) {
+        unsafe self.buffer = buffer
+    }
+}
+
 public extension RawSpan {
     /// Runs `body` with these bytes lent as a `Sendable` value, for work on other threads that ends before
     /// `body` returns (`concurrentPerform`, a task group).
@@ -72,6 +94,23 @@ public extension RawSpan {
         // Unsafe: a pointer to the span's memory. Safe: the span is borrowed for this whole call, and `body`
         // must finish with the pointer before returning (the rule `LentBytes` states).
         try withUnsafeBytes { buffer throws(E) -> R in try unsafe body(LentBytes(buffer: buffer)) }
+    }
+}
+
+public extension MutableRawSpan {
+    /// Runs `body` with these bytes lent as a `Sendable` value, to read and write in place in work on other threads
+    /// that ends before `body` returns (`concurrentPerform`, a task group).
+    ///
+    /// - Parameter body: Receives the lent bytes. Work using them must finish before it returns.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws.
+    @inlinable
+    @_lifetime(self: copy self)
+    mutating func withLentBytes<R: ~Copyable, E: Error>(_ body: (LentMutableSpan) throws(E) -> R) throws(E) -> R {
+        // Unsafe: a pointer to the span's memory. Safe: the span is `inout` for this whole call, so nothing else
+        // reaches its memory, and `body` must finish with the pointer before returning (the rule `LentMutableSpan`
+        // states).
+        try withUnsafeMutableBytes { buffer throws(E) -> R in try unsafe body(LentMutableSpan(buffer: buffer)) }
     }
 }
 

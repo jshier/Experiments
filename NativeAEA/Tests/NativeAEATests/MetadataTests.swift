@@ -65,8 +65,8 @@ import Testing
         let destination = directory.path("out")
         var options = AEAExtractionOptions()
         options.read.decodeThreads = threads
-        options.writerThreads = threads
-        options.fileSystemWidth = min(threads, 2)
+        options.disk.writers = threads
+        options.disk.fileSystemWidth = min(threads, 2)
         let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path), options: options)
         #expect(statistics.unreleasedBuffers == 0)
         #expect(statistics.hardLinks == 3)
@@ -104,7 +104,7 @@ import Testing
 
         // Without quarantine copying.
         let bare = directory.path("bare")
-        options.copyQuarantine = false
+        options.copiesQuarantine = false
         try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(bare.path), options: options)
         let bareMetadata = try readTree(bare, including: parts)
         #expect(bareMetadata.values.allSatisfy { $0.attributes?["com.apple.quarantine"] == nil })
@@ -117,7 +117,7 @@ import Testing
         stagingOptions.quarantine = own
         let final = FilePath(directory.path("Staged").path)
         let staging = try Destination.staging(for: final, options: stagingOptions)
-        options.copyQuarantine = true
+        options.copiesQuarantine = true
         try await AEAArchive(url: url, signingKey: keys.signingKey).extract(into: staging, options: options)
         let published = URL(filePath: try staging.publish(as: final).string)
         #expect(try readTree(published, including: parts, ignoringAttributes: ignored) == extracted)

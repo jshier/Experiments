@@ -16,17 +16,16 @@ enum SyscallKind: Int, CaseIterable, Sendable {
 }
 
 #if DISK_SYSCALL_COUNTING
-/// One atomic counter per kind of call.
-final class SyscallCounters: Sendable {
-    static let shared = SyscallCounters()
-    let counts: [RelaxedCounter] = SyscallKind.allCases.map { _ in RelaxedCounter() }
+/// One atomic counter per kind of call, in one allocation.
+enum SyscallCounters {
+    static let shared = RelaxedCounters(count: SyscallKind.allCases.count)
 }
 #endif
 
 @inline(__always)
 func countSyscall(_ kind: SyscallKind) {
     #if DISK_SYSCALL_COUNTING
-    SyscallCounters.shared.counts[kind.rawValue].add()
+    SyscallCounters.shared.add(at: kind.rawValue)
     #endif
 }
 
@@ -45,7 +44,7 @@ public enum SyscallCounter {
     /// Calls made so far, all kinds together (0 without the trait).
     public static var total: Int {
         #if DISK_SYSCALL_COUNTING
-        SyscallCounters.shared.counts.reduce(0) { $0 + $1.value }
+        (0..<SyscallCounters.shared.count).reduce(0) { $0 + SyscallCounters.shared.value(at: $1) }
         #else
         0
         #endif
@@ -56,7 +55,7 @@ public enum SyscallCounter {
         #if DISK_SYSCALL_COUNTING
         var result: [String: Int] = [:]
         for kind in SyscallKind.allCases {
-            let count = SyscallCounters.shared.counts[kind.rawValue].value
+            let count = SyscallCounters.shared.value(at: kind.rawValue)
             if count > 0 { result["\(kind)"] = count }
         }
         return result

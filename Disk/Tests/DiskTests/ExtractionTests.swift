@@ -32,7 +32,7 @@ import Testing
         var attributes = ExtendedAttributeBlob()
         attributes.append(name: "com.example.a", value: ([1, 2] as [UInt8]).span.bytes)
         let blob = attributes.bytes
-        let report = try await Extraction.run(into: destination, source: source, options: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+        let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
             try withPath("top") { (path) throws(DiskError) in try planner.directory(path, metadata: EntryMetadata(mode: 0o755, times: time)) }
             try withPath("top/locked") { (path) throws(DiskError) in try planner.directory(path, metadata: EntryMetadata(mode: 0o555, times: time)) }
             let first = try await planFile(&planner, "top/a.txt", index: 0, size: 100, metadata: EntryMetadata(mode: 0o600, times: time), hardLinked: true)
@@ -101,7 +101,7 @@ import Testing
         // Every byte counted, those of pieces bridged into a later piece's job (no chunk ends in them) included.
         let progress = ExtractionProgress(expectedEntries: 1, expectedBytes: size)
         options.progress = progress
-        let report = try await Extraction.run(into: destination, source: source, options: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+        let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
             let file = try await withPathAsync("big") { (path) async throws(DiskError) in
                 try await planner.beginLargeFile(path, size: size, metadata: EntryMetadata(mode: 0o644), storage: .compressed(.appleArchive),
                                                  first: bytes.span.bytes, minimumPieceSize: pieceSize)
@@ -139,7 +139,7 @@ import Testing
         // An existing file where one entry goes.
         try FileManager.default.createDirectory(at: directory.path("out"), withIntermediateDirectories: true)
         try Data([9]).write(to: directory.path("out/f3"))
-        let report = try await Extraction.run(into: destination, source: source, options: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+        let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
             for index in files.indices {
                 _ = try await planFile(&planner, "f\(index)", index: index, size: files[index].count, tag: index)
             }
@@ -173,7 +173,7 @@ import Testing
             options.stopsOnFirstFailure = false
             let out = "out-\(name)"
             let destination = try Destination(directory.filePath(out))
-            let report = try await Extraction.run(into: destination, source: source, options: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+            let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 for index in files.indices {
                     _ = try await planFile(&planner, "f\(index)", index: index, size: files[index].count, storage: storage, tag: index)
                 }

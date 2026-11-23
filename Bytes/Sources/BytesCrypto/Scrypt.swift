@@ -95,22 +95,23 @@ public enum Scrypt {
             var blocks = scratch._mutatingExtracting(0..<blocksByteCount)
             PBKDF2.deriveKey(SHA256.self, password: password, salt: salt, iterations: 1, into: &blocks)
         }
-        // Unsafe: a raw pointer to the scratch memory, shared by the lanes. Safe: lane `l` reads and writes only block
-        // `i` of B for `i ≡ l (mod lanes)` and its own table region (`(n + 2) × block` bytes from `blocksByteCount +
-        // l × (n + 2) × block`), all within `needed` bytes (checked above), and the pointer doesn't outlive the
-        // closure: `concurrentPerform` returns once every lane is done.
-        scratch.withUnsafeMutableBytes { buffer in
-            let memory = unsafe ScryptMemory(base: buffer.baseAddress!)
+        // Unsafe: the scratch memory lent to the lanes as a pointer. Safe: lane `l` reads and writes only block `i` of B
+        // for `i ≡ l (mod lanes)` and its own table region (`(n + 2) × block` bytes from `blocksByteCount + l × (n + 2)
+        // × block`), all within `needed` bytes (checked above), and the pointer doesn't outlive the closure:
+        // `concurrentPerform` returns once every lane is done.
+        unsafe scratch.withLentBytes { memory in
             let laneByteCount = (n &+ 2) &* block
             if lanes == 1 {
+                let base = unsafe memory.buffer.baseAddress!
                 for index in 0..<p {
-                    unsafe romix(memory.base + index &* block, table: memory.base + blocksByteCount, n: n, r: r)
+                    unsafe romix(base + index &* block, table: base + blocksByteCount, n: n, r: r)
                 }
             } else {
                 DispatchQueue.concurrentPerform(iterations: lanes) { lane in
+                    let base = unsafe memory.buffer.baseAddress!
                     var index = lane
                     while index < p {
-                        unsafe romix(memory.base + index &* block, table: memory.base + (blocksByteCount &+ lane &* laneByteCount), n: n, r: r)
+                        unsafe romix(base + index &* block, table: base + (blocksByteCount &+ lane &* laneByteCount), n: n, r: r)
                         index &+= lanes
                     }
                 }
@@ -197,12 +198,6 @@ public enum Scrypt {
             unsafe state.store(output + 64 &* destination)
         }
     }
-}
-
-/// The scratch memory's start, shared by the lanes (see the safety comment where it's made).
-@unsafe
-struct ScryptMemory: @unchecked Sendable {
-    let base: UnsafeMutableRawPointer
 }
 
 /// One Salsa20 block's 16 words, kept in locals so they live in registers.

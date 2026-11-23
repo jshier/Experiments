@@ -287,7 +287,7 @@ import Testing
         var options = ExtractionSettings()
         options.writers = 3
         let source = IndexSource(writers: 3)
-        try await Extraction.run(into: try Destination(directory.filePath("out")), source: source, options: options) { (planner: inout Planner<IndexSource>) throws(DiskError) in
+        try await Extraction.run(into: try Destination(directory.filePath("out")), source: source, settings: options) { (planner: inout Planner<IndexSource>) throws(DiskError) in
             for index in 0..<100 { _ = try await planFile(&planner, "f\(index)", index: index, size: 1) }
         }
         #expect(source.seen.value == 100)

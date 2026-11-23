@@ -3,7 +3,7 @@ import Darwin
 import System
 
 /// How a file ended up stored.
-public enum StoredForm: Sendable, Hashable {
+package enum StoredForm: Sendable, Hashable {
     /// An ordinary file.
     case plain
     /// APFS-compressed, the data inline in the `com.apple.decmpfs` attribute.
@@ -363,10 +363,10 @@ struct WriterCore: ~Copyable {
 /// ```
 ///
 /// Not `Sendable`: one per thread (it owns its scratch and encoders: about 1.2 MB, plus the staging capacity).
-public struct FileWriter: ~Copyable {
+package struct FileWriter: ~Copyable {
     var core: WriterCore
 
-    public init(_ destination: Destination) {
+    package init(_ destination: Destination) {
         core = WriterCore(destination, stagingCapacity: 1)
     }
 
@@ -374,7 +374,7 @@ public struct FileWriter: ~Copyable {
     ///
     /// - Returns: How it was stored.
     @discardableResult
-    public mutating func writeFile(_ path: EntryPath, contents: RawSpan, metadata: EntryMetadata = .init(), storage: Storage = .plain) throws(DiskError) -> StoredForm {
+    package mutating func writeFile(_ path: EntryPath, contents: RawSpan, metadata: EntryMetadata = .init(), storage: Storage = .plain) throws(DiskError) -> StoredForm {
         guard !path.isRoot else { throw .unsafePath("") }
         let count = contents.byteCount
         // Unsafe: the path's bytes, as a pointer, to `setPath`. Safe: not empty (checked above), so not `nil`; an

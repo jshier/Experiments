@@ -51,10 +51,11 @@ checks beyond the resumptions after real suspensions (§9). `forEachEntry`'s cal
 closure, called on the calling task one entry at a time. Opening (`AEAArchive(path:…)`, `XIPArchive`,
 `AppleArchiveFile`) stays synchronous: it reads only headers.
 
-The options map one to one onto `AEAReadOptions`, which control decoding (decoders, decoder, input, checks), and
-`AEAExtractionOptions`, which control writing (writers, file-system width, disk compression, overwriting, quarantine,
-progress), mapped onto Disk's options (§7). Both are defined in `NativeAEA/Listing.swift` and
-`NativeAEA/Extraction.swift`. `decodeThreads` and `writerThreads` count child tasks; `--hard-link-threads` and
+The options map one to one onto `AEAReadOptions`, which control decoding (decoders, input, checks), and
+`AEAExtractionOptions`, which control writing (disk compression, overwriting, quarantine, and in `disk`, Disk's own
+`ExtractionSettings`: writers, file-system width, progress, timings), mapped onto Disk's options (§7). Both are defined
+in `NativeAEA/Listing.swift` and `NativeAEA/Extraction.swift`. `--decode-threads` and `--writer-threads` count child
+tasks; the format comes from `ArchiveKind(detecting:)` (first bytes, then extension); `--hard-link-threads` and
 `--spread-directories` went with the move to Disk (2026-11-20: both measured slower), and `--progress` draws the
 extraction's progress.
 
@@ -301,7 +302,7 @@ For a xip, this means 32 decoders working through 617 blocks of 16 MiB, each blo
   16 MiB**, about 1.1 GB, most of the peak memory footprint: 1.21 GB extracting the xip, 1.37 GB the `.aea` (whose
   decoders' read buffers can hold 32 large stored segments at once, §4), 0.82 and 1.08 GB listing them. The `+ 1`
   ensures a decoder can always get a buffer while the consumer holds its own.
-- **References:** `references: [AtomicCounter]`, one per buffer.
+- **References:** `references`, BytesAsync's `RelaxedCounters`: one count per buffer, all in one allocation.
   - `acquire() async -> Int?` takes the last freed buffer under the pool's `Mutex` (free list, waiters, `closed`) and
     sets its count to 1; that reference belongs to the walker while it reads the chunk. With none free it stores its
     continuation in the waiter queue (checked again under the lock) and suspends. `tryAcquire()` never waits.
@@ -379,17 +380,17 @@ sequenceDiagram
 
 ### Setup
 
-- `AEAExtractionOptions` maps onto Disk's options (`scheduling` and `destination(quarantine:quarantinesDestination:)`):
-  `writerThreads` → `ExtractionSettings.writers`, `fileSystemWidth`, `progress`, `collectsTimings`; and on the
-  destination, Apple's extractors' rules: `permissions: .exact` and `keepsSpecialBits` (the archived mode exactly),
-  `overwrite` → `existingItems: .replace`, `restoreOwnership` → `restoresOwnership`, `relativeToParents` →
+- `AEAExtractionOptions` maps onto Disk's options: `disk` is Disk's `ExtractionSettings` itself (`scheduling` only
+  clamps its writers and width to at least 1), and `destination(quarantine:quarantinesDestination:)` gives the
+  destination Apple's extractors' rules: `permissions: .exact` and `keepsSpecialBits` (the archived mode exactly),
+  `overwrite` → `existingItems: .replace`, `restoresOwnership`, `relativeToParents` →
   `directoryResolution: .descriptors`, devices allowed (made as root, skipped and counted otherwise), and the archive's
   quarantine (`Quarantine(copyingFrom:)`) with `quarantinesDestination` for an `.aar` only.
 - `DiskCompressionMode.storage(_:)` turns a file's `AFT` into Disk's `Storage`: `.archived` uses
   `StoragePolicy.forArchivedType` (LZBITMAP → `.appleArchive`, `aa extract`'s rules; LZVN → `.lzvnForks`,
   `xip --expand`'s, since the cpio walker asks for LZVN only over 16 KiB), `.lzfse` uses `.appleArchiveLZFSE`, `.none`
   is plain.
-- After `await source.prepare()`, `Extraction.run(into:source:options:_:)` starts the writers (24 child tasks) and runs
+- After `await source.prepare()`, `Extraction.run(into:source:settings:_:)` starts the writers (24 child tasks) and runs
   the plan closure on the calling task. The closure moves Disk's `Planner` into an `ExtractionSink`, walks, stops the
   source (`stop(nil)`: no more chunks are taken), and hands the planner back, so Disk can run its passes after the
   writers.
@@ -542,7 +543,7 @@ flowchart LR
     WK -->|"Disk JobQueue (16,384 + path ring): push/pop suspend"| WR
     WR -->|"Disk AsyncLimiter (6)"| FS[("APFS")]
     WK -.->|"mkdirat, openat"| FS
-    POOL[["SegmentBufferPool<br/>Mutex: free list + waiters<br/>AtomicCounter refs"]]
+    POOL[["SegmentBufferPool<br/>Mutex: free list + waiters<br/>RelaxedCounters refs"]]
     DE -.->|"await acquire"| POOL
     WR -.->|"release"| POOL
     WK -.->|"retain, release"| POOL
@@ -555,7 +556,7 @@ flowchart LR
 | `withTaskCancellationHandler` | `ChunkSource.withDecoding`; Disk's `Extraction.run` | Cancellation: stops the source; stops Disk's planner and writers (§11) |
 | `Mutex` + continuations, waiters in a `WaiterQueue` reserved up front (BytesAsync) | `SegmentBufferPool`, `AsyncQueue` (the block stream's), `SegmentStream`/`BlockStream` slots, `AEAPayload` decision; Disk's queue, limiter, large-file slots and turns, latch | Free buffers; the block queue's ring; published chunks and the first failure; Disk: the write queue, file-system permits, whose turn it is to write a fork, writers ending |
 | `Atomic<Int>` / `Atomic<Bool>` | `nextSegment`, `cancelled`, `peakInUse`, source counters; Disk's stop flag, `outstanding`, counters, `ExtractionProgress` slots | Claiming the next segment without a lock; stopping; counts read across tasks |
-| `AtomicCounter` (a class around `Atomic`, so arrays can hold them) | Pool `references` | One reference count per buffer |
+| `RelaxedCounters` (BytesAsync: N atomics in one allocation) | Pool `references` | One reference count per buffer |
 
 ### The primitives
 

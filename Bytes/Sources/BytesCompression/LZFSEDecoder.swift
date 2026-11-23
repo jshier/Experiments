@@ -446,9 +446,7 @@ struct LZFSEReverseBits {
     /// The next `count` bits, 0 through 56.
     @inline(__always)
     mutating func read(_ count: Int) -> Int {
-        let value = ((container &<< UInt64(truncatingIfNeeded: consumed)) &>> 1) &>> UInt64(truncatingIfNeeded: 63 &- count)
-        consumed &+= count
-        return Int(truncatingIfNeeded: value)
+        BackwardBits.read(count, from: container, consumed: &consumed)
     }
 
     /// Refills the container to at least 57 unread bits.

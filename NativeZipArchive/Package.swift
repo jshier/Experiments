@@ -75,7 +75,10 @@ let package = Package(
             // Archives and vectors the tests load from their own directory (#filePath).
             exclude: ["Fixtures"],
             // Not strict memory safety: the tests call zlib's C API directly to make reference streams.
-            swiftSettings: [.swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes")]
+            swiftSettings: [
+                .swiftLanguageMode(.v6), .enableExperimentalFeature("Lifetimes"),
+                .enableUpcomingFeature("NonisolatedNonsendingByDefault"),
+            ]
         ),
         .executableTarget(
             name: "NativeZipBenchmarks",
@@ -90,7 +93,7 @@ let package = Package(
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/NativeZipBenchmarks",
-            swiftSettings: [.swiftLanguageMode(.v6)],
+            swiftSettings: [.swiftLanguageMode(.v6), .enableUpcomingFeature("NonisolatedNonsendingByDefault")],
             plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
         ),
     ]

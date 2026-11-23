@@ -1052,3 +1052,21 @@ text, 11 against 13 ms for raster).
 New rows, on the new side only (no old value): `Inflate + CRC 32 MB text: ZipCrypto` (241 M, 55–56 ms), `…: AES-256`
 (181 M, 20 ms), and `Decrypt + CRC 32 MB text: ZipCrypto, stored` (493 M, 201 ms). Against a run of the old cipher
 during the work (instructions, one round), `CRC32.updateRegister` cut ZipCrypto stored 40.6% and deflated 16.9%.
+
+## step19 (2026-11-22, late): names (baselines `pass2-old-{1,2}` → `pass2-new-{1,2}`, M1 Max)
+
+HEAD (425420e) against the working tree, two interleaved rounds of the `Extract …`, `Verify 2,000 small files
+(parallel): Bytes`, and `Parse central directory` rows. NativeZip's own changes are names: `ZipExtractionOptions`,
+`ZipExtractionFailure`, `ZipExtractionEvent` (were `ExtractionOptions`, …, which clashed with Disk's in clients importing
+both), and Disk's Boolean names for the options (`restoresTimestamps`, `restoresDirectoryTimestamps`, `restoresOwnership`,
+`keepsSpecialBits`, `restoresLinkTimestamps`); `NonisolatedNonsendingByDefault` in the test and benchmark targets. What
+moved came from below:
+
+| Benchmark | Old → new, both rounds |
+|---|---|
+| Every `Extract` row | mallocs −10 to −11 (Disk's writer counters in one allocation: 32 MB rows 116 → 105, 2,000 files 2,297 → 2,287) |
+| Extract 32 MB text: LZMA, xz | instructions +5.7% (1.36 → 1.44 G); time 150 → 145–147 ms (−2.0 to −3.3%; Bytes' LZMA change) |
+| Extract 32 MB text: Bytes, Deflate64, Zstd | instructions 0 to +0.6%, times unchanged |
+| Extract 2,000 / 20,000 small files | instructions −7 to +4% both ways (kernel included), no consistent direction |
+| Extract 8 archives of 64 MB text (one pool) | 2.88 → 2.77 G (−3.5%); 158 → 102 / 103 → 90 ms (round 1's old sample an outlier; parallel rows ±20%) |
+| Parse central directory | +0.2% |

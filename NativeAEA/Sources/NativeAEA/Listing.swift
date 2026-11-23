@@ -1,4 +1,5 @@
 import BytesAsync
+public import Disk
 import Foundation
 
 /// An entry of the archive, for listing.
@@ -53,18 +54,18 @@ public struct AEAStatistics: Sendable {
     /// Of ``walkSeconds``, the time it waited for decoded segments and for room in the writers' queue.
     public var walkWaitForSegments = 0.0
     public var walkWaitForWriters = 0.0
-    /// The writers' busy time, summed (with ``AEAExtractionOptions/collectsTimings``).
+    /// The writers' busy time, summed (with `collectsTimings` in ``AEAExtractionOptions/disk``).
     public var writeSeconds = 0.0
     public var peakSegmentBuffers = 0
     /// Buffers still referenced after the pass, in every pool the decoding used: 0 unless something leaked (the tests
     /// check).
     public var unreleasedBuffers = 0
     /// Seconds per kind of writer work, summed across writers (Disk's `ExtractionReport.writerSeconds`, with
-    /// ``AEAExtractionOptions/collectsTimings``).
-    public var writerWork: [String: Double] = [:]
-    /// Seconds of each phase (Disk's `ExtractionReport.phaseSeconds`): `planning` (the walk), then after the writers
-    /// `hardLinks`, `specialFiles`, `symbolicLinks`, `deferred` metadata, and `directories`.
-    public var phaseSeconds: [String: Double] = [:]
+    /// `collectsTimings` in ``AEAExtractionOptions/disk``).
+    public var writerWork: [WriterWork: Double] = [:]
+    /// Seconds of each phase (Disk's `ExtractionReport.phaseSeconds`): `planning` (the walk), then the passes after
+    /// the writers.
+    public var phaseSeconds: [ExtractionPhase: Double] = [:]
 }
 
 extension AEAArchive {

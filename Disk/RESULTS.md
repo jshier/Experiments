@@ -13,6 +13,33 @@ swift package --traits SyscallCounting --scratch-path .build-syscalls --disable-
 Tools/bench-table Disk --metric 'wall|Disk syscalls|Malloc' syscalls disk-1
 ```
 
+## 2026-11-22, late: access by usage, typed timings, one allocation for counters (baselines `pass2-old-{1,2}` → `pass2-new-{1,2}`, M1 Max)
+
+HEAD (425420e) against the working tree, the whole suite, two interleaved rounds on an otherwise idle machine (37 GB
+free: the 98%-full volume of the evening's run is gone).
+
+- **Access follows usage** (AGENTS.md's rule). Public symbols listed from the symbol graph, each name looked for in
+  NativeAEA's, NativeZip's, and the app's sources, then every client built: 26 symbols to `package` (`FileWriter` and its
+  `StoredForm`, `MemorySource`, `TreeRemoval`, `Destination`'s creation methods, `DiskError.sourceError`, the decmpfs
+  policy's rules, `ExtractionReport`'s queue and file counts), 12 to `internal`, and `Destination.setExtendedAttributes`
+  removed (no caller). Six types a name search marked unused stayed public, because clients use them without naming them:
+  the three option policies (`settings.permissions = .exact`), `MappedFile.Access`, `EntryFailure`, and
+  `EntryPath.Sanitized` (what `sanitize` returns; NativeZip calls it).
+- **`Extraction.run(into:source:settings:_:)`** (was `options:`: the type is `ExtractionSettings`).
+- **Typed timing keys:** `ExtractionReport.phaseSeconds` is `[ExtractionPhase: Double]` (`.planning`, `.hardLinks`,
+  `.specialFiles`, `.symbolicLinks`, `.deferred`, `.directories`) and `writerSeconds` is `[WriterWork: Double]`; they
+  were keyed by strings.
+- **Counters in one allocation:** the writers' timings (11 kinds) and the `SyscallCounting` trait's counters are a
+  `RelaxedCounters` (BytesAsync) instead of an array of `RelaxedCounter` objects.
+
+| Rows | Old → new, both rounds |
+|---|---|
+| Mallocs, every extraction row | −11 per run (single writer 83 → 72, 20,000 files 145 → 134, one 32 KB file 116 → 105, Xcode-like 238 → 227): the 11 counter objects and their array |
+| Instructions, small files and workers | within the table's resolution (rows at 21–23 G read ±4.5%, one step of two digits, both ways) |
+| Instructions, `Compressed: 2,000 x 1–64 KB` | plain −2.5 / −2.6%, the codecs −0.8 to +2.0% |
+| Times | within ±5% both ways but `Extended attributes` (+11 / +4%) and `Workers: 24 writers, width 16` (+3.4 / +3.1%), neither in code this changed |
+| 1 GB single files and probes | as before: the kernel's state (probes, unchanged code, −3 to +27%) |
+
 ## 2026-11-22, evening: bridges without allocations (baseline `alloc-new-1`; NativeAEA's RESULTS.md has the trace)
 
 A compressed large file's piece whose first chunk starts in earlier pieces (a bridge) cost two arrays: `Bridge.parts`

@@ -279,10 +279,10 @@ func makeXIP(
         for (writers, width) in [(1, 1), (8, 4)] {
             let output = directory.path("out-\(writers)")
             var options = AEAExtractionOptions()
-            options.writerThreads = writers
-            options.fileSystemWidth = width
+            options.disk.writers = writers
+            options.disk.fileSystemWidth = width
             let progress = ExtractionProgress()
-            options.progress = progress
+            options.disk.progress = progress
             let statistics = try await archive.extract(to: FilePath(output.path), options: options)
             #expect(statistics.unreleasedBuffers == 0)
             #expect(statistics.hardLinks == 2)

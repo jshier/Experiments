@@ -77,7 +77,7 @@ enum AppleArchiveAdapter {
     /// directory's (its options', which NativeAEA's `extract(into:)` takes).
     static func options(progress: ExtractionProgress) -> AEAExtractionOptions {
         var options = AEAExtractionOptions()
-        options.progress = progress
+        options.disk.progress = progress
         // Archive Utility's: the folder it makes has the archive's root entry's mode and times, and a `.xip`'s
         // directories the times recorded for them.
         options.restoresDestinationMetadata = true

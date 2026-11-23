@@ -28,8 +28,9 @@ final class SegmentBufferPool: Sendable {
     let segmentCapacity: Int
     let stride: Int
     private let storage: RawStorage
-    /// References per buffer: the parser's while it reads the segment, plus one per job using its bytes.
-    private let references: [RelaxedCounter]
+    /// References per buffer: the parser's while it reads the segment, plus one per job using its bytes. One
+    /// allocation for all of them.
+    private let references: RelaxedCounters
 
     private struct State {
         /// Free buffers, last freed on top.
@@ -56,7 +57,7 @@ final class SegmentBufferPool: Sendable {
         // Room past the segment for decoders that copy in 16-byte steps; a multiple of the page size.
         stride = (Self.carryCapacity + segmentCapacity + 64 + 16_383) & ~16_383
         storage = RawStorage(byteCount: stride * count)
-        references = (0..<count).map { _ in RelaxedCounter() }
+        references = RelaxedCounters(count: count)
         let active = max(1, min(count, active ?? count))
         var free = Array((0..<active).reversed())
         free.reserveCapacity(count)
@@ -123,20 +124,20 @@ final class SegmentBufferPool: Sendable {
     }
 
     private func taken(_ index: Int) -> Int {
-        references[index].store(1)
+        references.store(1, at: index)
         let now = inUse.add(1, ordering: .relaxed).newValue
         peakInUse.max(now, ordering: .relaxed)
         return index
     }
 
     func retain(_ index: Int) {
-        references[index].add()
+        references.add(at: index)
     }
 
     /// Drops a reference; the last one hands the buffer to the task waiting longest for one, or returns it to the pool.
     func release(_ index: Int) {
         // The last release publishes every holder's reads of the buffer to its next user: not relaxed.
-        if references[index].atomic.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 {
+        if references.withAtomic(at: index, { $0.subtract(1, ordering: .acquiringAndReleasing).newValue }) == 0 {
             inUse.subtract(1, ordering: .relaxed)
             let waiter: Continuation<Int?>? = state.withLock { state in
                 if let waiter = state.waiters.popFirst() { return waiter }

@@ -5,7 +5,7 @@ import Disk
 ///
 /// `ditto -c -k` (the Finder's Compress, too) writes one for every item that has any of these: beside the item, or
 /// under `__MACOSX` with `--sequesterRsrc`. Archive Utility, `ditto -x -k`, and macOS's `unzip` merge them back
-/// instead of extracting them as files; so does ``ZipExtractor`` (``ExtractionOptions/mergesAppleDouble``).
+/// instead of extracting them as files; so does ``ZipExtractor`` (``ZipExtractionOptions/mergesAppleDouble``).
 ///
 /// The layout (big-endian), as `copyfile` writes it:
 ///

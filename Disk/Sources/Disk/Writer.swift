@@ -37,9 +37,9 @@ public struct FileOutput: ~Copyable {
     public let writerIndex: Int
 
     /// The size the planner gave (`nil`: unknown).
-    public let expectedSize: Int?
+    let expectedSize: Int?
     /// Bytes written so far.
-    public private(set) var bytesWritten = 0
+    private(set) var bytesWritten = 0
 
     enum Mode { case initial, staged, streaming, done }
     var mode = Mode.initial

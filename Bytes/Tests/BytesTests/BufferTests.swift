@@ -1,4 +1,5 @@
 import Bytes
+import Dispatch
 import Testing
 
 /// Copies into spans and output spans, output spans over arrays, and `ByteBuffer`.
@@ -191,5 +192,43 @@ import Testing
             }
         }
         #expect([UInt8](copying: buffer.unread) == [1, 2])
+    }
+
+    /// Lanes on other threads read and rewrite their own quarters of a mutable span in place, and the lending call
+    /// returns its body's result.
+    @Test func lentMutableSpanIsReadAndWrittenInPlace() {
+        let source = Self.pattern(4_096)
+        var buffer = source
+        var span = buffer.mutableSpan
+        var raw = MutableRawSpan(mutating: &span)
+        // Unsafe: the span's memory as a pointer, on four threads. Safe: each lane touches only its own 1,024 bytes,
+        // and `concurrentPerform` returns before the lending call does.
+        let lent = unsafe raw.withLentBytes { bytes in
+            DispatchQueue.concurrentPerform(iterations: 4) { lane in
+                let quarter = unsafe UnsafeMutableRawBufferPointer(rebasing: bytes.buffer[(lane * 1_024)..<((lane + 1) * 1_024)])
+                for index in quarter.indices { unsafe quarter[index] = unsafe quarter[index] &* 3 &+ UInt8(lane) }
+            }
+            return unsafe bytes.buffer.count
+        }
+        _ = consume raw
+        _ = consume span
+        #expect(lent == 4_096)
+        #expect(buffer == source.indices.map { source[$0] &* 3 &+ UInt8($0 / 1_024) })
+    }
+
+    @Test func lentMutableSpanPassesOnItsBodysError() {
+        var buffer = [UInt8](repeating: 0, count: 4)
+        var span = buffer.mutableSpan
+        var raw = MutableRawSpan(mutating: &span)
+        #expect(throws: BytesError.invalidValue) {
+            // Unsafe: a store through the lent pointer. Safe: index 0 of 4 bytes, on this thread, during the call.
+            try unsafe raw.withLentBytes { bytes throws(BytesError) in
+                unsafe bytes.buffer[0] = 7
+                throw .invalidValue
+            }
+        }
+        _ = consume raw
+        _ = consume span
+        #expect(buffer == [7, 0, 0, 0])
     }
 }

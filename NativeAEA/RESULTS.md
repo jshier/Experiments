@@ -7,6 +7,36 @@ and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIV
 synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
 M1 Max's (baseline `m1max`).
 
+## 2026-11-22, late: Disk's settings inside the options, `ArchiveKind`, input by reads (baselines `pass2-old-{1,2}` → `pass2-new-{1,2}`, M1 Max)
+
+HEAD (425420e) against the working tree, two interleaved rounds of the whole suite on an otherwise idle machine.
+
+- **`AEAExtractionOptions.disk`** is Disk's `ExtractionSettings` itself (writers, file-system width, progress, timings)
+  instead of four copies of its fields; `restoresOwnership` and `copiesQuarantine` follow Disk's Boolean names.
+  `ExtractionReport`'s timings use Disk's `ExtractionPhase` and `WriterWork` keys.
+- **`ArchiveKind`**: a file's format from its first four bytes (ZIP, AEA, Apple Archive, XAR), then its extension.
+  `nunarchiver` switches on it (a ZIP is sent to `nunzip`), and the app's own format enum is gone.
+- **The segment pool's reference counts** are one `RelaxedCounters` instead of one `RelaxedCounter` object per buffer.
+- `NonisolatedNonsendingByDefault` in the test and benchmark targets, as in the library.
+
+| Benchmark | Old → new, both rounds |
+|---|---|
+| Extract: synthetic (none / archived / archived, progress / lzfse) | mallocs 377–486 → 341–454 (−30 to −36: the pool's counters and Disk's 11); instructions +2.1 to +4.1%; time −1.5 to −3.7% (lzfse +0.7 / −1.6%) |
+| List (decode, verify, parse): synthetic | 260 → 272 G (+4.6%); 3.71 → 3.62 / 3.71 → 3.55 s |
+| Decode segment 0: synthetic: bytes | 1.13 → 1.19 G (+5.2%); 121 → 118 / 123 → 118 ms |
+| Open and verify; parse headers; make segment decoder | instructions 0 to −1.6%, times within ±5% |
+| Peak resident memory | unchanged (1.44–1.46 GB extracting) |
+
+The synthetic archive's segments are LZMA (Xcode's settings), so the instruction rise and the time gain are Bytes'
+LZMA change (Bytes' RESULTS.md, same date: more instructions, fewer cycles).
+
+**`--input read` against `mapped`** (`nunarchiver` extracting the synthetic archive, five alternating rounds,
+`/usr/bin/time -l`): read 5.59–5.82 s, mapped 5.67–5.88 s (means 5.71 and 5.74); peak memory footprint read 541–544 MB,
+mapped 488–489 MB (−53 MB). The default stays `read`: no time to gain, and a mapping turns a file truncated while it's
+read into SIGBUS for the whole process (the app expands several archives at once). The footprint difference is the
+decoders' read buffers, each kept resident to `RawStorage.residentFloor` (2 MiB) between uses; mapped pages are clean
+and file-backed, outside the footprint.
+
 ## 2026-11-22, evening: allocations in an extraction, traced (baseline `alloc-new-1` against `unify-new-{1,2}`, M1 Max)
 
 **Method.** `Tools/allocations` (Instruments) gives counts by size class, but most responsible callers came back as

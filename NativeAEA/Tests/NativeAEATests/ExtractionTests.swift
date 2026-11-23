@@ -54,7 +54,7 @@ import Testing
                 for destination in destinations {
                     group.addTask {
                         var options = AEAExtractionOptions()
-                        options.writerThreads = 2
+                        options.disk.writers = 2
                         _ = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path), options: options)
                     }
                 }
@@ -79,8 +79,8 @@ import Testing
             let destination = directory.path("out-\(threads)")
             var options = AEAExtractionOptions()
             options.read.decodeThreads = threads
-            options.writerThreads = threads
-            options.fileSystemWidth = min(threads, 2)
+            options.disk.writers = threads
+            options.disk.fileSystemWidth = min(threads, 2)
             // Entries made relative to opened parents (Disk's `.descriptors`) as well as by path.
             options.relativeToParents = threads > 1
             let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey)
@@ -179,8 +179,8 @@ import Testing
         let destination = directory.path("out")
         var options = AEAExtractionOptions()
         options.diskCompression = mode
-        options.writerThreads = 6
-        options.fileSystemWidth = 3
+        options.disk.writers = 6
+        options.disk.fileSystemWidth = 3
         let statistics = try await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(destination.path), options: options)
         #expect(statistics.unreleasedBuffers == 0)
         let tree = try readTree(destination, including: .entries)
@@ -320,7 +320,7 @@ import Testing
         try writer.write(to: stream)
         let url = try makeAEA(stream, keys: keys, in: directory)
         var options = AEAExtractionOptions()
-        options.fileSystemWidth = 1
+        options.disk.fileSystemWidth = 1
         options.overwrite = overwrite
         _ = try? await AEAArchive(url: url, signingKey: keys.signingKey).extract(to: FilePath(directory.path("out").path), options: options)
         // Nothing was made or removed outside.
@@ -340,9 +340,9 @@ import Testing
         for mode in [DiskCompressionMode.none, .archived] {
             let progress = ExtractionProgress()
             var options = AEAExtractionOptions()
-            options.writerThreads = 4
+            options.disk.writers = 4
             options.diskCompression = mode
-            options.progress = progress
+            options.disk.progress = progress
             let statistics = try await archive.extract(to: FilePath(directory.path("out-\(mode)").path), options: options)
             #expect(progress.bytes == progress.expectedBytes, "\(mode)")
             #expect(progress.entries == progress.expectedEntries, "\(mode)")

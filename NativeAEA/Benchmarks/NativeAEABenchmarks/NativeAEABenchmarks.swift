@@ -278,7 +278,7 @@ let benchmarks: @Sendable () -> Void = {
             ) { (benchmark: Benchmark) async throws in
                 var options = AEAExtractionOptions()
                 options.diskCompression = mode
-                if counted { options.progress = ExtractionProgress() }
+                if counted { options.disk.progress = ExtractionProgress() }
                 let destination = FilePath(Fixtures.output.appending(path: "\(benchmark.currentIteration)-\(UUID().uuidString)").path)
                 let archive = fixture.archive
                 benchmark.startMeasurement()

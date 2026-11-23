@@ -51,7 +51,7 @@ public struct DestinationOptions: Sendable, Hashable {
     /// Restore owners and groups: only when running as root, otherwise ignored.
     public var restoresOwnership = false
     /// Restore BSD flags (`UF_HIDDEN`, `UF_IMMUTABLE`, …; `SF_` flags only as root).
-    public var restoresFlags = true
+    var restoresFlags = true
     /// Make character and block devices (as root; otherwise they're skipped and counted). Off: refused.
     public var allowsDevices = false
     public var symbolicLinks = SymbolicLinkPolicy.anyTarget
@@ -62,7 +62,7 @@ public struct DestinationOptions: Sendable, Hashable {
     public var directoryResolution = DirectoryResolution.paths
     /// Ask the kernel to keep every path beneath the destination (`O_RESOLVE_BENEATH`, `AT_RESOLVE_BENEATH`), on top of
     /// ``EntryPath``'s checks and `O_NOFOLLOW_ANY`. On by default; measured free (Disk/RESULTS.md).
-    public var resolvesBeneath = true
+    package var resolvesBeneath = true
 }
 
 /// A special file's kind.
@@ -530,7 +530,7 @@ public final class Destination: Sendable {
 
     /// Makes a directory (and missing parents), and applies its metadata. A directory with read-only permissions is
     /// made owner-writable: call ``finishDirectory(_:metadata:)`` after its contents (the scheduler does).
-    public func makeDirectory(_ path: EntryPath, metadata: EntryMetadata = .init()) throws(DiskError) {
+    package func makeDirectory(_ path: EntryPath, metadata: EntryMetadata = .init()) throws(DiskError) {
         guard !path.isRoot else { return }
         // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes (an
         // `EntryPath` has no NUL, so `byteCount` bytes before it), valid inside the body, which keeps nothing.
@@ -545,7 +545,7 @@ public final class Destination: Sendable {
     }
 
     /// Applies a directory's metadata (after its contents): quarantine, mode, times, flags.
-    public func finishDirectory(_ path: EntryPath, metadata: EntryMetadata) throws(DiskError) {
+    package func finishDirectory(_ path: EntryPath, metadata: EntryMetadata) throws(DiskError) {
         // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes (just a NUL
         // for the destination itself), valid inside the body, which keeps nothing.
         try unsafe CString.with(path.bytes) { (name) throws(DiskError) in
@@ -571,7 +571,7 @@ public final class Destination: Sendable {
     }
 
     /// Makes a symbolic link, with its mode and times (on the link itself).
-    public func makeSymbolicLink(_ path: EntryPath, to target: RawSpan, metadata: EntryMetadata = .init()) throws(DiskError) {
+    package func makeSymbolicLink(_ path: EntryPath, to target: RawSpan, metadata: EntryMetadata = .init()) throws(DiskError) {
         guard !path.isRoot else { throw .unsafePath("") }
         // Unsafe (the next two lines): `CString.with` hands each body a pointer. Safe: NUL-terminated copies of the
         // path's bytes (`byteCount` of them before the NUL: an `EntryPath` has none) and of the target's, each valid
@@ -679,7 +679,7 @@ public final class Destination: Sendable {
 
     /// Makes `path` another name of the file at `existing`, both inside the destination, following no link in either
     /// path (`AT_SYMLINK_NOFOLLOW_ANY`, `AT_RESOLVE_BENEATH`).
-    public func makeHardLink(_ path: EntryPath, to existing: EntryPath) throws(DiskError) {
+    package func makeHardLink(_ path: EntryPath, to existing: EntryPath) throws(DiskError) {
         guard !path.isRoot, !existing.isRoot else { throw .unsafePath("") }
         // Unsafe (the next two lines): `CString.with` hands each body a pointer. Safe: NUL-terminated copies of the
         // two paths' bytes (`byteCount` of them before the NUL: an `EntryPath` has none), each valid inside its body;
@@ -721,7 +721,7 @@ public final class Destination: Sendable {
     ///
     /// - Returns: `false` if a device was skipped (not root).
     @discardableResult
-    public func makeSpecialFile(_ path: EntryPath, _ kind: SpecialFileKind, metadata: EntryMetadata = .init()) throws(DiskError) -> Bool {
+    package func makeSpecialFile(_ path: EntryPath, _ kind: SpecialFileKind, metadata: EntryMetadata = .init()) throws(DiskError) -> Bool {
         guard !path.isRoot else { throw .unsafePath("") }
         // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes
         // (`byteCount` of them before the NUL: an `EntryPath` has none), valid inside the body, which keeps nothing.
@@ -813,25 +813,6 @@ public final class Destination: Sendable {
                 kind: kind, size: Int(info.st_size),
                 modification: Timestamp(seconds: Int64(info.st_mtimespec.tv_sec), nanoseconds: UInt32(info.st_mtimespec.tv_nsec))
             )
-        }
-    }
-
-    /// Sets extended attributes from an `XAT` blob (``ExtendedAttributeBlob``) on the file or directory at `path`.
-    public func setExtendedAttributes(_ blob: RawSpan, of path: EntryPath) throws(DiskError) {
-        // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes (just a NUL
-        // for the destination itself), valid inside the body, which keeps nothing.
-        try unsafe CString.with(path.bytes) { (name) throws(DiskError) in
-            // Unsafe (the next two lines): a C string to `openat`. Safe: a literal's, or `name` (NUL-terminated,
-            // valid in this body); read only during the call.
-            let descriptor = path.isRoot
-                ? unsafe Sys.openat(root, ".", O_RDONLY | O_CLOEXEC)
-                : unsafe Sys.openat(root, name, O_RDONLY | O_NOFOLLOW_ANY | O_CLOEXEC | openBeneath)
-            // Unsafe: `name` as a `PathRef`. Safe: NUL-terminated, valid in this body; read at once, into the error.
-            guard descriptor >= 0 else { throw unsafe .system("open", path: PathRef(cString: name), code: errno) }
-            defer { Sys.close(descriptor) }
-            // Unsafe: `name` as a `PathRef`, to `applyExtendedAttributes`. Safe: as above; read only while it runs,
-            // inside this body.
-            try unsafe EntryAttributes.applyExtendedAttributes(descriptor, blob, path: PathRef(cString: name))
         }
     }
 }

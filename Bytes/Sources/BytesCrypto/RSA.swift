@@ -156,7 +156,7 @@ public enum RSA {
             guard bits >= Self.minimumModulusBitCount, bits <= Self.maximumModulusBitCount,
                   n.byteOffsetLoad(n.byteCount &- 1) & 1 == 1 else { throw .invalidValue }
 
-            let words = RSALimbs.read(bigEndian: n)
+            let words: InlineArray<64, UInt64> = RSALimbs.read(bigEndian: n)
             let limbs = RSALimbs.arithmeticLimbCount(forBits: bits)
             let inverse = RSALimbs.negativeInverse(words[0])
             let rSquared: InlineArray<64, UInt64>
@@ -341,9 +341,11 @@ public enum RSA {
 
 /// Helpers on the 64-limb form keys store.
 enum RSALimbs {
-    /// The value of big-endian `bytes` (at most 512 of them), least significant limb first.
-    static func read(bigEndian bytes: RawSpan) -> InlineArray<64, UInt64> {
-        var words = InlineArray<64, UInt64>(repeating: 0)
+    /// The value of big-endian `bytes` (at most `8 × n` of them), least significant limb first: the keys' 64-limb
+    /// form, or ``RSAModulus``' `limbs`.
+    @inline(__always)
+    static func read<let n: Int>(bigEndian bytes: RawSpan) -> InlineArray<n, UInt64> {
+        var words = InlineArray<n, UInt64>(repeating: 0)
         var end = bytes.byteCount
         var index = 0
         while end >= 8 {
@@ -679,8 +681,8 @@ enum RSAModulus<let limbs: Int> {
     /// Whether s^e mod n, for the signature s (big-endian, below n), equals `encoded` (big-endian, as long).
     @inline(never)
     static func verify(_ signature: RawSpan, _ encoded: RawSpan, _ key: borrowing RSA.PublicKey) -> Bool {
-        let s = read(bigEndian: signature)
-        let expected = read(bigEndian: encoded)
+        let s: Limbs = RSALimbs.read(bigEndian: signature)
+        let expected: Limbs = RSALimbs.read(bigEndian: encoded)
         let exponent = key.publicExponent, inverse = key.negativeInverse
         var rSquared = Limbs(repeating: 0)
         for index in 0..<limbs { rSquared[index] = key.rSquared[index] }
@@ -708,22 +710,4 @@ enum RSAModulus<let limbs: Int> {
         return true
     }
 
-    /// The value of big-endian `bytes` (at most 8 · limbs of them).
-    @inline(__always)
-    static func read(bigEndian bytes: RawSpan) -> Limbs {
-        var words = Limbs(repeating: 0)
-        var end = bytes.byteCount
-        var index = 0
-        while end >= 8 {
-            words[index] = UInt64(bigEndian: bytes.load(fromByteOffset: end &- 8, as: UInt64.self))
-            end &-= 8
-            index &+= 1
-        }
-        if end > 0 {
-            var word: UInt64 = 0
-            for offset in 0..<end { word = word &<< 8 | UInt64(bytes.byteOffsetLoad(offset)) }
-            words[index] = word
-        }
-        return words
-    }
 }

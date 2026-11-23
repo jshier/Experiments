@@ -40,19 +40,30 @@ public struct AEAExtractionOptions: Sendable {
 
     /// Decoding: decoders, decoder, input, checks.
     public var read = AEAReadOptions()
-    /// Writers (child tasks) writing files, and compressing them with ``DiskCompressionMode/archived`` (Disk's
-    /// `ExtractionSettings.writers`): one per performance core by default.
-    public var writerThreads = DiskDefaults.writers
-    /// Writers in file system calls at once (each blocks its thread in the call): APFS contends beyond a few, so
-    /// compression runs outside this limit and the calls inside it. Also the width of the passes after the writers.
-    /// Disk's default: a quarter of the performance cores, from 2 to 6 (6 on the M3 Ultra, where Xcode measured best).
-    public var fileSystemWidth = DiskDefaults.fileSystemWidth
+    /// How Disk writes: `writers` (child tasks writing files, and compressing them with
+    /// ``DiskCompressionMode/archived``: one per performance core by default), `fileSystemWidth` (writers in file
+    /// system calls at once; APFS contends beyond a few, so compression runs outside this limit and the calls inside
+    /// it; also the width of the passes after the writers), `progress`, and `collectsTimings` (the writers' time per
+    /// kind of work, in ``AEAStatistics/writerWork``).
+    ///
+    /// `progress` is where the extraction counts entries and bytes as they're written, for an app to poll (a timer
+    /// reading `read()`): relaxed per-writer counters, nothing published. The extraction sets its totals. No archive
+    /// here lists them up front, so the bytes start as an estimate, the size of the decoded stream the files are in
+    /// (headers included, so a little high):
+    /// - `.aea`: the payload's raw size from the root header (for a payload that's a `pbz` stream, its compressed size:
+    ///   low);
+    /// - `.aar`: the file's size (compressed, for `pbz`: low);
+    /// - `.xip`: the cpio stream's size from the archive's `Metadata` (else `Content`'s stored size: low).
+    ///
+    /// Once the walk has read the whole stream, both totals become exact: the entries to make and the bytes of the
+    /// files to write (each hard-linked file once). The walk runs ahead of the writers, so that's well before the end.
+    public var disk = ExtractionSettings()
     /// How files are stored: compressed as the archive asks, or not.
     public var diskCompression = DiskCompressionMode.archived
     /// Replace existing files and links (otherwise an existing one is an error). Existing directories are reused.
     public var overwrite = false
     /// Restore the archived owner and group (root only).
-    public var restoreOwnership = false
+    public var restoresOwnership = false
     /// Create entries relative to their parent directory's descriptor (each directory opened once) instead of by path
     /// from the destination (Disk's `DirectoryResolution.descriptors`). Off by default: it measured 3% slower on Xcode
     /// (an `open` per directory on the walker's critical path).
@@ -61,22 +72,7 @@ public struct AEAExtractionOptions: Sendable {
     /// Apple's `aa extract` does (the destination directory too, for an `.aar`). A `.xip` copies none, as `xip --expand`.
     /// The forms that take a `Destination` ignore it: the destination's options say what everything gets (Disk's
     /// `DestinationOptions.quarantine`).
-    public var copyQuarantine = true
-    /// Where the extraction counts entries and bytes as they're written, for an app to poll (a timer reading
-    /// `fractionCompleted`): relaxed per-writer counters, nothing published. Measured: no cost in instructions
-    /// (NativeAEA/RESULTS.md, 2026-11-20).
-    ///
-    /// The extraction sets its totals (`setExpected(entries:bytes:)`). No archive here lists them up front, so the
-    /// bytes start as an estimate, the size of the decoded stream the files are in (headers included, so a little
-    /// high):
-    /// - `.aea`: the payload's raw size from the root header (for a payload that's a `pbz` stream, its compressed size:
-    ///   low);
-    /// - `.aar`: the file's size (compressed, for `pbz`: low);
-    /// - `.xip`: the cpio stream's size from the archive's `Metadata` (else `Content`'s stored size: low).
-    ///
-    /// Once the walk has read the whole stream, both totals become exact: the entries to make and the bytes of the
-    /// files to write (each hard-linked file once). The walk runs ahead of the writers, so that's well before the end.
-    public var progress: ExtractionProgress?
+    public var copiesQuarantine = true
     /// Give the destination directory the mode, times, flags, and attributes of the archive's entry for its root (`aa
     /// archive -d DIR` writes one), as Archive Utility does for the folder it makes. Off by default: `aa extract` leaves
     /// the destination as it is.
@@ -86,18 +82,17 @@ public struct AEAExtractionOptions: Sendable {
     /// only directories holding nothing but directories keep them: 1,877 of Xcode 27.3's 30,068. NativeAEA/RESULTS.md,
     /// 2026-11-21.)
     public var restoresXIPDirectoryTimes = false
-    /// Measure the writers' time per kind of work (``AEAStatistics/writerWork``): a clock read around each step.
-    public var collectsTimings = false
 
-    /// Disk's settings for the writers.
+    /// ``disk``, with at least one writer and one in file system calls.
     var scheduling: ExtractionSettings {
-        var settings = ExtractionSettings()
-        settings.writers = max(1, writerThreads)
-        settings.fileSystemWidth = max(1, fileSystemWidth)
-        settings.progress = progress
-        settings.collectsTimings = collectsTimings
+        var settings = disk
+        settings.writers = max(1, settings.writers)
+        settings.fileSystemWidth = max(1, settings.fileSystemWidth)
         return settings
     }
+
+    /// Writers that may hold a decoded buffer through a job: what the buffer pool adds for them.
+    var heldBuffers: Int { max(1, disk.writers) }
 
     /// Disk's settings for the destination: Apple's extractors' (`aa extract`, `xip --expand`).
     func destination(quarantine: Quarantine?, quarantinesDestination: Bool) -> DestinationOptions {
@@ -106,7 +101,7 @@ public struct AEAExtractionOptions: Sendable {
         // The archived mode exactly, special bits included, as `aa extract` restores it.
         options.permissions = .exact
         options.keepsSpecialBits = true
-        options.restoresOwnership = restoreOwnership
+        options.restoresOwnership = restoresOwnership
         // Devices as root (`aa extract` makes them); otherwise skipped and counted.
         options.allowsDevices = true
         options.quarantine = quarantine
@@ -121,7 +116,7 @@ extension AEAArchive {
     ///
     /// Runs off the caller's actor, every part of it a child task of the calling task: ``AEAReadOptions/decodeThreads``
     /// decoders fill a fixed pool of buffers, and the calling task walks the stream in order and plans each entry for
-    /// Disk's ``AEAExtractionOptions/writerThreads`` writers, files as references into the buffers (a file's bytes are
+    /// Disk's writers (``AEAExtractionOptions/disk``), files as references into the buffers (a file's bytes are
     /// never copied: they go from the decoded segment to `write`, or to the compressor). A file that spans segments is
     /// written in pieces as they arrive. Symbolic links are made last (so no file is written through one), then
     /// directories get their permissions, times, and flags.
@@ -133,7 +128,7 @@ extension AEAArchive {
     /// - Throws: ``AEAError``: a failed check, a malformed stream, an unsafe path, a file system error, or cancellation.
     @concurrent @discardableResult
     public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
-        let source = try payload(options.read, heldBeyondDecoding: options.writerThreads)
+        let source = try payload(options.read, heldBeyondDecoding: options.heldBuffers)
         // `aa extract` quarantines what's in the destination, not the destination itself, for an `.aea` (Xcode's,
         // compared item by item); for a plain `.aar` it quarantines the destination too.
         let target = try Extractor.open(destination, options: options, archivePath: path, quarantinesDestination: false)
@@ -145,10 +140,10 @@ extension AEAArchive {
     /// duplicate of the destination's descriptor (`Destination.reopened(with:)`). Nothing is looked up by path.
     ///
     /// Everything extracted gets the destination's quarantine (its options'), whatever
-    /// ``AEAExtractionOptions/copyQuarantine`` says; the destination directory itself is left as its caller opened it.
+    /// ``AEAExtractionOptions/copiesQuarantine`` says; the destination directory itself is left as its caller opened it.
     @concurrent @discardableResult
     public func extract(into destination: Destination, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
-        let source = try payload(options.read, heldBeyondDecoding: options.writerThreads)
+        let source = try payload(options.read, heldBeyondDecoding: options.heldBuffers)
         let target = try Extractor.reopen(destination, options: options)
         return try await Extractor.extract(source, into: target, options: options, expectedBytes: rootHeader.rawSize)
     }
@@ -174,13 +169,13 @@ extension StreamFormat {
 
 enum Extractor {
     /// The destination for the `FilePath` forms: `path` made if needed and opened with the options' policies, and the
-    /// archive's quarantine when ``AEAExtractionOptions/copyQuarantine`` asks.
+    /// archive's quarantine when ``AEAExtractionOptions/copiesQuarantine`` asks.
     ///
     /// - Parameters:
     ///   - archivePath: The archive file, whose quarantine attribute is copied.
     ///   - quarantinesDestination: Whether the destination directory gets it too.
     static func open(_ path: FilePath, options: AEAExtractionOptions, archivePath: FilePath, quarantinesDestination: Bool) throws(AEAError) -> Destination {
-        let quarantine = options.copyQuarantine ? Quarantine(copyingFrom: archivePath) : nil
+        let quarantine = options.copiesQuarantine ? Quarantine(copyingFrom: archivePath) : nil
         do throws(DiskError) {
             return try Destination(path, options: options.destination(quarantine: quarantine, quarantinesDestination: quarantinesDestination))
         } catch {
@@ -213,7 +208,7 @@ enum Extractor {
         expectedBytes: Int = 0
     ) async throws(AEAError) -> AEAStatistics {
         let started = MonotonicClock.now
-        options.progress?.setExpected(entries: 0, bytes: max(0, expectedBytes))
+        options.disk.progress?.setExpected(entries: 0, bytes: max(0, expectedBytes))
         let outcome: Result<AEAStatistics, AEAError> = await source.withDecoding { _ in
             do throws(AEAError) {
                 return .success(try await extract(source, format: format, into: target, options: options))
@@ -237,7 +232,7 @@ enum Extractor {
         var compression = DiskCompressionCounts()
         let report: ExtractionReport
         do throws(ExtractionError<AEAError>) {
-            report = try await Extraction.run(into: destination, source: SegmentContents(pool: pool), options: options.scheduling) {
+            report = try await Extraction.run(into: destination, source: SegmentContents(pool: pool), settings: options.scheduling) {
                 (planner: inout Planner<SegmentContents>) async throws(AEAError) in
                 // The sink holds the planner while the walk runs, and hands it back after.
                 var sink = ExtractionSink(planner, pool: pool, options: options, keepsDirectoryTimes: format != .cpio || options.restoresXIPDirectoryTimes)
@@ -267,7 +262,7 @@ enum Extractor {
         statistics.phaseSeconds = report.phaseSeconds
         statistics.writerWork = report.writerSeconds
         statistics.writeSeconds = report.writerSeconds.values.reduce(0, +)
-        statistics.walkSeconds = report.phaseSeconds["planning"] ?? 0
+        statistics.walkSeconds = report.phaseSeconds[.planning] ?? 0
         statistics.walkWaitForWriters = report.plannerWaitSeconds
         statistics.decodeSeconds = Double(source.counters.busy.load(ordering: .relaxed)) / 1e9
         statistics.readSeconds = Double(source.counters.read.load(ordering: .relaxed)) / 1e9
@@ -345,7 +340,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
     private var planner: Planner<SegmentContents>
     let pool: SegmentBufferPool
     private let mode: DiskCompressionMode
-    private let restoreOwnership: Bool
+    private let restoresOwnership: Bool
     private let restoresDestinationMetadata: Bool
     /// Whether directories get their archived times (not a `.xip`'s, unless asked).
     private let keepsDirectoryTimes: Bool
@@ -393,10 +388,10 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         self.planner = planner
         self.pool = pool
         mode = options.diskCompression
-        restoreOwnership = options.restoreOwnership
+        restoresOwnership = options.restoresOwnership
         restoresDestinationMetadata = options.restoresDestinationMetadata
         self.keepsDirectoryTimes = keepsDirectoryTimes
-        progress = options.progress
+        progress = options.disk.progress
         segmentSize = pool.segmentCapacity
         // A batch of chunks (1 MiB, Disk's staging buffer), or a segment if that's smaller.
         smallSpanLimit = min(1 << 20, pool.segmentCapacity)
@@ -480,7 +475,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
                     }
                     cluster = id
                 }
-                metadata = Self.metadata(entry, owner: restoreOwnership)
+                metadata = Self.metadata(entry, owner: restoresOwnership)
                 storage = mode.storage(entry.diskCompression)
                 attachments = hasBlobs
                 acceptsBlobs = hasBlobs
@@ -490,7 +485,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
                 statistics.directories += 1
                 // The destination itself: left as it is (as before Disk; `aa extract` compares the same) unless asked.
                 guard pathCount > 0 || restoresDestinationMetadata else { return }
-                var metadata = Self.metadata(entry, owner: restoreOwnership)
+                var metadata = Self.metadata(entry, owner: restoresOwnership)
                 if !keepsDirectoryTimes { metadata.times = EntryTimes() }
                 token = try planner.directory(entryPath, metadata: metadata, attachments: hasBlobs, tag: tag)
                 acceptsBlobs = hasBlobs
@@ -500,7 +495,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
                 let target = entry.linkTarget! // Checked above.
                 // Within the header, valid for the call (the planner copies it).
                 let targetBytes = unsafe RawSpan(_unsafeStart: header + target.offset, byteCount: target.count)
-                token = try planner.symbolicLink(entryPath, target: targetBytes, metadata: Self.metadata(entry, owner: restoreOwnership), attachments: hasBlobs, tag: tag)
+                token = try planner.symbolicLink(entryPath, target: targetBytes, metadata: Self.metadata(entry, owner: restoresOwnership), attachments: hasBlobs, tag: tag)
                 acceptsBlobs = hasBlobs
                 plannedEntries += 1
             case .fifo, .characterDevice, .blockDevice:
@@ -510,7 +505,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
                 case .characterDevice: .characterDevice(entry.device ?? 0)
                 default: .blockDevice(entry.device ?? 0)
                 }
-                try planner.specialFile(entryPath, kind, metadata: Self.metadata(entry, owner: restoreOwnership), tag: tag)
+                try planner.specialFile(entryPath, kind, metadata: Self.metadata(entry, owner: restoresOwnership), tag: tag)
                 plannedEntries += 1
             default:
                 // Sockets (a bound socket can't be made from an archive), whiteouts, doors, ports, metadata entries.

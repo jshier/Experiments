@@ -5,7 +5,7 @@ import System
 
 /// Something that happened while planning an extraction, for progress reporting. Events arrive in archive
 /// order, as each archive is planned, before its files are written.
-public enum ExtractionEvent {
+public enum ZipExtractionEvent {
     /// A directory is being created.
     case creatingDirectory(ZipEntry, path: FilePath)
     /// A file will be decompressed and written. Files are written in parallel after planning, so this
@@ -42,20 +42,20 @@ public enum UpdateMode: Sendable {
 
 /// Settings for one archive's extraction: ``ZipArchive/extract(_:to:options:)`` and
 /// ``ZipExtractor/add(_:entries:into:options:)``.
-public struct ExtractionOptions {
+public struct ZipExtractionOptions {
     /// Creates options with the defaults below.
     public init() {}
 
     /// Flatten the archive: write every file into the destination root and skip directory entries.
     public var junkPaths = false
     /// Apply the archive's modification dates to extracted files and symbolic links' targets.
-    public var restoreTimestamps = true
+    public var restoresTimestamps = true
     /// Apply the archive's modification dates to directories.
-    public var restoreDirectoryTimestamps = true
+    public var restoresDirectoryTimestamps = true
     /// Restore the recorded Unix owner and group (as root; otherwise ignored, as Info-ZIP's failures are).
-    public var restoreOwnership = false
+    public var restoresOwnership = false
     /// Keep setuid, setgid, and sticky bits. Info-ZIP clears them unless asked (`-K`).
-    public var keepSetIDBits = false
+    public var keepsSpecialBits = false
     /// Lowercase names: none, those from MS-DOS hosts written in uppercase only (Info-ZIP's `-L`), or all (`-LL`).
     public var lowercaseNames = LowercaseNames.none
     /// What to do when an item already exists. The default is ``OverwritePolicy/always``.
@@ -65,7 +65,7 @@ public struct ExtractionOptions {
     /// The password for encrypted entries.
     public var password: String?
     /// Progress reporting. Paths are relative to the destination.
-    public var onEvent: ((ExtractionEvent) -> Void)?
+    public var onEvent: ((ZipExtractionEvent) -> Void)?
     /// For ``ZipArchive/extract(_:to:options:)`` and ``ZipArchive/extract(_:into:options:)``: the most files written at
     /// once (Disk's writers, each decoding its own). `nil`, the default: Disk's machine defaults, one writer per
     /// performance core with a quarter of them (2 to 6) in file system calls at once.
@@ -89,7 +89,7 @@ public struct ExtractionOptions {
     public var mergesAppleDouble = true
     /// Apply the archive's modification dates to symbolic links themselves, as Archive Utility does (Info-ZIP's `unzip`
     /// leaves a link the time it was made: the default).
-    public var restoreLinkTimestamps = false
+    public var restoresLinkTimestamps = false
     /// Write names in the file system's decomposed form (`fileSystemRepresentation`: `Ü` as `U` and a combining
     /// diaeresis), as Archive Utility does, instead of the archive's own bytes (the default, as Info-ZIP's `unzip`).
     /// APFS finds a file by either form but keeps the bytes it was made with, which is what a listing returns.
@@ -101,7 +101,7 @@ public struct ExtractionOptions {
 }
 
 /// An entry that failed to extract, and why.
-public struct ExtractionFailure: Error, Sendable, CustomStringConvertible {
+public struct ZipExtractionFailure: Error, Sendable, CustomStringConvertible {
     /// The archive the entry is in.
     public let archive: URL
     public let entry: ZipEntry
@@ -127,7 +127,7 @@ extension ZipArchive {
     /// - Throws: The errors of ``contents(of:using:password:_:)`` for damaged entries; `DiskError` for file system
     ///   failures; `CancellationError` if the task is cancelled.
     @concurrent
-    public func extract(_ entries: [ZipEntry]? = nil, to destination: FilePath, options: ExtractionOptions = .init()) async throws {
+    public func extract(_ entries: [ZipEntry]? = nil, to destination: FilePath, options: ZipExtractionOptions = .init()) async throws {
         _ = try await ZipExtractor.extract(
             into: destination, maxConcurrency: writers(for: entries, options), stopOnFirstError: true, progress: options.progress
         ) { extractor in
@@ -140,7 +140,7 @@ extension ZipArchive {
     /// duplicate of the destination's descriptor (`Destination.reopened(with:)`), so nothing is looked up by path.
     /// Everything extracted gets the destination's quarantine (its options'); the directory itself is left as it is.
     @concurrent
-    public func extract(_ entries: [ZipEntry]? = nil, into destination: Destination, options: ExtractionOptions = .init()) async throws {
+    public func extract(_ entries: [ZipEntry]? = nil, into destination: Destination, options: ZipExtractionOptions = .init()) async throws {
         _ = try await ZipExtractor.extract(
             into: destination, maxConcurrency: writers(for: entries, options), stopOnFirstError: true, progress: options.progress
         ) { extractor in
@@ -150,7 +150,7 @@ extension ZipArchive {
 
     /// The writers for one archive: no more than files, since an idle writer still costs its task (about 6 mallocs and
     /// 1 system call each, and 1 M instructions for 23 of them: RESULTS.md, 2026-11-20 follow-ups).
-    private func writers(for entries: [ZipEntry]?, _ options: ExtractionOptions) -> Int {
+    private func writers(for entries: [ZipEntry]?, _ options: ZipExtractionOptions) -> Int {
         options.maxConcurrency ?? max(1, min(DiskDefaults.writers, (entries ?? self.entries).count { $0.kind == .file }))
     }
 }
@@ -167,7 +167,7 @@ extension ZipArchive {
 /// is written through a link from an archive), then directories' permissions and timestamps, deepest first.
 ///
 /// Paths are made safe as Info-ZIP does: a leading `/` and any `..` components are removed (reported as
-/// ``ExtractionEvent/pathAdjusted(_:path:)``). Disk then makes every entry relative to the destination's descriptor,
+/// ``ZipExtractionEvent/pathAdjusted(_:path:)``). Disk then makes every entry relative to the destination's descriptor,
 /// refusing symbolic links anywhere in a path (`O_NOFOLLOW_ANY`) and anything outside it (`O_RESOLVE_BENEATH`). A file
 /// that fails to extract is removed.
 ///
@@ -241,7 +241,7 @@ public struct ZipExtractor: ~Copyable {
         stopOnFirstError: Bool = false,
         progress: ExtractionProgress? = nil,
         _ plan: (inout ZipExtractor) async throws -> Void
-    ) async throws -> [ExtractionFailure] {
+    ) async throws -> [ZipExtractionFailure] {
         let root = (destination.isAbsolute ? destination : FilePath(FileManager.default.currentDirectoryPath).pushing(destination))
             .lexicallyNormalized()
         let target = try Destination(root, options: destinationOptions(quarantine: nil))
@@ -265,7 +265,7 @@ public struct ZipExtractor: ~Copyable {
         stopOnFirstError: Bool = false,
         progress: ExtractionProgress? = nil,
         _ plan: (inout ZipExtractor) async throws -> Void
-    ) async throws -> [ExtractionFailure] {
+    ) async throws -> [ZipExtractionFailure] {
         let target = try destination.reopened(with: destinationOptions(quarantine: destination.options.quarantine))
         return try await extract(target, maxConcurrency: maxConcurrency, stopOnFirstError: stopOnFirstError, progress: progress, plan)
     }
@@ -292,7 +292,7 @@ public struct ZipExtractor: ~Copyable {
     private static func extract(
         _ target: Destination, maxConcurrency: Int?, stopOnFirstError: Bool, progress: ExtractionProgress?,
         _ plan: (inout ZipExtractor) async throws -> Void
-    ) async throws -> [ExtractionFailure] {
+    ) async throws -> [ZipExtractionFailure] {
         let caseSensitive = target.isCaseSensitive
 
         // Disk's defaults otherwise: writers make their scratch on their first job, and large-file slots on first use
@@ -308,7 +308,7 @@ public struct ZipExtractor: ~Copyable {
 
         let report: ExtractionReport
         do throws(ExtractionError<any Error>) {
-            report = try await Extraction.run(into: target, source: source, options: options) { (planner: inout Planner<ZipContentSource>) async throws in
+            report = try await Extraction.run(into: target, source: source, settings: options) { (planner: inout Planner<ZipContentSource>) async throws in
                 var extractor = ZipExtractor(
                     planner: planner, destination: target, source: source, record: record, stopOnFirstError: stopOnFirstError,
                     progress: progress, caseSensitive: caseSensitive
@@ -337,7 +337,7 @@ public struct ZipExtractor: ~Copyable {
             let job = record.jobs[Int(jobIndex)]
             let error = failure.error.unwrapped
             let relative = failure.path.hasPrefix(job.prefix) ? String(failure.path.dropFirst(job.prefix.count)) : failure.path
-            failures.append((failure.tag, ExtractionFailure(
+            failures.append((failure.tag, ZipExtractionFailure(
                 archive: job.archive.url, entry: job.entries[Int(entryIndex)], path: FilePath(relative), error: error
             )))
         }
@@ -362,8 +362,8 @@ public struct ZipExtractor: ~Copyable {
     ///   `DiskError.unsafePath` for a `subdirectory` that isn't a relative path inside the destination.
     @discardableResult
     public mutating func add(
-        _ archive: ZipArchive, entries: [ZipEntry]? = nil, into subdirectory: FilePath = FilePath(), options: ExtractionOptions = .init()
-    ) async throws -> [ExtractionFailure] {
+        _ archive: ZipArchive, entries: [ZipEntry]? = nil, into subdirectory: FilePath = FilePath(), options: ZipExtractionOptions = .init()
+    ) async throws -> [ZipExtractionFailure] {
         let selected = entries ?? archive.entries
         let prefix = subdirectory.lexicallyNormalized().string
         let prefixCount = try setPrefix(prefix)
@@ -406,7 +406,7 @@ public struct ZipExtractor: ~Copyable {
                 }
             } catch {
                 if stopOnFirstError { throw error }
-                record.failures.append((tag, ExtractionFailure(archive: archive.url, entry: entry, path: Self.cleaned(entry.path), error: error)))
+                record.failures.append((tag, ZipExtractionFailure(archive: archive.url, entry: entry, path: Self.cleaned(entry.path), error: error)))
                 planned = false
             }
             if !planned {
@@ -422,7 +422,7 @@ public struct ZipExtractor: ~Copyable {
     /// extracted), and what each described entry gets. `nil` when there are none (the usual archive: one scan of the
     /// names). They're decoded here, during planning, as symbolic links are: small (attributes), except for a
     /// resource fork; one over 64 MB is left as a file.
-    private mutating func readAppleDoubles(_ selected: [ZipEntry], job: ArchiveJob, options: ExtractionOptions) -> (merged: Set<Int>, attachments: [Int: AppleDouble])? {
+    private mutating func readAppleDoubles(_ selected: [ZipEntry], job: ArchiveJob, options: ZipExtractionOptions) -> (merged: Set<Int>, attachments: [Int: AppleDouble])? {
         var candidates: [(index: Int, target: String)] = []
         for (index, entry) in selected.enumerated() where entry.kind == .file {
             guard entry.uncompressedSize >= 26, entry.uncompressedSize <= 64 << 20, let target = AppleDouble.target(of: entry.path) else { continue }
@@ -477,7 +477,7 @@ public struct ZipExtractor: ~Copyable {
     ///
     /// - Returns: Whether it was planned (`false`: skipped).
     private mutating func plan(
-        _ entry: ZipEntry, index: Int, tag: Int, job: ArchiveJob, prefixCount: Int, root: Int, options: ExtractionOptions,
+        _ entry: ZipEntry, index: Int, tag: Int, job: ArchiveJob, prefixCount: Int, root: Int, options: ZipExtractionOptions,
         appleDouble: AppleDouble?
     ) async throws -> Bool {
         // The name, cleaned, after the subdirectory.
@@ -509,10 +509,10 @@ public struct ZipExtractor: ~Copyable {
         if sanitized.adjusted { options.onEvent?(.pathAdjusted(entry, path: relativePath(prefixCount..<count))) }
         let entryPath = try EntryPath(validating: path.span.bytes.extracting(0..<count))
 
-        let mask: UInt16 = options.keepSetIDBits ? 0o7777 : 0o777
+        let mask: UInt16 = options.keepsSpecialBits ? 0o7777 : 0o777
         let defaultMode = mode_t(entry.kind == .directory ? 0o755 : 0o644) & ~umask
         var metadata = EntryMetadata(mode: entry.posixPermissions.map { UInt16(truncatingIfNeeded: $0) & mask } ?? UInt16(defaultMode))
-        if options.restoreOwnership, let user = entry.ownerID, let group = entry.groupID { metadata.owner = Owner(user: user, group: group) }
+        if options.restoresOwnership, let user = entry.ownerID, let group = entry.groupID { metadata.owner = Owner(user: user, group: group) }
         let time = entry.modificationTime
         if !time.isNaN {
             let seconds = time.rounded(.down)
@@ -523,7 +523,7 @@ public struct ZipExtractor: ~Copyable {
         if entry.kind == .directory {
             options.onEvent?(.creatingDirectory(entry, path: relativePath(prefixCount..<count)))
             // Applied last, so read-only directories and mtimes aren't disturbed by their contents.
-            if !options.restoreDirectoryTimestamps { metadata.times = EntryTimes() }
+            if !options.restoresDirectoryTimestamps { metadata.times = EntryTimes() }
             let token = try planner.directory(entryPath, metadata: metadata, attachments: appleDouble != nil, tag: tag)
             if let appleDouble { try Self.attach(appleDouble, to: token, in: &planner) }
             return true
@@ -582,7 +582,7 @@ public struct ZipExtractor: ~Copyable {
             }
         }
 
-        if !options.restoreTimestamps { metadata.times = EntryTimes() }
+        if !options.restoresTimestamps { metadata.times = EntryTimes() }
         if entry.kind == .symlink {
             // Read now (links are small), so the event can name the destination; made after every file.
             if linkDecoder == nil { linkDecoder = ZipDecoder() }
@@ -593,7 +593,7 @@ public struct ZipExtractor: ~Copyable {
             // As Info-ZIP does, only the owner (no mode) on the link; its time when asked (Archive Utility's).
             record.links.append(PlanRecord.Link(
                 path: Array(path[0..<count]), target: target, owner: metadata.owner,
-                times: options.restoreLinkTimestamps ? metadata.times : EntryTimes(), appleDouble: appleDouble, tag: tag
+                times: options.restoresLinkTimestamps ? metadata.times : EntryTimes(), appleDouble: appleDouble, tag: tag
             ))
             return true
         }
@@ -628,7 +628,7 @@ public struct ZipExtractor: ~Copyable {
         FilePath(String(decoding: path[range], as: UTF8.self))
     }
 
-    /// Keeps only the last component of the cleaned name at `start` (`count` bytes) for ``ExtractionOptions/junkPaths``:
+    /// Keeps only the last component of the cleaned name at `start` (`count` bytes) for ``ZipExtractionOptions/junkPaths``:
     /// its new length.
     private mutating func junkPath(at start: Int, count: Int) -> Int {
         var slash = start + count - 1
@@ -672,7 +672,7 @@ final class PlanRecord {
     var jobs: [ArchiveJob] = []
     /// By plan tag: the archive (its index in `jobs`) and the entry (its index in the job's entries).
     var tags: [(job: Int32, entry: Int32)] = []
-    var failures: [(tag: Int, failure: ExtractionFailure)] = []
+    var failures: [(tag: Int, failure: ZipExtractionFailure)] = []
     /// Symbolic links to make; `nil` for one a later entry replaced.
     var links: [Link?] = []
 }

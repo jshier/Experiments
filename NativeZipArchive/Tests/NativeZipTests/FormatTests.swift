@@ -141,7 +141,7 @@ private let largeFixtures = [
         defer { temporary.remove() }
         let directory = temporary.url
         var adjusted: [String] = []
-        var options = ExtractionOptions()
+        var options = ZipExtractionOptions()
         options.onEvent = { event in
             if case let .pathAdjusted(_, path) = event { adjusted.append(path.string) }
         }
@@ -159,7 +159,7 @@ private let largeFixtures = [
             let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
             defer { temporary.remove() }
             let directory = temporary.url
-            var options = ExtractionOptions()
+            var options = ZipExtractionOptions()
             options.overwrite = policy
             var skipped = 0
             options.onEvent = { if case .skipped = $0 { skipped += 1 } }
@@ -191,7 +191,7 @@ private let largeFixtures = [
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }
         let directory = temporary.url
-        var options = ExtractionOptions()
+        var options = ZipExtractionOptions()
         options.password = "secret"
         let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor in
             for name in largeFixtures {

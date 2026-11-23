@@ -2,6 +2,7 @@ import BytesTestSupport
 import Disk
 import DiskTestSupport
 import Foundation
+import NativeAEA
 import System
 import Testing
 
@@ -12,30 +13,16 @@ import Testing
 /// Disk's `Destination.publishUnwrapped`, tested there; the comparison with Archive Utility's output, item by item, is
 /// in Disk/RESULTS.md.)
 @Suite struct ExpanderTests {
-    @Test func `formats by their first bytes`() {
-        #expect(ArchiveFormat(magic: Array("PK\u{3}\u{4}rest".utf8)) == .zip)
-        // An empty ZIP is only its end record; a spanned one starts with a data descriptor's signature.
-        #expect(ArchiveFormat(magic: Array("PK\u{5}\u{6}".utf8)) == .zip)
-        #expect(ArchiveFormat(magic: Array("PK\u{7}\u{8}PK\u{3}\u{4}".utf8)) == .zip)
-        #expect(ArchiveFormat(magic: Array("AEA1....".utf8)) == .appleEncryptedArchive)
-        #expect(ArchiveFormat(magic: Array("xar!....".utf8)) == .xip)
-        #expect(ArchiveFormat(magic: Array("AA01....".utf8)) == .appleArchive)
-        #expect(ArchiveFormat(magic: Array("YAA1....".utf8)) == .appleArchive)
-        #expect(ArchiveFormat(magic: Array("pbze....".utf8)) == .appleArchive)
-        #expect(ArchiveFormat(magic: Array("%PDF-1.7".utf8)) == nil)
-        // Too short to say, or nothing at all.
-        #expect(ArchiveFormat(magic: Array("PK".utf8)) == nil)
-        #expect(ArchiveFormat(magic: []) == nil)
-    }
-
+    /// NativeAEA's `ArchiveKind` recognizes the formats (its tests cover every magic); here, the app's use of it and
+    /// the alerts' messages.
     @Test func `a file's format is its first bytes', else its extension's`() async throws {
         try await withTemporaryDirectory { directory in
-            func format(_ name: String, _ contents: String) throws -> ArchiveFormat {
+            func format(_ name: String, _ contents: String) throws -> ArchiveKind {
                 let file = directory.appending(path: name)
                 try Data(contents.utf8).write(to: file)
-                return try ArchiveFormat(detecting: FilePath(file.path))
+                return try ArchiveKind.detect(FilePath(file.path))
             }
-            let cases: [(name: String, contents: String, format: ArchiveFormat)] = [
+            let cases: [(name: String, contents: String, format: ArchiveKind)] = [
                 // The contents win over a wrong extension, and need none.
                 ("Renamed.xip", "PK\u{3}\u{4}....", .zip),
                 ("NoExtension", "AEA1....", .appleEncryptedArchive),
@@ -56,7 +43,7 @@ import Testing
             #expect(failure?.description == "“Notes.pdf” isn’t a ZIP, Apple Archive, Apple Encrypted Archive, or XIP archive.")
             // A file that can't be read: the call and the system's reason.
             let missing = #expect(throws: ExpansionFailure.self) {
-                _ = try ArchiveFormat(detecting: FilePath(directory.appending(path: "Missing.zip").path))
+                _ = try ArchiveKind.detect(FilePath(directory.appending(path: "Missing.zip").path))
             }
             #expect(missing?.description == "open “Missing.zip”: No such file or directory")
         }

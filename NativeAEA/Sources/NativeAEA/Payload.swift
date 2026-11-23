@@ -197,14 +197,14 @@ public final class AppleArchiveFile: Sendable {
     @concurrent @discardableResult
     public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
         let target = try Extractor.open(destination, options: options, archivePath: path, quarantinesDestination: true)
-        return try await Extractor.extract(source(options.read, heldBeyondDecoding: options.writerThreads), into: target, options: options, expectedBytes: size)
+        return try await Extractor.extract(source(options.read, heldBeyondDecoding: options.heldBuffers), into: target, options: options, expectedBytes: size)
     }
 
     /// Extracts the archive into `destination`, a directory the caller opened; see ``AEAArchive/extract(into:options:)``.
     @concurrent @discardableResult
     public func extract(into destination: Destination, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
         let target = try Extractor.reopen(destination, options: options)
-        return try await Extractor.extract(source(options.read, heldBeyondDecoding: options.writerThreads), into: target, options: options, expectedBytes: size)
+        return try await Extractor.extract(source(options.read, heldBeyondDecoding: options.heldBuffers), into: target, options: options, expectedBytes: size)
     }
 
     /// Decodes the archive and calls `body` with each entry, in order; see ``AEAArchive/forEachEntry(options:_:)``.

@@ -3,7 +3,7 @@ import Darwin
 /// Removes a directory tree through descriptors, never following a link: each directory opened with `O_NOFOLLOW`
 /// relative to its parent, its entries unlinked relative to it. Read-only directories and locking flags (what
 /// extracted trees have) are cleared on the way.
-public enum TreeRemoval {
+package enum TreeRemoval {
     /// Removes `path` (a file, link, or directory tree) and everything in it. Errors are ignored: what can be removed
     /// is.
     public static func remove(_ path: String) {

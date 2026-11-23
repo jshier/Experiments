@@ -143,7 +143,7 @@ public final class ExtractionProgress: Sendable {
 /// Defaults derived from the machine.
 public enum DiskDefaults {
     /// Performance cores (`hw.perflevel0.physicalcpu`; all cores where there are no levels).
-    public static let performanceCores: Int = {
+    static let performanceCores: Int = {
         var count: Int32 = 0
         var size = MemoryLayout<Int32>.size
         // Unsafe: `sysctlbyname` writes through pointers to `count` and `size`. Safe: locals that outlive the call;

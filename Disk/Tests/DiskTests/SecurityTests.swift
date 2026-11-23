@@ -43,7 +43,7 @@ import Testing
         var options = ExtractionSettings()
         options.stopsOnFirstFailure = false
         let outside = setup.outside.path
-        let report = try await Extraction.run(into: destination, source: source, options: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+        let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
             try withPath("a") { (path) throws(DiskError) in try planner.symbolicLink(path, target: Array(outside.utf8).span.bytes) }
             _ = try await planFile(&planner, "a/victim", index: 0, size: 7)
             _ = try await planFile(&planner, "a/new", index: 1, size: 3)
@@ -85,7 +85,7 @@ import Testing
             let source = ArraySource([Array("x".utf8)])
             var options = ExtractionSettings()
             options.stopsOnFirstFailure = false
-            let report = try await Extraction.run(into: destination, source: source, options: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
+            let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 _ = try await planFile(&planner, "evil/sub/file", index: 0, size: 1)
                 try withPath("evil/dir") { (path) throws(DiskError) in try planner.directory(path) }
             }
