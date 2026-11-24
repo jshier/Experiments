@@ -411,37 +411,39 @@ public struct ZstdEncoder: ~Copyable {
         frame.contentSize = contentSize
         frame.startIndex = nextIndex
         blocks.startFrame()
-        // Unsafe: the header's stores, at most 18 bytes at the staging buffer's start.
-        let output = unsafe blocks.stagingPointer + stagedEnd
+        // Unsafe: a span over the header's room: 18 bytes at `stagedEnd` (always 0 here: a frame starts with nothing
+        // staged), within the staging buffer's `blockSizeMaximum + 512`; the largest header is 14 bytes. Its stores
+        // are checked.
+        var output = unsafe MutableRawSpan(_unsafeStart: blocks.stagingPointer + stagedEnd, byteCount: 18)
         let windowSize = frameParameters.windowSize
         let singleSegment = contentSize.map { windowSize >= $0 } ?? false
         var sizeCode = 0
         if let contentSize {
             sizeCode = (contentSize >= 256 ? 1 : 0) &+ (contentSize >= 65536 &+ 256 ? 1 : 0) &+ (contentSize >= 0xFFFF_FFFF ? 1 : 0)
         }
-        unsafe output.storeBytes(of: Zstd.magic.littleEndian, as: UInt32.self)
+        output.storeBytes(of: Zstd.magic.littleEndian, toByteOffset: 0, as: UInt32.self)
         let descriptor = (includesChecksum ? 1 : 0) &<< 2 | (singleSegment ? 1 : 0) &<< 5 | sizeCode &<< 6
-        unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: descriptor), toByteOffset: 4, as: UInt8.self)
+        output.storeBytes(of: UInt8(truncatingIfNeeded: descriptor), toByteOffset: 4, as: UInt8.self)
         var position = 5
         if !singleSegment {
-            unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: (frameParameters.windowLog &- 10) &<< 3), toByteOffset: position, as: UInt8.self)
+            output.storeBytes(of: UInt8(truncatingIfNeeded: (frameParameters.windowLog &- 10) &<< 3), toByteOffset: position, as: UInt8.self)
             position &+= 1
         }
         if let contentSize {
             switch sizeCode {
             case 0:
                 if singleSegment {
-                    unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: contentSize), toByteOffset: position, as: UInt8.self)
+                    output.storeBytes(of: UInt8(truncatingIfNeeded: contentSize), toByteOffset: position, as: UInt8.self)
                     position &+= 1
                 }
             case 1:
-                unsafe output.storeBytes(of: UInt16(truncatingIfNeeded: contentSize &- 256).littleEndian, toByteOffset: position, as: UInt16.self)
+                output.storeBytes(of: UInt16(truncatingIfNeeded: contentSize &- 256).littleEndian, toByteOffset: position, as: UInt16.self)
                 position &+= 2
             case 2:
-                unsafe output.storeBytes(of: UInt32(truncatingIfNeeded: contentSize).littleEndian, toByteOffset: position, as: UInt32.self)
+                output.storeBytes(of: UInt32(truncatingIfNeeded: contentSize).littleEndian, toByteOffset: position, as: UInt32.self)
                 position &+= 4
             default:
-                unsafe output.storeBytes(of: UInt64(contentSize).littleEndian, toByteOffset: position, as: UInt64.self)
+                output.storeBytes(of: UInt64(contentSize).littleEndian, toByteOffset: position, as: UInt64.self)
                 position &+= 8
             }
         }
@@ -450,16 +452,16 @@ public struct ZstdEncoder: ~Copyable {
 
     /// Ends the frame: an empty last block if none was marked last, and the checksum.
     private mutating func finishFrame() {
-        // Unsafe: up to 7 bytes after what's staged, within the staging buffer's slack.
-        let output = unsafe blocks.stagingPointer + stagedEnd
+        // Unsafe: a span over 7 bytes after what's staged, within the staging buffer's slack; its stores are checked.
+        var output = unsafe MutableRawSpan(_unsafeStart: blocks.stagingPointer + stagedEnd, byteCount: 7)
         var position = 0
         if !frame.lastBlockWritten {
-            unsafe output.storeBytes(of: UInt16(1).littleEndian, as: UInt16.self)
-            unsafe output.storeBytes(of: UInt8(0), toByteOffset: 2, as: UInt8.self)
+            output.storeBytes(of: UInt16(1).littleEndian, toByteOffset: 0, as: UInt16.self)
+            output.storeBytes(of: UInt8(0), toByteOffset: 2, as: UInt8.self)
             position = 3
         }
         if let digest = frame.digest ?? frame.hasher?.digest {
-            unsafe output.storeBytes(of: UInt32(truncatingIfNeeded: digest).littleEndian, toByteOffset: position, as: UInt32.self)
+            output.storeBytes(of: UInt32(truncatingIfNeeded: digest).littleEndian, toByteOffset: position, as: UInt32.self)
             position &+= 4
         }
         stagedEnd &+= position

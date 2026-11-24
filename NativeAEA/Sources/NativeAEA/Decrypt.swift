@@ -57,9 +57,9 @@ extension AEAArchive {
                     // The part of this segment inside the range.
                     let low = max(wanted.lowerBound, segment.rawOffset), high = min(wanted.upperBound, segment.rawOffset + segment.rawSize)
                     let start = MonotonicClock.now
-                    // Unsafe: a span over the decoded segment. Safe: within its `rawSize` bytes, in a buffer this task
-                    // holds until the `defer` above releases it, after the write.
-                    let bytes = unsafe RawSpan(_unsafeStart: pool.segmentBase(buffer) + (low - segment.rawOffset), byteCount: high - low)
+                    // Within its `rawSize` bytes, in a buffer this task holds until the `defer` above releases it, after
+                    // the write.
+                    let bytes = pool.bytes(buffer, at: low - segment.rawOffset, count: high - low)
                     do throws(DiskError) {
                         try output.write(bytes, at: low - wanted.lowerBound)
                     } catch {

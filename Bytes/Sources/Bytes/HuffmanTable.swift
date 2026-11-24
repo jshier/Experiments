@@ -227,11 +227,10 @@ extension HuffmanTable {
             var sorted = storage.mutableSpan
             return try _sortAndBuild(lengths, &sorted, counts, bitOrder, rootBits, &table, makeSymbol, makeLink)
         }
-        return try withUnsafeTemporaryAllocation(of: UInt16.self, capacity: lengths.count) { buffer throws(BytesError) -> Int in
-            // Unsafe: a span over stack memory. Safe: initialized here, and it lives only for this call. No
-            // safe stack storage has a size known only at run time.
-            _ = unsafe buffer.initialize(repeating: 0)
-            var sorted = unsafe MutableSpan(_unsafeElements: buffer)
+        // Stack memory of a size known only at run time, zeroed.
+        return try withTemporaryAllocation(of: UInt16.self, capacity: lengths.count) { storage throws(BytesError) -> Int in
+            storage.append(repeating: 0, count: lengths.count)
+            var sorted = storage.mutableSpan
             return try _sortAndBuild(lengths, &sorted, counts, bitOrder, rootBits, &table, makeSymbol, makeLink)
         }
     }

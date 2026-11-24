@@ -142,10 +142,10 @@ extension RawSpan {
     /// The byte at `offset`, bounds-checked.
     @inlinable @inline(__always)
     func byteOffsetLoad(_ offset: Int) -> UInt8 {
+        // One unsigned compare; the load's own check folds into it (the same machine code as an unchecked load after
+        // it, where `Span<UInt8>(viewing:)[offset]` cost X.509 parsing 0.4% more instructions).
         precondition(UInt(bitPattern: offset) < UInt(bitPattern: byteCount), "Offset out of range")
-        // Unsafe: an unchecked load. Safe: the offset is within the span (checked above), and every bit pattern is a
-        // `UInt8`.
-        return unsafe unsafeLoad(fromUncheckedByteOffset: offset, as: UInt8.self)
+        return load(fromByteOffset: offset, as: UInt8.self)
     }
 }
 

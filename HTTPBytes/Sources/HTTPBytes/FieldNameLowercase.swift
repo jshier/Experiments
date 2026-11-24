@@ -18,21 +18,21 @@ extension HTTPFieldName {
     static func exactWords(_ name: RawSpan) -> (UInt64, UInt64) {
         let count = name.byteCount
         if count >= 8 {
-            // Unsafe: 8-byte loads at 0 and count − 8. Safe: count ≥ 8.
-            let first = unsafe name.unsafeLoadUnaligned(fromUncheckedByteOffset: 0, as: UInt64.self)
-            let last = unsafe name.unsafeLoadUnaligned(fromUncheckedByteOffset: count &- 8, as: UInt64.self)
+            // 8-byte loads at 0 and count − 8: count ≥ 8, so the checks fold.
+            let first = name.load(fromByteOffset: 0, as: UInt64.self)
+            let last = name.load(fromByteOffset: count &- 8, as: UInt64.self)
             return (UInt64(littleEndian: first), UInt64(littleEndian: last))
         }
         if count >= 4 {
-            // Unsafe: 4-byte loads at 0 and count − 4. Safe: count ≥ 4.
-            let first = unsafe name.unsafeLoadUnaligned(fromUncheckedByteOffset: 0, as: UInt32.self)
-            let last = unsafe name.unsafeLoadUnaligned(fromUncheckedByteOffset: count &- 4, as: UInt32.self)
+            // 4-byte loads at 0 and count − 4: count ≥ 4.
+            let first = name.load(fromByteOffset: 0, as: UInt32.self)
+            let last = name.load(fromByteOffset: count &- 4, as: UInt32.self)
             return (UInt64(UInt32(littleEndian: first)), UInt64(UInt32(littleEndian: last)))
         }
-        // Unsafe: single bytes at 0, count / 2, and count − 1. Safe: 1 ≤ count ≤ 3 (the caller checks count > 0).
-        let b0 = UInt64(unsafe name.unsafeLoad(fromUncheckedByteOffset: 0, as: UInt8.self))
-        let b1 = UInt64(unsafe name.unsafeLoad(fromUncheckedByteOffset: count &>> 1, as: UInt8.self))
-        let b2 = UInt64(unsafe name.unsafeLoad(fromUncheckedByteOffset: count &- 1, as: UInt8.self))
+        // Single bytes at 0, count / 2, and count − 1: 1 ≤ count ≤ 3 (the caller checks count > 0).
+        let b0 = UInt64(name.load(fromByteOffset: 0, as: UInt8.self))
+        let b1 = UInt64(name.load(fromByteOffset: count &>> 1, as: UInt8.self))
+        let b2 = UInt64(name.load(fromByteOffset: count &- 1, as: UInt8.self))
         return (b0 | b1 &<< 8 | b2 &<< 16, 0)
     }
 

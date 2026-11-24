@@ -12,6 +12,59 @@ Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module h
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
 
+## 2026-11-23, M1 Max, safe APIs where they're free (baselines `safe-bytes-before` → `safe-bytes-after`, `safe-bytes-final`)
+
+The survey's "free" items for Bytes, BytesAsync, and BytesCrypto (`Writeups/Library-Survey-2026-11-23.md`, "Unsafe code"),
+each kept only if no row that runs it gained instructions. Measured under load (three other agents building): instruction
+counts and codegen (`Tools/loops`, per-function instruction and trap counts) are the evidence, times aren't. The portable
+build's paths were compared against the committed code built the same way (`git archive` copy; baselines
+`safe-bytes-portable-old`, `-old-adler` → `safe-bytes-portable-new`). Net: 32 code lines naming an unsafe construct fewer
+(ByteBlock now has none, nor do HuffmanTable, `RelaxedCounters`, DER, and PEM), one `@unchecked Sendable` gone, and three
+changes that are faster. `safe-bytes-final` is the kept set alone: every row equal to `safe-bytes-before` or lower, mallocs
+unchanged.
+
+**Kept:**
+
+| Site | Safe form | Instructions |
+|---|---|---|
+| PEM's boundary search (`PEM.decodeAll`) | `Byte11`/`Byte9`/`Byte5` patterns found with `RawSpan.firstByteOffset(of:from:)` (Bytes' 16-at-a-time search) instead of a byte loop over `StaticString.withUTF8Buffer` | X.509 PEM decode and parse −45% (ACCVRAIZ1), −35% (G3); PEM P-256 key −20% |
+| `RawSpan.byteOffsetLoad` (DER, X.509) | `precondition(UInt(offset) < UInt(byteCount))` then `load(fromByteOffset:as: UInt8.self)`: byte-identical to the unchecked load (LLVM merged the two in a probe) | X.509 parse −0.4%, parse and read −0.3% |
+| `Poly1305.blocks` | `Span<InlineArray<16, UInt8>>(viewing:)` over the whole blocks, two loads at constant offsets per element | ChaCha20-Poly1305 seal 64 B −1.3%, 16 KB −0.1%; the block loop 43 → 42 |
+| `Poly1305.absorb(_:at:)` | removed: nothing called it | — |
+| `RelaxedCounters` | `UniqueArray<Atomic<Int>>` in a final class that is `Sendable` without `@unchecked` | `add(_:at:)` 24 → 10 instructions, `value(at:)` 21 → 7: the `ManagedBuffer` form called `swift_beginAccess` on every access. One more allocation per `RelaxedCounters` (made once per extraction or pool) |
+| `RawSpan.byteBlock(at:)` | four checked `load`s after its precondition | identical (9 instructions) |
+| `RawSpan.byteBlock(at:padding:)` | an `InlineArray<64, UInt8>` of padding and checked loads and stores, the tail's words loaded at offsets from `offset` and from `byteCount` (whose checks fold), written out rather than as a loop | path lengths equal or 2–3 instructions shorter for every tail length; 1–3-byte tails no longer call `memcpy` |
+| `HuffmanTable` scratch over 720 symbols | `withTemporaryAllocation` and `append(repeating: 0, count:)` | equal (static), a path no benchmark reaches |
+
+**Tried and reverted** (each costs; the sites keep their `unsafe` code and comments as they were):
+
+| Site | Safe form | Cost |
+|---|---|---|
+| `ASCII` digit reads (`read(_:asciiDigits:)` and the octal and up-to forms) | checked `load` under the `remaining >= 8` guard | log lines +10.3%: the cursor's offset isn't known to be non-negative, so the load's `UInt(offset) <= UInt(count)` half stays (the "Making loops of single reads vectorize" trade) |
+| `Adler32`, the `udot` loop's 128-byte steps | `Span<InlineArray<128, UInt8>>`, the element read through its `span` or as `InlineArray<2, SIMD64<UInt8>>` subscripts | 64 B ×16 K +26%: both take the address of a local, so every call gets a stack-protector check. Two 64-byte elements a step instead: inner loop 26 → 30 |
+| `Adler32`, the 64-byte tail | checked `extracting(offset..<offset + 64)` | +6 instructions a call (two compares and a null-base select) |
+| `Adler32`, the 32-byte loop | `Span<InlineArray<32, UInt8>>` read as `SIMD32<UInt8>` halves | portable build: 1 MB +0.7%, 64 B +5.6% (the view's setup each 2 KB chunk and call) |
+| `Hexadecimal` encode and decode | typed views of 8-byte input and 16-byte output elements (and the reverse) | 32 B: encode +0.3%, decode +0.5% (view setup); decode 1 KB −5.4%. Reading elements with `bitCast` and storing a `SIMD2` instead left the encoder's loop scalar: 1 KB +52% |
+| `GroupShuffle.pack` staging (portable builds) | `withTemporaryAllocation(of:capacity:)`, zeroed once, `mutableSpan` stores, loads from `span.bytes` (needed `ConvertibleToBytes` on `ByteGroup.Integer`) | Write Byte5–7 +4.3%, Byte3 +0.5% |
+| `forEach` staging (portable builds, `BytesReader`) | `withTemporaryAllocation(byteCount:alignment:)`, zeroed once, `mutableBytes` stores, `bytes.load` per value | forEach Byte5–7 +1.5–1.8% |
+| `_unalignedRawBytes` (bit-offset reads of `ByteRepresentable`) | `withTemporaryAllocation(byteCount:alignment:)` and `append` per byte | per-byte loop 19 → 25 instructions (the count kept in memory and checked) |
+| ChaCha20's 512- and 256-byte batches | checked loads and stores at `offset + k` | `seal` 1,024 → 1,519 instructions static, 74 traps |
+| ChaCha20's batches, second form | per-batch `_mutatingExtracting(offset..<offset + 512)` with constant offsets; the stitched MAC from a 512-byte span of the previous batch at `round * 48` | XOR batch 556 → 579 instructions (per 512 B); `open`'s round loop 379 → 391: LLVM rotated the loop and kept six compares a round |
+| AES-GCM `openBatches` (the spill check) | the group as a 128-byte `_mutatingExtracting`, hashed and finished at constant offsets | 336 → 342 and 406 → 426 instructions a group, stack accesses 54 → 57 |
+
+Not tried: AES-CTR's kernel serves in-place and separate output through one pair of pointers (two safe kernels, and the
+AES-GCM result above); `Shuffle`'s steps load 64 bytes per 40–56-byte step, so they overlap and no typed view fits.
+
+Two things to know before trying again:
+
+- **A span of a typed view's element, or a subscript of a local `InlineArray`, takes a local's address**, and the function
+  then gets a stack-protector check on every call (about 10 instructions: guard load, store, compare at the end), even
+  when LLVM removes the copy itself. `bitCast(element, to: SIMD32<UInt8>.self)` (or `UInt64`, `SIMD2<UInt64>`) reads the
+  element as a value without it. Check with `objdump -r` for `___stack_chk_guard` in the function.
+- **Checks fold for offsets measured from `byteCount`** (`load(fromByteOffset: byteCount - 16)` under `byteCount - offset
+  >= 16`) where offsets measured from a start (`offset + 16` under `byteCount - offset >= 32`) keep theirs: LLVM doesn't
+  relate `byteCount - (offset + 16)` to `byteCount - offset` once `&+` has dropped the no-wrap flags.
+
 ## 2026-11-23, M1 Max, one-shot reuse and gzip members (baselines `r3-codec-before` → `r3-codec-after`)
 
 Two behaviour fixes in BytesCompression, measured under load (other agents building): instruction counts are the
@@ -3318,3 +3371,96 @@ Against the references in the same run: x-ray now 1.26x liblzma's instructions a
 and 0.80x Compression's time (179 ms); mozilla 1.09x liblzma's instructions, 0.73x its time. The one row that got
 slower, x-ray streamed with 64 KiB of input per call, spends more of its time in the careful path near each input's
 end, which the change doesn't speed up.
+
+## BytesCompression's `unsafe` on safe APIs (2026-11-23, M1 Max, loaded machine; baselines `safe-comp-before` → `safe-comp-after`)
+
+From the library survey's unsafe-code audit (`Writeups/Library-Survey-2026-11-23.md`, "Unsafe code"): the sites it
+called safe now at no cost, then the per-block builders it called likely free. 174 fewer lines with `unsafe` in
+BytesCompression (2,155 → 1,981, comment lines left out), every one judged by instruction counts (174 rows of
+`CompressionBenchmarks`: every codec's small and mid inputs, xz/LZMA, XXH64, CRC-64, the zero-malloc gates) and
+codegen (`Tools/loops` against the old object, `Tools/calls --callee 'stack_chk|assertionFailure|memset|swift_allocObject'`).
+Times weren't compared (three other agents were building).
+
+Converted, by pattern (net `unsafe` lines):
+
+| Pattern | Where | Lines | How |
+|---|---|---:|---|
+| `SIMDMask` and SIMD reinterpretations | `LZBitmapEncoder` 9, `LZBitmapDecoder` 1, `LZVNEncoder` 2 | −12 | `SIMDMask.lanes(as:)` (`bitCast(_storage, to:)`, in `LZCopy.swift`), `mask._storage`, `bitCast` for a vector's lanes. Same loops as before (`Tools/loops`: no line differs in the three files). Not `replacing(with:where:)`: the code's comments record it compiling a lane at a time there. |
+| Fills | `BrotliEncoder.reset`, `DeflateCompressor.clear` | −2 | `MutableSpan.update(repeating:)`; `MutableRawSpan.storeBytes(repeating:count:as: SIMD8<Int16>)`, whose loop is 3 instructions per 16 bytes against 4–5: DEFLATE's 1.6 KB rows −11 to −17% (the tables are cleared per call). |
+| Hash and CRC | `XXHash64` 11, `CRC64` 6 | −17 | Input as typed elements, `Span<InlineArray<32 or 8, UInt8>>(viewing:)` (byte arrays: any address is aligned), read with `bitCast`; CRC-64's table as a `Span` after `precondition(count == 2048)`, which folds every lookup's check. XXH64's stripe loop 18 → 16 instructions, its tail 12 → 11; CRC-64's word loop 28 → 27. |
+| Cold headers and entry points | `XZFormat` 28, `XZDecoder` 25, `LZMA2Decoder` 7, `ZstdEncoder` 10, `ZstdDecoder` 5, `ZstdFormat` 3, `Deflate` 3, `DeflateDecoder` 2 | −83 | Checked `RawSpan.load(fromByteOffset:as:)` (unaligned for integers) and `extracting`; `XZCursor` is `~Escapable` over a `RawSpan`; the xz and LZMA2 chunk loops and `ZstdDecoder.decodeFrames` take the input as a span and hand the hot decoders each chunk's base address; Zstandard's frame header and trailer go through an 18- and a 7-byte `MutableRawSpan`, each made once. |
+| Zstandard encoder's per-block builders | `ZstdEncoderEntropy` 49, `ZstdEncoderBlock` 13 | −62 | `normalize`, `normalizeSecondary`, histograms (`count`, `countBytes`), `estimateSize`, `isValid`, the Huffman description's weights, the FSE description's counts, the cost functions: spans made once per call from the workspace (`CodecWorkspace.pointer(_:as:)`, +2), with a precondition on `maximumSymbol` that folds the loops' checks. |
+
+Tried and reverted (or replaced), with what each cost:
+
+- **Shrinking spans** (`rest = rest.extracting(droppingFirst: 32)`, checked loads at constant offsets) for XXH64 and
+  CRC-64: +2 instructions an iteration in the main loops (18 → 20, 28 → 32) and +3 to +4 in the tails (the
+  null-base `csel` and the count update). The typed-element views replaced them.
+- **Typed elements read through `element.span.bytes.load`**: the `InlineArray` copy put a stack protector in
+  `XXHash64.hash`, `XXHash64.update`, `CRC64.update`, and `countBytes` (4–6 instructions a call): CRC-64's 64-byte
+  row +1.4%. `bitCast(element, to: UInt64.self)` keeps the word in a register (no protector; the row is now −3.8%).
+  `bitCast` to `SIMD2<UInt64>` for 16-byte blocks moved lanes out of a vector register (`umov`) in the histogram
+  loop: 8-byte words instead.
+- **The Huffman tree on spans** (`sort`, `quickSort`, `buildTree`, `limitHeight`, `buildCodes`; about 50 lines): node
+  indexes come from the data (parents, sorted positions, the sentinel at −1), so the checks stay: `buildTree`'s merge
+  loop 31 → 44 instructions, about 2–3 K a new table, Zstandard's 1–4 KB bodies +2 to +6%. Reverted (a comment at the
+  call says why).
+- **The FSE table build on spans** (`ZstdFSETable.build`, about 25 lines): `cumulative[symbol]` and `states[slot]`
+  per cell keep their checks: about 4 K instructions a block with new sequence tables, 4 KB bodies +4%. Reverted.
+- **The FSE description's stores to a `MutableRawSpan`**: about 20 instructions a symbol (the main loop 120 → 142),
+  up to 1 K a block. The stores went back to the pointer; the counts' loads stay checked (their checks fold).
+- **A `CodecWorkspace.span(_:of:count:)` accessor borrowing the workspace**: a span borrowed from `self.workspace` in a
+  `mutating` method can't outlive the access ("lifetime-dependent variable escapes its scope"). Replaced by
+  `pointer(_:as:)` and `MutableSpan(_unsafeStart:count:)` at each use.
+
+Not done, and why: the survey's other fills (26) fill raw pointers into workspaces and outputs inside hot or pointer
+functions, so a span would need an unsafe creation per fill (no fewer `unsafe`); `CodecWorkspace`/`GrowableWorkspace`
+array-backed (and the windows' `RawSpan(_unsafeBytes:)`): the hot loops take `base` as a raw pointer, which an array
+can lend only inside `withUnsafeMutableBytes`, and `GrowableWorkspace` memory past what's written is uninitialized
+(`zeroed: false`), so a safe accessor over it could read uninitialized bytes; the streaming stash units (Zstandard's
+`unit`/`finishUnit`, xz's window) return bytes from the input or the stash, a lifetime on both from a `mutating`
+method; the decoders' table builders (`ZstdEntropy`, LZFSE, bzip2) index by decoded values like the FSE build and
+Huffman tree above, not attempted after those measured.
+
+Instructions, exact minimums of each row's samples (`minNonZeroValue` of the unslimmed histograms; `bench-table`'s 3
+digits hide these):
+
+| Row | Before | After | Change |
+|---|---:|---:|---:|
+| Deflate 1 JSON (1.6 KB) | 148,108 | 123,598 | −16.6% |
+| XXH64 64 B (×16 K) | 2,458,842 | 2,131,162 | −13.3% |
+| XXH64 1 MB | 591,197 | 525,675 | −11.1% |
+| Deflate 6 JSON (1.6 KB) | 221,334 | 196,798 | −11.1% |
+| CRC-64 64 B (×16 K) | 4,736,247 | 4,556,024 | −3.8% |
+| Zstd decode L3 xml 64 KB (frames carry XXH64 checksums) | 284,566 | 280,506 | −1.4% |
+| Zstd decode L3 xml (5.1 MB) | 28,699,140 | 28,366,430 | −1.2% |
+| Zstd encode L1 body dickens 64 KB | 2,251,091 | 2,246,533 | −0.2% |
+| CRC-64 1 MB | 296,361 | 296,317 | 0.0% |
+| LZMA decode -6 xml (5.1 MB) | 129,094,346 | 129,081,849 | 0.0% |
+| LZBITMAP encode xml (64 KB × 16) | 23,091,489 | 23,091,489 | 0 |
+| LZVN encode xml (64 KB × 16) | 56,681,072 | 56,681,012 | 0.0% |
+| Zstd encode L1 body Main.html | 120,071 | 120,365 | +0.24% |
+| Zstd encode L3 body Main.js 1 KB | 56,360 | 56,558 | +0.35% |
+| Inflate gzip JSON (1.6 KB) | 27,028 | 27,136 | +0.40% |
+
+The worst rows: Zstandard's encoder on 1–4 KB bodies moves −0.1 to +0.35% (+40 to +300 instructions a frame; its
+64 KB and larger rows −0.1 to −0.2%, from the histogram); `Inflate gzip JSON` +108 instructions, where the gzip
+header's two checked loads account for a few. Rows whose code didn't change moved as much in the same run (BZip2 JSON
++89, Brotli decode JSON +30, LZFSE decode JSON +30), so these are at the noise floor. Every zero-malloc gate still
+reads 0; the default tests and the touched codecs' bulk suites (Zstandard, xz/LZMA, LZ encoders, DEFLATE, gzip
+members) pass.
+
+**Adversarial review (five reviewers, given the diffs and not these notes).** Differential runs against the old code
+(about 237,000 malformed and truncated streams, every hash and CRC length at every start offset, Zstd frames at levels
+1–4 against libzstd) found no change in behavior. Two findings, fixed:
+
+- `DeflateCompressor.clear`'s `storeBytes(repeating:count:as: SIMD8<Int16>.self)` requires the span's start aligned
+  for `SIMD8<Int16>` (16 bytes; it rebinds memory), while a `UniqueArray<Int16>` promises 2. It held only because the
+  allocator gives 16; a probe at offset 2 or 8 traps in debug ("self must be a properly aligned pointer"), and in
+  release it's undefined. Now the start's alignment is checked once: aligned (always, in practice), the same
+  3-instruction loop; otherwise unaligned `storeBytes(of:toByteOffset:as:)` (8 instructions per 16 bytes: its checks
+  don't fold). Tried first: `InlineArray<8, Int16>` (aligned as `Int16`) compiled back to one 2-byte store per entry.
+  **For later:** make the compressor's tables generic over their store stride (typed as groups of 8 entries), so a
+  misaligned type can't be written in the first place.
+- `ZstdHistogram.count` zeroed the whole counts span, not `maximumSymbol + 1` entries; `buildTable` passes 256 entries
+  for at most 53 symbols, so every block cleared about 2.5 KB more. Bounded again.

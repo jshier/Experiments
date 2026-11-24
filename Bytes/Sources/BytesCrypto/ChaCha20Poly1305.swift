@@ -476,17 +476,6 @@ struct Poly1305 {
         h2 &+= c4 ? 1 : 0
     }
 
-    /// Adds the 16-byte block at `offset` in `data`.
-    ///
-    /// - Precondition: 16 bytes from `offset` (unchecked: callers have checked).
-    @inline(__always)
-    mutating func absorb(_ data: RawSpan, at offset: Int) {
-        // Unsafe: unchecked loads. Safe: callers check that 16 bytes remain.
-        let t0 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt64.self))
-        let t1 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 8, as: UInt64.self))
-        absorb(t0, t1)
-    }
-
     /// Adds full 16-byte blocks of `data`, and a last partial block zero-padded (RFC 8439, 2.8).
     @inline(__always)
     mutating func blocks(_ data: RawSpan) {
@@ -496,13 +485,14 @@ struct Poly1305 {
         let r0 = r0, r1 = r1, s1 = s1
         @inline(__always)
         func process(_ t0: UInt64, _ t1: UInt64) { Self.absorb(t0, t1, into: &h0, &h1, &h2, r0: r0, r1: r1, s1: s1) }
-        while count &- offset >= 16 {
-            // Unsafe: unchecked loads. Safe: 16 bytes remain, checked by the loop.
-            let t0 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: UInt64.self))
-            let t1 = UInt64(littleEndian: unsafe data.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 8, as: UInt64.self))
-            process(t0, t1)
-            offset &+= 16
+        // The whole blocks as 16-byte elements: loads at constant offsets within one need no checks.
+        let whole = Span<InlineArray<16, UInt8>>(viewing: data.extracting(first: count & ~15))
+        for index in whole.indices {
+            let block = whole[index].span.bytes
+            process(UInt64(littleEndian: block.load(fromByteOffset: 0, as: UInt64.self)),
+                    UInt64(littleEndian: block.load(fromByteOffset: 8, as: UInt64.self)))
         }
+        offset = count & ~15
         if offset < count {
             var block = InlineArray<16, UInt8>(repeating: 0)
             for index in 0..<(count &- offset) { block[index] = data.load(fromByteOffset: offset &+ index, as: UInt8.self) }

@@ -41,16 +41,14 @@ public enum HTTPToken {
     /// folded (the overload taking two spans folds both).
     @inlinable
     public static func equalsIgnoringCase(_ bytes: RawSpan, _ token: StaticString) -> Bool {
-        // Unsafe: the static string's bytes. Safe: `utf8CodeUnitCount` of them, read within that count.
-        assert((0..<token.utf8CodeUnitCount).allSatisfy { unsafe token.utf8Start[$0] &- 0x41 >= 26 }, "a lowercase literal")
-        guard bytes.byteCount == token.utf8CodeUnitCount else { return false }
-        // Unsafe: the static string's bytes. Safe: `utf8CodeUnitCount` of them, read within that count.
-        let start = unsafe token.utf8Start
+        let expected = immortalSpan(token)
+        assert((0..<expected.byteCount).allSatisfy { expected.load(fromByteOffset: $0, as: UInt8.self) &- 0x41 >= 26 },
+               "a lowercase literal")
+        guard bytes.byteCount == expected.byteCount else { return false }
         for offset in 0..<bytes.byteCount {
             let byte = bytes.load(fromByteOffset: offset, as: UInt8.self)
             let folded = byte &- 0x41 < 26 ? byte | 0x20 : byte
-            let expected = unsafe start[offset]
-            guard folded == expected else { return false }
+            guard folded == expected.load(fromByteOffset: offset, as: UInt8.self) else { return false }
         }
         return true
     }

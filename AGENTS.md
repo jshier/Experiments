@@ -1194,6 +1194,11 @@ The survey's bugs (2026-11-23; Disk/RESULTS.md, ARCHITECTURE.md §8):
   with `swift build`, compare `ls -lT …/Build/Products/Debug/*.swiftmodule` dates with the sources' and remove the stale
   ones. Also: Xcode's builds didn't give DiskTestSupport Disk's `package` symbols; SPI (`@_spi(Testing) public`)
   works in both.
+- **`storeBytes(repeating:count:as:)` and typed views require the start aligned for the type**; a `UniqueArray<T>` or
+  `[T]` promises only `T`'s alignment. Storing `SIMD8<Int16>` groups into a `UniqueArray<Int16>` worked only because
+  `malloc` returns 16-byte blocks (a probe at offset 2 traps in debug; release is undefined). Check the address once,
+  or type the storage by its store stride. Unaligned `storeBytes(of:toByteOffset:as:)` is always safe but its bounds
+  checks didn't fold (8 instructions per 16 bytes against 3).
 - **An app composes its packages' errors too**: Nunarchiver's `ExpansionError` (`.credential`, `.failure`, `.zip`,
   `.appleArchive`, `.disk`, `.cancelled`) replaced `any Error` and a message-suffix test for a wrong key
   (`AEAError.incorrectKey` now); the outcome is decided by case.

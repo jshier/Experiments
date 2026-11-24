@@ -501,6 +501,31 @@ func makeXIP(
     }
 }
 
+/// cpio (odc) headers: what a damaged or tampered `.xip`'s content can put in front of the walker before its checksum
+/// is known.
+@Suite struct CpioHeaderTests {
+    /// A 76-byte odc header with `mode` (six octal digits) and the other fields plausible.
+    static func header(mode: String) -> [UInt8] {
+        Array(("070707" + "000001" + "000002" + mode + "000765" + "000024" + "000001" + "000000" + "15000000000" + "000006"
+            + "00000000005").utf8)
+    }
+
+    /// A mode wider than 16 bits (six octal digits reach 0o777777) is an invalid archive; it trapped converting to
+    /// `mode_t` (found fuzzing, 2026-11-23). The widest valid mode parses and has its type.
+    @Test func rejectsModesWiderThanSixteenBits() throws {
+        for mode in ["400644", "200000", "777777"] {
+            let bytes = Self.header(mode: mode)
+            #expect(throws: AEAError.self, "\(mode)") { _ = try Cpio.parseHeader(bytes.span.bytes) }
+        }
+        let regular = try Cpio.parseHeader(Self.header(mode: "100644").span.bytes)
+        #expect(regular.mode == 0o100644 && Cpio.type(regular.mode) == .regularFile)
+        let widest = try Cpio.parseHeader(Self.header(mode: "177777").span.bytes)
+        #expect(widest.mode == 0o177777)
+        // Any caller: truncated to 16 bits (0o400644 → 0o000644: no type bits), never a trap.
+        #expect(Cpio.type(0o400644) == nil)
+    }
+}
+
 @Suite(.diskLifetimes) struct XARTimeTests {
     /// `creation-time` through Bytes' `UTCDateTime`: checked fields, so dates that don't exist are rejected (the
     /// hand-written parser before took any day up to 31), and a leap second is allowed.

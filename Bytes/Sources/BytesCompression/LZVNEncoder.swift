@@ -659,8 +659,7 @@ struct LZMatchTable: ~Copyable {
     /// A comparison's mask as lanes of all ones or zeros: its storage.
     @inline(__always)
     static func lanes(_ mask: SIMDMask<SIMD4<Int32>>) -> SIMD4<Int32> {
-        // Unsafe: a reinterpretation of the same bytes; a mask's storage is its lanes, each 0 or -1.
-        unsafe unsafeBitCast(mask, to: SIMD4<Int32>.self)
+        mask._storage
     }
 
     /// The lanes `mask` sets, one bit each: lane `i` in bit `16i` (narrowed in one instruction, then masked, so
@@ -715,7 +714,7 @@ struct LZMatchTable: ~Copyable {
                 let equal = unsafe src.loadUnaligned(fromByteOffset: position, as: SIMD16<UInt8>.self)
                     .== src.loadUnaligned(fromByteOffset: position &- distance, as: SIMD16<UInt8>.self)
                 // Each lane 0xFF where equal; narrowed to 4 bits a lane and inverted, the first difference's.
-                let lanes = unsafe unsafeBitCast(equal, to: SIMD8<UInt16>.self)
+                let lanes = equal.lanes(as: SIMD8<UInt16>.self)
                 let differing = ~bitCast(SIMD8<UInt8>(truncatingIfNeeded: lanes &>> 4), to: UInt64.self)
                 if differing != 0 {
                     return min(position &+ UInt64(littleEndian: differing).trailingZeroBitCount &>> 2, limit)

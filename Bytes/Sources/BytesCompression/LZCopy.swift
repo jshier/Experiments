@@ -35,6 +35,15 @@ enum LZBuffers {
     }
 }
 
+extension SIMDMask where Storage: ConvertibleToBytes {
+    /// The comparison's lanes as a vector of all ones (true) or zeros (false): its storage, reinterpreted. The same
+    /// machine code as `unsafeBitCast` (nothing: the `cmeq` result itself), checked by `bitCast`'s sizes.
+    @inline(__always)
+    func lanes<Vector: ConvertibleFromBytes>(as type: Vector.Type) -> Vector {
+        bitCast(_storage, to: Vector.self)
+    }
+}
+
 /// The match finders' hash, shared by the DEFLATE and Brotli encoders: libdeflate's, the top bits of a multiply.
 enum LZHash {
     /// The top `bits` bits of `value` times 0x1E35A7BD.

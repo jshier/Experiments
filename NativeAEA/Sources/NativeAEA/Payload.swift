@@ -121,11 +121,11 @@ final class AEAPayload: ChunkSource {
     nonisolated(nonsending) private func pbzStream() async throws(AEAError) -> BlockStream? {
         guard let first = try await segments.peek() else { return nil }
         let pool = segments.pool
-        // The first chunk's first bytes, published and held until the consumer takes it: safe.
-        let head = unsafe UnsafeRawBufferPointer(start: pool.segmentBase(first.buffer), count: min(first.rawSize, PBZ.headerSize))
-        guard let compression = unsafe PBZ.compression(head) else { return nil }
+        // The first chunk's first bytes, published and held until the consumer takes it.
+        let head = pool.bytes(first.buffer, at: 0, count: min(first.rawSize, PBZ.headerSize))
+        guard let compression = PBZ.compression(head) else { return nil }
         guard first.rawSize >= PBZ.headerSize else { throw .invalidArchive("a pbz header is cut short") }
-        let blockSize = try unsafe PBZ.blockSize(RawSpan(_unsafeBytes: head)) // The first chunk's first 12 bytes: safe.
+        let blockSize = try PBZ.blockSize(head)
         // The segments' pool stays as it started: writers hold the block stream's buffers (its pool is sized for them).
         return BlockStream(
             .upstream(segments), layout: .pbz(compression, blockSize: blockSize),
@@ -168,13 +168,13 @@ public final class AppleArchiveFile: Sendable {
         do throws(AEAError) {
             size = file.count
             let head = try AEAArchive.read(file, at: 0, count: min(size, PBZ.headerSize))
-            let detected: AEACompression? = head.withUnsafeBytes { unsafe PBZ.compression($0) }
+            let detected = PBZ.compression(head.span.bytes)
             if let detected {
                 guard head.count == PBZ.headerSize else { throw AEAError.invalidArchive("a pbz header is cut short") }
                 compression = detected
                 blockSize = try PBZ.blockSize(head.span.bytes)
             } else {
-                let isArchive = head.withUnsafeBytes { unsafe PBZ.isAppleArchive($0) }
+                let isArchive = PBZ.isAppleArchive(head.span.bytes)
                 guard size == 0 || isArchive else {
                     throw AEAError.invalidArchive("not an Apple Archive (no AA01 or pbz magic)")
                 }

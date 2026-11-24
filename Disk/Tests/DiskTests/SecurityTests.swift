@@ -130,9 +130,7 @@ import Testing
     @Test(arguments: ["../victim", "/etc/passwd", "a/../../victim", "a//b", "./a", "a/."])
     func refusesPathsThatClimbOut(_ path: String) {
         let bytes = Array(path.utf8)
-        _ = bytes.withUnsafeBytes { buffer in
-            #expect(throws: DiskError.self) { _ = try EntryPath(validating: RawSpan(_unsafeBytes: buffer)) }
-        }
+        #expect(throws: DiskError.self) { _ = try EntryPath(validating: bytes.span.bytes) }
     }
 
     /// Hard links only to files this extraction wrote: a token from a file planned `hardLinked`.

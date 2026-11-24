@@ -101,15 +101,14 @@ extension DeflateFormat {
     /// Whether `bytes`, ``trailerSize`` of them, are the trailer of output with `checksum` and `length`.
     func trailerMatches(_ bytes: RawSpan, checksum: UInt32, length: UInt32) -> Bool {
         guard bytes.byteCount == trailerSize else { return false }
-        // Unsafe: loads of the trailer's fields. Safe: the span holds `trailerSize` bytes, checked just above.
         switch self {
         case .raw:
             return true
         case .zlib:
-            return UInt32(bigEndian: unsafe bytes.unsafeLoadUnaligned(as: UInt32.self)) == checksum
+            return UInt32(bigEndian: bytes.load(fromByteOffset: 0, as: UInt32.self)) == checksum
         case .gzip:
-            return UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(as: UInt32.self)) == checksum
-                && UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 4, as: UInt32.self)) == length
+            return UInt32(littleEndian: bytes.load(fromByteOffset: 0, as: UInt32.self)) == checksum
+                && UInt32(littleEndian: bytes.load(fromByteOffset: 4, as: UInt32.self)) == length
         }
     }
 }

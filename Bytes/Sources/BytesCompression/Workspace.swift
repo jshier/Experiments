@@ -37,6 +37,15 @@ struct CodecWorkspace: ~Copyable {
         unsafe base + offset
     }
 
+    /// A typed pointer `offset` bytes in, for a span over a region of the layout
+    /// (`MutableSpan(_unsafeStart: workspace.pointer(offset, as: T.self), count: n)`): code that works on the region
+    /// then has checked accesses.
+    @unsafe @inline(__always)
+    func pointer<T>(_ offset: Int, as type: T.Type) -> UnsafeMutablePointer<T> {
+        // Unsafe: pointer arithmetic, as `pointer(_:)`; the callers' layouts align each region for its type.
+        unsafe (base + offset).assumingMemoryBound(to: T.self)
+    }
+
     deinit {
         // Unsafe: freeing the allocation. Safe: only `deinit` frees it, once.
         unsafe base.deallocate()

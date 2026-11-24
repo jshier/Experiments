@@ -56,27 +56,38 @@ public struct XXHash64: Sendable {
         // end. (Through the streaming hasher, its buffer and lane fields cost a 64-byte message 230 instructions
         // against libzstd's 130.)
         let count = bytes.byteCount
-        var index = 0
         var hash: UInt64
         if count >= 32 {
-            var v1 = seed &+ prime1 &+ prime2
-            var v2 = seed &+ prime2
-            var v3 = seed
-            var v4 = seed &- prime1
-            let end = count &- 32
-            repeat {
-                // Unsafe: unchecked loads. Safe: `index <= count - 32`, so all 32 bytes are within `bytes`.
-                v1 = round(v1, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt64.self)))
-                v2 = round(v2, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 8, as: UInt64.self)))
-                v3 = round(v3, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 16, as: UInt64.self)))
-                v4 = round(v4, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 24, as: UInt64.self)))
-                index &+= 32
-            } while index <= end
-            hash = converge(v1, v2, v3, v4)
+            var lanes = (seed &+ prime1 &+ prime2, seed &+ prime2, seed, seed &- prime1)
+            rounds(&lanes, stripes(bytes))
+            hash = converge(lanes.0, lanes.1, lanes.2, lanes.3)
         } else {
             hash = seed &+ prime5
         }
-        return finish(hash &+ UInt64(truncatingIfNeeded: count), bytes, from: index)
+        return finish(hash &+ UInt64(truncatingIfNeeded: count), bytes.extracting(droppingFirst: count & ~31))
+    }
+
+    /// The whole 32-byte stripes at the start of `bytes`, as elements: byte arrays, so any address is aligned for
+    /// them, read with `bitCast` (no checks within an element, and no stack copy: reading one through its `span` put
+    /// a stack protector in the function, 4 instructions a call).
+    @inline(__always)
+    @_lifetime(copy bytes)
+    static func stripes(_ bytes: RawSpan) -> Span<InlineArray<32, UInt8>> {
+        Span(viewing: bytes.extracting(first: bytes.byteCount & ~31))
+    }
+
+    /// The four lanes' rounds over `stripes`.
+    @inline(__always)
+    static func rounds(_ lanes: inout (UInt64, UInt64, UInt64, UInt64), _ stripes: Span<InlineArray<32, UInt8>>) {
+        var (v1, v2, v3, v4) = lanes
+        for index in stripes.indices {
+            let words = bitCast(stripes[index], to: SIMD4<UInt64>.self)
+            v1 = round(v1, UInt64(littleEndian: words[0]))
+            v2 = round(v2, UInt64(littleEndian: words[1]))
+            v3 = round(v3, UInt64(littleEndian: words[2]))
+            v4 = round(v4, UInt64(littleEndian: words[3]))
+        }
+        lanes = (v1, v2, v3, v4)
     }
 
     /// The four lanes merged into one hash, once 32 bytes or more were hashed.
@@ -89,27 +100,27 @@ public struct XXHash64: Sendable {
         return merge(hash, v4)
     }
 
-    /// The hash finished with `bytes[start...]` (fewer than 32 bytes) and avalanched.
+    /// The hash finished with `bytes` (fewer than 32) and avalanched.
     @inline(__always)
-    static func finish(_ hash: UInt64, _ bytes: RawSpan, from start: Int) -> UInt64 {
+    static func finish(_ hash: UInt64, _ bytes: RawSpan) -> UInt64 {
+        // Words and bytes as elements, as the stripes are.
         var hash = hash
         let count = bytes.byteCount
-        var index = start
-        // Unsafe: unchecked loads. Safe: each loop's condition keeps its load's bytes below `count`.
-        while count &- index >= 8 {
-            hash ^= round(0, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt64.self)))
+        let words = Span<InlineArray<8, UInt8>>(viewing: bytes.extracting(first: count & ~7))
+        for index in words.indices {
+            hash ^= round(0, UInt64(littleEndian: bitCast(words[index], to: UInt64.self)))
             hash = hash.rotatedLeft(by: 27) &* prime1 &+ prime4
-            index &+= 8
         }
-        if count &- index >= 4 {
-            hash ^= UInt64(UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt32.self))) &* prime1
+        var rest = bytes.extracting(droppingFirst: count & ~7)
+        if rest.byteCount >= 4 {
+            hash ^= UInt64(UInt32(littleEndian: rest.load(fromByteOffset: 0, as: UInt32.self))) &* prime1
             hash = hash.rotatedLeft(by: 23) &* prime2 &+ prime3
-            index &+= 4
+            rest = rest.extracting(droppingFirst: 4)
         }
-        while index < count {
-            hash ^= UInt64(unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt8.self)) &* prime5
+        let tail = Span<UInt8>(viewing: rest)
+        for index in tail.indices {
+            hash ^= UInt64(tail[index]) &* prime5
             hash = hash.rotatedLeft(by: 11) &* prime1
-            index &+= 1
         }
         hash ^= hash &>> 33
         hash &*= prime2
@@ -152,24 +163,18 @@ public struct XXHash64: Sendable {
             lane4 = Self.round(lane4, UInt64(littleEndian: buffer[3]))
             bufferedCount = 0
         }
-        if count &- index >= 32 {
-            var (v1, v2, v3, v4) = (lane1, lane2, lane3, lane4)
-            let end = count &- 32
-            repeat {
-                // Unsafe: unchecked loads. Safe: `index <= count - 32`, so all 32 bytes are within `bytes`.
-                v1 = Self.round(v1, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index, as: UInt64.self)))
-                v2 = Self.round(v2, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 8, as: UInt64.self)))
-                v3 = Self.round(v3, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 16, as: UInt64.self)))
-                v4 = Self.round(v4, UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: index &+ 24, as: UInt64.self)))
-                index &+= 32
-            } while index <= end
-            (lane1, lane2, lane3, lane4) = (v1, v2, v3, v4)
+        var rest = bytes.extracting(droppingFirst: index)
+        if rest.byteCount >= 32 {
+            var lanes = (lane1, lane2, lane3, lane4)
+            Self.rounds(&lanes, Self.stripes(rest))
+            (lane1, lane2, lane3, lane4) = lanes
+            rest = rest.extracting(droppingFirst: rest.byteCount & ~31)
         }
-        if index < count {
+        if rest.byteCount > 0 {
             var stash = buffer.mutableSpan
             var raw = MutableRawSpan(mutating: &stash)
-            raw.copyBytes(from: bytes.extracting(index..<count), toByteOffset: 0)
-            bufferedCount = count &- index
+            raw.copyBytes(from: rest, toByteOffset: 0)
+            bufferedCount = rest.byteCount
         }
     }
 
@@ -183,7 +188,7 @@ public struct XXHash64: Sendable {
     /// The hash of everything added so far. Adding more afterwards continues the same hash.
     public var digest: UInt64 {
         let hash = length >= 32 ? Self.converge(lane1, lane2, lane3, lane4) : seed &+ Self.prime5
-        return Self.finish(hash &+ length, buffer.span.bytes.extracting(0..<bufferedCount), from: 0)
+        return Self.finish(hash &+ length, buffer.span.bytes.extracting(0..<bufferedCount))
     }
 }
 

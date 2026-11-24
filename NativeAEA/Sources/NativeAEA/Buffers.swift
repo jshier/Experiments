@@ -159,9 +159,53 @@ final class SegmentBufferPool: Sendable {
         for waiter in waiters { waiter.resume(returning: nil) }
     }
 
-    /// Where `index`'s segment bytes start (after the carry region).
+    /// Where `index`'s segment bytes start (after the carry region): for the decoders, which write disjoint regions of
+    /// a buffer from several tasks (a span can't be split between them).
     @inline(__always)
     func segmentBase(_ index: Int) -> UnsafeMutableRawPointer {
         unsafe storage.pointer(index * stride + Self.carryCapacity)
+    }
+
+    /// Bytes `offset..<offset + byteCount` of buffer `index`, counted from its segment base (the carry region is at
+    /// negative offsets, from `-carryCapacity`). The caller holds a reference to the buffer while it reads them.
+    @inline(__always) @_lifetime(borrow self)
+    func bytes(_ index: Int, at offset: Int, count byteCount: Int) -> RawSpan {
+        Self.checkRange(index, offset, byteCount, count: count, stride: stride)
+        // Unsafe (the next two): a span over the pool's storage, its lifetime set by hand to a borrow of the pool.
+        // Safe: within buffer `index` (checked above), in storage the pool owns and frees only when it goes, which the
+        // borrow outlasts.
+        let span = unsafe RawSpan(_unsafeStart: segmentBase(index) + offset, byteCount: byteCount)
+        return unsafe _overrideLifetime(span, borrowing: self)
+    }
+
+    /// Calls `body` with bytes `offset..<offset + byteCount` of buffer `index` to write, counted as ``bytes(_:at:count:)``
+    /// counts. The caller holds a reference to the buffer, and no one else reads or writes those bytes meanwhile.
+    @inline(__always)
+    func withMutableBytes<R, E: Error>(
+        _ index: Int, at offset: Int, count byteCount: Int, _ body: (inout MutableRawSpan) throws(E) -> R
+    ) throws(E) -> R {
+        Self.checkRange(index, offset, byteCount, count: count, stride: stride)
+        // Unsafe: a mutable span over the pool's storage. Safe: within buffer `index` (checked above), in storage the
+        // pool owns; the span ends with `body`.
+        var span = unsafe MutableRawSpan(_unsafeStart: segmentBase(index) + offset, byteCount: byteCount)
+        return try body(&span)
+    }
+
+    /// Copies `byteCount` bytes from `offset` in buffer `source` to just before buffer `target`'s segment bytes, into
+    /// its carry region: the start of a header that continues in `target`. The caller holds both buffers.
+    func carry(_ byteCount: Int, from source: Int, at offset: Int, to target: Int) {
+        precondition(byteCount <= Self.carryCapacity, "a carry larger than the carry region")
+        let from = bytes(source, at: offset, count: byteCount)
+        withMutableBytes(target, at: -byteCount, count: byteCount) { $0.copyBytes(from: from, toByteOffset: 0) }
+    }
+
+    /// Checks that `offset..<offset + byteCount` is within a buffer: from `-carryCapacity` to the end of its stride.
+    @inline(__always)
+    private static func checkRange(_ index: Int, _ offset: Int, _ byteCount: Int, count: Int, stride: Int) {
+        precondition(
+            UInt(bitPattern: index) < UInt(bitPattern: count) && offset >= -carryCapacity && byteCount >= 0
+                && byteCount <= stride - carryCapacity - offset,
+            "bytes outside a segment buffer"
+        )
     }
 }

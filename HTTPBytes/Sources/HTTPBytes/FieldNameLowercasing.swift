@@ -20,21 +20,13 @@ extension HTTPFieldName {
 
 /// Memory to lowercase names HTTPBytes doesn't know into before an encoder writes them, made once and grown only for a
 /// name longer than any before: no allocation per field.
-@safe @usableFromInline
-package struct FieldNameLowercasing: ~Copyable {
-    @usableFromInline var scratch: UnsafeMutableRawPointer
-    @usableFromInline var capacity: Int
+@usableFromInline
+package struct FieldNameLowercasing: ~Copyable, Sendable {
+    @usableFromInline var scratch: UniqueArray<UInt8>
 
     @usableFromInline
     package init(capacity: Int = 64) {
-        self.capacity = Swift.max(capacity, 16)
-        // Unsafe: an allocation owned by this value and freed in `deinit`.
-        unsafe scratch = UnsafeMutableRawPointer.allocate(byteCount: self.capacity, alignment: 16)
-    }
-
-    deinit {
-        // Unsafe: frees this value's own allocation, which nothing else holds (it's noncopyable).
-        unsafe scratch.deallocate()
+        scratch = UniqueArray(repeating: 0, count: Swift.max(capacity, 16))
     }
 
     /// Whether `name` has an ASCII uppercase letter: a scan of 16 bytes at a time.
@@ -54,20 +46,19 @@ package struct FieldNameLowercasing: ~Copyable {
     @usableFromInline
     package mutating func lowercase(_ name: RawSpan) -> UnsafeRawPointer {
         let count = name.byteCount
-        if count > capacity {
-            // Unsafe: replaces this value's own allocation; nothing holds it between calls.
-            unsafe scratch.deallocate()
-            capacity = Swift.max(count, capacity &* 2)
-            unsafe scratch = UnsafeMutableRawPointer.allocate(byteCount: capacity, alignment: 16)
+        if count > scratch.count {
+            // Nothing holds the old memory between calls.
+            scratch = UniqueArray(repeating: 0, count: Swift.max(count, scratch.count &* 2))
         }
+        var output = scratch.mutableSpan
         for offset in 0..<count {
             let byte = name.load(fromByteOffset: offset, as: UInt8.self)
-            // Unsafe: a store into the scratch memory. Safe: `offset < count <= capacity`.
-            unsafe scratch.storeBytes(of: byte &- 0x41 < 26 ? byte | 0x20 : byte, toByteOffset: offset, as: UInt8.self)
+            output[offset] = byte &- 0x41 < 26 ? byte | 0x20 : byte
         }
-        return unsafe UnsafeRawPointer(scratch)
+        return scratch.span.withUnsafeBytes {
+            // Unsafe: the scratch memory's address, kept past the closure. Safe: it stays where it is until the next
+            // call (which is when the caller's use ends, as this method's contract says).
+            unsafe UnsafeRawPointer($0.baseAddress.unsafelyUnwrapped)
+        }
     }
 }
-
-// The value owns its memory alone (it's noncopyable), so moving it to another task is safe.
-extension FieldNameLowercasing: @unchecked Sendable {}

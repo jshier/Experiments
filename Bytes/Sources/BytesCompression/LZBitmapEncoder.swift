@@ -382,7 +382,7 @@ enum LZBitmapEncoding {
             let block = unsafe UnsafeRawPointer(nibbles + read).loadUnaligned(as: SIMD16<UInt8>.self)
             let next = unsafe UnsafeRawPointer(nibbles + (read &+ 1)).loadUnaligned(as: SIMD16<UInt8>.self)
             unsafe UnsafeMutableRawPointer(runs + written).storeBytes(of: block, as: SIMD16<UInt8>.self)
-            let equal = ByteMatches(highBits: unsafe unsafeBitCast(block .== next, to: SIMD16<UInt8>.self)).nibbleMask
+            let equal = ByteMatches(highBits: (block .== next).lanes(as: SIMD16<UInt8>.self)).nibbleMask
             let starts = equal & equal &>> 4 & equal &>> 8
             let step = (starts | 1 &<< 55).trailingZeroBitCount &>> 2 &+ 1
             read &+= step
@@ -395,7 +395,7 @@ enum LZBitmapEncoding {
                 repeat {
                     let previous = unsafe UnsafeRawPointer(nibbles + (read &- 1)).loadUnaligned(as: SIMD16<UInt8>.self)
                     let current = unsafe UnsafeRawPointer(nibbles + read).loadUnaligned(as: SIMD16<UInt8>.self)
-                    let same = ByteMatches(highBits: unsafe unsafeBitCast(previous .== current, to: SIMD16<UInt8>.self)).nibbleMask
+                    let same = ByteMatches(highBits: (previous .== current).lanes(as: SIMD16<UInt8>.self)).nibbleMask
                     length = (~same & 0x8888_8888_8888_8888 | 1 &<< 63).trailingZeroBitCount &>> 2
                     unsafe runs[written] = UInt8(truncatingIfNeeded: length)
                     written &+= 1
@@ -582,7 +582,7 @@ enum LZBitmapEncoding {
             // 16-byte load at a candidate period back. Safe: candidates are positions already seen in this chunk's
             // input, and `here + 16` is within it (the block loop's limit).
             let candidate = unsafe UnsafeRawPointer(here - Int(k < 8 ? newer[k] : older[k &- 8])).loadUnaligned(as: SIMD16<UInt8>.self)
-            return unsafe unsafeBitCast(bytes .== candidate, to: SIMD16<UInt8>.self)
+            return (bytes .== candidate).lanes(as: SIMD16<UInt8>.self)
         }
         @inline(__always) func pairwise(_ a: SIMD16<UInt8>, _ b: SIMD16<UInt8>) -> SIMD16<UInt8> {
             let both = SIMD32(lowHalf: a, highHalf: b)
@@ -608,18 +608,18 @@ enum LZBitmapEncoding {
         let lowBytes = distanceBytes.evenHalf
         let highBytes = distanceBytes.oddHalf
         let zero = SIMD16<UInt8>()
-        let oneByte = unsafe unsafeBitCast(highBytes .== zero, to: SIMD16<UInt8>.self)
-        let short = unsafe unsafeBitCast(highBytes | lowBytes & SIMD16(repeating: 0xF8) .== zero, to: SIMD16<UInt8>.self)
+        let oneByte = (highBytes .== zero).lanes(as: SIMD16<UInt8>.self)
+        let short = (highBytes | lowBytes & SIMD16(repeating: 0xF8) .== zero).lanes(as: SIMD16<UInt8>.self)
         thisGroup = thisGroup & ~short | eight & short
         nextGroup = nextGroup & ~short | eight & short
         let byteCounts = SIMD16<UInt8>(repeating: 2) &+ oneByte
         let costs = (thisGroup &+ byteCounts) &<< 2 &+ nextGroup
-        let zeroPairs = unsafe unsafeBitCast((thisGroup | nextGroup) .== zero, to: SIMD16<UInt8>.self)
+        let zeroPairs = ((thisGroup | nextGroup) .== zero).lanes(as: SIMD16<UInt8>.self)
 
         // The current period's cost (no period bytes), 40 less 4 per equal byte in this group and 1 per equal
         // byte in the next: one weighted sum. It's on the chain from one group's period to the next's, so it
         // and the choice stay short: the candidates' minimum is found apart from it, and compared in scalars.
-        let current = unsafe unsafeBitCast(bytes .== back, to: SIMD16<UInt8>.self)
+        let current = (bytes .== back).lanes(as: SIMD16<UInt8>.self)
         let currentWeights = unsafe scratch.load(fromByteOffset: LZBitmapEncoderWorkspace.currentWeights, as: SIMD16<UInt8>.self)
         let currentCost = 40 &- Int(UInt8(Builtin.int_vector_reduce_add_Vec16xInt8((current & currentWeights)._storage._value)))
 
@@ -635,7 +635,7 @@ enum LZBitmapEncoding {
                 // through 3, within the 64 bytes each table has there.
                 let indices = unsafe scratch.load(fromByteOffset: LZBitmapEncoderWorkspace.keyIndices &+ j &* 16, as: SIMD16<UInt8>.self)
                 let choices = unsafe scratch.load(fromByteOffset: LZBitmapEncoderWorkspace.keyChoices &+ j &* 16, as: SIMD16<UInt8>.self)
-                return unsafe unsafeBitCast(ByteLanes(indices).lookup(in: table) | choices, to: SIMD4<UInt32>.self)
+                return bitCast(ByteLanes(indices).lookup(in: table) | choices, to: SIMD4<UInt32>.self)
             }
             let key = UInt32(Builtin.int_vector_reduce_umin_Vec4xInt32(Builtin.int_umin_Vec4xInt32(
                 Builtin.int_umin_Vec4xInt32(keys(0)._storage._value, keys(1)._storage._value),
@@ -673,7 +673,7 @@ enum LZBitmapEncoding {
         let chosen = unsafe UnsafeRawPointer(here - newPeriod).loadUnaligned(as: SIMD8<UInt8>.self)
         // Each differing byte's lane bit, summed.
         let weights = unsafe scratch.load(fromByteOffset: LZBitmapEncoderWorkspace.laneBits, as: SIMD8<UInt8>.self)
-        let differing = unsafe ~unsafeBitCast(bytes.lowHalf .== chosen, to: SIMD8<UInt8>.self) & weights
+        let differing = ~(bytes.lowHalf .== chosen).lanes(as: SIMD8<UInt8>.self) & weights
         let bitmap = Int(UInt8(Builtin.int_vector_reduce_add_Vec8xInt8(differing._storage._value)))
         let pack = unsafe packs.load(fromByteOffset: bitmap &* 16, as: SIMD16<UInt8>.self)
         let packed = ByteLanes(pack).lookup(in: bytes)

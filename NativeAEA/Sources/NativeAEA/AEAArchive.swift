@@ -148,11 +148,10 @@ public final class AEAArchive: Sendable {
                 // The segment infos, decrypted in place on encrypted profiles (MACed as stored); the MACs after them
                 // stay as stored.
                 if encrypted {
-                    header.withUnsafeMutableBytes { bytes in
-                        // The header array's first `infoCount` bytes (fewer than its count), used only in this call: safe.
-                        var infoBytes = unsafe MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(rebasing: bytes[0..<infoCount]))
-                        headerKey.crypt(&infoBytes)
-                    }
+                    var span = header.mutableSpan
+                    var bytes = MutableRawSpan(mutating: &span)
+                    var infoBytes = bytes._mutatingExtracting(0..<infoCount)
+                    headerKey.crypt(&infoBytes)
                 }
                 let headerSpan = header.span.bytes
                 let macs = headerSpan.extracting((infoCount + 32)..<headerSpan.byteCount)

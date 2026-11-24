@@ -6,6 +6,47 @@ M1 Max (8 performance and 2 efficiency cores), macOS 27.2, Swift 6.4 (Xcode 27.3
 HTTP/3 traffic as HTTP/1 heads: 401 requests, 580 B average; 383 responses, 953 B average). References: picohttpparser
 (dd573d8) and llhttp (release 9.4.4), built -O3 with NDEBUG from `Tools/test-data fetch picohttpparser llhttp`.
 
+## 2026-11-23, later: safe forms where they're free (baselines `safe-http-before`, `safe-http-after-1`…`-5`, `safe-http-after`)
+
+The library survey's unsafe audit (Writeups/Library-Survey-2026-11-23.md, "Unsafe code") marked about 220 of HTTPBytes'
+506 `unsafe` lines as safe now at little or no cost: loads under a dominating count guard (probe P3: identical machine
+code) and the coders' masked tables on `UniqueArray` (probe P5: +1–3 instructions a random access, free in loops). Each
+was converted, measured by instructions on the HTTP/1, HPACK, QPACK, field store, date, field value, and Structured
+Fields rows (taken with three other agents building: instructions only), and kept only if free. The pointer-and-count
+HPACK/QPACK/Huffman decoders (the audit's K list) weren't touched.
+
+**Kept** (45 lines of `unsafe` code gone, 2 added; one `@unchecked Sendable` of five gone). Every row of the final
+baseline within ±0.3% of `safe-http-before` (73 instruction rows; the largest moves −0.3% Cache-Control, +0.1% HPACK
+decode of 383 responses), every `Allocations:` gate at 0:
+
+| Site | Form now | Evidence |
+|---|---|---|
+| `FieldNameLowercase.exactWords` (7), `FieldName.words`' 1–3-byte path (3), `HTTPDate.imfFixdate`'s four words, `HeadScanner.tokenEndNearEnd`'s last 16 bytes | checked `RawSpan.load` after the count test | `lookUpLowercase`, `lookUp`, `imfFixdate`, `tokenEndNearEnd` the same instructions in the benchmark binary (addresses aside) |
+| `HTTPDate`'s RFC 850 day name, `HTTPToken.equalsIgnoringCase`'s literal | `immortalSpan(StaticString)` then checked loads (the one `unsafe` stays in `immortalSpan`) | same size; the generic `equalsIgnoringCase` gained one out-of-line trap, its loop the same 11 instructions |
+| `QPACKDecoder`'s blocked streams (two pointer lists and a count) | `UniqueArray<QPACKBlockedStream>`, `append`/`remove(at:)` | QPACK decode rows −0.1 to −0.2%; `nextUnblockedStream` 55 → 27 instructions |
+| `FieldNameLowercasing`'s scratch, and `HPACKEncoder`'s copy of the same code | `UniqueArray<UInt8>`; the HPACK encoder now uses `FieldNameLowercasing` | `Sendable` without `@unchecked`; the address it returns is still one `unsafe` (the encoders take pointers); off every benchmarked path (unknown names with uppercase letters), HPACK rows unchanged |
+
+**Tried and reverted** (each a cost on a per-field row):
+
+| Change | Rows, instructions against `safe-http-before` | Why |
+|---|---|---|
+| `FieldName.words`' 4-byte loads checked | HTTP/1 heads with known names +5 to +9% (`lookUp` 173 → 187) | the offsets are selected by `long` (`long ? count − 8 : count − 4`), which LLVM doesn't relate to the count: four checks stay |
+| All the tables on `UniqueArray` (`DynamicFieldTable` ring and byte store, `DynamicFieldIndex` with its four per-slot arrays merged into one slot struct, `StaticFieldEntries` padded to powers of two, `QPACKEncoder`'s history, entry starts, sections), masks from the arrays' counts (`after-1`) | HPACK encode +6.7 to +8.8%, decode +2.1 to +2.8%; QPACK encode +0.5 to +5.9%, decode +0.6 to +2.3% | `HPACKEncoder.encodeField` 1,151 → 1,244 instructions, 1 → 25 trap sites. A mask from the count leaves `cbz count` per random access (in loops it's hoisted, as P5 found); a stored mask, or a `UInt8` index (LLVM narrows `count − 1` to 32 bits and loses the fold), `cmp` + `b.hs` |
+| … with the byte store back on a pointer (`after-2`) | HPACK encode +3.8 to +5.2%, decode +1.2 to +1.8%; QPACK encode +0.5 to +5.3%, decode +0.6 to +1.4% | an address from `bytes.span.withUnsafeBytes` costs a `count >= 0` check (the buffer pointer's precondition) and a spill per address: the other 3 points of HPACK encoding |
+| `StaticFieldEntries` as `InlineArray`s with a value-generic size (`StaticFieldEntries<64>`, `<128>`: every check folds) (`after-3`) | HPACK +39 to +257%, QPACK +114 to +1,005% | the 2–4 KB arrays are copied (`memcpy`) at every subscript through the coder's `let`: AGENTS.md's `InlineArray`-borrowing lesson, again |
+| Only `QPACKEncoder`'s history, name history, entry starts, and sections (`after-4`) | QPACK encode −0.8 to +1.5% | |
+| Only its sections (`after-5`) | QPACK encode +0.3 to +1.3% (16 in flight the most) | `UniqueArray.append` and `_RigidArray.remove(at:)` stay out-of-line specialized calls |
+
+So the tables the coders read per field stay pointers in coder-owned memory, as do the K-list decoders' scratch and
+decoder-stream buffers (written through pointers). Four `@unchecked Sendable`s remain (the two encoders and two
+decoders, which hold those pointers). Not tried: `HeadScanner`'s `byte`/`word`/`slice` and `StructuredFieldScan.byte`,
+whose callers' offsets have an unknown sign (the audit's P1: +18–23%; the HTTP/1 section below measured 3.71 → 3.43
+instructions/B for making them unchecked).
+
+Tests: `swift build --build-tests` without warnings; the default set (265 tests in 62 suites, the four known issues of
+the conformance tables unchanged); `BULK_TESTS=1` for h2o's HTTP/1 fuzz corpus, the HPACK and QPACK bulk suites, and
+dates (14 tests, h2o's one known issue unchanged).
+
 ## 2026-11-23, later: concatenated gzip members and zstd frames in a body
 
 BytesCompression's gzip decoder now takes any number of members (Bytes' RESULTS.md, "one-shot reuse and gzip members"),

@@ -111,15 +111,14 @@ final class ArchiveFixture: @unchecked Sendable {
         precondition(decoded.count == archive.segments[0].rawSize, "Compression decoded \(decoded.count) bytes of segment 0")
         var segment = FirstSegment(stored: stored, decoded: decoded)
         var position = 0
-        segment.decoded.span.bytes.withUnsafeBytes { bytes in
-            while position + 6 <= bytes.count {
-                guard let size = try? AppleArchive.headerByteCount(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position...]))),
-                      position + size <= bytes.count,
-                      let header = try? AppleArchive.parseHeader(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position..<(position + size)])))
-                else { break }
-                position += size + header.blobByteCount
-                segment.headerCount += 1
-            }
+        let bytes = decoded.span.bytes
+        while position + 6 <= bytes.byteCount {
+            guard let size = try? AppleArchive.headerByteCount(bytes.extracting(position...)),
+                  position + size <= bytes.byteCount,
+                  let header = try? AppleArchive.parseHeader(bytes.extracting(position..<(position + size)))
+            else { break }
+            position += size + header.blobByteCount
+            segment.headerCount += 1
         }
         return segment
     }()
@@ -237,12 +236,11 @@ let benchmarks: @Sendable () -> Void = {
             benchmark.startMeasurement()
             for _ in benchmark.scaledIterations {
                 var position = 0
-                try decoded.span.bytes.withUnsafeBytes { bytes throws(AEAError) in
-                    for _ in 0..<headerCount {
-                        let size = try AppleArchive.headerByteCount(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position...])))
-                        let header = try AppleArchive.parseHeader(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: bytes[position..<(position + size)])))
-                        position += size + header.blobByteCount
-                    }
+                let bytes = decoded.span.bytes
+                for _ in 0..<headerCount {
+                    let size = try AppleArchive.headerByteCount(bytes.extracting(position...))
+                    let header = try AppleArchive.parseHeader(bytes.extracting(position..<(position + size)))
+                    position += size + header.blobByteCount
                 }
                 blackHole(position)
             }

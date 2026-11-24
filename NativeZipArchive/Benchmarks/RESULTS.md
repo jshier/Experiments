@@ -5,6 +5,36 @@ Each step is saved as a named baseline in `.benchmarkBaselines/` and can be re-c
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 The 2026-11-19 section below compares this machine's numbers with an M1 Max's (baseline `m1max`).
 
+## 2026-11-23: safe APIs where they're free (baselines `safe-arch-before` → `safe-arch-after`, M1 Max, under load)
+
+The survey's "safe now at no cost" list (Writeups/Library-Survey-2026-11-23.md, "Unsafe code") had three NativeZip
+items; one applied. Lines with `unsafe` in the sources: 111 → 108.
+
+- **The LZMA header** (`ZipDecoder.lzmaFormat`): one span over the pending input, then checked little-endian loads of
+  the properties size, byte, and dictionary size after the 9-byte guard. NativeZip's release object is byte-identical to
+  HEAD's (`cmp`): the checks fold.
+- **The decoder's two buffers stay raw allocations**, not `UniqueArray`: their chunks are handed between a decode task
+  and a write task across suspensions (`Chunk`, `ChunkHandoff`), so a `UniqueArray` would only move the `unsafe` to a
+  pointer taken out of its span's closure. That needs spans held across tasks (the survey's feature list).
+- **`nunzip`'s standard-output write stays**: `FileDescriptor` (swift-system 1.9) still has no span-taking `write`, so
+  `Darwin.write` with the span's pointer is the one line.
+
+| Row | before | after |
+|---|---:|---:|
+| Parse central directory (2,000 entries) | 4.305 M | 4.305 M |
+| Locate 2,000 payloads (0 mallocs) | 3.305 M | 3.299 M |
+| Inflate + CRC 2,000 small files: Bytes | 162 M | 162 M |
+| Inflate + CRC 32 MB text: Bytes | 147 M | 148 M |
+| Inflate + CRC 32 MB text: LZMA | 1,413 M | 1,415 M |
+| Inflate + CRC 32 MB text: ZipCrypto | 242 M | 241 M |
+| Extract 32 MB text: Bytes | 183 M | 185 M |
+| Extract 2,000 small files: Bytes | 2,877 M | 3,045 M, then 2,827 M |
+| Extract 2,000 small files (1 worker) | 2,781 M | 3,047 M, then 2,789 M |
+
+The extraction rows' instructions include the kernel's: they read 6–10% more while three packages were benchmarking at
+once, and −1.7% and +0.3% run again alone (`safe-arch-after-2`, the same code). Mallocs are unchanged on every row.
+Tests: 56 in 12 suites, no warnings.
+
 ## 2026-11-21 (later): AppleDouble merged, links' times, decomposed names: Archive Utility's output (baselines `v1-before` → `v1-after`)
 
 Nunarchiver's output was compared with Archive Utility's, item by item (the corpus, the method, and the table by

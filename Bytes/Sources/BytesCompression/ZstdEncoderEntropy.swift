@@ -166,7 +166,8 @@ enum ZstdFSETable {
     ) {
         // Unsafe: the table's and scratch's regions through pointers. Safe: states are below `1 << tableLog` (at most
         // 512), symbols at most `maximumSymbol` (below 64), cumulative counts below the scratch's 80 entries, and the
-        // spread's 8-byte stores within its `2 * size + 8` bytes.
+        // spread's 8-byte stores within its `2 * size + 8` bytes. (On spans, the per-cell checks of data-dependent
+        // indexes, `cumulative[symbol]` and `states[slot]`, cost about 4 K instructions a block with new tables.)
         let size = 1 &<< tableLog
         let mask = size &- 1
         let states = unsafe table.assumingMemoryBound(to: UInt16.self)
@@ -354,10 +355,11 @@ enum ZstdFSEEncoding {
     ///
     /// - Returns: Whether it succeeded (the secondary method can fail on pathological counts).
     static func normalize(
-        _ normalized: UnsafeMutablePointer<Int16>, tableLog: Int, counts: UnsafePointer<UInt32>, total: Int,
-        maximumSymbol: Int, useLowProbabilityCount: Bool
+        _ normalized: inout MutableSpan<Int16>, tableLog: Int, counts: Span<UInt32>, total: Int, maximumSymbol: Int,
+        useLowProbabilityCount: Bool
     ) -> Bool {
-        // Unsafe: loads and stores at symbols up to `maximumSymbol`, within the callers' 64-entry arrays.
+        // Checked accesses at symbols up to `maximumSymbol`, which both spans hold: the loops' checks fold.
+        precondition(maximumSymbol < normalized.count && maximumSymbol < counts.count)
         let restToBeat: InlineArray<8, UInt64> = [0, 473_195, 504_333, 520_860, 550_000, 700_000, 750_000, 830_000]
         let lowProbabilityCount: Int16 = useLowProbabilityCount ? -1 : 1
         let scale = UInt64(62 &- tableLog)
@@ -368,13 +370,13 @@ enum ZstdFSEEncoding {
         var largestProbability: Int16 = 0
         let lowThreshold = UInt32(truncatingIfNeeded: total &>> tableLog)
         for symbol in 0...maximumSymbol {
-            let count = unsafe counts[symbol]
+            let count = counts[symbol]
             if count == 0 {
-                unsafe normalized[symbol] = 0
+                normalized[symbol] = 0
                 continue
             }
             if count <= lowThreshold {
-                unsafe normalized[symbol] = lowProbabilityCount
+                normalized[symbol] = lowProbabilityCount
                 stillToDistribute &-= 1
             } else {
                 let scaled = UInt64(count) &* step
@@ -387,45 +389,46 @@ enum ZstdFSEEncoding {
                     largestProbability = probability
                     largest = symbol
                 }
-                unsafe normalized[symbol] = probability
+                normalized[symbol] = probability
                 stillToDistribute &-= Int(probability)
             }
         }
-        if -stillToDistribute >= Int(unsafe normalized[largest]) &>> 1 {
-            return unsafe normalizeSecondary(
-                normalized, tableLog: tableLog, counts: counts, total: total, maximumSymbol: maximumSymbol,
+        if -stillToDistribute >= Int(normalized[largest]) &>> 1 {
+            return normalizeSecondary(
+                &normalized, tableLog: tableLog, counts: counts, total: total, maximumSymbol: maximumSymbol,
                 lowProbabilityCount: lowProbabilityCount
             )
         }
-        unsafe normalized[largest] &+= Int16(truncatingIfNeeded: stillToDistribute)
+        normalized[largest] &+= Int16(truncatingIfNeeded: stillToDistribute)
         return true
     }
 
     /// `FSE_normalizeM2`: the secondary method, when rounding left the largest symbol too little.
     private static func normalizeSecondary(
-        _ normalized: UnsafeMutablePointer<Int16>, tableLog: Int, counts: UnsafePointer<UInt32>, total: Int,
-        maximumSymbol: Int, lowProbabilityCount: Int16
+        _ normalized: inout MutableSpan<Int16>, tableLog: Int, counts: Span<UInt32>, total: Int, maximumSymbol: Int,
+        lowProbabilityCount: Int16
     ) -> Bool {
-        // Unsafe: as `normalize`.
+        // Checked accesses, as `normalize`.
+        precondition(maximumSymbol < normalized.count && maximumSymbol < counts.count)
         let notYetAssigned: Int16 = -2
         var distributed = 0
         var total = total
         let lowThreshold = total &>> tableLog
         var lowOne = (total &* 3) &>> (tableLog &+ 1)
         for symbol in 0...maximumSymbol {
-            let count = Int(unsafe counts[symbol])
+            let count = Int(counts[symbol])
             if count == 0 {
-                unsafe normalized[symbol] = 0
+                normalized[symbol] = 0
             } else if count <= lowThreshold {
-                unsafe normalized[symbol] = lowProbabilityCount
+                normalized[symbol] = lowProbabilityCount
                 distributed &+= 1
                 total &-= count
             } else if count <= lowOne {
-                unsafe normalized[symbol] = 1
+                normalized[symbol] = 1
                 distributed &+= 1
                 total &-= count
             } else {
-                unsafe normalized[symbol] = notYetAssigned
+                normalized[symbol] = notYetAssigned
             }
         }
         var toDistribute = (1 &<< tableLog) &- distributed
@@ -433,9 +436,9 @@ enum ZstdFSEEncoding {
         if total / toDistribute > lowOne {
             lowOne = (total &* 3) / (toDistribute &* 2)
             for symbol in 0...maximumSymbol {
-                let count = Int(unsafe counts[symbol])
-                if unsafe normalized[symbol] == notYetAssigned && count <= lowOne {
-                    unsafe normalized[symbol] = 1
+                let count = Int(counts[symbol])
+                if normalized[symbol] == notYetAssigned && count <= lowOne {
+                    normalized[symbol] = 1
                     distributed &+= 1
                     total &-= count
                 }
@@ -446,19 +449,19 @@ enum ZstdFSEEncoding {
             // Every value is poor: give the rest to the most frequent.
             var maximumValue = 0
             var maximumCount: UInt32 = 0
-            for symbol in 0...maximumSymbol where unsafe counts[symbol] > maximumCount {
+            for symbol in 0...maximumSymbol where counts[symbol] > maximumCount {
                 maximumValue = symbol
-                maximumCount = unsafe counts[symbol]
+                maximumCount = counts[symbol]
             }
-            unsafe normalized[maximumValue] &+= Int16(truncatingIfNeeded: toDistribute)
+            normalized[maximumValue] &+= Int16(truncatingIfNeeded: toDistribute)
             return true
         }
         if total == 0 {
             var symbol = 0
             while toDistribute > 0 {
-                if unsafe normalized[symbol] > 0 {
+                if normalized[symbol] > 0 {
                     toDistribute &-= 1
-                    unsafe normalized[symbol] &+= 1
+                    normalized[symbol] &+= 1
                 }
                 symbol = (symbol &+ 1) % (maximumSymbol &+ 1)
             }
@@ -468,11 +471,11 @@ enum ZstdFSEEncoding {
         let mid = (UInt64(1) &<< (vStepLog &- 1)) &- 1
         let rStep = ((UInt64(1) &<< vStepLog) &* UInt64(toDistribute) &+ mid) / UInt64(total)
         var running = mid
-        for symbol in 0...maximumSymbol where unsafe normalized[symbol] == notYetAssigned {
-            let end = running &+ UInt64(unsafe counts[symbol]) &* rStep
+        for symbol in 0...maximumSymbol where normalized[symbol] == notYetAssigned {
+            let end = running &+ UInt64(counts[symbol]) &* rStep
             let weight = Int(end &>> vStepLog) &- Int(running &>> vStepLog)
             if weight < 1 { return false }
-            unsafe normalized[symbol] = Int16(truncatingIfNeeded: weight)
+            normalized[symbol] = Int16(truncatingIfNeeded: weight)
             running = end
         }
         return true
@@ -482,14 +485,16 @@ enum ZstdFSEEncoding {
     /// symbols at log 9 (`FSE_NCountWriteBound`, plus the 2-byte flushes).
     static var descriptionBound: Int { 80 }
 
-    /// Writes the table description of `normalized` at `output` (`FSE_writeNCount`).
+    /// Writes the table description of `normalized` at the start of `output` (`FSE_writeNCount`).
     ///
     /// - Returns: Its size in bytes.
     static func writeDescription(
-        _ output: UnsafeMutableRawPointer, normalized: UnsafePointer<Int16>, maximumSymbol: Int, tableLog: Int
+        _ output: UnsafeMutableRawPointer, normalized: Span<Int16>, maximumSymbol: Int, tableLog: Int
     ) -> Int {
-        // Unsafe: loads of the counts (up to `maximumSymbol`) and stores to `output`, which has room for
-        // `descriptionBound` bytes: at most one 2-byte flush per symbol or per 24 zero symbols, plus the last two.
+        // Checked loads of the counts (up to `maximumSymbol`, which the span holds: their checks fold). Unsafe: stores
+        // to `output`, which has room for `descriptionBound` bytes: at most one 2-byte flush per symbol or per 24 zero
+        // symbols, plus the last two. (Checked stores to a span cost about 20 instructions a symbol.)
+        precondition(maximumSymbol < normalized.count)
         var out = 0
         var bitStream = UInt32(truncatingIfNeeded: tableLog &- minimumTableLog)
         var bitCount = 4
@@ -501,23 +506,15 @@ enum ZstdFSEEncoding {
         let alphabetSize = maximumSymbol &+ 1
         var previousWasZero = false
 
-        @inline(__always)
-        func flush16() {
-            unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: bitStream), toByteOffset: out, as: UInt8.self)
-            unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: bitStream &>> 8), toByteOffset: out &+ 1, as: UInt8.self)
-            out &+= 2
-            bitStream = bitStream &>> 16
-        }
-
         while symbol < alphabetSize && remaining > 1 {
             if previousWasZero {
                 var start = symbol
-                while symbol < alphabetSize && (unsafe normalized[symbol]) == 0 { symbol &+= 1 }
+                while symbol < alphabetSize && normalized[symbol] == 0 { symbol &+= 1 }
                 if symbol == alphabetSize { break }
                 while symbol >= start &+ 24 {
                     start &+= 24
                     bitStream &+= 0xFFFF &<< UInt32(truncatingIfNeeded: bitCount)
-                    flush16()
+                    unsafe flush16(output, &out, &bitStream)
                 }
                 while symbol >= start &+ 3 {
                     start &+= 3
@@ -527,11 +524,11 @@ enum ZstdFSEEncoding {
                 bitStream &+= UInt32(truncatingIfNeeded: symbol &- start) &<< UInt32(truncatingIfNeeded: bitCount)
                 bitCount &+= 2
                 if bitCount > 16 {
-                    flush16()
+                    unsafe flush16(output, &out, &bitStream)
                     bitCount &-= 16
                 }
             }
-            var count = Int(unsafe normalized[symbol])
+            var count = Int(normalized[symbol])
             symbol &+= 1
             let maximum = (2 &* threshold &- 1) &- remaining
             remaining &-= count < 0 ? -count : count
@@ -546,14 +543,22 @@ enum ZstdFSEEncoding {
                 threshold &>>= 1
             }
             if bitCount > 16 {
-                flush16()
+                unsafe flush16(output, &out, &bitStream)
                 bitCount &-= 16
             }
         }
-        unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: bitStream), toByteOffset: out, as: UInt8.self)
-        unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: bitStream &>> 8), toByteOffset: out &+ 1, as: UInt8.self)
+        unsafe output.storeBytes(of: UInt16(truncatingIfNeeded: bitStream).littleEndian, toByteOffset: out, as: UInt16.self)
         out &+= (bitCount &+ 7) / 8
         return out
+    }
+
+    /// Writes the low 16 bits of `bitStream` at `out`, and moves both past them.
+    @inline(__always)
+    private static func flush16(_ output: UnsafeMutableRawPointer, _ out: inout Int, _ bitStream: inout UInt32) {
+        // Unsafe: a 2-byte store within the description's room (see `writeDescription`).
+        unsafe output.storeBytes(of: UInt16(truncatingIfNeeded: bitStream).littleEndian, toByteOffset: out, as: UInt16.self)
+        out &+= 2
+        bitStream = bitStream &>> 16
     }
 }
 
@@ -565,61 +570,63 @@ enum ZstdHistogram {
     ///
     /// - Returns: The largest count.
     @inline(__always)
-    static func count(
-        _ source: UnsafeRawPointer, count: Int, into counts: UnsafeMutablePointer<UInt32>, maximumSymbol: inout Int
-    ) -> Int {
-        // Unsafe: loads below `count`, and stores at byte values, at most `maximumSymbol` (the caller's bound for
-        // what the bytes hold).
-        unsafe counts.update(repeating: 0, count: maximumSymbol &+ 1)
-        if count == 0 {
+    static func count(_ source: Span<UInt8>, into counts: inout MutableSpan<UInt32>, maximumSymbol: inout Int) -> Int {
+        // Checked accesses: the bytes' indexes fold; the counts' fold for a 256-entry table, and are checked for a
+        // smaller one (the callers' bound for what the bytes hold: Huffman weights).
+        precondition(maximumSymbol < counts.count)
+        // Only the counts that can be read: `buildTable` passes 256 entries for at most 53 symbols.
+        var used = counts._mutatingExtracting(0..<(maximumSymbol &+ 1))
+        used.update(repeating: 0)
+        if source.isEmpty {
             maximumSymbol = 0
             return 0
         }
-        for index in 0..<count {
-            unsafe counts[Int(source.load(fromByteOffset: index, as: UInt8.self))] &+= 1
+        if counts.count >= 256 {
+            for index in source.indices { counts[Int(source[index])] &+= 1 }
+        } else {
+            for index in source.indices { counts[Int(source[index])] &+= 1 }
         }
-        while unsafe counts[maximumSymbol] == 0 { maximumSymbol &-= 1 }
+        while counts[maximumSymbol] == 0 { maximumSymbol &-= 1 }
         var largest: UInt32 = 0
-        for symbol in 0...maximumSymbol { largest = max(largest, unsafe counts[symbol]) }
+        for symbol in 0...maximumSymbol { largest = max(largest, counts[symbol]) }
         return Int(largest)
     }
 
-    /// Counts bytes as ``count(_:count:into:maximumSymbol:)`` does with four interleaved tables, for large inputs
+    /// Counts bytes as ``count(_:into:maximumSymbol:)`` does with four interleaved tables, for large inputs
     /// (`HIST_count_parallel_wksp`): the same result, without each increment waiting on the previous one when
     /// neighbouring bytes are equal.
     static func countBytes(
-        _ source: UnsafeRawPointer, count: Int, into counts: UnsafeMutablePointer<UInt32>,
-        scratch: UnsafeMutablePointer<UInt32>, maximumSymbol: inout Int
+        _ source: Span<UInt8>, into counts: inout MutableSpan<UInt32>, scratch: inout MutableSpan<UInt32>,
+        maximumSymbol: inout Int
     ) -> Int {
-        guard count >= 1500 else {
-            return unsafe Self.count(source, count: count, into: counts, maximumSymbol: &maximumSymbol)
+        guard source.count >= 1500 else {
+            return Self.count(source, into: &counts, maximumSymbol: &maximumSymbol)
         }
-        // Unsafe: loads below `count`, stores into four 256-entry tables in `scratch` (1,024 entries) at byte values.
-        unsafe scratch.update(repeating: 0, count: 1024)
-        var index = 0
-        while index &+ 16 <= count {
-            for half in 0..<2 {
-                let word = unsafe source.loadUnaligned(fromByteOffset: index &+ half &* 8, as: UInt64.self)
-                unsafe scratch[Int(truncatingIfNeeded: word & 0xFF)] &+= 1
-                unsafe scratch[256 &+ Int(truncatingIfNeeded: (word &>> 8) & 0xFF)] &+= 1
-                unsafe scratch[512 &+ Int(truncatingIfNeeded: (word &>> 16) & 0xFF)] &+= 1
-                unsafe scratch[768 &+ Int(truncatingIfNeeded: (word &>> 24) & 0xFF)] &+= 1
-                unsafe scratch[Int(truncatingIfNeeded: (word &>> 32) & 0xFF)] &+= 1
-                unsafe scratch[256 &+ Int(truncatingIfNeeded: (word &>> 40) & 0xFF)] &+= 1
-                unsafe scratch[512 &+ Int(truncatingIfNeeded: (word &>> 48) & 0xFF)] &+= 1
-                unsafe scratch[768 &+ Int(truncatingIfNeeded: word &>> 56)] &+= 1
-            }
-            index &+= 16
+        // Checked accesses that fold: 8-byte words as elements (byte arrays, so any address is aligned for them; read
+        // with `bitCast`, which keeps them in registers), four 256-entry tables in `scratch` (1,024 entries) at byte
+        // values, and 256 counts.
+        precondition(scratch.count == 1024 && counts.count >= 256)
+        scratch.update(repeating: 0)
+        let words = Span<InlineArray<8, UInt8>>(viewing: source.bytes.extracting(first: source.count & ~15))
+        for index in words.indices {
+            let word = bitCast(words[index], to: UInt64.self)
+            scratch[Int(truncatingIfNeeded: word & 0xFF)] &+= 1
+            scratch[256 &+ Int(truncatingIfNeeded: (word &>> 8) & 0xFF)] &+= 1
+            scratch[512 &+ Int(truncatingIfNeeded: (word &>> 16) & 0xFF)] &+= 1
+            scratch[768 &+ Int(truncatingIfNeeded: (word &>> 24) & 0xFF)] &+= 1
+            scratch[Int(truncatingIfNeeded: (word &>> 32) & 0xFF)] &+= 1
+            scratch[256 &+ Int(truncatingIfNeeded: (word &>> 40) & 0xFF)] &+= 1
+            scratch[512 &+ Int(truncatingIfNeeded: (word &>> 48) & 0xFF)] &+= 1
+            scratch[768 &+ Int(truncatingIfNeeded: word &>> 56)] &+= 1
         }
-        while index < count {
-            unsafe scratch[Int(source.load(fromByteOffset: index, as: UInt8.self))] &+= 1
-            index &+= 1
+        for index in (source.count & ~15)..<source.count {
+            scratch[Int(source[index])] &+= 1
         }
         var largest: UInt32 = 0
         var maximum = 0
         for symbol in 0..<256 {
-            let total = unsafe scratch[symbol] &+ scratch[256 &+ symbol] &+ scratch[512 &+ symbol] &+ scratch[768 &+ symbol]
-            unsafe counts[symbol] = total
+            let total = scratch[symbol] &+ scratch[256 &+ symbol] &+ scratch[512 &+ symbol] &+ scratch[768 &+ symbol]
+            counts[symbol] = total
             if total != 0 { maximum = symbol }
             largest = max(largest, total)
         }
@@ -945,25 +952,25 @@ enum ZstdHuffmanEncoding {
     }
 
     /// `HUF_estimateCompressedSize`: the bytes `counts` take with `table`.
-    static func estimateSize(_ table: UnsafePointer<UInt64>, counts: UnsafePointer<UInt32>, maximumSymbol: Int) -> Int {
-        // Unsafe: entries up to `maximumSymbol`, within both 256-entry arrays.
+    static func estimateSize(_ table: Span<UInt64>, counts: Span<UInt32>, maximumSymbol: Int) -> Int {
+        // Checked accesses at symbols up to `maximumSymbol`, which both spans hold: the checks fold.
+        precondition(maximumSymbol < table.count && maximumSymbol < counts.count)
         var bits = 0
         for symbol in 0...maximumSymbol {
-            bits &+= Int(unsafe table[symbol] & 0xFF) &* Int(unsafe counts[symbol])
+            bits &+= Int(table[symbol] & 0xFF) &* Int(counts[symbol])
         }
         return bits &>> 3
     }
 
     /// `HUF_validateCTable`: whether `table` (for symbols up to `tableMaximumSymbol`) has a code for every symbol
     /// counted.
-    static func isValid(
-        _ table: UnsafePointer<UInt64>, tableMaximumSymbol: Int, counts: UnsafePointer<UInt32>, maximumSymbol: Int
-    ) -> Bool {
+    static func isValid(_ table: Span<UInt64>, tableMaximumSymbol: Int, counts: Span<UInt32>, maximumSymbol: Int) -> Bool {
         if tableMaximumSymbol < maximumSymbol { return false }
-        // Unsafe: entries up to `maximumSymbol`, within both 256-entry arrays.
+        // Checked accesses at symbols up to `maximumSymbol`, which both spans hold: the checks fold.
+        precondition(maximumSymbol < table.count && maximumSymbol < counts.count)
         var bad = false
         for symbol in 0...maximumSymbol {
-            bad = bad || (unsafe counts[symbol] != 0 && table[symbol] & 0xFF == 0)
+            bad = bad || (counts[symbol] != 0 && table[symbol] & 0xFF == 0)
         }
         return !bad
     }
@@ -985,28 +992,31 @@ enum ZstdHuffmanEncoding {
     /// - Returns: The description's size, or `nil` if neither form is possible (more than 128 weights that FSE
     ///   doesn't shrink).
     static func writeDescription(
-        _ output: UnsafeMutableRawPointer, capacity: Int, table: UnsafePointer<UInt64>, maximumSymbol: Int,
-        tableLog: Int, scratch: UnsafeMutableRawPointer
+        _ output: UnsafeMutableRawPointer, capacity: Int, table: Span<UInt64>, maximumSymbol: Int, tableLog: Int,
+        scratch: UnsafeMutableRawPointer
     ) -> Int? {
-        // Unsafe: the weights (one per symbol below `maximumSymbol`, at most 255) in the scratch, and stores to
-        // `output` within `capacity` (checked for the direct form; the FSE form checks its own).
-        let weights = unsafe (scratch + weightsOffset).assumingMemoryBound(to: UInt8.self)
+        // Unsafe: a span over the scratch's weights (256), and stores to `output` within `capacity` (checked for the
+        // direct form; the FSE form checks its own). The weights' and table's accesses are checked.
+        var weights = unsafe MutableSpan(_unsafeStart: (scratch + weightsOffset).assumingMemoryBound(to: UInt8.self), count: 256)
+        precondition(maximumSymbol < 256 && maximumSymbol < table.count)
         for symbol in 0..<maximumSymbol {
-            let length = Int(unsafe table[symbol] & 0xFF)
-            unsafe weights[symbol] = length == 0 ? 0 : UInt8(truncatingIfNeeded: tableLog &+ 1 &- length)
+            let length = Int(table[symbol] & 0xFF)
+            weights[symbol] = length == 0 ? 0 : UInt8(truncatingIfNeeded: tableLog &+ 1 &- length)
         }
         guard capacity >= 1 else { return nil }
-        let size = unsafe compressWeights(output + 1, capacity: capacity &- 1, weights: weights, count: maximumSymbol, scratch: scratch)
+        let size = unsafe compressWeights(
+            output + 1, capacity: capacity &- 1, weights: weights.span.extracting(first: maximumSymbol), scratch: scratch
+        )
         if size > 1 && size < maximumSymbol / 2 {
             unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: size), as: UInt8.self)
             return size &+ 1
         }
         guard maximumSymbol <= 128, (maximumSymbol &+ 1) / 2 &+ 1 <= capacity else { return nil }
         unsafe output.storeBytes(of: UInt8(truncatingIfNeeded: 127 &+ maximumSymbol), as: UInt8.self)
-        unsafe weights[maximumSymbol] = 0
+        weights[maximumSymbol] = 0
         var symbol = 0
         while symbol < maximumSymbol {
-            let byte = unsafe weights[symbol] &<< 4 &+ weights[symbol &+ 1]
+            let byte = weights[symbol] &<< 4 &+ weights[symbol &+ 1]
             unsafe output.storeBytes(of: byte, toByteOffset: symbol / 2 &+ 1, as: UInt8.self)
             symbol &+= 2
         }
@@ -1017,28 +1027,40 @@ enum ZstdHuffmanEncoding {
     ///
     /// - Returns: The size, 0 if FSE can't shrink them, 1 if they're all one value.
     private static func compressWeights(
-        _ output: UnsafeMutableRawPointer, capacity: Int, weights: UnsafePointer<UInt8>, count: Int,
-        scratch: UnsafeMutableRawPointer
+        _ output: UnsafeMutableRawPointer, capacity: Int, weights: Span<UInt8>, scratch: UnsafeMutableRawPointer
     ) -> Int {
+        let count = weights.count
         if count <= 1 { return 0 }
-        // Unsafe: the scratch's regions as laid out above; weights are at most 12, within the 13-entry counts.
-        let counts = unsafe (scratch + weightCountsOffset).assumingMemoryBound(to: UInt32.self)
-        let normalized = unsafe (scratch + weightNormalizedOffset).assumingMemoryBound(to: Int16.self)
+        // Unsafe: spans over the scratch's regions as laid out above (weights are at most 12, within the 16 counts),
+        // the description at `output` (`descriptionBound` bytes, checked below), the weights' table built in the
+        // scratch, and its stream at `output` within `capacity`.
+        let normalizedPointer = unsafe (scratch + weightNormalizedOffset).assumingMemoryBound(to: Int16.self)
+        var counts = unsafe MutableSpan(_unsafeStart: (scratch + weightCountsOffset).assumingMemoryBound(to: UInt32.self), count: 16)
+        var normalized = unsafe MutableSpan(_unsafeStart: normalizedPointer, count: 32)
         var maximumSymbol = tableLogLimit
-        let largest = unsafe ZstdHistogram.count(UnsafeRawPointer(weights), count: count, into: counts, maximumSymbol: &maximumSymbol)
+        let largest = ZstdHistogram.count(weights, into: &counts, maximumSymbol: &maximumSymbol)
         if largest == count { return 1 }
         if largest == 1 { return 0 }
         let tableLog = ZstdFSEEncoding.optimalTableLog(6, total: count, maximumSymbol: maximumSymbol)
-        guard unsafe ZstdFSEEncoding.normalize(
-            normalized, tableLog: tableLog, counts: counts, total: count, maximumSymbol: maximumSymbol,
+        guard ZstdFSEEncoding.normalize(
+            &normalized, tableLog: tableLog, counts: counts.span, total: count, maximumSymbol: maximumSymbol,
             useLowProbabilityCount: false
         ) else { return 0 }
         // The description is at most 13 symbols' worth: far below the capacity the callers give (64 bytes and up).
         guard capacity >= ZstdFSEEncoding.descriptionBound else { return 0 }
-        let headerSize = unsafe ZstdFSEEncoding.writeDescription(output, normalized: normalized, maximumSymbol: maximumSymbol, tableLog: tableLog)
+        let headerSize = unsafe ZstdFSEEncoding.writeDescription(
+            output, normalized: normalized.span, maximumSymbol: maximumSymbol, tableLog: tableLog
+        )
         let table = unsafe scratch + weightTableOffset
-        unsafe ZstdFSETable.build(table, normalized: normalized, maximumSymbol: maximumSymbol, tableLog: tableLog, scratch: scratch + weightBuildOffset)
-        let streamSize = unsafe compressFSE(output + headerSize, capacity: capacity &- headerSize, source: weights, count: count, table: table, tableLog: tableLog)
+        unsafe ZstdFSETable.build(
+            table, normalized: normalizedPointer, maximumSymbol: maximumSymbol, tableLog: tableLog, scratch: scratch + weightBuildOffset
+        )
+        let streamSize = weights.withUnsafeBufferPointer { source in
+            unsafe compressFSE(
+                output + headerSize, capacity: capacity &- headerSize, source: source.baseAddress!, count: count,
+                table: table, tableLog: tableLog
+            )
+        }
         if streamSize == 0 { return 0 }
         return headerSize &+ streamSize
     }

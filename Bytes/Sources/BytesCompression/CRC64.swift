@@ -41,46 +41,52 @@ public struct CRC64: Hashable, Sendable {
     /// - Returns: The CRC-64 of the earlier bytes followed by `bytes`.
     public static func checksum(_ bytes: RawSpan, continuing value: UInt64) -> UInt64 {
         guard bytes.byteCount > 0 else { return value }
-        return tables.withUnsafeBufferPointer { tables in
-            bytes.withUnsafeBytes { buffer in
-                // Unsafe: the base addresses of nonempty buffers.
-                let table = tables.baseAddress!
-                let input = buffer.baseAddress!
-                var crc = ~value
-                var index = 0
-                #if HardwareCRC && arch(arm64) && !Portable
-                if buffer.count >= 128 {
-                    let folded = unsafe fold(crc, input, buffer.count)
-                    index = folded.count
-                    crc = withUnsafeBytes(of: folded.state) { unsafe update(0, $0.baseAddress!, 16, table) }
-                }
-                #endif
-                crc = unsafe update(crc, input + index, buffer.count &- index, table)
-                return ~crc
+        let tables = Self.tables
+        let table = tables.span
+        precondition(table.count == 2048) // Folds every lookup's check.
+        var crc = ~value
+        var rest = bytes
+        #if HardwareCRC && arch(arm64) && !Portable
+        if rest.byteCount >= 128 {
+            let folded = rest.withUnsafeBytes { buffer in
+                // Unsafe: the base address of a nonempty buffer.
+                unsafe fold(crc, buffer.baseAddress!, buffer.count)
             }
+            rest = rest.extracting(droppingFirst: folded.count)
+            let words = bitCast(folded.state, to: SIMD2<UInt64>.self)
+            crc = update(update(0, word: UInt64(littleEndian: words[0]), table), word: UInt64(littleEndian: words[1]), table)
         }
+        #endif
+        return ~update(crc, rest, table)
     }
 
-    /// Updates the unconditioned register `crc` with `count` bytes at `input`, eight at a time with the tables.
-    private static func update(_ crc: UInt64, _ input: UnsafeRawPointer, _ count: Int, _ table: UnsafePointer<UInt64>) -> UInt64 {
-        // Unsafe: table lookups and input loads. Safe: every index is a byte plus a multiple of 256 below 2048,
-        // the tables' size; loads stay below `count`, which the caller's buffer holds.
+    /// Updates the unconditioned register `crc` with `bytes`, eight at a time with the tables.
+    private static func update(_ crc: UInt64, _ bytes: RawSpan, _ table: Span<UInt64>) -> UInt64 {
+        // Words and bytes as elements (byte arrays, so any address is aligned for them; words read with `bitCast`),
+        // and table lookups: no checks once the table's size is known, as every index is a byte plus a multiple of
+        // 256 below 2048.
+        precondition(table.count == 2048)
         var crc = crc
-        var index = 0
-        while count &- index >= 8 {
-            let word = UInt64(littleEndian: unsafe input.loadUnaligned(fromByteOffset: index, as: UInt64.self)) ^ crc
-            crc = unsafe table[7 &* 256 &+ Int(word & 0xFF)] ^ table[6 &* 256 &+ Int(word &>> 8 & 0xFF)]
-                ^ table[5 &* 256 &+ Int(word &>> 16 & 0xFF)] ^ table[4 &* 256 &+ Int(word &>> 24 & 0xFF)]
-                ^ table[3 &* 256 &+ Int(word &>> 32 & 0xFF)] ^ table[2 &* 256 &+ Int(word &>> 40 & 0xFF)]
-                ^ table[256 &+ Int(word &>> 48 & 0xFF)] ^ table[Int(word &>> 56)]
-            index &+= 8
+        let count = bytes.byteCount
+        let words = Span<InlineArray<8, UInt8>>(viewing: bytes.extracting(first: count & ~7))
+        for index in words.indices {
+            crc = update(crc, word: UInt64(littleEndian: bitCast(words[index], to: UInt64.self)), table)
         }
-        while index < count {
-            let byte = UInt64(unsafe input.load(fromByteOffset: index, as: UInt8.self))
-            crc = unsafe table[Int((crc ^ byte) & 0xFF)] ^ crc &>> 8
-            index &+= 1
+        let tail = Span<UInt8>(viewing: bytes.extracting(droppingFirst: count & ~7))
+        for index in tail.indices {
+            crc = table[Int((crc ^ UInt64(tail[index])) & 0xFF)] ^ crc &>> 8
         }
         return crc
+    }
+
+    /// Updates the unconditioned register `crc` with the 8 bytes `word` (little-endian).
+    @inline(__always)
+    private static func update(_ crc: UInt64, word: UInt64, _ table: Span<UInt64>) -> UInt64 {
+        let word = word ^ crc
+        return table[7 &* 256 &+ Int(word & 0xFF)] ^ table[6 &* 256 &+ Int(word &>> 8 & 0xFF)]
+            ^ table[5 &* 256 &+ Int(word &>> 16 & 0xFF)] ^ table[4 &* 256 &+ Int(word &>> 24 & 0xFF)]
+            ^ table[3 &* 256 &+ Int(word &>> 32 & 0xFF)] ^ table[2 &* 256 &+ Int(word &>> 40 & 0xFF)]
+            ^ table[256 &+ Int(word &>> 48 & 0xFF)] ^ table[Int(word &>> 56)]
     }
 
     /// Eight tables of 256: the first, each byte's CRC; table `k`, the CRC of a byte followed by `k` zeros.

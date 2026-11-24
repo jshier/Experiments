@@ -13,6 +13,60 @@ swift package --traits SyscallCounting --scratch-path .build-syscalls --disable-
 Tools/bench-table Disk --metric 'wall|Disk syscalls|Malloc' syscalls disk-1
 ```
 
+## 2026-11-23, later: safe APIs where they're free (baselines `safe-arch-before` → `safe-arch-after`, `safe-arch-syscalls-before`; M1 Max, under load)
+
+The survey's "safe now at no cost" list (Writeups/Library-Survey-2026-11-23.md, "Unsafe code"), Disk's part, judged by
+the release object's per-function instruction and call counts against HEAD (file-system rows' instructions include the
+kernel's: the table below is a check that nothing moved by much, not the measure). Lines with `unsafe` in Disk's
+sources: 456 → 433.
+
+Kept:
+- **`EntryPath`** (12 of 13 lines): `isValid`, `screen`, `exactCheck`, and `sanitize` take the `RawSpan` and read it with
+  checked loads. The first try (checked `load` at a variable offset, the survey's P3 form) didn't fold here: the
+  screen's 16-byte loop went 26 → 31 instructions, `exactCheck`'s 30 → 40 a byte, `sanitize`'s scan 7 → 11. What
+  folds: the block loop reading constant offsets 0 and 1 of a shrinking span (`extracting(droppingFirst: 16)`), 26
+  instructions as before; byte loops on `Span<UInt8>(viewing:)` (one unsigned compare per check): short paths 13 → 14,
+  `exactCheck` 30 → 33 (paths that fail the screen only), `sanitize` 7 → 8. Only `string`'s decode stays `unsafe`.
+- **The planner's directory table** (`DirectoryTable`): hash, lookup, and insert take a `RawSpan`; `memcmp` is Bytes'
+  `bytesEqual` (inline, 16 bytes at a time; one call fewer per lookup). The path buffer (a `RawStorage`, which has no
+  span API) is read through one helper, `Planner.prefix(_:_:)` (a bounds precondition, the one `unsafe` span and its
+  `_overrideLifetime`). Binding the storage to a local first cost two retains and two releases per `parent(_:)`; reading
+  `self.path` directly conflicts with `ensureDirectory`'s exclusive access, so the read-only part is a non-mutating
+  `findParent`. `parent` 98 → 173 instructions (the inline compare; 4 → 3 calls, no retains).
+- **`Decmpfs` PNG check**: a checked load after the count guard.
+- Tests: `withUnsafeBytesAsyncForTests` (a pointer escaping its closure) is gone; the helpers hold `bytes.span.bytes`
+  across their awaits; `PathTests` calls the span forms.
+
+Tried and reverted:
+- **`CString.with` on `withTemporaryAllocation`** (SE-0524, the survey's P7): every caller grew. The body became an
+  out-of-line specialized closure of 122–134 instructions per result type (Bytes' `append(copying:)` inlines a 64-byte
+  copy), called through a partial apply: `makeHardLink` 209 → 378, `makeSymbolicLink` 437 → 652, `publishUnwrapped`
+  963 → 1,264, `makeDirectory` 138 → 216. The pointer form stays.
+- **`PostPasses`' quarantine path built in a `withTemporaryAllocation`**: `fixDirectory`'s builder 63 → 237 instructions
+  (13 checks). Same reason; reverted.
+- **`JobQueue`'s ring as `UniqueArray<Slot?>`** in the `Mutex` state (slots appended as pushes first reach them, so
+  pages are still touched only as jobs fill them). `JobQueue` is generic and unspecialized: each push gained an
+  `Optional` metadata accessor call and the slot's assignment through value witnesses (`offer` 128 → 178
+  instructions, 4 → 9 calls, under the lock). Reverted. (Initializing the ring up front, which `UniqueArray(repeating:)`
+  would do, cost about 8 M instructions an extraction before.)
+
+Left alone, as the survey classifies them: syscalls with C strings, ACLs, `fsetattrlist`, `mmap`, `TreeRemoval`
+(inherent); `RawStorage` plumbing in the writers, `JobQueue`'s path ring and hand-off, `ExtractionContext`,
+`LargeFileTable`, `MemorySource`, `SharedArena`, `MappedFile.base` (memory shared between tasks).
+
+| Row (instructions include the kernel's) | before | after |
+|---|---:|---:|
+| FileWriter-1000-small-files (0 mallocs) | 1,350 M | 1,331 M |
+| Small files: 2,000 x 1-8 KB | 2,164 M | 2,154 M |
+| Single writer: 2,000 small files | 2,121 M | 2,116 M |
+| Compressed: 2,000 x 1-64 KB: LZBITMAP (aa) | 5,083 M | 5,042 M |
+| Extended attributes: 2,000 files x 3 | 3,743 M | 3,735 M |
+| One file: 32 KB | 2.41 M | 2.37 M |
+
+Mallocs unchanged on every row; the zero-malloc gate passes. `Disk syscalls` (`safe-arch-syscalls-before` → `-after`)
+identical: 8,029 for 2,000 small files, 20,000 with attributes, 10,000 with hard links, 100,000 for 20,000 quarantined.
+Tests: 72 in 17 suites, the `.diskLifetimes` checks included; no warnings.
+
 ## 2026-11-23: explicit descriptor lifetimes, mappings that can't fault, quarantine on any volume, composed errors (M1 Max)
 
 The survey's first four bugs (Writeups/Library-Survey-2026-11-23.md), fixed in Disk and its clients.

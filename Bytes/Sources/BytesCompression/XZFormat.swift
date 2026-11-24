@@ -25,49 +25,50 @@ enum XZ {
         return (2 | Int(byte) & 1) &<< (Int(byte) / 2 &+ 11)
     }
 
-    /// Checks the stream header at `header` (`headerSize` bytes): magic, flags, and the flags' CRC-32.
+    /// Checks the stream header at the start of `header` (`headerSize` bytes or more): magic, flags, and the flags'
+    /// CRC-32.
     ///
     /// - Returns: The check type.
     /// - Throws: ``BytesError/invalidValue`` for the wrong magic, reserved flags, or a reserved check type;
     ///   ``BytesError/mismatch`` for a wrong CRC.
-    static func streamHeader(_ header: UnsafePointer<UInt8>) throws(BytesError) -> Int {
-        // Unsafe: reads of the header's 12 bytes, which the caller checked are there.
-        let magic = unsafe UInt64(UnsafeRawPointer(header).loadUnaligned(as: UInt32.self).littleEndian)
-            | UInt64(UnsafeRawPointer(header + 4).loadUnaligned(as: UInt16.self).littleEndian) &<< 32
+    static func streamHeader(_ header: RawSpan) throws(BytesError) -> Int {
+        let magic = UInt64(UInt32(littleEndian: header.load(fromByteOffset: 0, as: UInt32.self)))
+            | UInt64(UInt16(littleEndian: header.load(fromByteOffset: 4, as: UInt16.self))) &<< 32
         guard magic == headerMagic else { throw .invalidValue }
-        let flags = unsafe header + 6
-        guard unsafe flags[0] == 0, unsafe flags[1] & 0xF0 == 0 else { throw .invalidValue }
-        guard unsafe crc32(flags, 2) == UnsafeRawPointer(header + 8).loadUnaligned(as: UInt32.self).littleEndian else {
+        let flags = header.extracting(6..<8)
+        let checkType = Int(flags.load(fromByteOffset: 1, as: UInt8.self))
+        guard flags.load(fromByteOffset: 0, as: UInt8.self) == 0, checkType & 0xF0 == 0 else { throw .invalidValue }
+        guard CRC32.checksum(flags) == UInt32(littleEndian: header.load(fromByteOffset: 8, as: UInt32.self)) else {
             throw .mismatch
         }
-        let checkType = Int(unsafe flags[1])
         switch checkType {
         case 0, 1, 4, 10: return checkType
         default: throw .invalidValue // Reserved check types.
         }
     }
 
-    /// Throws ``BytesError/invalidValue`` if `count` bytes at `bytes`, fewer than a stream header's, already show
-    /// they don't start one.
-    static func checkHeaderPrefix(_ bytes: UnsafePointer<UInt8>, count: Int) throws(BytesError) {
-        // Unsafe: reads of the `count` bytes the caller has.
-        for index in 0..<min(count, 6) where unsafe bytes[index] != UInt8(truncatingIfNeeded: headerMagic &>> UInt64(8 &* index)) {
+    /// Throws ``BytesError/invalidValue`` if `bytes`, fewer than a stream header's, already show they don't start
+    /// one.
+    static func checkHeaderPrefix(_ bytes: RawSpan) throws(BytesError) {
+        for index in 0..<min(bytes.byteCount, 6)
+        where bytes.load(fromByteOffset: index, as: UInt8.self) != UInt8(truncatingIfNeeded: headerMagic &>> UInt64(8 &* index)) {
             throw .invalidValue
         }
     }
 
-    /// Checks the stream footer at `footer` (`headerSize` bytes): its CRC-32, the backward size against the
-    /// index's `indexSize`, the flags against the header's `checkType`, and "YZ".
+    /// Checks the stream footer at the start of `footer` (`headerSize` bytes or more): its CRC-32, the backward size
+    /// against the index's `indexSize`, the flags against the header's `checkType`, and "YZ".
     ///
     /// - Throws: ``BytesError/invalidValue`` for the wrong magic; ``BytesError/mismatch`` for anything else.
-    static func checkFooter(_ footer: UnsafePointer<UInt8>, indexSize: Int, checkType: Int) throws(BytesError) {
-        // Unsafe: reads of the footer's 12 bytes, which the caller checked are there.
-        guard unsafe footer[10] == 0x59, unsafe footer[11] == 0x5A else { throw .invalidValue }
-        guard unsafe crc32(footer + 4, 6) == UnsafeRawPointer(footer).loadUnaligned(as: UInt32.self).littleEndian else {
+    static func checkFooter(_ footer: RawSpan, indexSize: Int, checkType: Int) throws(BytesError) {
+        guard UInt16(littleEndian: footer.load(fromByteOffset: 10, as: UInt16.self)) == 0x5A59 else { throw .invalidValue } // "YZ"
+        guard CRC32.checksum(footer.extracting(4..<10)) == UInt32(littleEndian: footer.load(fromByteOffset: 0, as: UInt32.self)) else {
             throw .mismatch
         }
-        let backwardSize = unsafe UnsafeRawPointer(footer + 4).loadUnaligned(as: UInt32.self).littleEndian
-        guard (Int(backwardSize) &+ 1) &* 4 == indexSize, unsafe footer[8] == 0, unsafe footer[9] == UInt8(checkType) else {
+        let backwardSize = UInt32(littleEndian: footer.load(fromByteOffset: 4, as: UInt32.self))
+        guard (Int(backwardSize) &+ 1) &* 4 == indexSize, footer.load(fromByteOffset: 8, as: UInt8.self) == 0,
+            footer.load(fromByteOffset: 9, as: UInt8.self) == UInt8(checkType)
+        else {
             throw .mismatch
         }
     }
@@ -80,16 +81,16 @@ enum XZ {
         var dictionarySize: Int
     }
 
-    /// Parses the block header of `headerSize` bytes at `block`: its CRC-32, flags, sizes, and filter chain, which
-    /// must be LZMA2 alone.
+    /// Parses the block header of `headerSize` bytes at the start of `block`: its CRC-32, flags, sizes, and filter
+    /// chain, which must be LZMA2 alone.
     ///
     /// - Throws: ``BytesError/mismatch`` for a wrong CRC; ``BytesError/invalidValue`` for reserved flags, other
     ///   filters, or nonzero padding; ``BytesError/insufficientData`` for fields running past the header.
-    static func blockHeader(_ block: UnsafePointer<UInt8>, headerSize: Int) throws(BytesError) -> BlockHeader {
-        // Unsafe: reads within the header's bytes, which the caller checked are there.
-        let headerCRC = unsafe UnsafeRawPointer(block + (headerSize &- 4)).loadUnaligned(as: UInt32.self).littleEndian
-        guard unsafe crc32(block, headerSize &- 4) == headerCRC else { throw .mismatch }
-        var cursor = unsafe XZCursor(base: block, end: headerSize &- 4, position: 1)
+    static func blockHeader(_ block: RawSpan, headerSize: Int) throws(BytesError) -> BlockHeader {
+        let fields = block.extracting(0..<(headerSize &- 4))
+        let headerCRC = UInt32(littleEndian: block.load(fromByteOffset: headerSize &- 4, as: UInt32.self))
+        guard CRC32.checksum(fields) == headerCRC else { throw .mismatch }
+        var cursor = XZCursor(fields, position: 1)
         let flags = try cursor.byte()
         guard flags & 0x3C == 0 else { throw .invalidValue }
         var compressedSize: Int?
@@ -113,12 +114,6 @@ enum XZ {
         }
         return BlockHeader(compressedSize: compressedSize, uncompressedSize: uncompressedSize, dictionarySize: dictionarySize)
     }
-
-    /// The CRC-32 of `count` bytes at `bytes`.
-    static func crc32(_ bytes: UnsafePointer<UInt8>, _ count: Int) -> UInt32 {
-        // Unsafe: a span over bytes the caller checked are in the input.
-        CRC32.checksum(unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: bytes, count: count)))
-    }
 }
 
 /// What a stream's blocks were, summarized as they're decoded and again as its index lists them, to compare
@@ -139,17 +134,23 @@ struct XZIndexSummary: Equatable {
 }
 
 /// Reads the fields of a header or index: bytes and xz's variable-length integers, each checked against the end.
-@safe
-struct XZCursor {
-    let base: UnsafePointer<UInt8>
-    let end: Int
+struct XZCursor: ~Escapable {
+    let bytes: RawSpan
     var position: Int
+
+    @_lifetime(copy bytes)
+    init(_ bytes: RawSpan, position: Int = 0) {
+        self.bytes = bytes
+        self.position = position
+    }
+
+    /// Where the fields end: the span's end.
+    var end: Int { bytes.byteCount }
 
     /// The next byte.
     mutating func byte() throws(BytesError) -> UInt8 {
         guard position < end else { throw .insufficientData }
-        // Unsafe: a read below `end`, which the caller sets within the buffer.
-        let value = unsafe base[position]
+        let value = bytes.load(fromByteOffset: position, as: UInt8.self)
         position &+= 1
         return value
     }
@@ -172,8 +173,7 @@ struct XZCursor {
     /// A little-endian 32-bit integer.
     mutating func uint32() throws(BytesError) -> UInt32 {
         guard end &- position >= 4 else { throw .insufficientData }
-        // Unsafe: a read of four bytes below `end`.
-        let value = UInt32(littleEndian: unsafe UnsafeRawPointer(base + position).loadUnaligned(as: UInt32.self))
+        let value = UInt32(littleEndian: bytes.load(fromByteOffset: position, as: UInt32.self))
         position &+= 4
         return value
     }
@@ -202,15 +202,13 @@ extension LZMA2Decoder {
         guard input.byteCount > 0 else { throw .insufficientData }
         return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
             try span.withUnsafeMutableBytes { outputBuffer throws(BytesError) -> Int in
-                try input.withUnsafeBytes { inputBuffer throws(BytesError) -> Int in
-                    // Unsafe: base addresses of the buffers (a placeholder for an empty output, never written).
-                    written = try unsafe decodeXZ(
-                        inputBuffer.baseAddress!.assumingMemoryBound(to: UInt8.self), count: inputBuffer.count,
-                        output: (outputBuffer.baseAddress ?? UnsafeMutableRawPointer(bitPattern: 1)!).assumingMemoryBound(to: UInt8.self),
-                        capacity: outputBuffer.count
-                    )
-                    return inputBuffer.count
-                }
+                // Unsafe: the output's base address (a placeholder for an empty output, never written).
+                written = try unsafe decodeXZ(
+                    input,
+                    output: (outputBuffer.baseAddress ?? UnsafeMutableRawPointer(bitPattern: 1)!).assumingMemoryBound(to: UInt8.self),
+                    capacity: outputBuffer.count
+                )
+                return input.byteCount
             }
         }
     }
@@ -219,19 +217,19 @@ extension LZMA2Decoder {
     ///
     /// - Returns: The bytes written.
     private mutating func decodeXZ(
-        _ input: UnsafePointer<UInt8>, count: Int, output: UnsafeMutablePointer<UInt8>, capacity: Int
+        _ input: RawSpan, output: UnsafeMutablePointer<UInt8>, capacity: Int
     ) throws(BytesError) -> Int {
         var position = 0
         var end = 0
-        // Unsafe: reads of the input and its CRCs over pointer ranges, each checked against `count` first.
+        let count = input.byteCount
         repeat {
             // Stream header: magic, flags, and the flags' CRC-32.
             guard count &- position >= XZ.headerSize else {
                 // Too short for a header: a truncated one, or (as soon as its bytes show it) not one at all.
-                try unsafe XZ.checkHeaderPrefix(input + position, count: count &- position)
+                try XZ.checkHeaderPrefix(input.extracting(droppingFirst: position))
                 throw .insufficientData
             }
-            let checkType = try unsafe XZ.streamHeader(input + position)
+            let checkType = try XZ.streamHeader(input.extracting(droppingFirst: position))
             let checkSize = XZ.checkSize(checkType)
             position &+= XZ.headerSize
 
@@ -239,10 +237,11 @@ extension LZMA2Decoder {
             var blocks = XZIndexSummary()
             while true {
                 guard position < count else { throw .insufficientData }
-                let sizeByte = Int(unsafe input[position])
+                let sizeByte = Int(input.load(fromByteOffset: position, as: UInt8.self))
                 if sizeByte == 0 { break }
+                // Unsafe: the output's pointer, passed on to the block's decoder.
                 let block = try unsafe decodeBlock(
-                    input + position, count: count &- position, headerSize: (sizeByte &+ 1) &* 4, checkType: checkType,
+                    input.extracting(droppingFirst: position), headerSize: (sizeByte &+ 1) &* 4, checkType: checkType,
                     checkSize: checkSize, output: output, start: end, capacity: capacity
                 )
                 position &+= block.consumed
@@ -252,7 +251,7 @@ extension LZMA2Decoder {
 
             // Index: the indicator, the record count, the records, padding to 4 bytes, and a CRC-32.
             let indexStart = position
-            var cursor = unsafe XZCursor(base: input, end: count, position: position &+ 1)
+            var cursor = XZCursor(input, position: position &+ 1)
             var listed = XZIndexSummary()
             let records = try cursor.integer()
             guard records == UInt64(blocks.count) else { throw .mismatch }
@@ -265,7 +264,7 @@ extension LZMA2Decoder {
             while (cursor.position &- indexStart) & 3 != 0 {
                 guard try cursor.byte() == 0 else { throw .invalidValue }
             }
-            let indexCRC = unsafe XZ.crc32(input + indexStart, cursor.position &- indexStart)
+            let indexCRC = CRC32.checksum(input.extracting(indexStart..<cursor.position))
             guard try cursor.uint32() == indexCRC else { throw .mismatch }
             let indexSize = cursor.position &- indexStart
             position = cursor.position
@@ -273,11 +272,11 @@ extension LZMA2Decoder {
             // Stream footer: a CRC-32 of the backward size and flags, the backward size (the index's), the
             // flags (the header's), and "YZ".
             guard count &- position >= XZ.headerSize else { throw .insufficientData }
-            try unsafe XZ.checkFooter(input + position, indexSize: indexSize, checkType: checkType)
+            try XZ.checkFooter(input.extracting(droppingFirst: position), indexSize: indexSize, checkType: checkType)
             position &+= XZ.headerSize
 
             // Stream padding: zeros, a multiple of 4 bytes.
-            while count &- position >= 4, unsafe UnsafeRawPointer(input + position).loadUnaligned(as: UInt32.self) == 0 {
+            while count &- position >= 4, input.load(fromByteOffset: position, as: UInt32.self) == 0 {
                 position &+= 4
             }
             if position < count && count &- position < 4 {
@@ -287,16 +286,16 @@ extension LZMA2Decoder {
         return end
     }
 
-    /// Decodes the block at `block` (`count` bytes to the input's end) into `output` from `start`.
+    /// Decodes the block at the start of `block` (the input to its end) into `output` from `start`.
     ///
     /// - Returns: The block's size in the input (header to check), its unpadded size, and the output's end.
     private mutating func decodeBlock(
-        _ block: UnsafePointer<UInt8>, count: Int, headerSize: Int, checkType: Int, checkSize: Int,
+        _ block: RawSpan, headerSize: Int, checkType: Int, checkSize: Int,
         output: UnsafeMutablePointer<UInt8>, start: Int, capacity: Int
     ) throws(BytesError) -> (consumed: Int, unpadded: Int, end: Int) {
-        // Unsafe: reads within the block's bytes, each checked against `count` first.
+        let count = block.byteCount
         guard headerSize <= count else { throw .insufficientData }
-        let header = try unsafe XZ.blockHeader(block, headerSize: headerSize)
+        let header = try XZ.blockHeader(block, headerSize: headerSize)
         let compressedSize = header.compressedSize
         let uncompressedSize = header.uncompressedSize
         let dictionarySize = header.dictionarySize
@@ -309,8 +308,9 @@ extension LZMA2Decoder {
             available = compressedSize
         }
         if let uncompressedSize, uncompressedSize > capacity &- start { throw .insufficientCapacity }
+        // Unsafe: the output's pointer, passed on to the decoder.
         let (compressed, end) = try unsafe decodeLZMA2(
-            block + dataStart, count: available, output: output, start: start, capacity: capacity,
+            block.extracting(dataStart..<(dataStart &+ available)), output: output, start: start, capacity: capacity,
             dictionarySize: dictionarySize
         )
         if let compressedSize, compressed != compressedSize { throw .mismatch }
@@ -320,17 +320,19 @@ extension LZMA2Decoder {
         var position = dataStart &+ compressed
         while position & 3 != 0 {
             guard position < count else { throw .insufficientData }
-            guard unsafe block[position] == 0 else { throw .invalidValue }
+            guard block.load(fromByteOffset: position, as: UInt8.self) == 0 else { throw .invalidValue }
             position &+= 1
         }
         guard checkSize <= count &- position else { throw .insufficientData }
-        let check = unsafe UnsafeRawPointer(block + position)
+        // Unsafe: a span over the block's output. Safe: the decoder wrote `start..<end`, within the output.
         let content = unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: output + start, count: end &- start))
         switch checkType {
         case 1:
-            guard unsafe CRC32.checksum(content) == check.loadUnaligned(as: UInt32.self).littleEndian else { throw .mismatch }
+            let expected = UInt32(littleEndian: block.load(fromByteOffset: position, as: UInt32.self))
+            guard CRC32.checksum(content) == expected else { throw .mismatch }
         case 4:
-            guard unsafe CRC64.checksum(content) == check.loadUnaligned(as: UInt64.self).littleEndian else { throw .mismatch }
+            let expected = UInt64(littleEndian: block.load(fromByteOffset: position, as: UInt64.self))
+            guard CRC64.checksum(content) == expected else { throw .mismatch }
         default:
             break // None, or SHA-256: not verified.
         }

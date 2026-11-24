@@ -146,34 +146,49 @@ public struct Planner<Source: ContentSource>: ~Copyable {
         return count
     }
 
+    /// The first `count` bytes of `storage` (the path buffer or the last parent's), borrowing the storage, not the
+    /// planner, so the planner's tables can change while the span is alive. Callers don't keep one across a change to
+    /// the storage's bytes (`setPath`, `ensureDirectory`'s NUL).
+    @inline(__always) @_lifetime(borrow storage)
+    private static func prefix(_ storage: RawStorage, _ count: Int) -> RawSpan {
+        precondition(UInt(bitPattern: count) <= UInt(bitPattern: storage.byteCount), "a prefix longer than its buffer")
+        // Unsafe (the next two): a span over the storage, its lifetime set by hand to a borrow of it. Safe: within it
+        // (checked above), in memory it owns while the reference lives, which the borrow outlasts.
+        let span = unsafe RawSpan(_unsafeStart: storage.base, byteCount: count)
+        return unsafe _overrideLifetime(span, borrowing: storage)
+    }
+
     /// Appends `count` bytes of the path buffer to the arena, NUL-terminated: its offset.
     private mutating func storePath(_ count: Int) -> Int {
         let offset = arena.count
-        // Unsafe: a buffer over the path buffer's first `count` bytes, appended to the arena. Safe: the planner's own
-        // buffer, holding at least `count` bytes of the current path (the caller's `count`, from `setPath` or a prefix
-        // of it); the array copies them during the call.
-        unsafe arena.append(contentsOf: UnsafeRawBufferPointer(start: path.base, count: count))
+        arena.append(copying: Self.prefix(path, count))
         arena.append(0)
         return offset
+    }
+
+    /// The parent of the entry whose path is the first `count` bytes of the path buffer: its length (the last `/`'s
+    /// offset; 0 or less for none), whether it's the last entry's parent, and its descriptor if the table has it
+    /// (looked up only when it isn't the last parent).
+    @inline(__always)
+    private func findParent(_ count: Int) -> (slash: Int, isLast: Bool, known: Int32?) {
+        // The path buffer holds the current path's `count` bytes (the caller's contract), `count` under `PATH_MAX`.
+        let bytes = Self.prefix(path, count)
+        var slash = count - 1
+        while slash >= 0, bytes.load(fromByteOffset: slash, as: UInt8.self) != 0x2F { slash -= 1 }
+        guard slash > 0 else { return (slash, false, nil) }
+        // The usual case: the same parent as the last entry's (archives keep a directory's entries together).
+        let parent = bytes.extracting(0..<slash)
+        if slash == lastParentCount, Self.prefix(lastParent, slash).bytesEqual(parent) { return (slash, true, nil) }
+        return (slash, false, directories.lookup(parent))
     }
 
     /// Where the entry whose path is the first `count` bytes of the path buffer is made: its parent's descriptor and
     /// the name's offset, or the destination and 0. Makes parents that aren't there (checking each one that is).
     private mutating func parent(_ count: Int) throws(DiskError) -> (directory: Int32, leaf: Int) {
-        // The path buffer holds the current path's `count` bytes (the caller's contract), `count` under `PATH_MAX`.
-        var slash = count - 1
-        // Unsafe: loads byte `slash` of the path buffer. Safe: `0 <= slash < count` (tested first), within the path.
-        while slash >= 0, unsafe path.base.load(fromByteOffset: slash, as: UInt8.self) != 0x2F { slash -= 1 }
+        let (slash, isLast, known) = findParent(count)
         guard slash > 0 else { return (root, 0) }
-        // The usual case: the same parent as the last entry's (archives keep a directory's entries together).
-        // Unsafe: `memcmp` of the two buffers' first `slash` bytes. Safe: `slash < count`, within the path; and
-        // `slash == lastParentCount`, the bytes copied into the last parent's buffer (the same size) below.
-        if slash == lastParentCount, unsafe memcmp(lastParent.base, path.base, slash) == 0 {
-            return lastParentResolved.leaf ? (lastParentResolved.directory, slash + 1) : (root, 0)
-        }
-        // Unsafe: the path buffer's first `slash` bytes, compared in the table. Safe: within the path (`slash <
-        // count`); `lookup` only reads them, during the call.
-        var descriptor = unsafe directories.lookup(path.base, count: slash)
+        if isLast { return lastParentResolved.leaf ? (lastParentResolved.directory, slash + 1) : (root, 0) }
+        var descriptor = known
         if descriptor == nil { descriptor = try ensureDirectory(slash, mode: 0o755, listed: false) }
         let resolved = descriptor ?? -1
         // Unsafe: copies the parent's `slash` bytes into the last parent's buffer. Safe: within the path, under
@@ -210,8 +225,7 @@ public struct Planner<Source: ContentSource>: ~Copyable {
             // At the descriptor limit: its contents use paths from the destination.
             if descriptor < 0 { descriptor = -1 }
         }
-        // Unsafe: the prefix's bytes, copied into the table. Safe: `count` bytes of the path buffer.
-        unsafe directories.insert(path.base, count: count, descriptor: descriptor)
+        directories.insert(Self.prefix(path, count), descriptor: descriptor)
         if made, !listed, destination.options.quarantine != nil {
             fixes.append(DirectoryFix(
                 path: storePath(count), count: count, descriptor: descriptor, metadata: EntryMetadata(), depth: depth(count),
@@ -223,8 +237,10 @@ public struct Planner<Source: ContentSource>: ~Copyable {
 
     /// How deep the directory at the first `count` bytes of the path buffer is: its components.
     private func depth(_ count: Int) -> Int {
-        // Unsafe: a buffer over the path buffer's first `count` bytes. Safe: the planner's own, at least that long.
-        unsafe UnsafeRawBufferPointer(start: path.base, count: count).count { $0 == 0x2F } + (count > 0 ? 1 : 0)
+        let bytes = Self.prefix(path, count)
+        var slashes = 0
+        for index in 0..<count where bytes.load(fromByteOffset: index, as: UInt8.self) == 0x2F { slashes += 1 }
+        return slashes + (count > 0 ? 1 : 0)
     }
 
     // MARK: Entries
@@ -249,8 +265,7 @@ public struct Planner<Source: ContentSource>: ~Copyable {
         var hasItsMode = count > 0
         if count > 0 {
             do throws(DiskError) {
-                // Unsafe: the path buffer's first `count` bytes, compared in the table. Safe: the entry's, just set.
-                if let known = unsafe directories.lookup(path.base, count: count) {
+                if let known = directories.lookup(Self.prefix(path, count)) {
                     descriptor = known
                     hasItsMode = false
                 } else {
@@ -612,48 +627,39 @@ struct DirectoryTable: ~Copyable {
     init() {}
 
     @inline(__always)
-    private static func hash(_ bytes: UnsafeRawPointer, _ count: Int) -> UInt64 {
+    private static func hash(_ bytes: RawSpan) -> UInt64 {
         // FNV-1a.
         var hash: UInt64 = 0xCBF2_9CE4_8422_2325
-        for index in 0..<count {
-            // Unsafe: loads byte `index`. Safe: `index < count`, and the caller's `count` bytes at `bytes` are
-            // readable for the call (its contract).
-            hash = (hash ^ UInt64(unsafe bytes.load(fromByteOffset: index, as: UInt8.self))) &* 0x100_0000_01B3
+        for index in 0..<bytes.byteCount {
+            hash = (hash ^ UInt64(bytes.load(fromByteOffset: index, as: UInt8.self))) &* 0x100_0000_01B3
         }
         return hash
     }
 
-    /// The directory at `path` (`count` bytes): its descriptor (-1: not opened), or `nil` if it isn't known.
-    func lookup(_ path: UnsafeRawPointer, count: Int) -> Int32? {
+    /// The directory at `path`: its descriptor (-1: not opened), or `nil` if it isn't known.
+    func lookup(_ path: RawSpan) -> Int32? {
         if entries.isEmpty { return nil }
-        // Unsafe: `path` to `hash`. Safe: the caller's `count` readable bytes, valid for this call (its contract).
-        let hash = unsafe Self.hash(path, count)
+        let hash = Self.hash(path)
+        let count = path.byteCount
         let mask = slots.count - 1
         var slot = Int(truncatingIfNeeded: hash) & mask
         while slots[slot] != 0 {
             let entry = entries[Int(slots[slot]) - 1]
-            if entry.hash == hash, entry.count == count {
-                // Unsafe: `memcmp` of an entry's bytes in the arena with the caller's. Safe: `insert` appended the
-                // entry's `entry.count` bytes at `entry.start`, and `entry.count == count` (just tested), so both
-                // sides have `count` bytes; the arena's buffer is valid inside `withUnsafeBytes`, and not `nil` (it
-                // holds this entry: no path here is empty).
-                let equal = arena.withUnsafeBytes { unsafe memcmp($0.baseAddress! + entry.start, path, count) == 0 }
-                if equal { return entry.descriptor }
+            if entry.hash == hash, entry.count == count,
+               arena.span.bytes.extracting(entry.start..<(entry.start + count)).bytesEqual(path) {
+                return entry.descriptor
             }
             slot = (slot + 1) & mask
         }
         return nil
     }
 
-    mutating func insert(_ path: UnsafeRawPointer, count: Int, descriptor: Int32) {
+    mutating func insert(_ path: RawSpan, descriptor: Int32) {
         if (entries.count + 1) * 2 > slots.count { grow() }
-        // Unsafe: `path` to `hash`. Safe: the caller's `count` readable bytes, valid for this call (its contract).
-        let hash = unsafe Self.hash(path, count)
+        let hash = Self.hash(path)
         let start = arena.count
-        // Unsafe: a buffer over the caller's bytes, appended to the arena. Safe: the same `count` bytes; the array
-        // copies them during the call, and they aren't in the arena itself (the planner's path buffer).
-        unsafe arena.append(contentsOf: UnsafeRawBufferPointer(start: path, count: count))
-        entries.append((hash, start, count, descriptor))
+        arena.append(copying: path)
+        entries.append((hash, start, path.byteCount, descriptor))
         place(entries.count - 1)
     }
 

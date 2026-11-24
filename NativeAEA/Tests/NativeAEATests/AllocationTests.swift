@@ -10,12 +10,8 @@ import Testing
 
     /// Parses `bytes` as one header, as the walker does.
     private func parse(_ bytes: [UInt8]) throws(AEAError) -> AAEntryHeader {
-        let count = try bytes.span.bytes.withUnsafeBytes { buffer throws(AEAError) in
-            try unsafe AppleArchive.headerByteCount(RawSpan(_unsafeBytes: buffer)) // The array's bytes, in the call: safe.
-        }
-        return try bytes.span.bytes.extracting(0..<count).withUnsafeBytes { buffer throws(AEAError) in
-            try unsafe AppleArchive.parseHeader(RawSpan(_unsafeBytes: buffer)) // Same.
-        }
+        let count = try AppleArchive.headerByteCount(bytes.span.bytes)
+        return try AppleArchive.parseHeader(bytes.span.bytes.extracting(0..<count))
     }
 
     /// A header of `fields`, with its magic and size.

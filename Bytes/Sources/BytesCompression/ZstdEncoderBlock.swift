@@ -448,19 +448,24 @@ struct ZstdBlockEncoder: ~Copyable {
         }
         if preferRepeat && repeatMode == .valid { return unsafe encode(previousTable, log: previousLog, at: 0) }
 
-        let counts = unsafe workspace.pointer(layout.counts).assumingMemoryBound(to: UInt32.self)
+        // Unsafe: spans over the literals and the workspace's regions (counts 256, histogram scratch 1,024, tables
+        // 256 entries), each in the layout; the tree builder below reads the counts and writes the new table through
+        // pointers, between the spans' uses.
+        let literalBytes = unsafe Span(_unsafeStart: source, count: count)
+        var counts = unsafe MutableSpan(_unsafeStart: workspace.pointer(layout.counts, as: UInt32.self), count: 256)
+        let previousEntries = unsafe Span(_unsafeStart: previousTable, count: 256)
         let sampleSize = 4096
         if suspectUncompressible && count >= sampleSize &* 10 {
             var maximumBegin = 255
             var maximumEnd = 255
-            let begin = unsafe ZstdHistogram.count(literals, count: sampleSize, into: counts, maximumSymbol: &maximumBegin)
-            let end = unsafe ZstdHistogram.count(literals + (count &- sampleSize), count: sampleSize, into: counts, maximumSymbol: &maximumEnd)
+            let begin = ZstdHistogram.count(literalBytes.extracting(first: sampleSize), into: &counts, maximumSymbol: &maximumBegin)
+            let end = ZstdHistogram.count(literalBytes.extracting(last: sampleSize), into: &counts, maximumSymbol: &maximumEnd)
             if begin &+ end <= (2 &* sampleSize) &>> 7 &+ 4 { return 0 }
         }
         var maximumSymbol = 255
-        let largest = unsafe ZstdHistogram.countBytes(
-            literals, count: count, into: counts,
-            scratch: workspace.pointer(layout.histogramScratch).assumingMemoryBound(to: UInt32.self), maximumSymbol: &maximumSymbol
+        var histogramScratch = unsafe MutableSpan(_unsafeStart: workspace.pointer(layout.histogramScratch, as: UInt32.self), count: 1024)
+        let largest = ZstdHistogram.countBytes(
+            literalBytes, into: &counts, scratch: &histogramScratch, maximumSymbol: &maximumSymbol
         )
         if largest == count {
             unsafe output.storeBytes(of: literals.load(as: UInt8.self), as: UInt8.self)
@@ -468,30 +473,34 @@ struct ZstdBlockEncoder: ~Copyable {
         }
         if largest <= (count &>> 7) &+ 4 { return 0 }
 
-        if repeatMode == .check && !(unsafe ZstdHuffmanEncoding.isValid(
-            previousTable, tableMaximumSymbol: previous.huffman.maximumSymbol, counts: counts, maximumSymbol: maximumSymbol
-        )) {
+        if repeatMode == .check && !ZstdHuffmanEncoding.isValid(
+            previousEntries, tableMaximumSymbol: previous.huffman.maximumSymbol, counts: counts.span, maximumSymbol: maximumSymbol
+        ) {
             repeatMode = .none
         }
         if preferRepeat && repeatMode != .none { return unsafe encode(previousTable, log: previousLog, at: 0) }
 
         // A new tree, in the other slot.
         let slot = 1 &- previous.huffman.slot
-        let table = unsafe workspace.pointer(layout.huffmanTables &+ slot &* 2048).assumingMemoryBound(to: UInt64.self)
+        let tableOffset = layout.huffmanTables &+ slot &* 2048
+        let table = unsafe workspace.pointer(tableOffset, as: UInt64.self)
         let tableLog = ZstdFSEEncoding.optimalTableLog(
             ZstdHuffmanEncoding.maximumCodeLength, total: count, maximumSymbol: maximumSymbol, minus: 1
         )
+        // The tree is built through pointers: its nodes' indexes come from the data (parents, the sorted symbols),
+        // and checked accesses cost every block (measured: 2–3 K instructions a table).
         let bits = unsafe ZstdHuffmanEncoding.buildTable(
-            table, counts: counts, maximumSymbol: maximumSymbol, maximumBits: tableLog,
+            table, counts: workspace.pointer(layout.counts, as: UInt32.self), maximumSymbol: maximumSymbol, maximumBits: tableLog,
             scratch: workspace.pointer(layout.huffmanScratch)
         )
+        let entries = unsafe Span(_unsafeStart: table, count: 256)
         guard let descriptionSize = unsafe ZstdHuffmanEncoding.writeDescription(
-            output, capacity: capacity, table: table, maximumSymbol: maximumSymbol, tableLog: bits,
+            output, capacity: capacity, table: entries, maximumSymbol: maximumSymbol, tableLog: bits,
             scratch: workspace.pointer(layout.descriptionScratch)
         ) else { return 0 }
         if repeatMode != .none {
-            let oldSize = unsafe ZstdHuffmanEncoding.estimateSize(previousTable, counts: counts, maximumSymbol: maximumSymbol)
-            let newSize = unsafe ZstdHuffmanEncoding.estimateSize(table, counts: counts, maximumSymbol: maximumSymbol)
+            let oldSize = ZstdHuffmanEncoding.estimateSize(previousEntries, counts: counts.span, maximumSymbol: maximumSymbol)
+            let newSize = ZstdHuffmanEncoding.estimateSize(entries, counts: counts.span, maximumSymbol: maximumSymbol)
             if oldSize <= descriptionSize &+ newSize || descriptionSize &+ 12 >= count {
                 return unsafe encode(previousTable, log: previousLog, at: 0)
             }
@@ -544,20 +553,22 @@ struct ZstdBlockEncoder: ~Copyable {
         previousState: ZstdTableState, strategy: Int, output: UnsafeMutableRawPointer, written: inout Int,
         lastDescriptionSize: inout Int
     ) -> Int {
-        // Unsafe: counts (64 entries, codes below that), normalized counts and scratch from the workspace, and the
-        // description's stores at `output` (the caller checked `descriptionBound` bytes of room).
-        let counts = unsafe workspace.pointer(layout.counts).assumingMemoryBound(to: UInt32.self)
+        // Unsafe: spans over the codes, the counts (256 entries, codes below 64), the histogram scratch, and the
+        // normalized counts from the workspace; the description's stores at `output` (the caller checked
+        // `descriptionBound` bytes of room); the table built in its region.
+        let codeBytes = unsafe Span(_unsafeStart: codes.assumingMemoryBound(to: UInt8.self), count: count)
+        var counts = unsafe MutableSpan(_unsafeStart: workspace.pointer(layout.counts, as: UInt32.self), count: 256)
+        var histogramScratch = unsafe MutableSpan(_unsafeStart: workspace.pointer(layout.histogramScratch, as: UInt32.self), count: 1024)
         var maximumSymbol = field.maximumSymbol
         // Four interleaved tables for many codes (`HIST_countFast_wksp`): runs of one code would otherwise make each
         // increment wait for the one before.
-        let mostFrequent = unsafe ZstdHistogram.countBytes(
-            UnsafeRawPointer(codes), count: count, into: counts,
-            scratch: workspace.pointer(layout.histogramScratch).assumingMemoryBound(to: UInt32.self), maximumSymbol: &maximumSymbol
+        let mostFrequent = ZstdHistogram.countBytes(
+            codeBytes, into: &counts, scratch: &histogramScratch, maximumSymbol: &maximumSymbol
         )
         let defaultAllowed = field.index != 1 || maximumSymbol <= field.defaultMaximumSymbol
         state.repeatMode = previousState.repeatMode
-        let mode = unsafe selectMode(
-            field, repeatMode: &state.repeatMode, counts: counts, maximumSymbol: maximumSymbol, mostFrequent: mostFrequent,
+        let mode = selectMode(
+            field, repeatMode: &state.repeatMode, counts: counts.span, maximumSymbol: maximumSymbol, mostFrequent: mostFrequent,
             count: count, previousState: previousState, defaultAllowed: defaultAllowed, strategy: strategy
         )
         switch mode {
@@ -565,7 +576,7 @@ struct ZstdBlockEncoder: ~Copyable {
             let region = layout.fseRegion(field.index, 1)
             unsafe ZstdFSETable.buildRLE(workspace.pointer(region), symbol: maximumSymbol)
             state = ZstdTableState(region: region, tableLog: 0, maximumSymbol: maximumSymbol, repeatMode: state.repeatMode)
-            unsafe output.storeBytes(of: codes.load(as: UInt8.self), as: UInt8.self)
+            unsafe output.storeBytes(of: codeBytes[0], as: UInt8.self)
             written &+= 1
         case 3:
             state = ZstdTableState(
@@ -580,22 +591,25 @@ struct ZstdBlockEncoder: ~Copyable {
         default:
             let tableLog = ZstdFSEEncoding.optimalTableLog(field.maximumTableLog, total: count, maximumSymbol: maximumSymbol)
             var total = count
-            let last = Int(unsafe codes.load(fromByteOffset: count &- 1, as: UInt8.self))
-            if unsafe counts[last] > 1 {
-                unsafe counts[last] &-= 1
+            let last = Int(codeBytes[count &- 1])
+            if counts[last] > 1 {
+                counts[last] &-= 1
                 total &-= 1
             }
-            let normalized = unsafe workspace.pointer(layout.normalized).assumingMemoryBound(to: Int16.self)
-            _ = unsafe ZstdFSEEncoding.normalize(
-                normalized, tableLog: tableLog, counts: counts, total: total, maximumSymbol: maximumSymbol,
+            let normalizedPointer = unsafe workspace.pointer(layout.normalized, as: Int16.self)
+            var normalized = unsafe MutableSpan(_unsafeStart: normalizedPointer, count: 64)
+            _ = ZstdFSEEncoding.normalize(
+                &normalized, tableLog: tableLog, counts: counts.span, total: total, maximumSymbol: maximumSymbol,
                 useLowProbabilityCount: total >= 2048
             )
-            let size = unsafe ZstdFSEEncoding.writeDescription(output, normalized: normalized, maximumSymbol: maximumSymbol, tableLog: tableLog)
+            let size = unsafe ZstdFSEEncoding.writeDescription(
+                output, normalized: normalized.span, maximumSymbol: maximumSymbol, tableLog: tableLog
+            )
             // The slot the previous block's table isn't in.
             let first = layout.fseRegion(field.index, 2)
             let region = previousState.region == first ? layout.fseRegion(field.index, 3) : first
             unsafe ZstdFSETable.build(
-                workspace.pointer(region), normalized: normalized, maximumSymbol: maximumSymbol, tableLog: tableLog,
+                workspace.pointer(region), normalized: normalizedPointer, maximumSymbol: maximumSymbol, tableLog: tableLog,
                 scratch: workspace.pointer(layout.fseScratch)
             )
             state = ZstdTableState(region: region, tableLog: tableLog, maximumSymbol: maximumSymbol, repeatMode: state.repeatMode)
@@ -607,7 +621,7 @@ struct ZstdBlockEncoder: ~Copyable {
 
     /// `ZSTD_selectEncodingType`: libzstd's heuristics below the lazy strategies, its cost estimates from them on.
     private func selectMode(
-        _ field: ZstdSequenceField, repeatMode: inout ZstdRepeatMode, counts: UnsafePointer<UInt32>, maximumSymbol: Int,
+        _ field: ZstdSequenceField, repeatMode: inout ZstdRepeatMode, counts: Span<UInt32>, maximumSymbol: Int,
         mostFrequent: Int, count: Int, previousState: ZstdTableState, defaultAllowed: Bool, strategy: Int
     ) -> Int {
         if mostFrequent == count {
@@ -627,11 +641,11 @@ struct ZstdBlockEncoder: ~Copyable {
             }
         } else {
             // Costs in bits, scaled as libzstd's (`Int.max` for "not possible").
-            let basicCost = defaultAllowed ? unsafe crossEntropyCost(field, counts: counts, maximumSymbol: maximumSymbol) : Int.max
+            let basicCost = defaultAllowed ? crossEntropyCost(field, counts: counts, maximumSymbol: maximumSymbol) : Int.max
             let repeatCost = repeatMode != .none
-                ? unsafe fseBitCost(previousState, counts: counts, maximumSymbol: maximumSymbol) : Int.max
-            let descriptionCost = unsafe descriptionCost(field, counts: counts, maximumSymbol: maximumSymbol, count: count)
-            let compressedCost = (descriptionCost &<< 3) &+ (unsafe Self.entropyCost(counts, maximumSymbol: maximumSymbol, total: count))
+                ? fseBitCost(previousState, counts: counts, maximumSymbol: maximumSymbol) : Int.max
+            let descriptionCost = descriptionCost(field, counts: counts, maximumSymbol: maximumSymbol, count: count)
+            let compressedCost = (descriptionCost &<< 3) &+ Self.entropyCost(counts, maximumSymbol: maximumSymbol, total: count)
             if basicCost <= repeatCost && basicCost <= compressedCost {
                 repeatMode = .none
                 return 0
@@ -643,7 +657,7 @@ struct ZstdBlockEncoder: ~Copyable {
     }
 
     /// `ZSTD_crossEntropyCost` of the counts against the field's predefined distribution.
-    private func crossEntropyCost(_ field: ZstdSequenceField, counts: UnsafePointer<UInt32>, maximumSymbol: Int) -> Int {
+    private func crossEntropyCost(_ field: ZstdSequenceField, counts: Span<UInt32>, maximumSymbol: Int) -> Int {
         let norm: [Int16] = switch field.index {
         case 0: Zstd.literalLengthDefaultNorm
         case 1: Zstd.offsetDefaultNorm
@@ -651,25 +665,25 @@ struct ZstdBlockEncoder: ~Copyable {
         }
         let shift = 8 &- field.defaultLog
         var cost = 0
-        // Unsafe: counts up to `maximumSymbol`, within the predefined distribution (checked by the caller).
+        // Counts up to `maximumSymbol`, within the predefined distribution (checked by the caller).
         for symbol in 0...maximumSymbol {
             let value = Int(norm[symbol])
             let probability = (value != -1 ? value : 1) &<< shift
-            cost &+= Int(unsafe counts[symbol]) &* Self.inverseProbabilityLog256[probability]
+            cost &+= Int(counts[symbol]) &* Self.inverseProbabilityLog256[probability]
         }
         return cost &>> 8
     }
 
     /// `ZSTD_fseBitCost` of the counts with the previous block's table, or `Int.max` if it lacks a symbol.
-    private func fseBitCost(_ state: ZstdTableState, counts: UnsafePointer<UInt32>, maximumSymbol: Int) -> Int {
+    private func fseBitCost(_ state: ZstdTableState, counts: Span<UInt32>, maximumSymbol: Int) -> Int {
         if state.maximumSymbol < maximumSymbol { return Int.max }
         let accuracyLog = 8
         var cost = 0
-        // Unsafe: the table's transforms, up to `maximumSymbol` (at most the table's), and counts.
+        // Unsafe: the table's transforms, up to `maximumSymbol` (at most the table's).
         let table = unsafe UnsafeRawPointer(workspace.pointer(state.region))
         for symbol in 0...maximumSymbol {
             let bitCost = unsafe ZstdFSETable.bitCost(table, tableLog: state.tableLog, symbol: symbol, accuracyLog: accuracyLog)
-            let symbolCount = Int(unsafe counts[symbol])
+            let symbolCount = Int(counts[symbol])
             if symbolCount == 0 { continue }
             if bitCost >= (state.tableLog &+ 1) &<< accuracyLog { return Int.max }
             cost &+= symbolCount &* bitCost
@@ -678,25 +692,26 @@ struct ZstdBlockEncoder: ~Copyable {
     }
 
     /// `ZSTD_NCountCost`: the size of the table description a new table would need.
-    private func descriptionCost(_ field: ZstdSequenceField, counts: UnsafePointer<UInt32>, maximumSymbol: Int, count: Int) -> Int {
-        // Unsafe: normalized counts in the workspace, and the description written to the scratch (bound: 80 bytes).
-        let normalized = unsafe workspace.pointer(layout.normalized).assumingMemoryBound(to: Int16.self)
+    private func descriptionCost(_ field: ZstdSequenceField, counts: Span<UInt32>, maximumSymbol: Int, count: Int) -> Int {
+        // Unsafe: a span over the normalized counts in the workspace, and the scratch the description is written to
+        // (bound: 80 bytes).
+        var normalized = unsafe MutableSpan(_unsafeStart: workspace.pointer(layout.normalized, as: Int16.self), count: 64)
         let tableLog = ZstdFSEEncoding.optimalTableLog(field.maximumTableLog, total: count, maximumSymbol: maximumSymbol)
-        guard unsafe ZstdFSEEncoding.normalize(
-            normalized, tableLog: tableLog, counts: counts, total: count, maximumSymbol: maximumSymbol,
+        guard ZstdFSEEncoding.normalize(
+            &normalized, tableLog: tableLog, counts: counts, total: count, maximumSymbol: maximumSymbol,
             useLowProbabilityCount: count >= 2048
         ) else { return Int.max &>> 4 }
         return unsafe ZstdFSEEncoding.writeDescription(
-            workspace.pointer(layout.fseScratch), normalized: normalized, maximumSymbol: maximumSymbol, tableLog: tableLog
+            workspace.pointer(layout.fseScratch), normalized: normalized.span, maximumSymbol: maximumSymbol, tableLog: tableLog
         )
     }
 
     /// `ZSTD_entropyCost`: the counts' cost at their own probabilities.
-    private static func entropyCost(_ counts: UnsafePointer<UInt32>, maximumSymbol: Int, total: Int) -> Int {
+    private static func entropyCost(_ counts: Span<UInt32>, maximumSymbol: Int, total: Int) -> Int {
         var cost = 0
-        // Unsafe: counts up to `maximumSymbol`.
+        // Counts up to `maximumSymbol`.
         for symbol in 0...maximumSymbol {
-            let count = Int(unsafe counts[symbol])
+            let count = Int(counts[symbol])
             var probability = (256 &* count) / total
             if count != 0 && probability == 0 { probability = 1 }
             cost &+= count &* inverseProbabilityLog256[probability]

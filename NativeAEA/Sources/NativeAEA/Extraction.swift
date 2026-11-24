@@ -298,24 +298,15 @@ struct SegmentContents: PieceSource {
         var secondCount = 0
     }
 
-    /// Where `offset` is in `buffer`: bytes a reference the caller's job owns keeps in place.
-    @inline(__always)
-    private func bytes(_ buffer: Int, _ offset: Int) -> UnsafeMutableRawPointer {
-        // An offset the walker took from this buffer's segment base: within the buffer.
-        unsafe pool.segmentBase(buffer) + offset
-    }
-
     func write(_ contents: Contents, to output: inout FileOutput) async throws(EntryError<Never>) {
         do throws(DiskError) {
             if contents.buffer >= 0 {
                 // The job's reference keeps the buffer's bytes until `release`, after the write.
-                let span = unsafe RawSpan(_unsafeStart: bytes(contents.buffer, contents.offset), byteCount: contents.count)
-                try await output.write(span)
+                try await output.write(pool.bytes(contents.buffer, at: contents.offset, count: contents.count))
             }
             if contents.secondBuffer >= 0 {
                 // Same, for the second buffer.
-                let span = unsafe RawSpan(_unsafeStart: bytes(contents.secondBuffer, contents.secondOffset), byteCount: contents.secondCount)
-                try await output.write(span)
+                try await output.write(pool.bytes(contents.secondBuffer, at: contents.secondOffset, count: contents.secondCount))
             }
         } catch {
             throw .disk(error)
@@ -335,8 +326,7 @@ struct SegmentContents: PieceSource {
     func withPiece<R>(_ contents: Contents, _ body: (inout MutableRawSpan) throws(DiskError) -> R) throws(DiskError) -> R {
         // A piece's range of its buffer, held by the job until its last release, and read by no one else (the walker
         // reads only past it, and the buffer's next user gets it after the release).
-        var span = unsafe MutableRawSpan(_unsafeStart: bytes(contents.buffer, contents.offset), byteCount: contents.count)
-        return try body(&span)
+        try pool.withMutableBytes(contents.buffer, at: contents.offset, count: contents.count, body)
     }
 }
 
@@ -364,7 +354,9 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
 
     /// The current entry's path, copied from its header: a file's data can arrive after the walker has released the
     /// header's buffer (a header that ends a segment), and planning it copies the path again.
-    private let path = RawStorage(byteCount: Int(PATH_MAX), alignment: RawStorage.small)
+    /// (`PATH_MAX` bytes, the first `pathCount` of them the path; bound to a local constant to plan: its span then
+    /// borrows the constant, not the sink, so the planner can be called while it's alive.)
+    private var path = [UInt8](repeating: 0, count: Int(PATH_MAX))
     private var pathCount = 0
     private var entry = AAEntryHeader()
     private var tag = 0
@@ -419,15 +411,6 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         return planner
     }
 
-    /// The first `count` bytes of `storage` (the current entry's path), borrowing the storage, not the sink, so the
-    /// planner can be called while it's alive.
-    @_lifetime(borrow storage)
-    private static func bytes(_ storage: RawStorage, _ count: Int) -> RawSpan {
-        // `count` bytes of the storage, which the caller's reference keeps alive for the span's lifetime.
-        let span = unsafe RawSpan(_unsafeStart: storage.base, byteCount: count)
-        return unsafe _overrideLifetime(span, borrowing: storage)
-    }
-
     private static func metadata(_ entry: AAEntryHeader, owner: Bool) -> EntryMetadata {
         EntryMetadata(
             mode: entry.mode.map { $0 & 0o7777 },
@@ -440,13 +423,15 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         )
     }
 
-    nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: UnsafeRawPointer, buffer: Int) async throws(AEAError) {
+    nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: RawSpan, buffer: Int) async throws(AEAError) {
         statistics.entries += 1
         guard let range = entry.path, let type = entry.type else { throw .invalidArchive("an entry without a type or path") }
+        let name = header.extracting(range.offset..<(range.offset + range.count))
         guard range.count <= EntryPath.maximumByteCount else {
-            throw .unsafePath(unsafe String(decoding: UnsafeRawBufferPointer(start: header + range.offset, count: range.count), as: UTF8.self)) // Within the header: safe.
+            throw .unsafePath(String(decoding: [UInt8](copying: name), as: UTF8.self))
         }
-        unsafe path.base.copyMemory(from: header + range.offset, byteCount: range.count) // Under PATH_MAX, the storage's size: safe.
+        var pathBytes = path.mutableSpan
+        pathBytes.copyBytes(from: name, toByteOffset: 0) // Under PATH_MAX (checked above).
         pathCount = range.count
         self.entry = entry
         tag = statistics.entries
@@ -465,7 +450,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         if type == .symbolicLink, entry.linkTarget == nil { throw .invalidArchive("a link without a target") }
         let pathStorage = path
         do throws(DiskError) {
-            let entryPath = try EntryPath(validating: Self.bytes(pathStorage, pathCount))
+            let entryPath = try EntryPath(validating: pathStorage.span.bytes.extracting(0..<pathCount))
             switch type {
             case .regularFile:
                 let size = entry.data?.count ?? 0
@@ -503,7 +488,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
                 statistics.symbolicLinks += 1
                 let target = entry.linkTarget! // Checked above.
                 // Within the header, valid for the call (the planner copies it).
-                let targetBytes = unsafe RawSpan(_unsafeStart: header + target.offset, byteCount: target.count)
+                let targetBytes = header.extracting(target.offset..<(target.offset + target.count))
                 token = try planner.symbolicLink(entryPath, target: targetBytes, metadata: Self.metadata(entry, owner: restoresOwnership), attachments: hasBlobs, tag: tag)
                 acceptsBlobs = hasBlobs
                 plannedEntries += 1
@@ -531,7 +516,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         let pathStorage = path
         let entryPath: EntryPath
         do throws(DiskError) {
-            entryPath = try EntryPath(validating: Self.bytes(pathStorage, pathCount))
+            entryPath = try EntryPath(validating: pathStorage.span.bytes.extracting(0..<pathCount))
         } catch {
             SegmentContents(pool: pool).release(contents)
             throw error
@@ -543,10 +528,10 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         if let cluster { hardLinkTargets[cluster] = token }
     }
 
-    nonisolated(nonsending) mutating func data(_ bytes: UnsafeRawPointer, count: Int, fileOffset: Int, buffer: Int, segment: Int) async throws(AEAError) {
+    nonisolated(nonsending) mutating func data(_ bytes: RawSpan, offset: Int, fileOffset: Int, buffer: Int, segment: Int) async throws(AEAError) {
         guard entry.type == .regularFile, !skipContents, let data = entry.data else { return }
         let size = data.count
-        let offset = unsafe bytes - UnsafeRawPointer(pool.segmentBase(buffer)) // Both in buffer `buffer`: a distance, no access.
+        let count = bytes.byteCount
         if var contents = pending {
             // The second range of a small file across a segment boundary.
             pending = nil
@@ -582,8 +567,8 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
                 // A large file: opened now, written a piece per segment as they arrive (pieces compress in parallel).
                 let pathStorage = path
                 let file = try await planner.beginLargeFile(
-                    EntryPath(validating: Self.bytes(pathStorage, pathCount)), size: size, metadata: metadata, storage: storage,
-                    first: unsafe RawSpan(_unsafeStart: bytes, byteCount: count), // This piece, in the walker's buffer: safe for the call.
+                    EntryPath(validating: pathStorage.span.bytes.extracting(0..<pathCount)), size: size, metadata: metadata, storage: storage,
+                    first: bytes, // This piece, in the walker's buffer, for the call.
                     minimumPieceSize: segmentSize, attachments: attachments, hardLinked: cluster != nil, tag: tag
                 )
                 largeFile = file
@@ -598,11 +583,11 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         }
     }
 
-    mutating func metadata(_ blob: AAMetadataBlob, _ bytes: UnsafeRawPointer, count: Int, offset: Int) throws(AEAError) {
+    mutating func metadata(_ blob: AAMetadataBlob, _ bytes: RawSpan, offset: Int) throws(AEAError) {
         // Blobs come whole and in order (one finishes before the next starts), so each is one run of `blobs`.
         guard acceptsBlobs else { return }
         let start = blobs.count
-        unsafe blobs.append(contentsOf: UnsafeRawBufferPointer(start: bytes, count: count)) // In the walker's buffer: safe.
+        blobs.append(copying: bytes)
         switch blob {
         case .extendedAttributes:
             extendedAttributes = (offset == 0 ? start : extendedAttributes.lowerBound)..<blobs.count

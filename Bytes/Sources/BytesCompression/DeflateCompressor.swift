@@ -314,17 +314,28 @@ struct DeflateCompressor: ~Copyable {
 
     /// Empties a table, 16 bytes per store. A loop of element stores (and `MutableSpan.update(repeating:)`)
     /// compiled to one 2-byte store per entry: 59% of compressing a 2.7 KB file.
+    ///
+    /// `storeBytes(repeating:count:as:)` requires the span's start aligned for its type, and a `UniqueArray<Int16>`
+    /// promises only 2 bytes: a `SIMD8<Int16>` needs 16, which the allocator gives in practice but the type doesn't
+    /// promise. So the start is checked once: aligned (always, today), one 16-byte store per group (3 instructions);
+    /// otherwise unaligned stores, whose bounds checks don't fold (8 instructions per group). The
+    /// `InlineArray<8, Int16>` form, aligned as `Int16`, compiled to one 2-byte store per entry. (Typing the tables by
+    /// their store stride would make the alignment the type's own.)
     static func clear(_ table: inout UniqueArray<Int16>) {
         var span = table.mutableSpan
+        let groups = span.count &>> 3 // The tables' sizes are multiples of 8 entries.
+        var bytes = span.mutableBytes
         let empty = SIMD8<Int16>(repeating: emptyEntry)
-        // Unsafe: raw vector stores into the table. Safe: the tables' sizes are multiples of 8 entries, and the
-        // stores stay below `count * 2` bytes.
-        span.withUnsafeMutableBytes { buffer in
-            var offset = 0
-            while offset < buffer.count {
-                unsafe buffer.storeBytes(of: empty, toByteOffset: offset, as: SIMD8<Int16>.self)
-                offset &+= 16
-            }
+        // The start's address as an integer: only its value is read, never memory through it.
+        let aligned = bytes.withUnsafeBytes { Int(bitPattern: $0.baseAddress) & (MemoryLayout<SIMD8<Int16>>.alignment &- 1) == 0 }
+        if aligned {
+            bytes.storeBytes(repeating: empty, count: groups, as: SIMD8<Int16>.self)
+            return
+        }
+        var offset = 0
+        while offset < groups &<< 4 {
+            bytes.storeBytes(of: empty, toByteOffset: offset, as: SIMD8<Int16>.self)
+            offset &+= 16
         }
     }
 

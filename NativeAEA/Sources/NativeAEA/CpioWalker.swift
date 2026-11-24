@@ -26,12 +26,12 @@ enum Cpio {
         var fileSize = 0
     }
 
-    /// Parses the 76 header bytes at `bytes`.
+    /// Parses the 76 header bytes that start `bytes`.
     ///
     /// - Throws: ``AEAError/invalidArchive(_:)`` for another magic or a field that isn't octal.
-    static func parseHeader(_ bytes: UnsafeRawPointer) throws(AEAError) -> Header {
-        // Unsafe: a span over the header's bytes. Safe: the caller checked all 76 are in its buffer.
-        var reader = AlignedBytesReader(unsafe RawSpan(_unsafeStart: bytes, byteCount: headerSize))
+    static func parseHeader(_ bytes: RawSpan) throws(AEAError) -> Header {
+        // Exactly the header (a constant count lets the reader's checks fold).
+        var reader = AlignedBytesReader(bytes.extracting(0..<headerSize))
         // The magic, "070707", as one comparison of 6 bytes.
         do throws(BytesError) {
             try reader.expect(Byte6(ascii: "070707"))
@@ -54,12 +54,18 @@ enum Cpio {
         } catch {
             throw .invalidArchive("a cpio header field isn't octal")
         }
+        // Six octal digits hold up to 0o777777; a mode has 16 bits (type and permissions). More is a damaged or
+        // tampered header (it trapped converting to `mode_t`, found fuzzing: 2026-11-23).
+        guard header.mode <= 0o177777 else {
+            throw .invalidArchive("a cpio mode wider than 16 bits (\(String(header.mode, radix: 8)))")
+        }
         return header
     }
 
     /// The entry type for `mode`'s file type bits.
     static func type(_ mode: Int) -> AAEntryType? {
-        switch mode_t(mode) & S_IFMT {
+        // Truncating: a mode is 16 bits (the header parser rejects wider ones), and no input may trap here.
+        switch mode_t(truncatingIfNeeded: mode) & S_IFMT {
         case S_IFREG: .regularFile
         case S_IFDIR: .directory
         case S_IFLNK: .symbolicLink
@@ -100,13 +106,12 @@ enum CpioWalker {
         }
         while let chunk = try await source.nextChunk() {
             let buffer = chunk.buffer
-            let base = unsafe pool.segmentBase(buffer)
             let start = chunk.rawOffset
             let end = start + chunk.rawSize
             streamEnd = end
             if carry > 0 {
                 // The partial header goes just before this chunk's bytes; the previous buffer is still held.
-                unsafe (base - carry).copyMemory(from: pool.segmentBase(previousBuffer) + (position - previousStart), byteCount: carry)
+                pool.carry(carry, from: previousBuffer, at: position - previousStart, to: buffer)
                 carry = 0
             }
             previousStart = start
@@ -114,9 +119,7 @@ enum CpioWalker {
             previousBuffer = buffer
             if ended { continue } // Padding after the trailer.
 
-            // `pointer(p)` for stream positions from `start - carry` to `end`.
-            func pointer(_ p: Int) -> UnsafeMutableRawPointer { unsafe base + (p - start) }
-
+            // Stream positions from `start - carry` to `end` are at `p - start` in the buffer.
             while true {
                 if inHeader {
                     let available = end - position
@@ -125,8 +128,8 @@ enum CpioWalker {
                         carry = available
                         break
                     }
-                    // The fixed part is in this buffer (or carried before it): safe.
-                    let header = try unsafe Cpio.parseHeader(pointer(position))
+                    // The fixed part is in this buffer (or carried before it).
+                    let header = try Cpio.parseHeader(pool.bytes(buffer, at: position - start, count: Cpio.headerSize))
                     guard header.nameSize >= 1, header.nameSize <= PATH_MAX else { throw .invalidArchive("a cpio name size \(header.nameSize)") }
                     let type = Cpio.type(header.mode)
                     // A link's target is its contents: part of the header here, so that it's contiguous.
@@ -138,22 +141,20 @@ enum CpioWalker {
                         carry = available
                         break
                     }
-                    let headerPointer = unsafe pointer(position)
+                    let headerBytes = pool.bytes(buffer, at: position - start, count: count)
                     // The name ends with its NUL, which must be its last byte.
-                    guard unsafe headerPointer.load(fromByteOffset: Cpio.headerSize + header.nameSize - 1, as: UInt8.self) == 0 else {
+                    guard headerBytes.load(fromByteOffset: Cpio.headerSize + header.nameSize - 1, as: UInt8.self) == 0 else {
                         throw .invalidArchive("a cpio name without its NUL")
                     }
                     let nameCount = header.nameSize - 1
-                    // Unsafe: a span over the name. Safe: its `nameCount` bytes follow the header, within `count`,
-                    // which is in the buffer (checked above).
                     if nameCount == 10,
-                       unsafe RawSpan(_unsafeStart: headerPointer + Cpio.headerSize, byteCount: nameCount).hasPrefix(Byte10(ascii: "TRAILER!!!")) {
+                       headerBytes.extracting(Cpio.headerSize..<(Cpio.headerSize + nameCount)).hasPrefix(Byte10(ascii: "TRAILER!!!")) {
                         position += count
                         ended = true
                         break
                     }
-                    let entry = try unsafe entryHeader(header, type: type, at: headerPointer, count: count)
-                    try await unsafe sink.entry(entry, header: headerPointer, buffer: buffer)
+                    let entry = try entryHeader(header, type: type, bytes: headerBytes)
+                    try await sink.entry(entry, header: headerBytes, buffer: buffer)
                     position += count
                     if let data = entry.data, data.count > 0 {
                         inHeader = false
@@ -166,7 +167,10 @@ enum CpioWalker {
                 }
                 let stop = min(dataEnd, end)
                 if position < stop {
-                    try await unsafe sink.data(pointer(position), count: stop - position, fileOffset: position - dataStart, buffer: buffer, segment: chunk.index)
+                    try await sink.data(
+                        pool.bytes(buffer, at: position - start, count: stop - position), offset: position - start,
+                        fileOffset: position - dataStart, buffer: buffer, segment: chunk.index
+                    )
                 }
                 position = stop
                 guard position == dataEnd else { break }
@@ -178,20 +182,19 @@ enum CpioWalker {
         guard ended, position <= streamEnd else { throw .invalidArchive("the cpio stream ends without its trailer") }
     }
 
-    /// The Apple Archive form of a cpio entry whose header (and name, and a link's target) is the `count` bytes at
-    /// `header`.
-    static func entryHeader(_ cpio: Cpio.Header, type: AAEntryType?, at header: UnsafeRawPointer, count: Int) throws(AEAError) -> AAEntryHeader {
+    /// The Apple Archive form of a cpio entry whose header (and name, and a link's target) is `bytes`.
+    static func entryHeader(_ cpio: Cpio.Header, type: AAEntryType?, bytes header: RawSpan) throws(AEAError) -> AAEntryHeader {
         guard let type else { throw .invalidArchive("a cpio entry of an unknown type (mode \(String(cpio.mode, radix: 8)))") }
         var entry = AAEntryHeader()
-        entry.byteCount = count
+        entry.byteCount = header.byteCount
         entry.type = type
         // Names are relative, `./a/b` or `.` for the root: the path without `./`, empty for the root.
         var nameOffset = Cpio.headerSize, nameCount = cpio.nameSize - 1
-        if nameCount >= 2, unsafe header.load(fromByteOffset: nameOffset, as: UInt8.self) == 0x2E,
-           unsafe header.load(fromByteOffset: nameOffset + 1, as: UInt8.self) == 0x2F {
+        if nameCount >= 2, header.load(fromByteOffset: nameOffset, as: UInt8.self) == 0x2E,
+           header.load(fromByteOffset: nameOffset + 1, as: UInt8.self) == 0x2F {
             nameOffset += 2
             nameCount -= 2
-        } else if nameCount == 1, unsafe header.load(fromByteOffset: nameOffset, as: UInt8.self) == 0x2E {
+        } else if nameCount == 1, header.load(fromByteOffset: nameOffset, as: UInt8.self) == 0x2E {
             nameCount = 0
         }
         entry.path = AAHeaderRange(offset: nameOffset, count: nameCount)

@@ -17,20 +17,16 @@ import Testing
     @Test(arguments: valid)
     func acceptsCanonicalRelativePaths(_ path: String) throws {
         let bytes = Array(path.utf8)
-        bytes.withUnsafeBytes { buffer in
-            let valid = EntryPath.isValid(RawSpan(_unsafeBytes: buffer))
-            #expect(valid, "\(path)")
-        }
+        let valid = EntryPath.isValid(bytes.span.bytes)
+        #expect(valid, "\(path)")
     }
 
     @Test(arguments: invalid)
     func rejectsUnsafePaths(_ path: String) throws {
         let bytes = Array(path.utf8)
-        bytes.withUnsafeBytes { buffer in
-            let valid = EntryPath.isValid(RawSpan(_unsafeBytes: buffer))
-            #expect(!valid, "\(path.debugDescription)")
-            #expect(throws: DiskError.self) { _ = try EntryPath(validating: RawSpan(_unsafeBytes: buffer)) }
-        }
+        let valid = EntryPath.isValid(bytes.span.bytes)
+        #expect(!valid, "\(path.debugDescription)")
+        #expect(throws: DiskError.self) { _ = try EntryPath(validating: bytes.span.bytes) }
     }
 
     /// The vector screen and the exact check agree, for every placement of each unsafe pattern around block
@@ -42,15 +38,12 @@ import Testing
                 for position in 0...(count - pattern.count) {
                     var bytes = [UInt8](repeating: 0x61, count: count)
                     for (index, byte) in pattern.enumerated() { bytes[position + index] = byte }
-                    bytes.withUnsafeBytes { buffer in
-                        let base = buffer.baseAddress!
-                        let screened = EntryPath.screen(base, count)
-                        let exact = EntryPath.exactCheck(base, count)
-                        // The screen may send valid paths to the exact check, never pass an invalid one.
-                        #expect(!screened || exact, "\(bytes)")
-                        let valid = EntryPath.isValid(RawSpan(_unsafeBytes: buffer))
-                        #expect(valid == exact, "\(bytes)")
-                    }
+                    let screened = EntryPath.screen(bytes.span.bytes)
+                    let exact = EntryPath.exactCheck(bytes.span.bytes)
+                    // The screen may send valid paths to the exact check, never pass an invalid one.
+                    #expect(!screened || exact, "\(bytes)")
+                    let valid = EntryPath.isValid(bytes.span.bytes)
+                    #expect(valid == exact, "\(bytes)")
                 }
             }
         }
@@ -63,14 +56,7 @@ import Testing
     func sanitizesAsInfoZIPDoes(_ input: String, _ expected: String, _ adjusted: Bool) throws {
         var output = [UInt8](repeating: 0, count: 64)
         let bytes = Array(input.utf8)
-        let result = try bytes.withUnsafeBytes { buffer in
-            try output.withUnsafeMutableBytes { outputBuffer in
-                var span = OutputRawSpan(buffer: outputBuffer, initializedCount: 0)
-                let result = try EntryPath.sanitize(RawSpan(_unsafeBytes: buffer), into: &span)
-                _ = span.finalize(for: outputBuffer)
-                return result
-            }
-        }
+        let result = try output.withOutputRawSpan { (span) throws(DiskError) in try EntryPath.sanitize(bytes.span.bytes, into: &span) }
         #expect(String(decoding: output.prefix(result.count), as: UTF8.self) == expected)
         #expect(result.adjusted == adjusted)
     }

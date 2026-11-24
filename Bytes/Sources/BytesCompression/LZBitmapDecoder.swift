@@ -417,8 +417,7 @@ enum LZBitmapStream {
     /// `replacing(with:where:)` compiled a lane at a time.)
     @inline(__always)
     static func lanes(_ mask: SIMDMask<SIMD8<Int16>>) -> SIMD8<UInt16> {
-        // Unsafe: a reinterpretation of the same 16 bytes; a mask's storage is its lanes, each 0 or -1.
-        unsafe unsafeBitCast(mask, to: SIMD8<UInt16>.self)
+        mask.lanes(as: SIMD8<UInt16>.self)
     }
 
     /// Each lane's value, or where it's 0, the last nonzero lane's before it (0 if none). Lanes 0–127.

@@ -33,10 +33,7 @@ extension TemporaryDirectory {
 /// path borrows for `body`.
 func withEntryPath<R>(_ string: String, _ body: (EntryPath) throws -> R) throws -> R {
     let bytes = Array(string.utf8)
-    return try bytes.withUnsafeBytes { buffer in
-        let span = RawSpan(_unsafeBytes: buffer)
-        return try body(EntryPath(validating: span))
-    }
+    return try body(EntryPath(validating: bytes.span.bytes))
 }
 
 /// Deterministic bytes: `compressible` repeats text; otherwise random.
@@ -107,9 +104,7 @@ final class ArraySource: ContentSource, PieceSource, @unchecked Sendable {
         while offset < bytes.count {
             let end = min(bytes.count, offset + step)
             do throws(DiskError) {
-                try await bytes.withUnsafeBytesAsyncForTests { buffer throws(DiskError) in
-                    try await output.write(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: buffer[offset..<end])))
-                }
+                try await output.write(bytes.span.bytes.extracting(offset..<end))
             } catch {
                 throw .disk(error)
             }
@@ -136,15 +131,6 @@ final class ArraySource: ContentSource, PieceSource, @unchecked Sendable {
     }
 }
 
-extension Array where Element == UInt8 {
-    /// The array's bytes for an async body (the array is kept alive by the caller for the call).
-    func withUnsafeBytesAsyncForTests<R, E: Error>(_ body: (UnsafeRawBufferPointer) async throws(E) -> R) async throws(E) -> R {
-        let buffer = withUnsafeBytes { $0 }
-        defer { withExtendedLifetime(self) {} }
-        return try await body(buffer)
-    }
-}
-
 /// Runs an extraction of `files` (path, bytes) and `directories` into `destination`, all files planned as given.
 @discardableResult
 func extract(
@@ -166,18 +152,14 @@ func planFile<S: ContentSource>(
     storage: Storage = .plain, attachments: Bool = false, hardLinked: Bool = false, tag: Int = 0
 ) async throws(DiskError) -> EntryToken {
     let bytes = Array(path.utf8)
-    return try await bytes.withUnsafeBytesAsyncForTests { (buffer) async throws(DiskError) -> EntryToken in
-        let entry = try EntryPath(validating: RawSpan(_unsafeBytes: buffer))
-        return try await planner.file(entry, size: size, contents: index, metadata: metadata, storage: storage, attachments: attachments, hardLinked: hardLinked, tag: tag)
-    }
+    let entry = try EntryPath(validating: bytes.span.bytes)
+    return try await planner.file(entry, size: size, contents: index, metadata: metadata, storage: storage, attachments: attachments, hardLinked: hardLinked, tag: tag)
 }
 
 /// Calls `body` with an `EntryPath` for `path` (for planner calls).
 @discardableResult
 func withPath<R, E: Error>(_ path: String, _ body: (EntryPath) throws(E) -> R) throws(E) -> R {
     let bytes = Array(path.utf8)
-    let buffer = bytes.withUnsafeBytes { $0 }
-    defer { withExtendedLifetime(bytes) {} }
     // Test paths are valid.
-    return try body(try! EntryPath(validating: RawSpan(_unsafeBytes: buffer)))
+    return try body(try! EntryPath(validating: bytes.span.bytes))
 }

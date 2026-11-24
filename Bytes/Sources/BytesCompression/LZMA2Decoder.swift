@@ -95,16 +95,14 @@ public struct LZMA2Decoder: ~Copyable {
         guard input.byteCount > 0 else { throw .insufficientData }
         return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
             try span.withUnsafeMutableBytes { outputBuffer throws(BytesError) -> Int in
-                try input.withUnsafeBytes { inputBuffer throws(BytesError) -> Int in
-                    // Unsafe: base addresses of the buffers (a placeholder for an empty output, never written).
-                    let result = try unsafe decodeLZMA2(
-                        inputBuffer.baseAddress!.assumingMemoryBound(to: UInt8.self), count: inputBuffer.count,
-                        output: (outputBuffer.baseAddress ?? UnsafeMutableRawPointer(bitPattern: 1)!).assumingMemoryBound(to: UInt8.self),
-                        start: 0, capacity: outputBuffer.count, dictionarySize: dictionarySize
-                    )
-                    written = result.end
-                    return result.consumed
-                }
+                // Unsafe: the output's base address (a placeholder for an empty output, never written).
+                let result = try unsafe decodeLZMA2(
+                    input,
+                    output: (outputBuffer.baseAddress ?? UnsafeMutableRawPointer(bitPattern: 1)!).assumingMemoryBound(to: UInt8.self),
+                    start: 0, capacity: outputBuffer.count, dictionarySize: dictionarySize
+                )
+                written = result.end
+                return result.consumed
             }
         }
     }
@@ -113,8 +111,7 @@ public struct LZMA2Decoder: ~Copyable {
     ///
     /// - Returns: The input consumed, through the end marker, and the output's new end.
     mutating func decodeLZMA2(
-        _ input: UnsafePointer<UInt8>, count: Int, output: UnsafeMutablePointer<UInt8>, start: Int, capacity: Int,
-        dictionarySize: Int
+        _ input: RawSpan, output: UnsafeMutablePointer<UInt8>, start: Int, capacity: Int, dictionarySize: Int
     ) throws(BytesError) -> (consumed: Int, end: Int) {
         var registers = LZMARegisters()
         var model = LZMAModel(lc: 0, literalPositionMask: 0, positionMask: 0, dictionarySize: dictionarySize)
@@ -123,12 +120,13 @@ public struct LZMA2Decoder: ~Copyable {
         var needsProperties = true
         var position = 0
         var end = start
+        let count = input.byteCount
 
-        // Unsafe: reads of the input and copies into the output. Safe: each chunk's header and data are read
-        // only after checking that the input holds them, and its output after checking that it fits.
+        // Chunk headers are checked loads; each chunk's data is passed on only after checking that the input holds
+        // it, and its output that it fits.
         while true {
             guard position < count else { throw .insufficientData }
-            let control = Int(unsafe input[position])
+            let control = Int(input.load(fromByteOffset: position, as: UInt8.self))
             if control == 0 {
                 return (position &+ 1, end)
             }
@@ -143,10 +141,11 @@ public struct LZMA2Decoder: ~Copyable {
             if control >= 0x80 {
                 let headerSize = control >= 0xC0 ? 6 : 5
                 guard count &- position >= headerSize else { throw .insufficientData }
-                let unpacked = ((control & 0x1F) &<< 16 | Int(unsafe input[position &+ 1]) &<< 8 | Int(unsafe input[position &+ 2])) &+ 1
-                let packed = (Int(unsafe input[position &+ 3]) &<< 8 | Int(unsafe input[position &+ 4])) &+ 1
+                let header = input.extracting(position..<(position &+ headerSize))
+                let unpacked = ((control & 0x1F) &<< 16 | Int(UInt16(bigEndian: header.load(fromByteOffset: 1, as: UInt16.self)))) &+ 1
+                let packed = Int(UInt16(bigEndian: header.load(fromByteOffset: 3, as: UInt16.self))) &+ 1
                 if control >= 0xC0 {
-                    let properties = try LZMAProperties(byte: unsafe input[position &+ 5], dictionarySize: dictionarySize)
+                    let properties = try LZMAProperties(byte: header.load(fromByteOffset: 5, as: UInt8.self), dictionarySize: dictionarySize)
                     guard properties.literalContextBits &+ properties.literalPositionBits <= 4 else { throw .invalidValue }
                     model = LZMAModel(properties: properties)
                     needsProperties = false
@@ -159,20 +158,27 @@ public struct LZMA2Decoder: ~Copyable {
                 position &+= headerSize
                 guard packed <= count &- position else { throw .insufficientData }
                 guard unpacked <= capacity &- end else { throw .insufficientCapacity }
-                try unsafe decodeChunk(
-                    input + position, packed: packed, &registers, model: model, dictionary: output + dictionaryStart,
-                    limit: registers.position &+ unpacked
-                )
+                try input.extracting(position..<(position &+ packed)).withUnsafeBytes { chunk throws(BytesError) in
+                    // Unsafe: the chunk's base address (it isn't empty), and the dictionary's, whose room for
+                    // `unpacked` more bytes was just checked.
+                    try unsafe decodeChunk(
+                        chunk.baseAddress!.assumingMemoryBound(to: UInt8.self), packed: packed, &registers, model: model,
+                        dictionary: output + dictionaryStart, limit: registers.position &+ unpacked
+                    )
+                }
                 position &+= packed
                 end &+= unpacked
             } else {
                 guard control <= 2 else { throw .invalidValue }
                 guard count &- position >= 3 else { throw .insufficientData }
-                let size = (Int(unsafe input[position &+ 1]) &<< 8 | Int(unsafe input[position &+ 2])) &+ 1
+                let size = Int(UInt16(bigEndian: input.load(fromByteOffset: position &+ 1, as: UInt16.self))) &+ 1
                 position &+= 3
                 guard size <= count &- position else { throw .insufficientData }
                 guard size <= capacity &- end else { throw .insufficientCapacity }
-                unsafe (output + end).update(from: input + position, count: size)
+                input.extracting(position..<(position &+ size)).withUnsafeBytes { chunk in
+                    // Unsafe: a copy into the output, which has room for `size` more bytes (checked above).
+                    unsafe UnsafeMutableRawPointer(output + end).copyMemory(from: chunk.baseAddress!, byteCount: size)
+                }
                 position &+= size
                 end &+= size
                 registers.position &+= size
@@ -288,9 +294,9 @@ public struct LZMA2Decoder: ~Copyable {
     /// - Throws: As ``decompressLZMA(_:properties:uncompressedSize:into:)``.
     public mutating func decompressLZMAFile(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
         guard input.byteCount >= 13 else { throw .insufficientData }
-        let dictionarySize = Int(UInt32(littleEndian: unsafe input.unsafeLoadUnaligned(fromByteOffset: 1, as: UInt32.self)))
+        let dictionarySize = Int(UInt32(littleEndian: input.load(fromByteOffset: 1, as: UInt32.self)))
         let properties = try LZMAProperties(byte: input.load(fromByteOffset: 0, as: UInt8.self), dictionarySize: dictionarySize)
-        let size = UInt64(littleEndian: unsafe input.unsafeLoadUnaligned(fromByteOffset: 5, as: UInt64.self))
+        let size = UInt64(littleEndian: input.load(fromByteOffset: 5, as: UInt64.self))
         let uncompressedSize: Int?
         if size == .max {
             uncompressedSize = nil

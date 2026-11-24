@@ -170,9 +170,7 @@ public struct QPACKDecoder: ~Copyable {
     /// The strings' limit in the scratch buffer (16 bytes past it are room for the Huffman decoder's wide stores).
     @usableFromInline let scratchLimit: Int
     /// The blocked streams and the Required Insert Count each waits for.
-    @usableFromInline let blockedStreams: UnsafeMutablePointer<UInt64>
-    @usableFromInline let blockedCounts: UnsafeMutablePointer<Int>
-    @usableFromInline var blockedCount = 0
+    @usableFromInline var blocked: UniqueArray<QPACKBlockedStream>
     /// Decoder stream bytes queued (Section Acknowledgments, Stream Cancellations).
     @usableFromInline let instructions: UnsafeMutablePointer<UInt8>
     @usableFromInline let instructionCapacity: Int
@@ -220,18 +218,16 @@ public struct QPACKDecoder: ~Copyable {
         maximumEntries = maximumTableCapacity / 32
         scratchLimit = Swift.max(maximumFieldSectionSize, maximumTableCapacity)
         instructionCapacity = decoderStreamCapacity
+        // Room for every stream that may be blocked: appending never grows it.
+        blocked = UniqueArray(capacity: maximumBlockedStreams)
         // Unsafe: allocations owned by this decoder and freed in `deinit`.
         unsafe scratch = UnsafeMutableRawPointer.allocate(byteCount: scratchLimit &+ 16, alignment: 16)
-        unsafe blockedStreams = UnsafeMutablePointer<UInt64>.allocate(capacity: Swift.max(maximumBlockedStreams, 1))
-        unsafe blockedCounts = UnsafeMutablePointer<Int>.allocate(capacity: Swift.max(maximumBlockedStreams, 1))
         unsafe instructions = UnsafeMutablePointer<UInt8>.allocate(capacity: decoderStreamCapacity)
     }
 
     deinit {
         // Unsafe: frees this decoder's own allocations, which nothing else holds (the decoder is noncopyable).
         unsafe scratch.deallocate()
-        unsafe blockedStreams.deallocate()
-        unsafe blockedCounts.deallocate()
         unsafe instructions.deallocate()
     }
 
@@ -241,7 +237,7 @@ public struct QPACKDecoder: ~Copyable {
     public mutating func reset() {
         table.removeAllNumberingFromZero()
         table.maximumSize = 0
-        blockedCount = 0
+        blocked.removeAll()
         instructionCount = 0
         knownReceivedCount = 0
         offset = 0
@@ -256,7 +252,7 @@ public struct QPACKDecoder: ~Copyable {
     /// The Insert Count: entries inserted since the connection began.
     @inlinable public var insertCount: Int { table.inserted }
     /// The number of streams blocked.
-    @inlinable public var blockedStreamCount: Int { blockedCount }
+    @inlinable public var blockedStreamCount: Int { blocked.count }
     /// Whether there are decoder stream instructions to write.
     @inlinable public var hasDecoderInstructions: Bool { instructionCount > 0 || table.inserted > knownReceivedCount }
 
@@ -374,11 +370,8 @@ public struct QPACKDecoder: ~Copyable {
     /// The next stream whose blocked section can now be decoded (the inserts it needs have arrived), forgotten as blocked;
     /// `nil` if there's none.
     public mutating func nextUnblockedStream() -> UInt64? {
-        for index in 0..<blockedCount where unsafe blockedCounts[index] <= table.inserted {
-            // Unsafe: reads and moves within the blocked list. Safe: index < blockedCount ≤ its capacity.
-            let stream = unsafe blockedStreams[index]
-            removeBlocked(at: index)
-            return stream
+        for index in blocked.indices where blocked[index].required <= table.inserted {
+            return blocked.remove(at: index).stream
         }
         return nil
     }
@@ -396,8 +389,8 @@ public struct QPACKDecoder: ~Copyable {
             guard instructionCapacity &- instructionCount &- reserved >= 10 else { throw .decoderStreamFull }
         }
         if abandons { offset = 0 }
-        for index in 0..<blockedCount where unsafe blockedStreams[index] == stream {
-            removeBlocked(at: index)
+        for index in blocked.indices where blocked[index].stream == stream {
+            _ = blocked.remove(at: index)
             break
         }
         guard maximumTableCapacity > 0 else { return }
@@ -446,18 +439,6 @@ public struct QPACKDecoder: ~Copyable {
         guard n > 0 else { return false }
         instructionCount &+= n
         return true
-    }
-
-    /// Removes blocked entry `index`, keeping the others' order.
-    @usableFromInline
-    mutating func removeBlocked(at index: Int) {
-        let after = blockedCount &- index &- 1
-        if after > 0 {
-            // Unsafe: moves entries within the lists' initialized `blockedCount` slots.
-            unsafe (blockedStreams + index).update(from: blockedStreams + (index &+ 1), count: after)
-            unsafe (blockedCounts + index).update(from: blockedCounts + (index &+ 1), count: after)
-        }
-        blockedCount &-= 1
     }
 
     // MARK: - The steps
@@ -515,22 +496,20 @@ public struct QPACKDecoder: ~Copyable {
             sectionBase = required &+ delta
         }
         if required > table.inserted {
-            for index in 0..<blockedCount where unsafe blockedStreams[index] == stream {
+            for index in blocked.indices where blocked[index].stream == stream {
                 // Already blocked (begun again early): it waits for the same inserts.
                 return 1
             }
-            guard blockedCount < maximumBlockedStreams else { return Int(QPACKError.tooManyBlockedStreams.code) }
-            // Unsafe: stores at blockedCount, below the lists' capacity (checked just above).
-            unsafe blockedStreams[blockedCount] = stream
-            unsafe blockedCounts[blockedCount] = required
-            blockedCount &+= 1
+            guard blocked.count < maximumBlockedStreams else { return Int(QPACKError.tooManyBlockedStreams.code) }
+            // Within the list's capacity (checked just above).
+            blocked.append(QPACKBlockedStream(stream: stream, required: required))
             return 1
         }
         // Room for the Section Acknowledgment `endSection` will queue (none needed without dynamic references).
         if required > 0, instructionCapacity &- instructionCount < 10 { return Int(QPACKError.decoderStreamFull.code) }
-        if blockedCount > 0 {
-            for index in 0..<blockedCount where unsafe blockedStreams[index] == stream {
-                removeBlocked(at: index)
+        if !blocked.isEmpty {
+            for index in blocked.indices where blocked[index].stream == stream {
+                _ = blocked.remove(at: index)
                 break
             }
         }
@@ -1016,5 +995,19 @@ struct QPACKDecodedString {
     }
 }
 
-// A decoder owns its memory alone (it's noncopyable), so moving it to another task is safe.
+/// A stream whose field section is blocked, and the Required Insert Count it waits for.
+@frozen @usableFromInline
+struct QPACKBlockedStream: Sendable {
+    @usableFromInline let stream: UInt64
+    @usableFromInline let required: Int
+
+    @inlinable @inline(__always)
+    init(stream: UInt64, required: Int) {
+        self.stream = stream
+        self.required = required
+    }
+}
+
+// A decoder owns its memory alone (it's noncopyable), so moving it to another task is safe. (`@unchecked` for the
+// scratch and decoder stream buffers, which the pointer decoders write through.)
 extension QPACKDecoder: @unchecked Sendable {}

@@ -105,8 +105,8 @@ extension HTTPFieldName {
     /// A name's two hash words, each byte ORed with 0x20 (case folding for token characters): 8 or more bytes, the first
     /// and last 8 (overlapping below 16); 4 to 7, the first and last 4; 1 to 3, bytes 0, n/2, and n − 1 in the first
     /// word and 0 in the second. Together they cover every byte of a name up to 16, so the lookup compares them with
-    /// the table's words; longer names compare their middle too. The loads are unchecked: each is within `name` by the
-    /// length test before it.
+    /// the table's words; longer names compare their middle too. Each load is within `name` by the length test before
+    /// it: the 1–3-byte ones are checked loads whose checks fold, the others unchecked (see below).
     ///
     /// From 4 bytes up, branch-free: four 4-byte loads whose offsets, and how they're paired, are selected by the length
     /// class. A branch per class mispredicted whenever consecutive names changed class (`Host`, `Accept`, `Connection`):
@@ -117,7 +117,8 @@ extension HTTPFieldName {
         if count >= 4 {
             let long = count >= 8
             // Unsafe: 4-byte loads at 0, at 4 (or 0), at count − 4, and at count − 8 (or count − 4). Safe: count ≥ 4, and
-            // the offsets 4 and count − 8 are taken only when count ≥ 8.
+            // the offsets 4 and count − 8 are taken only when count ≥ 8. (Checked loads don't fold here: the offsets are
+            // selected by `long`, which LLVM doesn't relate to the count. +12 instructions a name, 2026-11-23.)
             let a = UInt64(UInt32(littleEndian: unsafe name.unsafeLoadUnaligned(fromUncheckedByteOffset: 0, as: UInt32.self)))
             let b = UInt64(UInt32(littleEndian: unsafe name.unsafeLoadUnaligned(
                 fromUncheckedByteOffset: long ? 4 : 0, as: UInt32.self)))
@@ -128,10 +129,10 @@ extension HTTPFieldName {
             let fold: UInt64 = long ? 0x2020_2020_2020_2020 : 0x2020_2020
             return ((long ? a | b &<< 32 : a) | fold, (long ? d | c &<< 32 : c) | fold)
         }
-        // Unsafe: single bytes at 0, count / 2, and count − 1. Safe: 1 ≤ count ≤ 3 (the caller checks count > 0).
-        let b0 = UInt64(unsafe name.unsafeLoad(fromUncheckedByteOffset: 0, as: UInt8.self))
-        let b1 = UInt64(unsafe name.unsafeLoad(fromUncheckedByteOffset: count &>> 1, as: UInt8.self))
-        let b2 = UInt64(unsafe name.unsafeLoad(fromUncheckedByteOffset: count &- 1, as: UInt8.self))
+        // Single bytes at 0, count / 2, and count − 1: 1 ≤ count ≤ 3 (the caller checks count > 0).
+        let b0 = UInt64(name.load(fromByteOffset: 0, as: UInt8.self))
+        let b1 = UInt64(name.load(fromByteOffset: count &>> 1, as: UInt8.self))
+        let b2 = UInt64(name.load(fromByteOffset: count &- 1, as: UInt8.self))
         return ((b0 | b1 &<< 8 | b2 &<< 16) | 0x20_2020, 0)
     }
 

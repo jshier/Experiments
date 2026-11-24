@@ -618,10 +618,10 @@ struct InflateStream: ~Copyable {
                     return false
                 }
                 let fixed = try reader.read(byteCount: 10)
-                // Unsafe: two loads within the 10 bytes just read. As two words, the fields cost a few shifts (they
-                // were read one at a time through a checked reader, about 100 instructions a member).
-                let low = UInt64(littleEndian: unsafe fixed.unsafeLoadUnaligned(as: UInt64.self))
-                let high = UInt16(littleEndian: unsafe fixed.unsafeLoadUnaligned(fromByteOffset: 8, as: UInt16.self))
+                // Two loads within the 10 bytes just read. As two words, the fields cost a few shifts (they were
+                // read one at a time through a checked reader, about 100 instructions a member).
+                let low = UInt64(littleEndian: fixed.load(fromByteOffset: 0, as: UInt64.self))
+                let high = UInt16(littleEndian: fixed.load(fromByteOffset: 8, as: UInt16.self))
                 guard low & 0xFF_FFFF == 0x08_8B_1F else { throw BytesError.invalidValue } // ID1, ID2, CM (8, DEFLATE)
                 gzipFlags = Byte(truncatingIfNeeded: low &>> 24)
                 try gzipFlags.requireZero(GzipFlags.reserved)

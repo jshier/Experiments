@@ -289,11 +289,11 @@ extension HTTPDate {
     static func imfFixdate(_ value: RawSpan) -> Int64? {
         guard value.byteCount == 29 else { return nil }
         // "Sun, 06 " "Nov 1994" " 08:49:3" and, from byte 21, "9:37 GMT".
-        // Unsafe: unaligned 8-byte loads of a trivial type. Safe: bounds-checked offsets (0, 8, 16, 21: within 29 bytes).
-        let first = UInt64(littleEndian: unsafe value.unsafeLoadUnaligned(fromByteOffset: 0, as: UInt64.self))
-        let second = UInt64(littleEndian: unsafe value.unsafeLoadUnaligned(fromByteOffset: 8, as: UInt64.self))
-        let third = UInt64(littleEndian: unsafe value.unsafeLoadUnaligned(fromByteOffset: 16, as: UInt64.self))
-        let fourth = UInt64(littleEndian: unsafe value.unsafeLoadUnaligned(fromByteOffset: 21, as: UInt64.self))
+        // 8-byte loads at 0, 8, 16, and 21: within the 29 bytes just checked, so the loads' checks fold.
+        let first = UInt64(littleEndian: value.load(fromByteOffset: 0, as: UInt64.self))
+        let second = UInt64(littleEndian: value.load(fromByteOffset: 8, as: UInt64.self))
+        let third = UInt64(littleEndian: value.load(fromByteOffset: 16, as: UInt64.self))
+        let fourth = UInt64(littleEndian: value.load(fromByteOffset: 21, as: UInt64.self))
         // The fixed bytes (", " and spaces, ":"s, " GMT"), then the digits, all in one test.
         let fixed = (first & 0xFF00_00FF_FF00_0000 ^ 0x2000_0020_2C00_0000)
             | (second & 0x0000_0000_FF00_0000 ^ 0x0000_0000_2000_0000)
@@ -390,11 +390,9 @@ extension HTTPDate {
             }
         }
         // The full day name must be the date's.
-        let name = longDayName(weekday(days: daysAndTime(seconds &- (second == 60 ? 1 : 0)).days))
-        guard name.utf8CodeUnitCount == nameLength else { return nil }
-        // Unsafe: the static string's bytes. Safe: `utf8CodeUnitCount` of them, read within that count.
-        let start = unsafe name.utf8Start
-        for index in 0..<nameLength where unsafe start[index] != byte(index) { return nil }
+        let name = immortalSpan(longDayName(weekday(days: daysAndTime(seconds &- (second == 60 ? 1 : 0)).days)))
+        guard name.byteCount == nameLength else { return nil }
+        for index in 0..<nameLength where name.load(fromByteOffset: index, as: UInt8.self) != byte(index) { return nil }
         return seconds
     }
 }

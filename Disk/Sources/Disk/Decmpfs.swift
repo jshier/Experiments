@@ -140,9 +140,7 @@ public struct StoragePolicy: Sendable, Hashable {
     func skips(size: Int, first: RawSpan) -> Bool {
         if size < minimumSize { return true }
         guard skipsPNG, first.byteCount >= 8 else { return false }
-        // Unsafe: an unchecked, unaligned 8-byte load from the span's start. Safe: `first` has at least 8 bytes (the
-        // guard above).
-        let magic = UInt64(littleEndian: unsafe first.unsafeLoadUnaligned(fromByteOffset: 0, as: UInt64.self))
+        let magic = UInt64(littleEndian: first.load(fromByteOffset: 0, as: UInt64.self))
         return magic == Decmpfs.pngMagic
     }
 }

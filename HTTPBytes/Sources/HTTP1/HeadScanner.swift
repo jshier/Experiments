@@ -162,8 +162,8 @@ func tokenEndNearEnd(_ bytes: RawSpan, from start: Int) -> Int {
     let count = bytes.byteCount
     guard start < count else { return count }
     if count >= 16 {
-        // Unsafe: an unchecked 16-byte load ending at the bytes' end. Safe: `count >= 16`.
-        let lanes = unsafe bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: count &- 16, as: SIMD16<UInt8>.self)
+        // A 16-byte load ending at the bytes' end: `count >= 16`, so its check folds.
+        let lanes = bytes.load(fromByteOffset: count &- 16, as: SIMD16<UInt8>.self)
         // The lanes before `start` shifted out (zeros come in at the top: no match before the end gives `count`).
         let nibbles = HTTPCharacters.nonToken(ByteLanes(lanes)).nibbleMask &>> UInt64(4 &* (start &- (count &- 16)))
         return nibbles == 0 ? count : start &+ nibbles.trailingZeroBitCount &>> 2

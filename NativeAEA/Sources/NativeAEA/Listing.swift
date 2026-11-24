@@ -154,11 +154,12 @@ struct ListingSink: ArchiveSink, ~Copyable {
     var statistics = AEAStatistics()
     var diskCompression = DiskCompressionCounts()
 
-    nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: UnsafeRawPointer, buffer: Int) async throws(AEAError) {
+    nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: RawSpan, buffer: Int) async throws(AEAError) {
         func string(_ range: AAHeaderRange?) -> String? {
             guard let range else { return nil }
-            // Within the header the walker just parsed: safe.
-            return unsafe String(decoding: UnsafeRawBufferPointer(start: header + range.offset, count: range.count), as: UTF8.self)
+            // Unsafe: decodes the bytes' buffer. Safe: the range's bytes (`extracting` checks it is in the header),
+            // valid inside `withUnsafeBytes`; the string copies them.
+            return header.extracting(range.offset..<(range.offset + range.count)).withUnsafeBytes { unsafe String(decoding: $0, as: UTF8.self) }
         }
         statistics.entries += 1
         switch entry.type {
@@ -176,7 +177,7 @@ struct ListingSink: ArchiveSink, ~Copyable {
         if let body { body(AAEntry(header: entry, path: string(entry.path) ?? "", linkTarget: string(entry.linkTarget))) }
     }
 
-    nonisolated(nonsending) mutating func data(_ bytes: UnsafeRawPointer, count: Int, fileOffset: Int, buffer: Int, segment: Int) async throws(AEAError) {}
-    mutating func metadata(_ blob: AAMetadataBlob, _ bytes: UnsafeRawPointer, count: Int, offset: Int) throws(AEAError) {}
+    nonisolated(nonsending) mutating func data(_ bytes: RawSpan, offset: Int, fileOffset: Int, buffer: Int, segment: Int) async throws(AEAError) {}
+    mutating func metadata(_ blob: AAMetadataBlob, _ bytes: RawSpan, offset: Int) throws(AEAError) {}
     nonisolated(nonsending) mutating func endEntry() async throws(AEAError) {}
 }

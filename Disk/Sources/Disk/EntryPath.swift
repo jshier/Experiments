@@ -69,71 +69,57 @@ public struct EntryPath: ~Escapable {
         let count = bytes.byteCount
         if count == 0 { return true }
         guard count <= maximumByteCount else { return false }
-        return bytes.withUnsafeBytes { buffer in
-            let base = buffer.baseAddress!
-            // Unsafe: the buffer's base pointer to `screen`. Safe: the span's `count` bytes (`count >= 1`, as `screen`
-            // needs), valid inside `withUnsafeBytes`; `screen` only reads them, and returns before the closure does.
-            if unsafe screen(base, count) { return true }
-            // Unsafe: the same pointer to `exactCheck`. Safe: as above.
-            return unsafe exactCheck(base, count)
-        }
+        return screen(bytes) || exactCheck(bytes)
     }
 
-    /// The vector screen: `true` means valid; `false` means "check exactly".
-    static func screen(_ base: UnsafeRawPointer, _ count: Int) -> Bool {
-        // The caller's `count` readable bytes at `base`, `count >= 1` (`isValid` returns before this for an empty path).
-        // Unsafe (the next two): loads of the first and last bytes. Safe: offsets 0 and `count - 1`, within the bytes.
-        let first = unsafe base.load(as: UInt8.self)
-        let last = unsafe base.load(fromByteOffset: count - 1, as: UInt8.self)
+    /// The vector screen: `true` means valid; `false` means "check exactly". `bytes` isn't empty.
+    static func screen(_ bytes: RawSpan) -> Bool {
+        let count = bytes.byteCount
+        let first = bytes.load(fromByteOffset: 0, as: UInt8.self)
+        let last = bytes.load(fromByteOffset: count - 1, as: UInt8.self)
         if first == 0x2F || first == 0x2E || last == 0x2F || last == 0 { return false }
         guard count >= 17 else {
             // Short paths: one pass over the pairs.
-            for index in 0..<(count - 1) {
-                // Unsafe (the next two): loads of a byte and its successor. Safe: `index + 1 <= count - 1` (the loop's
-                // bound), so both are within the caller's `count` bytes.
-                let byte = unsafe base.load(fromByteOffset: index, as: UInt8.self)
-                let next = unsafe base.load(fromByteOffset: index + 1, as: UInt8.self)
+            let bytes = Span<UInt8>(viewing: bytes)
+            for index in 1..<count {
+                let byte = bytes[index - 1], next = bytes[index]
                 if byte == 0 || (byte == 0x2F && (next == 0x2F || next == 0x2E)) { return false }
             }
             return true
         }
-        // Each block tests bytes `offset..<offset + 16` and their successors: whole blocks, then the last 16 pairs
-        // (overlapping), all ORed and tested once. Loads stay within `count` (offset + 17 <= count).
+        // Each block tests 16 bytes and their successors, at the front of what's left: whole blocks, then the last 16
+        // pairs (overlapping), all ORed and tested once. (Loads at constant offsets of a span that has at least 17
+        // bytes: their checks fold.)
         var found = ByteMatches.none
-        var offset = 0
         @inline(__always)
-        func test(_ offset: Int) -> ByteMatches {
-            // Unsafe (the next two): unaligned 16-byte loads at `offset` and `offset + 1`. Safe: both callers pass
-            // `0 <= offset` and `offset + 17 <= count` (the loop's condition; `count - 17` with `count >= 17`), so
-            // bytes `offset..<offset + 17` are within the caller's `count`.
-            let lanes = ByteLanes(unsafe base.loadUnaligned(fromByteOffset: offset, as: SIMD16<UInt8>.self))
-            let next = ByteLanes(unsafe base.loadUnaligned(fromByteOffset: offset + 1, as: SIMD16<UInt8>.self))
+        func test(_ block: RawSpan) -> ByteMatches {
+            let lanes = ByteLanes(block.load(fromByteOffset: 0, as: SIMD16<UInt8>.self))
+            let next = ByteLanes(block.load(fromByteOffset: 1, as: SIMD16<UInt8>.self))
             return lanes.matching(0) | (lanes.matching(0x2F) & (next.matching(0x2F) | next.matching(0x2E)))
         }
-        while offset + 17 <= count {
-            found = found | test(offset)
-            offset += 16
+        var rest = bytes
+        while rest.byteCount >= 17 {
+            found = found | test(rest)
+            rest = rest.extracting(droppingFirst: 16)
         }
-        found = found | test(count - 17)
+        found = found | test(bytes.extracting(last: 17))
         return !found.any
     }
 
     /// The exact check, a component at a time.
-    static func exactCheck(_ base: UnsafeRawPointer, _ count: Int) -> Bool {
-        // The caller's `count` readable bytes at `base`.
+    static func exactCheck(_ bytes: RawSpan) -> Bool {
+        let bytes = Span<UInt8>(viewing: bytes)
+        let count = bytes.count
         var start = 0
         for index in 0...count {
-            // Unsafe: a load of byte `index`. Safe: only when `index < count` (the condition before it).
-            let byte: UInt8 = index < count ? unsafe base.load(fromByteOffset: index, as: UInt8.self) : 0x2F
+            let byte: UInt8 = index < count ? bytes[index] : 0x2F
             if byte == 0 { return false }
             guard byte == 0x2F else { continue }
             let length = index - start
             if length == 0 { return false }
-            // Unsafe: a load of the component's first byte. Safe: `length > 0`, so `start < index <= count`.
-            if unsafe base.load(fromByteOffset: start, as: UInt8.self) == 0x2E {
+            if bytes[start] == 0x2E {
                 if length == 1 { return false }
-                // Unsafe: a load of the component's second byte. Safe: `length == 2`, so `start + 1 < index <= count`.
-                if length == 2, unsafe base.load(fromByteOffset: start + 1, as: UInt8.self) == 0x2E { return false }
+                if length == 2, bytes[start + 1] == 0x2E { return false }
             }
             start = index + 1
         }
@@ -163,29 +149,27 @@ public struct EntryPath: ~Escapable {
         guard output.freeCapacity >= bytes.byteCount else { throw .unsafePath(string(bytes)) }
         let initial = output.byteCount
         var adjusted = false
-        bytes.withUnsafeBytes { buffer in
-            let count = buffer.count
-            // Unsafe: an unchecked (in release) subscript of the name's raw buffer, valid inside `withUnsafeBytes`.
-            // Safe: every call below passes an index under `count`: 0 after `count > 0`; `end` after `end < count`;
-            // `index` and `index + 1` only for a component of 1 or 2 bytes, which ends at `end <= count`.
-            func byte(_ index: Int) -> UInt8 { unsafe buffer[index] }
-            if count > 0, byte(0) == 0x2F { adjusted = true }
-            var index = 0
-            while index < count {
-                // One component: `index..<end`.
-                var end = index
-                while end < count, byte(end) != 0x2F, byte(end) != 0 { end += 1 }
-                let length = end - index
-                let isDot = length == 1 && byte(index) == 0x2E
-                let isDotDot = length == 2 && byte(index) == 0x2E && byte(index + 1) == 0x2E
-                if isDotDot { adjusted = true }
-                if length > 0, !isDot, !isDotDot {
-                    if output.byteCount > initial { output.append(UInt8(0x2F)) }
-                    output.append(copying: bytes.extracting(index..<end))
-                }
-                if end < count, byte(end) == 0 { break }
-                index = end + 1
+        let count = bytes.byteCount
+        // Every index below is under `count`: 0 after `count > 0`; `end` after `end < count`; `index` and `index + 1`
+        // only for a component of 1 or 2 bytes, which ends at `end <= count`.
+        let name = Span<UInt8>(viewing: bytes)
+        @inline(__always) func byte(_ index: Int) -> UInt8 { name[index] }
+        if count > 0, byte(0) == 0x2F { adjusted = true }
+        var index = 0
+        while index < count {
+            // One component: `index..<end`.
+            var end = index
+            while end < count, byte(end) != 0x2F, byte(end) != 0 { end += 1 }
+            let length = end - index
+            let isDot = length == 1 && byte(index) == 0x2E
+            let isDotDot = length == 2 && byte(index) == 0x2E && byte(index + 1) == 0x2E
+            if isDotDot { adjusted = true }
+            if length > 0, !isDot, !isDotDot {
+                if output.byteCount > initial { output.append(UInt8(0x2F)) }
+                output.append(copying: bytes.extracting(index..<end))
             }
+            if end < count, byte(end) == 0 { break }
+            index = end + 1
         }
         let written = output.byteCount - initial
         guard written <= maximumByteCount else { throw .unsafePath(string(bytes)) }

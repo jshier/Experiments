@@ -67,8 +67,8 @@ public final class RelaxedCounter: Sendable {
     }
 }
 
-/// A fixed number of ``RelaxedCounter``s in one allocation: one count per buffer, per kind of work, or per call kind,
-/// where an array of counter objects would allocate each.
+/// A fixed number of ``RelaxedCounter``s in two allocations (a class holding a `UniqueArray`), whatever their number:
+/// one count per buffer, per kind of work, or per call kind, where an array of counter objects would allocate each.
 ///
 /// ```swift
 /// let references = RelaxedCounters(count: buffers)
@@ -80,17 +80,19 @@ public final class RelaxedCounter: Sendable {
 /// A value with reference semantics: copies share the counters. Each index is checked against ``count`` (one
 /// unsigned compare).
 @frozen
-public struct RelaxedCounters: @unchecked Sendable {
-    // Unchecked: the storage holds only `Atomic`s, made in `init` and never moved; every access is atomic.
-    // (`ManagedBuffer` is explicitly not `Sendable`, so the storage class can't be.)
-
-    /// The counters, after a header holding their count, in one allocation.
+public struct RelaxedCounters: Sendable {
+    /// The counters, shared by copies: a `UniqueArray` isn't copyable, so a class holds it. `Sendable` because the
+    /// array is a `let` of atomics.
     @usableFromInline
-    final class Storage: ManagedBuffer<Int, Atomic<Int>> {
-        deinit {
-            // Unsafe: the elements' pointer, to end their lifetimes. Safe: `header` counters were initialized by
-            // `init` and nothing uses them once the storage is released.
-            _ = unsafe withUnsafeMutablePointers { count, counters in unsafe counters.deinitialize(count: count.pointee) }
+    final class Storage: Sendable {
+        @usableFromInline
+        let counters: UniqueArray<Atomic<Int>>
+
+        @inlinable
+        init(count: Int, value: Int) {
+            counters = UniqueArray(capacity: count) { counters in
+                for _ in 0..<count { counters.append(Atomic(value)) }
+            }
         }
     }
 
@@ -105,20 +107,13 @@ public struct RelaxedCounters: @unchecked Sendable {
     @inlinable
     public init(count: Int, value: Int = 0) {
         precondition(count >= 0, "A negative counter count")
-        let buffer = Storage.create(minimumCapacity: count) { _ in count }
-        // Unsafe: the elements' pointer, to initialize them. Safe: `count` elements of capacity (at least what
-        // was asked for), each initialized once, before the storage is shared.
-        unsafe buffer.withUnsafeMutablePointerToElements { counters in
-            for index in 0..<count { unsafe (counters + index).initialize(to: Atomic(value)) }
-        }
-        // Unsafe: an unchecked downcast. Safe: `Storage.create` makes an instance of `Storage` itself.
-        storage = unsafe unsafeDowncast(buffer, to: Storage.self)
+        storage = Storage(count: count, value: value)
     }
 
     /// How many counters there are.
     @inlinable
     public var count: Int {
-        @inline(__always) get { storage.header }
+        @inline(__always) get { storage.counters.count }
     }
 
     /// Runs `body` with counter `index` itself, for orderings other than relaxed.
@@ -129,10 +124,8 @@ public struct RelaxedCounters: @unchecked Sendable {
     /// - Returns: What `body` returns.
     @inlinable @inline(__always)
     public func withAtomic<R, E: Error>(at index: Int, _ body: (borrowing Atomic<Int>) throws(E) -> R) throws(E) -> R {
-        precondition(UInt(bitPattern: index) < UInt(bitPattern: storage.header), "Counter index out of range")
-        // Unsafe: a pointer to counter `index`. Safe: below `count` (checked), initialized by `init`, and the storage
-        // is kept alive by `self` for the call.
-        return try unsafe storage.withUnsafeMutablePointerToElements { counters throws(E) -> R in try body(unsafe counters[index]) }
+        // The subscript's check: one unsigned compare against the count.
+        try body(storage.counters[index])
     }
 
     /// Counter `index`'s current value.

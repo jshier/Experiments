@@ -7,6 +7,59 @@ and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIV
 synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
 M1 Max's (baseline `m1max`).
 
+## 2026-11-23, later: spans from the pool, not pointers (baselines `safe-arch-before` → `safe-arch-after`, M1 Max, under load)
+
+The survey's "safe now at no cost" list, NativeAEA's part (Writeups/Library-Survey-2026-11-23.md, "Unsafe code"). Lines
+with `unsafe` in the sources: 89 → 41; the walkers, the extraction and listing sinks, `Decrypt`, `Payload`, and `XIP`
+have none left.
+
+- **The pool hands out spans.** `SegmentBufferPool.bytes(_:at:count:)` (a `RawSpan` borrowing the pool, the range
+  checked against the buffer, carry region included), `withMutableBytes(_:at:count:_:)`, and `carry(_:from:at:to:)`
+  (the partial header copied into the next buffer's carry region) hold the pool's three `unsafe` lines. The caller still
+  holds a reference to the buffer while it reads: that part of the contract is the pool's, as before.
+- **The sink protocol takes spans**: `entry(_:header: RawSpan, buffer:)`, `data(_: RawSpan, offset:fileOffset:buffer:segment:)`
+  (the walker passes the offset from the segment base, so the sink no longer subtracts pointers), `metadata(_:_: RawSpan,
+  offset:)`. `ArchiveWalker` and `CpioWalker` read headers, names, and link targets from them; `Cpio.parseHeader` and
+  `entryHeader` take spans (the parser reads `extracting(0..<76)`: without the constant count it ran 489 instructions
+  against 284).
+- **The current path is an array** of `PATH_MAX` bytes (copied with `MutableSpan.copyBytes`, Bytes'), bound to a local
+  to plan, as the `RawStorage` was. Appending into an emptied array instead put an out-of-line `Array.append` and an
+  extra uniqueness check in `entry`; `withOutputRawSpan` an out-of-line closure.
+- **Guarded loads**: `Murmur64`'s word loop on checked `load` compiles to the same machine code (in a probe LLVM merged
+  the checked and unchecked functions; in situ `Murmur64.hash` is unchanged); the checksum's bytes are a `bitCast` to
+  `InlineArray<8, UInt8>`; `PBZ.compression`/`isAppleArchive` take spans (one 32-bit load); the header-info decrypt is
+  `_mutatingExtracting` of the array's span; `ContentCheck` reads into a `[UInt8]` through Disk's `read(at:count:into:)`.
+- Tests and benchmarks: the header parses in `AllocationTests`, `FormatTests`, and the benchmarks' segment walk use
+  `extracting` on the array's span.
+
+Codegen against HEAD's release object: the 47 walker specializations grew 2,883 instructions in all (at most 185 in one),
+the bounds checks of `pool.bytes`, about a dozen compares per entry; `ExtractionSink.entry` 721 → 847 (48 calls against
+40, the new ones on error and copy-on-write paths but one uniqueness check). Left: the decoders' disjoint regions of a
+buffer (`SegmentStream`, `BlockStream`, `SegmentCodec.decode`), the two `@unchecked Sendable` streams, `AEAKeys`'
+`StaticString` loop (features the language lacks).
+
+| Row | before | after |
+|---|---:|---:|
+| List (decode, verify, parse): synthetic: bytes | 272 G | 272 G |
+| Extract: synthetic: none | 303 G | 303 G |
+| Extract: synthetic: archived | 413 G | 413 G |
+| Decode segment 0: synthetic: bytes (0 mallocs) | 1,191 M | 1,191 M |
+| Open and verify: synthetic | 1.90 M | 1.90 M |
+| Parse headers: synthetic segment 0 (0 mallocs) | 64 K | 64 K |
+
+Mallocs: the threaded extraction rows vary between samples (the archived row read 447–679 before the change and 679
+after in the first run, 446 in the second); the single-threaded rows are unchanged. Tests: 67 in 14 suites, no warnings.
+
+## 2026-11-23, later: a cpio mode that trapped (the safe-API review's fuzzing)
+
+The adversarial review of the safe-API conversions fuzzed the cpio walker (3,000 mutated trees at 17 slice sizes) and
+found a trap the conversions didn't cause: odc's mode field is six octal digits (up to 0o777777) and `Cpio.type`
+converted it to the 16-bit `mode_t` with a checked conversion, so a mode like 0o400644 ended the process. A `.xip`'s
+content is walked while its SHA-1 is still being computed, so tampered content reaches the walker first, under every
+signature check. The header parser now rejects a mode wider than 16 bits as `.invalidArchive`, and `Cpio.type`
+truncates, so no caller can trap. `CpioHeaderTests` checks 0o400644, 0o200000, and 0o777777 are refused and
+0o177777 parses.
+
 ## 2026-11-23: explicit closes, a wrong key by its own case, composed errors (M1 Max)
 
 The survey's bugs, NativeAEA's part (Disk/RESULTS.md has the design):

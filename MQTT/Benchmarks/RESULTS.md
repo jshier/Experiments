@@ -11,6 +11,16 @@ One core parses the same 1.25 MB again and again, from cache. All 32 cores each 
 (4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput. Numbers
 are M3 Ultra unless a heading says otherwise; the 2026-11-19 section runs the same benchmarks on an M1 Max.
 
+## 2026-11-23: `MQTTError.detail` as a `String`, tried and reverted (baselines `safe-bytes-before` → `safe-bytes-after`, `safe-bytes-control`, M1 Max)
+
+The unsafe-code survey listed `MQTTError`'s `==` and `hash(into:)` (`StaticString.withUTF8Buffer`, the package's last two
+`unsafe` lines but one) as free with `detail: String`: string literals are immortal, so making an error allocates nothing,
+and the synthesized `Hashable` does the rest. Measured under load (instruction counts are the evidence): encoding PUBLISH
++1.2% (5,132 → 5,194 K), parsing +0.2 to +0.5%, frames −0.3%, no allocations either way. A control run with the
+`StaticString` restored and the same Bytes (`safe-bytes-control`) matched `safe-bytes-before` on every row, so the cost
+is the `String` itself: every throwing helper takes its detail as a `String`, and those calls grew. Reverted; the comment
+at `==` still says why it's unsafe.
+
 ## 2026-11-22: Bytes' cleanups, as a control (baselines `unify-old-{1,2}` → `unify-new-{1,2}`, M1 Max)
 
 The whole suite, two interleaved rounds against HEAD (5f28068), after Bytes' writers gained preconditions

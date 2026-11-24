@@ -2,15 +2,16 @@ import Bytes
 
 /// Receives an Apple Archive stream's entries as the walker finds them, in order.
 ///
-/// Pointers are into segment buffers: valid until the walker releases the buffer (after
-/// ``segmentFinished(buffer:)``) unless the sink retains it through the pool.
+/// Spans are of segment buffers, for the call: a sink that keeps bytes past it retains their buffer through the pool
+/// and finds them again by buffer and offset.
 protocol ArchiveSink: ~Copyable {
-    /// An entry's header. `header` points at its first byte, in buffer `buffer`.
-    nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: UnsafeRawPointer, buffer: Int) async throws(AEAError)
-    /// A piece of the current entry's file contents, at `fileOffset` in the file.
-    nonisolated(nonsending) mutating func data(_ bytes: UnsafeRawPointer, count: Int, fileOffset: Int, buffer: Int, segment: Int) async throws(AEAError)
+    /// An entry's header: `header` is its bytes, in buffer `buffer`.
+    nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: RawSpan, buffer: Int) async throws(AEAError)
+    /// A piece of the current entry's file contents, at `fileOffset` in the file: `bytes`, `offset` bytes from buffer
+    /// `buffer`'s segment base.
+    nonisolated(nonsending) mutating func data(_ bytes: RawSpan, offset: Int, fileOffset: Int, buffer: Int, segment: Int) async throws(AEAError)
     /// A piece of one of the current entry's metadata blobs, `offset` bytes into it.
-    mutating func metadata(_ blob: AAMetadataBlob, _ bytes: UnsafeRawPointer, count: Int, offset: Int) throws(AEAError)
+    mutating func metadata(_ blob: AAMetadataBlob, _ bytes: RawSpan, offset: Int) throws(AEAError)
     /// The current entry's blobs are complete.
     nonisolated(nonsending) mutating func endEntry() async throws(AEAError)
 }
@@ -26,7 +27,7 @@ enum AAMetadataBlob: Sendable {
 /// Walks the Apple Archive stream across segments: headers, then each entry's blobs, routed to a sink.
 ///
 /// Headers that cross a segment's end are made contiguous by copying their first bytes into the next buffer's
-/// carry region; file contents are never copied (the sink gets pointers into the buffers).
+/// carry region; file contents are never copied (the sink gets spans of the buffers).
 enum ArchiveWalker {
     nonisolated(nonsending) static func walk<Sink: ArchiveSink & ~Copyable>(_ source: some ChunkSource, into sink: inout Sink) async throws(AEAError) {
         let pool = source.pool
@@ -44,23 +45,20 @@ enum ArchiveWalker {
         }
         while let chunk = try await source.nextChunk() {
             let buffer = chunk.buffer
-            let base = unsafe pool.segmentBase(buffer)
             let start = chunk.rawOffset
             let end = start + chunk.rawSize
             streamEnd = end
             if carry > 0 {
                 // The partial header goes just before this chunk's bytes. `carry` is under the carry region's size
                 // (a header is at most 65,535 bytes), and the previous buffer is still held.
-                unsafe (base - carry).copyMemory(from: pool.segmentBase(previousBuffer) + (position - previousStart), byteCount: carry)
+                pool.carry(carry, from: previousBuffer, at: position - previousStart, to: buffer)
                 carry = 0
             }
             previousStart = start
             if previousBuffer >= 0 { pool.release(previousBuffer) }
             previousBuffer = buffer
 
-            // `pointer(p)` for stream positions from `start - carry` to `end`.
-            func pointer(_ p: Int) -> UnsafeMutableRawPointer { unsafe base + (p - start) }
-
+            // Stream positions from `start - carry` to `end` are at `p - start` in the buffer.
             while true {
                 if inHeader {
                     let available = end - position
@@ -69,13 +67,14 @@ enum ArchiveWalker {
                         carry = available
                         break
                     }
-                    let count = try unsafe AppleArchive.headerByteCount(RawSpan(_unsafeStart: pointer(position), byteCount: AppleArchive.minimumHeaderByteCount)) // Within the buffer: safe.
+                    let count = try AppleArchive.headerByteCount(pool.bytes(buffer, at: position - start, count: AppleArchive.minimumHeaderByteCount))
                     if available < count {
                         carry = available
                         break
                     }
-                    entry = try unsafe AppleArchive.parseHeader(RawSpan(_unsafeStart: pointer(position), byteCount: count)) // Same.
-                    try await unsafe sink.entry(entry, header: pointer(position), buffer: buffer)
+                    let header = pool.bytes(buffer, at: position - start, count: count)
+                    entry = try AppleArchive.parseHeader(header)
+                    try await sink.entry(entry, header: header, buffer: buffer)
                     position += count
                     if entry.blobByteCount == 0 {
                         try await sink.endEntry()
@@ -90,21 +89,24 @@ enum ArchiveWalker {
                     let dataStart = blobsStart + data.offset
                     let low = max(position, dataStart), high = min(stop, dataStart + data.count)
                     if low < high {
-                        try await unsafe sink.data(pointer(low), count: high - low, fileOffset: low - dataStart, buffer: buffer, segment: chunk.index)
+                        try await sink.data(
+                            pool.bytes(buffer, at: low - start, count: high - low), offset: low - start, fileOffset: low - dataStart,
+                            buffer: buffer, segment: chunk.index
+                        )
                     }
                 }
                 if let blob = entry.extendedAttributes, blob.count > 0 {
                     let blobStart = blobsStart + blob.offset
                     let low = max(position, blobStart), high = min(stop, blobStart + blob.count)
                     if low < high {
-                        try unsafe sink.metadata(.extendedAttributes, pointer(low), count: high - low, offset: low - blobStart)
+                        try sink.metadata(.extendedAttributes, pool.bytes(buffer, at: low - start, count: high - low), offset: low - blobStart)
                     }
                 }
                 if let blob = entry.accessControlList, blob.count > 0 {
                     let blobStart = blobsStart + blob.offset
                     let low = max(position, blobStart), high = min(stop, blobStart + blob.count)
                     if low < high {
-                        try unsafe sink.metadata(.accessControlList, pointer(low), count: high - low, offset: low - blobStart)
+                        try sink.metadata(.accessControlList, pool.bytes(buffer, at: low - start, count: high - low), offset: low - blobStart)
                     }
                 }
                 position = stop

@@ -160,8 +160,7 @@ public struct ZstdFrameHeader: Hashable, Sendable {
             }
             return nil
         }
-        // Unsafe: an unchecked load. Safe: at least 4 bytes (the guard above).
-        let magic = UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 0, as: UInt32.self))
+        let magic = UInt32(littleEndian: bytes.load(fromByteOffset: 0, as: UInt32.self))
         if magic & 0xFFFF_FFF0 == Zstd.skippableMagic { return 8 }
         guard magic == Zstd.magic else { throw .invalidValue }
         guard bytes.byteCount >= 5 else { return nil }
@@ -176,11 +175,9 @@ public struct ZstdFrameHeader: Hashable, Sendable {
     /// Parses a header, or returns `nil` if `bytes` doesn't hold all of it.
     static func parse(_ bytes: RawSpan) throws(BytesError) -> ZstdFrameHeader? {
         guard let size = try size(bytes), bytes.byteCount >= size else { return nil }
-        // Unsafe: unchecked loads. Safe: the whole header is there, at least 8 bytes for a skippable frame's
-        // magic and length, 4 for the magic otherwise.
-        let magic = UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 0, as: UInt32.self))
+        let magic = UInt32(littleEndian: bytes.load(fromByteOffset: 0, as: UInt32.self))
         if magic != Zstd.magic {
-            let length = UInt32(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: 4, as: UInt32.self))
+            let length = UInt32(littleEndian: bytes.load(fromByteOffset: 4, as: UInt32.self))
             return ZstdFrameHeader(
                 isSkippable: true, headerSize: 8, contentSize: UInt64(length), windowSize: 0,
                 dictionaryID: magic & 0xF, hasChecksum: false, isSingleSegment: false

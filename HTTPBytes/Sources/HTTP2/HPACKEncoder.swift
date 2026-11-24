@@ -47,8 +47,7 @@ public struct HPACKEncoder: ~Copyable {
     /// that a peer treats a message with one as malformed.
     public var removesConnectionSpecificFields = true
     /// Lowercased names (HTTP/1 spellings of names HTTPBytes doesn't know), grown to the longest seen.
-    @usableFromInline var scratch: UnsafeMutableRawPointer
-    @usableFromInline var scratchCapacity: Int
+    @usableFromInline var lowercasing = FieldNameLowercasing()
 
     /// An encoder that uses a dynamic table of up to `maximumTableSize` bytes (4,096: the peer's initial
     /// SETTINGS_HEADER_TABLE_SIZE). Its table starts at `min(maximumTableSize, 4,096)`, the size the peer assumes, and
@@ -62,14 +61,6 @@ public struct HPACKEncoder: ~Copyable {
             pendingSize = table.maximumSize
         }
         index = DynamicFieldIndex(slots: table.entryMask &+ 1)
-        scratchCapacity = 64
-        // Unsafe: an allocation owned by this encoder and freed in `deinit`.
-        unsafe scratch = UnsafeMutableRawPointer.allocate(byteCount: scratchCapacity, alignment: 16)
-    }
-
-    deinit {
-        // Unsafe: frees this encoder's own allocation, which nothing else holds (the encoder is noncopyable).
-        unsafe scratch.deallocate()
     }
 
     /// The dynamic table's size (RFC 7541 §4.1).
@@ -175,21 +166,10 @@ public struct HPACKEncoder: ~Copyable {
     mutating func encodeFieldLowercasing(_ name: RawSpan, _ value: RawSpan, _ strategy: HPACKIndexingStrategy,
                                          _ output: inout FieldEncoderOutput) -> Bool {
         let count = name.byteCount
-        if count > scratchCapacity {
-            // Unsafe: replaces this encoder's own scratch allocation; nothing borrows it between calls.
-            unsafe scratch.deallocate()
-            scratchCapacity = Swift.max(count, scratchCapacity &* 2)
-            unsafe scratch = UnsafeMutableRawPointer.allocate(byteCount: scratchCapacity, alignment: 16)
-        }
-        for offset in 0..<count {
-            let byte = name.load(fromByteOffset: offset, as: UInt8.self)
-            // Unsafe: a store into the scratch memory. Safe: `offset < count <= scratchCapacity`.
-            unsafe scratch.storeBytes(of: byte &- 0x41 < 26 ? byte | 0x20 : byte, toByteOffset: offset, as: UInt8.self)
-        }
-        let lowered = unsafe UnsafeRawPointer(scratch)
+        let lowered = unsafe lowercasing.lowercase(name)
         return value.withUnsafeBytes { value in
-            // Unsafe: the lowercased name in the scratch memory (`count` bytes) and the value's own bytes, read during the
-            // call; the table copies what it keeps.
+            // Unsafe: the lowercased name in the scratch memory (`count` bytes, unchanged until the next field) and the
+            // value's own bytes, read during the call; the table copies what it keeps.
             unsafe encodeField(name: lowered, nameCount: count, value: value.baseAddress, valueCount: value.count,
                                knownName: 0xFF, strategy: strategy, &output)
         }

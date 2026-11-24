@@ -256,8 +256,8 @@ import Testing
         var writer = ArchiveStreamWriter()
         writer.file("a/b", [1, 2, 3], mode: 0o4755, diskCompression: 14, flags: 0x20)
         let bytes = writer.bytes
-        let count = try bytes.span.bytes.withUnsafeBytes { try AppleArchive.headerByteCount(RawSpan(_unsafeBytes: $0)) }
-        let header = try bytes.span.bytes.extracting(0..<count).withUnsafeBytes { try AppleArchive.parseHeader(RawSpan(_unsafeBytes: $0)) }
+        let count = try AppleArchive.headerByteCount(bytes.span.bytes)
+        let header = try AppleArchive.parseHeader(bytes.span.bytes.extracting(0..<count))
         #expect(header.type == .regularFile)
         #expect(header.mode == 0o4755)
         #expect(header.diskCompression == 14)

@@ -78,8 +78,8 @@ enum SegmentChecks {
                 throw .checksumMismatch(segment: segment)
             }
         case .murmur64:
-            let hash = Murmur64.hash(raw).littleEndian
-            guard withUnsafeBytes(of: hash, { unsafe archive.checksumMatches(segment, RawSpan(_unsafeBytes: $0)) }) else {
+            let hash = bitCast(Murmur64.hash(raw).littleEndian, to: InlineArray<8, UInt8>.self)
+            guard archive.checksumMatches(segment, hash.span.bytes) else {
                 throw .checksumMismatch(segment: segment)
             }
         }
@@ -92,11 +92,11 @@ enum Murmur64 {
     static func hash(_ bytes: RawSpan) -> UInt64 {
         let m: UInt64 = 0xC6A4_A793_5BD1_E995
         var h: UInt64 = 0xE223_6FDC_26A5_F6D2 ^ (UInt64(bytes.byteCount) &* m)
-        // Words loaded from the span directly, the loop bounded by the count: no per-word check or `try`.
+        // Words loaded from the span directly, the loop bounded by the count: the loads' checks fold (the same machine
+        // code as unchecked loads, 2026-11-23).
         let words = bytes.byteCount / 8
         for index in 0..<words {
-            // Word `index` of `words`, all within the span: safe.
-            var k = UInt64(littleEndian: unsafe bytes.unsafeLoadUnaligned(fromByteOffset: index &* 8, as: UInt64.self))
+            var k = UInt64(littleEndian: bytes.load(fromByteOffset: index &* 8, as: UInt64.self))
             k &*= m
             k ^= k >> 47
             k &*= m
@@ -107,7 +107,7 @@ enum Murmur64 {
         if tail > 0 {
             var value: UInt64 = 0
             for index in 0..<tail {
-                value |= UInt64(unsafe bytes.unsafeLoad(fromByteOffset: words &* 8 &+ index, as: UInt8.self)) << (8 &* index) // The tail's bytes: safe.
+                value |= UInt64(bytes.load(fromByteOffset: words &* 8 &+ index, as: UInt8.self)) << (8 &* index)
             }
             h ^= value
             h &*= m

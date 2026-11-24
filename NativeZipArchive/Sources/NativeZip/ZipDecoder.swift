@@ -409,15 +409,15 @@ public struct ZipDecoder: ~Copyable {
     private mutating func lzmaFormat(size: UInt64?, endMarker: Bool, path: String) throws(ZipError) -> DecompressionFormat {
         // An encrypted entry's header is in its first decrypted bytes.
         while unsafe pendingInput().count < 9, refillInput() > 0 {}
-        let header = unsafe pendingInput()
-        guard header.count >= 9 else { throw .truncated("LZMA header for '\(path)'") }
-        // Unsafe: loads from the 9 bytes just checked.
-        let propertiesSize = unsafe UInt16(header[2]) | UInt16(header[3]) << 8
-        let dictionarySize = unsafe UInt32(header[5]) | UInt32(header[6]) << 8 | UInt32(header[7]) << 16 | UInt32(header[8]) << 24
+        // Unsafe: the pending input, read before it's consumed or refilled (see `pendingInput`).
+        let header = unsafe RawSpan(_unsafeBytes: pendingInput())
+        guard header.byteCount >= 9 else { throw .truncated("LZMA header for '\(path)'") }
+        let propertiesSize = UInt16(littleEndian: header.load(fromByteOffset: 2, as: UInt16.self))
+        let dictionarySize = UInt32(littleEndian: header.load(fromByteOffset: 5, as: UInt32.self))
         let properties: LZMAProperties
         do throws(BytesError) {
             guard propertiesSize == 5 else { throw .invalidValue }
-            properties = unsafe try LZMAProperties(byte: header[4], dictionarySize: Int(dictionarySize))
+            properties = try LZMAProperties(byte: header.load(fromByteOffset: 4, as: UInt8.self), dictionarySize: Int(dictionarySize))
         } catch {
             throw .unsupportedMethod(ZipArchive.Method.lzma, path)
         }

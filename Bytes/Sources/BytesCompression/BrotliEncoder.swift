@@ -274,10 +274,7 @@ struct BrotliEngine: ~Copyable {
         let next = UInt64(matcher.streamBase) &+ UInt64(streamEnd) &+ UInt64(windowSize) &+ 1
         if next > UInt64(UInt32.max) &- (1 << 30) {
             var span = buckets.mutableSpan
-            span.withUnsafeMutableBytes { buffer in
-                // Unsafe: raw stores into the table. Safe: within its bytes.
-                _ = unsafe buffer.initializeMemory(as: UInt8.self, repeating: 0)
-            }
+            span.update(repeating: 0)
             matcher.streamBase = 0
         } else {
             matcher.streamBase = UInt32(next)

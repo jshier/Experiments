@@ -149,7 +149,7 @@ public final class XIPArchive: Sendable {
             }
             contentChecksum = content.archivedChecksum.flatMap { $0.style == "sha1" ? (try? [UInt8](hexadecimal: $0.hex)) : nil }
             let pbz = try AEAArchive.read(file, at: contentStart, count: PBZ.headerSize)
-            guard pbz.withUnsafeBytes({ unsafe PBZ.compression($0) }) == .lzma else { // "pbzx": the bytes are local: safe.
+            guard PBZ.compression(pbz.span.bytes) == .lzma else { // "pbzx"
                 throw AEAError.invalidArchive("the xip's Content isn't a pbzx stream")
             }
             blockSize = try PBZ.blockSize(pbz.span.bytes)
@@ -357,20 +357,18 @@ struct ContentCheck: Sendable {
     /// never runs on its caller's executor, whatever the module's default isolation for `async` functions.
     @concurrent
     func run() async -> AEAError? {
-        let buffer = RawStorage(byteCount: 4 << 20)
+        var buffer = [UInt8](repeating: 0, count: 4 << 20)
         var hash = SHA1()
         var offset = 0
         while offset < count {
             if Task.isCancelled { return .cancelled }
             let piece = min(4 << 20, count - offset)
-            // This task's buffer, `piece` bytes of it: safe.
-            let bytes = unsafe UnsafeMutableRawBufferPointer(start: buffer.base, count: piece)
-            do throws(AEAError) {
-                try unsafe AEAArchive.readFully(file, at: start + offset, into: bytes)
+            do throws(DiskError) {
+                try buffer.withOutputRawSpan { (output) throws(DiskError) in try file.read(at: start + offset, count: piece, into: &output) }
             } catch {
-                return error
+                return AEAError(error)
             }
-            unsafe hash.update(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(bytes))) // Same buffer: safe.
+            hash.update(buffer.span.bytes.extracting(0..<piece))
             offset += piece
         }
         let digest = hash.finalize()

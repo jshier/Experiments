@@ -18,15 +18,17 @@ enum PBZ {
     static let blockHeaderSize = 16
 
     /// Whether `bytes` (at least 4) start a `pbz` stream, and its algorithm.
-    static func compression(_ bytes: UnsafeRawBufferPointer) -> AEACompression? {
-        guard bytes.count >= 4, unsafe bytes[0] == 0x70, unsafe bytes[1] == 0x62, unsafe bytes[2] == 0x7A else { return nil } // "pbz"
-        return AEACompression(rawValue: unsafe bytes[3])
+    static func compression(_ bytes: RawSpan) -> AEACompression? {
+        guard bytes.byteCount >= 4 else { return nil }
+        let magic = bytes.load(fromByteOffset: 0, as: UInt32.self).bigEndian
+        guard magic >> 8 == 0x70_627A else { return nil } // "pbz"
+        return AEACompression(rawValue: UInt8(truncatingIfNeeded: magic))
     }
 
     /// Whether `bytes` start a plain Apple Archive stream.
-    static func isAppleArchive(_ bytes: UnsafeRawBufferPointer) -> Bool {
-        guard bytes.count >= 4 else { return false }
-        let magic = unsafe bytes.loadUnaligned(as: UInt32.self).bigEndian
+    static func isAppleArchive(_ bytes: RawSpan) -> Bool {
+        guard bytes.byteCount >= 4 else { return false }
+        let magic = bytes.load(fromByteOffset: 0, as: UInt32.self).bigEndian
         return magic == 0x4141_3031 || magic == 0x5941_4131 // "AA01", "YAA1"
     }
 

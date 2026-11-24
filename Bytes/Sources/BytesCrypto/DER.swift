@@ -152,20 +152,20 @@ public enum PEM {
         let wanted = Array(label.utf8)
         var documents: [[UInt8]] = []
         var offset = 0
-        while let begin = find(beginPrefix, in: text, from: offset) {
+        while let begin = text.firstByteOffset(of: beginPrefix, from: offset) {
             // The label runs to the next "-----".
-            let labelStart = begin &+ beginPrefix.utf8CodeUnitCount
-            guard let labelEnd = find(dashes, in: text, from: labelStart) else { throw .invalidValue }
-            let bodyStart = labelEnd &+ dashes.utf8CodeUnitCount
-            guard let end = find(endPrefix, in: text, from: bodyStart) else { throw .invalidValue }
-            let endLabelStart = end &+ endPrefix.utf8CodeUnitCount
+            let labelStart = begin &+ Byte11.byteCount
+            guard let labelEnd = text.firstByteOffset(of: dashes, from: labelStart) else { throw .invalidValue }
+            let bodyStart = labelEnd &+ Byte5.byteCount
+            guard let end = text.firstByteOffset(of: endPrefix, from: bodyStart) else { throw .invalidValue }
+            let endLabelStart = end &+ Byte9.byteCount
             let blockLabel = text.extracting(labelStart..<labelEnd)
-            guard let endLabelEnd = find(dashes, in: text, from: endLabelStart),
+            guard let endLabelEnd = text.firstByteOffset(of: dashes, from: endLabelStart),
                   blockLabel.equals(text.extracting(endLabelStart..<endLabelEnd)) else { throw .invalidValue }
             if blockLabel.equals(wanted.span.bytes) {
                 documents.append(try decodeBase64(text.extracting(bodyStart..<end)))
             }
-            offset = endLabelEnd &+ dashes.utf8CodeUnitCount
+            offset = endLabelEnd &+ Byte5.byteCount
         }
         return documents
     }
@@ -224,30 +224,10 @@ public enum PEM {
         }
     }
 
-    static var beginPrefix: StaticString { "-----BEGIN " }
-    static var endPrefix: StaticString { "-----END " }
-    static var dashes: StaticString { "-----" }
-
-    /// Whether `pattern` is at `offset` in `text`.
-    static func matches(_ pattern: StaticString, in text: RawSpan, at offset: Int) -> Bool {
-        let length = pattern.utf8CodeUnitCount
-        guard offset >= 0, text.byteCount &- offset >= length else { return false }
-        return pattern.withUTF8Buffer { bytes in
-            // Unsafe: the static string's buffer, unchecked. Safe: `index` is below `length`, its count.
-            for index in 0..<length where unsafe text.byteOffsetLoad(offset &+ index) != bytes[index] { return false }
-            return true
-        }
-    }
-
-    /// The first offset at or after `start` where `pattern` is.
-    static func find(_ pattern: StaticString, in text: RawSpan, from start: Int) -> Int? {
-        var offset = start
-        while text.byteCount &- offset >= pattern.utf8CodeUnitCount {
-            if matches(pattern, in: text, at: offset) { return offset }
-            offset &+= 1
-        }
-        return nil
-    }
+    // The boundary lines' fixed parts, as byte groups (constants once inlined), found with Bytes' SIMD search.
+    static var beginPrefix: Byte11 { Byte11(ascii: "-----BEGIN ") }
+    static var endPrefix: Byte9 { Byte9(ascii: "-----END ") }
+    static var dashes: Byte5 { Byte5(ascii: "-----") }
 
     /// Strict Base64 (RFC 4648, 4, the standard alphabet) with whitespace ignored: padding only at the end and only
     /// as much as the last group needs, and the padding bits zero. BytesBase64's decoder; every way the text can be

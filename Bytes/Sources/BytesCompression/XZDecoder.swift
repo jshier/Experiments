@@ -143,25 +143,20 @@ public struct XZDecoder: ~Copyable {
     public mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         if let failure { throw failure }
         do throws(BytesError) {
-            guard input.byteCount > 0 else { return try unsafe step(nil, count: 0, into: &output) }
-            return try input.withUnsafeBytes { buffer throws(BytesError) -> TransformProgress in
-                // Unsafe: the base address of a nonempty buffer.
-                try unsafe step(buffer.baseAddress!.assumingMemoryBound(to: UInt8.self), count: buffer.count, into: &output)
-            }
+            return try step(input, into: &output)
         } catch {
             failure = error
             throw error
         }
     }
 
-    /// The streaming loop over `count` bytes at `input`.
-    private mutating func step(
-        _ input: UnsafePointer<UInt8>?, count: Int, into output: inout OutputRawSpan
-    ) throws(BytesError) -> TransformProgress {
+    /// The streaming loop over `input`.
+    private mutating func step(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         var position = 0
         var produced = 0
-        // Unsafe: reads of the input, each unit's only after checking that the input holds all of it
-        // (`available`); writes into the window after making room for them.
+        let count = input.byteCount
+        // Each unit is read only after checking that the input holds all of it (`available`), through checked
+        // loads; the window is written after making room.
         while true {
             produced &+= window.deliver(upTo: registers.position, into: &output)
             guard window.delivered == registers.position else {
@@ -173,24 +168,24 @@ public struct XZDecoder: ~Copyable {
                 let status: TransformStatus = stage == .streamPadding ? .finished : .needsInput
                 return TransformProgress(consumed: position, produced: produced, status: status)
             }
-            let bytes = unsafe input! + position
+            let bytes = input.extracting(droppingFirst: position)
             switch stage {
             case .streamHeader:
                 guard available >= XZ.headerSize else {
-                    try unsafe XZ.checkHeaderPrefix(bytes, count: available)
+                    try XZ.checkHeaderPrefix(bytes)
                     return needsInput
                 }
-                checkType = try unsafe XZ.streamHeader(bytes)
+                checkType = try XZ.streamHeader(bytes)
                 position &+= XZ.headerSize
                 blocks = XZIndexSummary()
                 stage = .blockStart
 
             case .blockStart:
-                let sizeByte = Int(unsafe bytes[0])
+                let sizeByte = Int(bytes.load(fromByteOffset: 0, as: UInt8.self))
                 if sizeByte == 0 {
                     // The index's indicator.
                     indexCRC = CRC32()
-                    unsafe indexCRC.update(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: bytes, count: 1)))
+                    indexCRC.update(bytes.extracting(first: 1))
                     indexSize = 1
                     position &+= 1
                     stage = .indexCount
@@ -198,7 +193,7 @@ public struct XZDecoder: ~Copyable {
                 }
                 let headerSize = (sizeByte &+ 1) &* 4
                 guard available >= headerSize else { return needsInput }
-                let header = try unsafe XZ.blockHeader(bytes, headerSize: headerSize)
+                let header = try XZ.blockHeader(bytes, headerSize: headerSize)
                 position &+= headerSize
                 block = Block(
                     headerSize: headerSize, compressedSize: header.compressedSize, uncompressedSize: header.uncompressedSize,
@@ -218,7 +213,7 @@ public struct XZDecoder: ~Copyable {
                 stage = .chunk
 
             case .chunk:
-                let control = Int(unsafe bytes[0])
+                let control = Int(bytes.load(fromByteOffset: 0, as: UInt8.self))
                 if control == 0 {
                     position &+= 1
                     block.compressed &+= 1
@@ -237,13 +232,13 @@ public struct XZDecoder: ~Copyable {
                     if control < 0xC0 && needsProperties { throw .invalidValue }
                     headerSize = control >= 0xC0 ? 6 : 5
                     guard available >= headerSize else { return needsInput }
-                    unpacked = ((control & 0x1F) &<< 16 | Int(unsafe bytes[1]) &<< 8 | Int(unsafe bytes[2])) &+ 1
-                    packed = (Int(unsafe bytes[3]) &<< 8 | Int(unsafe bytes[4])) &+ 1
+                    unpacked = ((control & 0x1F) &<< 16 | Int(UInt16(bigEndian: bytes.load(fromByteOffset: 1, as: UInt16.self)))) &+ 1
+                    packed = Int(UInt16(bigEndian: bytes.load(fromByteOffset: 3, as: UInt16.self))) &+ 1
                 } else {
                     guard control <= 2 else { throw .invalidValue }
                     headerSize = 3
                     guard available >= headerSize else { return needsInput }
-                    unpacked = (Int(unsafe bytes[1]) &<< 8 | Int(unsafe bytes[2])) &+ 1
+                    unpacked = Int(UInt16(bigEndian: bytes.load(fromByteOffset: 1, as: UInt16.self))) &+ 1
                     packed = unpacked
                 }
                 guard packed <= available &- headerSize else { return needsInput }
@@ -258,7 +253,7 @@ public struct XZDecoder: ~Copyable {
                     window.restart()
                 }
                 if control >= 0xC0 {
-                    let properties = try LZMAProperties(byte: unsafe bytes[5], dictionarySize: block.dictionarySize)
+                    let properties = try LZMAProperties(byte: bytes.load(fromByteOffset: 5, as: UInt8.self), dictionarySize: block.dictionarySize)
                     guard properties.literalContextBits &+ properties.literalPositionBits <= 4 else { throw .invalidValue }
                     model = LZMAModel(properties: properties)
                     block.needsProperties = false
@@ -272,17 +267,25 @@ public struct XZDecoder: ~Copyable {
                     maximumDictionarySize: maximumDictionarySize
                 )
                 let start = registers.position
+                let data = bytes.extracting(headerSize..<(headerSize &+ packed))
                 if control >= 0x80 {
-                    // Unsafe and safe as `LZMALoop.decodeChunk`: the input holds `packed` bytes after the header, and
-                    // the window `unpacked` after the position (`makeRoom`).
-                    try unsafe LZMALoop.decodeChunk(
-                        bytes + headerSize, packed: packed, &registers, model: model, dictionary: window.base!,
-                        limit: start &+ unpacked, probabilities: workspace.base
-                    )
+                    // Unsafe and safe as `LZMALoop.decodeChunk`: the input holds `packed` bytes after the header (the
+                    // span's base address, as it isn't empty), and the window `unpacked` after the position
+                    // (`makeRoom`).
+                    let dictionary = unsafe window.base!
+                    let probabilities = unsafe workspace.base
+                    try data.withUnsafeBytes { chunk throws(BytesError) in
+                        try unsafe LZMALoop.decodeChunk(
+                            chunk.baseAddress!.assumingMemoryBound(to: UInt8.self), packed: packed, &registers, model: model,
+                            dictionary: dictionary, limit: start &+ unpacked, probabilities: probabilities
+                        )
+                    }
                 } else {
-                    // Unsafe: a copy of `unpacked` bytes, which the input holds after the header and the window
-                    // has room for.
-                    unsafe (window.base! + start).update(from: bytes + headerSize, count: unpacked)
+                    // Unsafe: a copy of the `unpacked` bytes after the header, which the window has room for.
+                    let destination = unsafe UnsafeMutableRawPointer(window.base! + start)
+                    data.withUnsafeBytes { chunk in
+                        unsafe destination.copyMemory(from: chunk.baseAddress!, byteCount: unpacked)
+                    }
                     registers.position &+= unpacked
                 }
                 switch checkType {
@@ -298,13 +301,14 @@ public struct XZDecoder: ~Copyable {
                 let padding = (0 &- (block.headerSize &+ block.compressed)) & 3
                 let checkSize = XZ.checkSize(checkType)
                 guard available >= padding &+ checkSize else { return needsInput }
-                for index in 0..<padding where unsafe bytes[index] != 0 { throw .invalidValue }
-                let check = unsafe UnsafeRawPointer(bytes + padding)
+                for index in 0..<padding where bytes.load(fromByteOffset: index, as: UInt8.self) != 0 { throw .invalidValue }
                 switch checkType {
                 case 1:
-                    guard unsafe block.crc32.value == check.loadUnaligned(as: UInt32.self).littleEndian else { throw .mismatch }
+                    let expected = UInt32(littleEndian: bytes.load(fromByteOffset: padding, as: UInt32.self))
+                    guard block.crc32.value == expected else { throw .mismatch }
                 case 4:
-                    guard unsafe block.crc64.value == check.loadUnaligned(as: UInt64.self).littleEndian else { throw .mismatch }
+                    let expected = UInt64(littleEndian: bytes.load(fromByteOffset: padding, as: UInt64.self))
+                    guard block.crc64.value == expected else { throw .mismatch }
                 default:
                     break // None, or SHA-256: not verified.
                 }
@@ -315,7 +319,7 @@ public struct XZDecoder: ~Copyable {
                 stage = .blockStart
 
             case .indexCount:
-                var cursor = unsafe XZCursor(base: bytes, end: available, position: 0)
+                var cursor = XZCursor(bytes)
                 let records: UInt64
                 do throws(BytesError) {
                     records = try cursor.integer()
@@ -323,7 +327,7 @@ public struct XZDecoder: ~Copyable {
                     return needsInput
                 }
                 guard records == UInt64(blocks.count) else { throw .mismatch }
-                unsafe consumeIndex(bytes, cursor.position, at: &position)
+                consumeIndex(bytes.extracting(first: cursor.position), at: &position)
                 listed = XZIndexSummary()
                 indexRemaining = blocks.count
                 stage = .indexRecords
@@ -334,7 +338,7 @@ public struct XZDecoder: ~Copyable {
                     stage = .indexEnd
                     continue
                 }
-                var cursor = unsafe XZCursor(base: bytes, end: available, position: 0)
+                var cursor = XZCursor(bytes)
                 let unpadded: UInt64
                 let uncompressed: UInt64
                 do throws(BytesError) {
@@ -344,15 +348,15 @@ public struct XZDecoder: ~Copyable {
                     return needsInput
                 }
                 listed.add(unpadded: unpadded, uncompressed: uncompressed)
-                unsafe consumeIndex(bytes, cursor.position, at: &position)
+                consumeIndex(bytes.extracting(first: cursor.position), at: &position)
                 indexRemaining &-= 1
 
             case .indexEnd:
                 let padding = (0 &- indexSize) & 3
                 guard available >= padding &+ 4 else { return needsInput }
-                for index in 0..<padding where unsafe bytes[index] != 0 { throw .invalidValue }
-                unsafe indexCRC.update(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: bytes, count: padding)))
-                guard unsafe indexCRC.value == UnsafeRawPointer(bytes + padding).loadUnaligned(as: UInt32.self).littleEndian else {
+                for index in 0..<padding where bytes.load(fromByteOffset: index, as: UInt8.self) != 0 { throw .invalidValue }
+                indexCRC.update(bytes.extracting(first: padding))
+                guard indexCRC.value == UInt32(littleEndian: bytes.load(fromByteOffset: padding, as: UInt32.self)) else {
                     throw .mismatch
                 }
                 indexSize &+= padding &+ 4
@@ -361,21 +365,21 @@ public struct XZDecoder: ~Copyable {
 
             case .footer:
                 guard available >= XZ.headerSize else { return needsInput }
-                try unsafe XZ.checkFooter(bytes, indexSize: indexSize, checkType: checkType)
+                try XZ.checkFooter(bytes, indexSize: indexSize, checkType: checkType)
                 position &+= XZ.headerSize
                 stage = .streamPadding
 
             case .streamPadding:
                 // Zeros, four at a time; anything else starts another stream.
                 if available >= 4 {
-                    if unsafe UnsafeRawPointer(bytes).loadUnaligned(as: UInt32.self) == 0 {
+                    if bytes.load(fromByteOffset: 0, as: UInt32.self) == 0 {
                         position &+= 4
                     } else {
                         stage = .streamHeader
                     }
                     continue
                 }
-                for index in 0..<available where unsafe bytes[index] != 0 {
+                for index in 0..<available where bytes.load(fromByteOffset: index, as: UInt8.self) != 0 {
                     stage = .streamHeader
                     break
                 }
@@ -384,12 +388,11 @@ public struct XZDecoder: ~Copyable {
         }
     }
 
-    /// Consumes `count` bytes of the index at `bytes`, adding them to its CRC and size.
-    private mutating func consumeIndex(_ bytes: UnsafePointer<UInt8>, _ count: Int, at position: inout Int) {
-        // Unsafe: a span over index bytes the caller parsed, in the input.
-        unsafe indexCRC.update(RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: bytes, count: count)))
-        indexSize &+= count
-        position &+= count
+    /// Consumes `bytes` of the index, adding them to its CRC and size.
+    private mutating func consumeIndex(_ bytes: RawSpan, at position: inout Int) {
+        indexCRC.update(bytes)
+        indexSize &+= bytes.byteCount
+        position &+= bytes.byteCount
     }
 }
 

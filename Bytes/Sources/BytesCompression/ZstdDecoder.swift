@@ -111,15 +111,11 @@ public struct ZstdDecoder: ~Copyable {
         guard input.byteCount > 0 else { throw .insufficientData }
         return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
             try span.withUnsafeMutableBytes { outputBuffer throws(BytesError) -> Int in
-                try input.withUnsafeBytes { inputBuffer throws(BytesError) -> Int in
-                    // Unsafe: base addresses of nonempty buffers.
-                    let produced = try unsafe decodeFrames(
-                        inputBuffer.baseAddress!, count: inputBuffer.count,
-                        into: outputBuffer.baseAddress ?? UnsafeMutableRawPointer(bitPattern: 1)!, capacity: outputBuffer.count
-                    )
-                    written = produced
-                    return inputBuffer.count
-                }
+                // Unsafe: the output's base address (a placeholder for an empty output, never written).
+                written = try unsafe decodeFrames(
+                    input, into: outputBuffer.baseAddress ?? UnsafeMutableRawPointer(bitPattern: 1)!, capacity: outputBuffer.count
+                )
+                return input.byteCount
             }
         }
     }
@@ -128,14 +124,15 @@ public struct ZstdDecoder: ~Copyable {
     ///
     /// - Returns: The bytes written.
     private mutating func decodeFrames(
-        _ input: UnsafeRawPointer, count: Int, into output: UnsafeMutableRawPointer, capacity: Int
+        _ input: RawSpan, into output: UnsafeMutableRawPointer, capacity: Int
     ) throws(BytesError) -> Int {
         var position = 0
         var end = 0
-        // Unsafe: spans and pointers over the input and output, each bounded by the checks before it.
+        let count = input.byteCount
+        // Headers through checked loads; blocks' bytes passed on as spans' base addresses, and the output's
+        // pointer, each bounded by the checks before it.
         repeat {
-            let rest = unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: input + position, count: count &- position))
-            guard let header = try ZstdFrameHeader.parse(rest) else { throw .insufficientData }
+            guard let header = try ZstdFrameHeader.parse(input.extracting(droppingFirst: position)) else { throw .insufficientData }
             if header.isSkippable {
                 let size = Int(header.contentSize ?? 0)
                 guard size <= count &- position &- 8 else { throw .insufficientData }
@@ -154,9 +151,8 @@ public struct ZstdDecoder: ~Copyable {
             let history = ZstdHistory(prefixStart: frameStart)
             while true {
                 guard count &- position >= 3 else { throw .insufficientData }
-                let blockHeader = Int(unsafe input.load(fromByteOffset: position, as: UInt8.self))
-                    | Int(unsafe input.load(fromByteOffset: position &+ 1, as: UInt8.self)) &<< 8
-                    | Int(unsafe input.load(fromByteOffset: position &+ 2, as: UInt8.self)) &<< 16
+                let blockHeader = Int(input.load(fromByteOffset: position, as: UInt8.self))
+                    | Int(UInt16(littleEndian: input.load(fromByteOffset: position &+ 1, as: UInt16.self))) &<< 8
                 position &+= 3
                 let size = blockHeader &>> 3
                 let produced: Int
@@ -165,23 +161,32 @@ public struct ZstdDecoder: ~Copyable {
                     guard size <= blockSizeMaximum else { throw .invalidValue }
                     guard size <= count &- position else { throw .insufficientData }
                     guard size <= capacity &- end else { throw .insufficientCapacity }
-                    unsafe (output + end).copyMemory(from: input + position, byteCount: size)
+                    input.extracting(position..<(position &+ size)).withUnsafeBytes { block in
+                        // Unsafe: a copy into the output, which has room for it (checked above).
+                        unsafe (output + end).copyMemory(from: block.baseAddress ?? UnsafeRawPointer(output), byteCount: size)
+                    }
                     position &+= size
                     produced = size
                 case 1: // RLE.
                     guard size <= blockSizeMaximum else { throw .invalidValue }
                     guard count &- position >= 1 else { throw .insufficientData }
                     guard size <= capacity &- end else { throw .insufficientCapacity }
-                    let byte = unsafe input.load(fromByteOffset: position, as: UInt8.self)
+                    let byte = input.load(fromByteOffset: position, as: UInt8.self)
+                    // Unsafe: a fill of the output, which has room for it (checked above).
                     unsafe (output + end).initializeMemory(as: UInt8.self, repeating: byte, count: size)
                     position &+= 1
                     produced = size
                 case 2: // Compressed.
                     guard size <= count &- position else { throw .insufficientData }
-                    produced = try unsafe blocks.decodeCompressedBlock(
-                        input + position, count: size, into: output, at: end, limit: capacity, history: history,
-                        blockSizeMaximum: blockSizeMaximum
-                    )
+                    let output = unsafe output
+                    produced = try input.extracting(position..<(position &+ size)).withUnsafeBytes { block throws(BytesError) in
+                        // Unsafe and safe as `decodeCompressedBlock`: the block's `size` bytes (a placeholder, never
+                        // read, for an empty one), and the output up to `capacity`.
+                        try unsafe blocks.decodeCompressedBlock(
+                            block.baseAddress ?? UnsafeRawPointer(output), count: size, into: output, at: end, limit: capacity,
+                            history: history, blockSizeMaximum: blockSizeMaximum
+                        )
+                    }
                     position &+= size
                 default:
                     throw .invalidValue
@@ -197,7 +202,7 @@ public struct ZstdDecoder: ~Copyable {
             }
             if let hasher {
                 guard count &- position >= 4 else { throw .insufficientData }
-                let expected = UInt32(littleEndian: unsafe input.loadUnaligned(fromByteOffset: position, as: UInt32.self))
+                let expected = UInt32(littleEndian: input.load(fromByteOffset: position, as: UInt32.self))
                 guard UInt32(truncatingIfNeeded: hasher.digest) == expected else { throw .mismatch }
                 position &+= 4
             }

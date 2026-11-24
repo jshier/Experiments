@@ -46,13 +46,14 @@ public struct ByteBlock: Sendable {
         self.lanes3 = ByteLanes(lanes3)
     }
 
-    /// The 64 bytes at `pointer`.
-    @unsafe @inlinable @inline(__always)
-    init(loading pointer: UnsafeRawPointer) {
-        unsafe self.init(pointer.loadUnaligned(as: SIMD16<UInt8>.self),
-                         pointer.loadUnaligned(fromByteOffset: 16, as: SIMD16<UInt8>.self),
-                         pointer.loadUnaligned(fromByteOffset: 32, as: SIMD16<UInt8>.self),
-                         pointer.loadUnaligned(fromByteOffset: 48, as: SIMD16<UInt8>.self))
+    /// The 64 bytes at `offset` in `bytes`. Each load is checked; under a caller's check that the 64 bytes are inside
+    /// `bytes`, the four checks fold away.
+    @inlinable @inline(__always)
+    init(loading bytes: RawSpan, at offset: Int) {
+        self.init(bytes.load(fromByteOffset: offset, as: SIMD16<UInt8>.self),
+                  bytes.load(fromByteOffset: offset &+ 16, as: SIMD16<UInt8>.self),
+                  bytes.load(fromByteOffset: offset &+ 32, as: SIMD16<UInt8>.self),
+                  bytes.load(fromByteOffset: offset &+ 48, as: SIMD16<UInt8>.self))
     }
 
     /// The bytes that pass `test`, one bit each: byte i in bit i.
@@ -90,10 +91,9 @@ public extension RawSpan {
     /// - Precondition: `offset >= 0` and `offset + 64 <= byteCount`.
     @inlinable @inline(__always)
     func byteBlock(at offset: Int) -> ByteBlock {
-        // One range check for the block; the load is then unchecked.
+        // One range check for the block; the four loads' own checks fold into it.
         precondition(offset >= 0 && offset <= byteCount &- 64, "a 64-byte block past the span's end")
-        // Unsafe: a 64-byte load from the span's memory. Safe: the precondition puts all 64 bytes inside the span.
-        return withUnsafeBytes { unsafe ByteBlock(loading: $0.baseAddress.unsafelyUnwrapped + offset) }
+        return ByteBlock(loading: self, at: offset)
     }
 
     /// The bytes from `offset` to the end, at most 64, followed by `padding` to fill the block: for a span's last,
@@ -110,43 +110,43 @@ public extension RawSpan {
     func byteBlock(at offset: Int, padding: UInt8) -> ByteBlock {
         precondition(offset >= 0 && offset <= byteCount, "a block offset past the span's end")
         if offset <= byteCount &- 64 { return byteBlock(at: offset) }
-        let available = byteCount &- offset
-        return withUnsafeBytes { source in
-            withUnsafeTemporaryAllocation(byteCount: 64, alignment: 16) { padded in
-                // Unsafe: raw copies into and a load from the 64-byte stack buffer. Safe: `available` < 64 bytes are
-                // read from the span at `offset` (inside it by the precondition) and written at the buffer's start: every
-                // load and store below is within those bytes, the last ones overlapping the ones before.
-                let to = unsafe padded.baseAddress.unsafelyUnwrapped
-                let fill = SIMD16<UInt8>(repeating: padding)
-                for lane in 0..<4 { unsafe to.storeBytes(of: fill, toByteOffset: 16 &* lane, as: SIMD16<UInt8>.self) }
-                guard available > 0 else { return unsafe ByteBlock(loading: UnsafeRawPointer(to)) }
-                let from = unsafe source.baseAddress.unsafelyUnwrapped + offset
-                // The tail copied inline (16-, 8-, or 4-byte words, the last overlapping), not by `memcpy`: a call for a
-                // few dozen bytes cost more than the copy, on every head that ends inside its last block.
-                if available >= 16 {
-                    var index = 0
-                    while index &+ 16 <= available {
-                        unsafe to.storeBytes(of: from.loadUnaligned(fromByteOffset: index, as: SIMD16<UInt8>.self),
-                                             toByteOffset: index, as: SIMD16<UInt8>.self)
-                        index &+= 16
-                    }
-                    unsafe to.storeBytes(of: from.loadUnaligned(fromByteOffset: available &- 16, as: SIMD16<UInt8>.self),
-                                         toByteOffset: available &- 16, as: SIMD16<UInt8>.self)
-                } else if available >= 8 {
-                    unsafe to.storeBytes(of: from.loadUnaligned(as: UInt64.self), as: UInt64.self)
-                    unsafe to.storeBytes(of: from.loadUnaligned(fromByteOffset: available &- 8, as: UInt64.self),
-                                         toByteOffset: available &- 8, as: UInt64.self)
-                } else if available >= 4 {
-                    unsafe to.storeBytes(of: from.loadUnaligned(as: UInt32.self), as: UInt32.self)
-                    unsafe to.storeBytes(of: from.loadUnaligned(fromByteOffset: available &- 4, as: UInt32.self),
-                                         toByteOffset: available &- 4, as: UInt32.self)
-                } else {
-                    for index in 0..<available {
-                        unsafe to.storeBytes(of: from.load(fromByteOffset: index, as: UInt8.self), toByteOffset: index, as: UInt8.self)
-                    }
+        // Below 64 bytes (the full-block case returned above), loaded from `self` at `offset` on. `min` states the bound
+        // to the optimizer, so the stores' checks fold away.
+        let available = Swift.min(byteCount &- offset, 63)
+        var padded = InlineArray<64, UInt8>(repeating: padding)
+        if available > 0 {
+            var span = padded.mutableSpan
+            var to = span.mutableBytes
+            // The tail copied inline (16-, 8-, or 4-byte words, the last overlapping), not by `memcpy`: a call for a
+            // few dozen bytes cost more than the copy, on every head that ends inside its last block. (Written out, not
+            // as loops: LLVM turned a loop of 16-byte copies back into `memcpy`.)
+            if available >= 16 {
+                // The first word, then up to three ending at the data's end (offsets the loads' checks fold for).
+                to.storeBytes(of: load(fromByteOffset: offset, as: SIMD16<UInt8>.self), toByteOffset: 0, as: SIMD16<UInt8>.self)
+                if available >= 48 {
+                    to.storeBytes(of: load(fromByteOffset: byteCount &- 48, as: SIMD16<UInt8>.self),
+                                  toByteOffset: available &- 48, as: SIMD16<UInt8>.self)
                 }
-                return unsafe ByteBlock(loading: UnsafeRawPointer(padded.baseAddress.unsafelyUnwrapped))
+                if available >= 32 {
+                    to.storeBytes(of: load(fromByteOffset: byteCount &- 32, as: SIMD16<UInt8>.self),
+                                  toByteOffset: available &- 32, as: SIMD16<UInt8>.self)
+                }
+                to.storeBytes(of: load(fromByteOffset: byteCount &- 16, as: SIMD16<UInt8>.self),
+                              toByteOffset: available &- 16, as: SIMD16<UInt8>.self)
+            } else if available >= 8 {
+                to.storeBytes(of: load(fromByteOffset: offset, as: UInt64.self), toByteOffset: 0, as: UInt64.self)
+                to.storeBytes(of: load(fromByteOffset: byteCount &- 8, as: UInt64.self), toByteOffset: available &- 8, as: UInt64.self)
+            } else if available >= 4 {
+                to.storeBytes(of: load(fromByteOffset: offset, as: UInt32.self), toByteOffset: 0, as: UInt32.self)
+                to.storeBytes(of: load(fromByteOffset: byteCount &- 4, as: UInt32.self), toByteOffset: available &- 4, as: UInt32.self)
+            } else {
+                // 1 to 3 bytes: the first, the middle, and the last cover them.
+                to.storeBytes(of: load(fromByteOffset: offset, as: UInt8.self), toByteOffset: 0, as: UInt8.self)
+                let middle = available &>> 1
+                to.storeBytes(of: load(fromByteOffset: offset &+ middle, as: UInt8.self), toByteOffset: middle, as: UInt8.self)
+                to.storeBytes(of: load(fromByteOffset: byteCount &- 1, as: UInt8.self), toByteOffset: available &- 1, as: UInt8.self)
             }
         }
+        return ByteBlock(loading: padded.span.bytes, at: 0)
     }
 }

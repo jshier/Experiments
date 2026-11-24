@@ -261,9 +261,7 @@ import Testing
 /// `withPath` for async bodies.
 func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError) -> R) async throws(DiskError) -> R {
     let bytes = Array(path.utf8)
-    return try await bytes.withUnsafeBytesAsyncForTests { (buffer) async throws(DiskError) -> R in
-        try await body(try EntryPath(validating: RawSpan(_unsafeBytes: buffer)))
-    }
+    return try await body(try EntryPath(validating: bytes.span.bytes))
 }
 
 @Suite(.bulk, .diskLifetimes) struct ExtractionBulkTests {
