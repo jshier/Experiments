@@ -9,7 +9,7 @@ READMEs are for people; this file, its companions, and each project's `RESULTS.m
 | `Tools/README.md` | Every tool's full reference (options, edge cases, exit codes), toolchains, the two LLVMs, compiler flags, xctrace, Binary Ninja, Homebrew; the full Tests, Benchmarks, and Parallel agents rules with their numbers |
 | `LESSONS.md` | Everything investigations found, by date, with a topic index: **read the sections for your area before starting** |
 | `PROJECT/RESULTS.md`, `Writeups/` | Numbers, per project; surveys, plans, and cross-machine comparisons |
-| `~/Scratch/swift-bugs/` | Compiler bug reports (`NN-swift-…md`, `repro-NN-…/`, a zip in `attachments/`, an index row in its READMEs) |
+| `~/Scratch/swift-bugs/` | Compiler bug reports (`NN-swift-…md`, `repro-NN-…/`, a zip in `attachments/`, an index row in its READMEs); package-benchmark's in `~/Scratch/package-benchmark-bugs.noindex/`, SwiftFormat's in `~/Scratch/swiftformat-bugs.noindex/` |
 
 Add new lessons to `LESSONS.md` under a dated heading; add a rule here only when it applies to all work.
 

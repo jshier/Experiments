@@ -251,6 +251,37 @@ public struct Decompressor: ~Copyable {
         }
     }
 
+    /// Frees every format's state, as ``init()`` holds none, keeping ``format``: the next ``reset(for:)``, or
+    /// ``reset()`` for the same format (a pipeline's next message), makes the format's state again.
+    ///
+    /// Each format's decoder keeps its memory between streams so that reusing it allocates nothing. Most of that is
+    /// small, but a streaming window grows to the largest stream's (Zstandard's up to its window limit, 128 MiB by
+    /// default; raw LZMA's and xz's to a dictionary plus room) and stays at that size. Call this when the decompressor
+    /// will sit idle (an HTTP connection between messages, an app between archives) or after a stream with a large
+    /// window. Windows of 9 MiB or more (zstd's past HTTP's 8 MiB limit, xz's from `xz -5` on) go back to the system at
+    /// once; smaller allocations go back to malloc, which keeps them for the process's next allocations. Dropping the
+    /// decompressor frees the same memory.
+    ///
+    /// Making a format's state again costs about 2–44 K instructions (RESULTS.md, "Small inputs and making coders"),
+    /// plus faulting in a large window's pages as the next stream touches them.
+    ///
+    /// It discards a stream in progress; until the next reset, decoding calls throw ``BytesError/invalidValue``.
+    public mutating func releaseMemory() {
+        codec = .none
+        streamPending = false
+        deflate = nil
+        deflate64 = nil
+        brotli = nil
+        zstd = nil
+        bzip2 = nil
+        lzma = nil
+        xz = nil
+        lzma2 = nil
+        lzfse = nil
+        lzbitmap = nil
+        lzraven = nil
+    }
+
     /// Makes or resets the raw LZMA or xz streaming decoder for the current format, on the first streaming call after
     /// ``reset(for:)``.
     private mutating func startStream() throws(BytesError) {

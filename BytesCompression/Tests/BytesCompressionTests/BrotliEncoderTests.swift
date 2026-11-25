@@ -116,4 +116,52 @@ func brotliEncodeStreaming(
         let compressed = brotliEncodeAll([], quality: 5)
         #expect(googleBrotliDecompress(compressed) == .decoded([]))
     }
+
+    /// A stream whose table positions pass 2^32 (started 100,000 bytes below it, which a stream reaches after 4 GiB):
+    /// every distance is a wrapping difference, so it decodes, and compresses as a fresh encoder's does (within 1%:
+    /// empty slots read as near positions for a window's worth after the wrap, and are compared like any candidate).
+    @Test(arguments: [1, 5, 9])
+    func positionsWrapWithinAStream(quality: Int) throws {
+        let text = samples()[2].bytes
+        let base = UInt32.max - 100_000
+        #expect(Int(base) + text.count > Int(UInt32.max), "the stream wraps")
+        let fresh = brotliEncodeAll(text, quality: quality)
+
+        var encoder = BrotliEncoder(quality: quality)
+        encoder.setStreamBase(base)
+        var output = [UInt8](repeating: 0, count: BrotliEncoder.maximumCompressedSize(forByteCount: text.count))
+        let count = try output.withOutputRawSpan { span throws(BytesError) in
+            try encoder.compressAll(text.span.bytes, into: &span)
+            return span.byteCount
+        }
+        let wrapped = Array(output[..<count])
+        #expect(googleBrotliDecompress(wrapped) == .decoded(text), "Google, one call")
+        #expect(brotliDecodeAll(wrapped) == .decoded(text), "Bytes, one call")
+        #expect(Double(wrapped.count) <= Double(fresh.count) * 1.01, "\(wrapped.count) against \(fresh.count) fresh")
+
+        // Streamed, in 7,000-byte pieces through a window of 2^16: its buffer (2^16 + 256 KiB) fills and slides after
+        // 327,680 bytes, and the positions wrap 400,000 bytes in, after that slide.
+        let large = Array(samples().last!.bytes.prefix(500_000))
+        let freshStreamed = try brotliEncodeStreaming(large, quality: quality, windowBits: 16, chunk: 7000, outputChunk: 4096)
+        encoder = BrotliEncoder(quality: quality, windowBits: 16)
+        encoder.setStreamBase(UInt32.max - 400_000)
+        var streamed: [UInt8] = []
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        var offset = 0
+        while offset < large.count {
+            let end = min(offset + 7000, large.count)
+            var piece = Array(large[offset..<end])
+            while true {
+                let (progress, produced) = try buffer.withOutputRawSpan { span throws(BytesError) in
+                    try (encoder.compress(piece.span.bytes, into: &span, flush: end == large.count ? .finish : .none), span.byteCount)
+                }
+                streamed += buffer[..<produced]
+                piece.removeFirst(progress.consumed)
+                if progress.status == .finished || (progress.status == .needsInput && piece.isEmpty) { break }
+            }
+            offset = end
+        }
+        #expect(googleBrotliDecompress(streamed) == .decoded(large), "Google, streamed")
+        #expect(Double(streamed.count) <= Double(freshStreamed.count) * 1.01, "\(streamed.count) against \(freshStreamed.count) fresh")
+    }
 }

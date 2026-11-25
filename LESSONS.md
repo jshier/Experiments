@@ -23,6 +23,7 @@ Where to look:
 - The app (TCA26, SwiftUI, AppKit): "The Disk package and the Nunarchiver app", "Reviewing the Nunarchiver app".
 - Tooling, Instruments, LLDB, the Edit tool's traps: "Every zip method in Swift", "The second cleanup pass", "The
   survey's bugs", "Masked tables…".
+- Memory footprint, malloc's caching, `mmap`/`madvise`: "Giving memory back, and positions past 2^32".
 
 ## Vectorization on ARM64
 
@@ -1103,3 +1104,38 @@ NativeAEA/RESULTS.md, NativeZipArchive/Benchmarks/RESULTS.md.
   Archive Utility does. The conformance check found both; NativeAEA matched `aa extract` on all 167,541 items.
 - **Check a generator's determinism by running it twice into two directories and comparing the manifests' items**
   (the `.aar` bytes matched too; `aea` and `ditto` archives don't, by keys and stored times).
+
+## Giving memory back, and positions past 2^32 (2026-11-25)
+
+BytesCompression/RESULTS.md ("Memory given back"); probes in `~/Scratch/release-memory.noindex/`.
+
+- **Freeing a large malloc block doesn't lower the footprint.** A touched 96 MiB block, freed, stayed in
+  `ri_phys_footprint` (four of them: 385 MB), after 1.5 s and after `malloc_zone_pressure_relief` (which released 0):
+  malloc keeps freed large blocks for reuse. `munmap` of an `mmap`ed block lowers it at once. So "drop the decoder" and
+  "free the window" released nothing until BytesCompression mapped its allocations of 9 MiB or more (just above HTTP's
+  windows, which are made per message and want malloc's reuse; 16 MiB missed `xz -6`'s 12 MiB window).
+- **A test's large input may not make the large allocation**: xz records each block's size, so a 6 MiB stream with a
+  16 MiB dictionary got a 6 MiB window (under the threshold), and the footprint test failed for its premise, not the code.
+  A temporary in-process test printing the numbers found it; an exit test's `observing: [\.standardErrorContent]` gave
+  back nothing on failure here.
+- **`madvise` give-backs aren't free, and they outlive `free`.** `MADV_FREE_REUSABLE` then `MADV_FREE_REUSE` cost
+  about 220 µs per 8 MB (about 430 ns a 16 KiB page), touched or not: too much after every stream. And a block freed
+  while reusable came back from malloc with its pages still reusable (touching them didn't count toward the footprint):
+  `REUSE` before freeing, or never mix advice with malloc's memory. `RawStorage` does `REUSE` before every reuse.
+- **Measure footprint in an exit test** (`#expect(processExitsWith: .success) { … precondition(drop >= …) }`): the
+  child process runs only that body, so parallel tests can't move the number. Break the fix once: with the mapping
+  turned off, the test trapped (`DecompressorTests.releaseMemoryGivesALargeWindowBack`).
+- **A hand-made zstd frame is the cheapest large window**: no content size, window descriptor exponent 15 (32 MiB),
+  then 300 RLE blocks of 128 KiB: nine bytes of header and 4 bytes a block, decoded with `memset`s even in debug.
+- **Check whether a wrap is a bug before "fixing" it.** Brotli's encoder keeps table positions as `UInt32`, and every
+  comparison is a wrapping difference (`absolute &- entry`): exact for anything a window apart, and an aliased stale
+  entry still names a position inside the window whose bytes are compared. A libzstd-style correction was written and
+  reverted (it only added code to the hot path); a hook that starts positions just below 2^32 and a 4.5 GiB bulk stream
+  test the wrap instead.
+- **A Homebrew upgrade can break builds and benchmarks that link it.** zstd 1.5.7 → 1.6.0 left SwiftPM's `CZstd-*.pcm`
+  stale ("file … has been modified since the module file … was built": delete the `.pcm`s under
+  `.build/out/Intermediates.noindex/SwiftExplicitPrecompiledModules/`), and every benchmark building the libzstd reference
+  trapped on its `ZSTD_versionNumber() == 10507` precondition. A crash report in `~/Library/Logs/DiagnosticReports/`
+  names the failing frame when package-benchmark only says "error code [5]". Pin what the comparison needs (identical
+  frames, checked per setup), not a version: 1.6.0 made the same frames with 2–18% fewer instructions, which is worth
+  knowing rather than refusing to measure. Keep the reference's *inputs* fixed (cached frames) so its versions compare.

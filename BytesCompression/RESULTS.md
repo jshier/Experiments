@@ -8,6 +8,86 @@ Until 2026-11-23 this was the `BytesCompression` module of the Bytes package: it
 `RESULTS-lzraven.md`, `LZRAVEN-FORMAT.md`). The `CompressionBenchmarks` baselines saved in Bytes before the move are
 here too (`.benchmarkBaselines/CompressionBenchmarks/`), under their old names.
 
+## 2026-11-25: Memory given back; positions past 2^32 (survey bugs 4 and 5; baselines `relmem-before` → `relmem-after`)
+
+From `Writeups/Bytes-Survey-2026-11-24.md`: a reused `Decompressor` never gave memory back (a 96 MiB zstd stream raised
+the footprint 131 → 227 MB, and it stayed after a reset to gzip and after dropping the decoder), and Brotli's encoder
+positions wrap past 4 GiB in one stream, untested, as was gzip's length past 2^32. M1 Max, one agent; instruction counts
+judge the rows.
+
+**Why the memory stayed** (probes in `~/Scratch/release-memory.noindex/`, phys_footprint from `proc_pid_rusage`): malloc
+keeps a freed large block for its next allocation, still counted. A touched 96 MiB block freed: 97 MB stayed, after 1.5 s
+too, and `malloc_zone_pressure_relief` released 0; four freed blocks, 385 MB stayed. `munmap` of a mapped block dropped
+it at once. Giving pages back with `madvise` instead was rejected: `MADV_FREE_REUSABLE` + `MADV_FREE_REUSE` cost
+~220 µs per 8 MB (touched or not), and a block freed while reusable came back from malloc with uncounted, discardable
+pages.
+
+**The change.**
+- `CodecMemory` (Workspace.swift): `CodecWorkspace` and `GrowableWorkspace` allocations of **9 MiB or more are mapped**
+  (`mmap`, zero-filled, `munmap` on free); smaller ones stay with malloc. The threshold keeps HTTP's windows (RFC 9659's
+  8 MiB plus a 128 KiB block, made per message) and every codec's tables (bzip2's 7.8 MB is the largest) on malloc's
+  reuse; mapped are the windows of large dictionaries: zstd's past 8 MiB (up to its 128 MiB limit), raw LZMA's and xz's
+  from `xz -5`/`-6`'s 12 MiB (an xz stream that states its size gets a window of that size). Dropping a decoder now gives
+  such a window back. (First 16 MiB; the review measured an `xz -6` stream's 12 MiB window giving back nothing, so it
+  came down to just above HTTP's.) Mapped memory isn't counted by package-benchmark's malloc gates and reads as zeros under
+  `MallocScribble`.
+- `Decompressor.releaseMemory()`: drops every format's state, keeping `format`; the next `reset(for:)` or `reset()` makes
+  it again (5–44 K instructions a format, the "new coder" rows). For holders that sit idle or just decoded a large stream.
+  `ChunkedDecompressor.releaseMemory()` forwards and drops its staged input (keeping its two chunk buffers). No client
+  calls it yet: NativeZip's decoder slots live for one extraction run (and now give their windows back at its end), HTTP's
+  windows are below the threshold.
+- Not done: giving a window back automatically at a stream's end (an `madvise` round trip per large stream, or a
+  re-mapping and re-faulting of the next one: ~0.8 µs per 16 KiB page, ~5% of decoding that much zstd); `Compressor` has
+  no `releaseMemory` yet (its zstd window is a `GrowableWorkspace` too, so a large one is mapped and goes back when the
+  encoder is dropped).
+
+**Tests.** `DecompressorTests.releaseMemoryGivesALargeWindowBack`, an exit test (its own process, so parallel tests don't
+move the number): a hand-made zstd frame (no content size, 32 MiB window, 300 RLE blocks) streamed; `releaseMemory()`
+must drop the footprint by at least 24 MiB, and so must dropping the decompressor after a second decode; then an xz
+stream of 12 MiB of zeros (16 MiB dictionary, so a 12 MiB window) must give back at least 8 MiB. Broken once each way:
+with the threshold out of reach the zstd check failed, and with 16 MiB the xz check did. `releaseMemoryForgetsEveryFormat`
+(every format whole and streamed after a release, `reset()` remaking the kept format; decoding before a reset throws
+`invalidValue`), `StreamEndTests.releaseMemoryBetweenAndWithinStreams` (staged and borrowed, mid-stream; after a release
+nothing is staged and `nextChunk` throws until a stream starts).
+
+**Review** (an adversarial agent, probes in `~/Scratch/release-memory-review.noindex/`): no defect in the product code
+(sizes match on every allocate/free path, the LZMA window exchange included; no call after a release crashes; the Brotli
+wrap claim holds, candidates staying inside the buffer through slides and parallel chunks). Fixed from it: the 16 MiB
+threshold (above); the streamed half of the Brotli wrap test never slid (200 KB fit the 320 KiB buffer: now 500 KB, the
+wrap after the first slide); the release tests would have passed with an empty `ChunkedDecompressor.releaseMemory()`
+(now checked), and no test guarded an LZMA/xz window (now the xz case); `streamBase`'s doc on empty slots was exact only
+for the one-entry table.
+
+**Brotli's positions.** Read first, then tested: the wrap is harmless. Table positions are `UInt32`, and every comparison
+of two is a wrapping difference (`absolute &- entry`), exact for anything a window apart; an entry 2^32 or more back
+aliases to a nearer position, but every candidate is a position in the window whose bytes are compared before use (as for
+any stale entry), and one position in 2^32 is stored as 0 (read as empty). A libzstd-style correction (moving the
+stream's positions down mid-stream) was written and reverted: it changed nothing the tests could see and added code to
+the parse. Instead: `BrotliEncoder.setStreamBase(_:)` (package) starts a stream 100,000 bytes below 2^32;
+`BrotliEncoderTests.positionsWrapWithinAStream` (qualities 1, 5, 9, one call and streamed through a 2^16 window) decodes
+with Google's decoder and ours, within 1% of a fresh encoder's size.
+
+**Long streams** (`LongStreamBulkTests`, release, `BULK_TESTS=1`): 4.5 GiB encoded and decoded a megabyte at a time,
+checked byte for byte: Brotli quality 1 (positions wrap 4 GiB in) and gzip level 1 (the trailer's ISIZE is the length
+modulo 2^32, checked against the stream's last four bytes, and the decoder accepts it). 11.6 s for both, in parallel.
+
+**Rows** (`../Tools/bench-table . --metric Instructions relmem-before relmem-after`, then `relmem-after-9mib` for the
+LZMA, xz, zstd, and coder rows after the threshold came down): every Brotli encode row, parallel Brotli, Brotli pipelines,
+zstd and LZMA/xz decode rows (streamed and whole; `xz -6`'s 12 MiB windows now mapped), and the reused-coder rows:
+unchanged in instructions (the largest moves, ±2.5%, are on rows under 5 K instructions), LZMA/xz wall times equal or
+0–6% lower. Every malloc gate stays 0. One row moves: **"New coder per 64 B stream: LZMADecoder (raw, streamed)"
+36 K → 129 K instructions, 3.5 → 11 µs**: a raw stream of unknown size gets a 12 MiB window, now mapped and unmapped
+for each new decoder where malloc reused its cached block. Paid only by a client making a decoder per stream of unknown
+size with a large dictionary; NativeZip keeps one per slot and states each entry's size, AEA decodes LZMA whole.
+
+**Environment, found on the way:** Homebrew upgraded zstd 1.5.7 → 1.6.0. The `CZstd` precompiled modules were stale
+(removed), and every benchmark building `LibZstdEncoder` trapped on its `ZSTD_versionNumber() == 10507` precondition (the
+four `Allocations:Zstd_encode*` gates and the libzstd encode rows), so those rows were left out of both baselines. Then
+the pin went: the rows' real guard is the setup's byte-for-byte frame check, which passes on 1.6.0. Every zstd row
+measured again (baseline `zstd160`): the same frames, libzstd 2–18% fewer instructions for them, ours unchanged, the four
+allocation gates 0. Details: `Benchmarks/RESULTS-zstd-encoder.md`, "libzstd 1.6.0". Decode fixtures stay the cached 1.5.7
+frames (`ZstdFixtures.cacheKey`; new ones are named for the libzstd that makes them).
+
 ## 2026-11-24, E2: masked tables, one file of word loads, docs, the public surface (fix plan D9, D10's rest, D11; baselines `fix-E2-before` → `fix-E2-after`)
 
 M1 Max, the only agent running; the "before" baselines of three packages were saved at once, so their times ran under

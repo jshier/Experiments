@@ -108,6 +108,52 @@ import Testing
         }
     }
 
+    /// `releaseMemory()` after a stream, and in the middle of one (its staged input a third in): the decoders' state and
+    /// the staged input go, and the next stream, staged or borrowed, decodes from its start.
+    @Test(arguments: Kind.allCases)
+    func releaseMemoryBetweenAndWithinStreams(_ kind: Kind) throws {
+        let a = try kind.compress(Self.first)
+        var chunks = ChunkedDecompressor()
+        #expect(try Self.decodeStaged(&chunks, a, kind.format, cuts: [a.count / 2]) == Self.first)
+        chunks.releaseMemory()
+        // Started again, then left a third in.
+        chunks.stageInput()
+        try chunks.start(kind.format, decodedSize: nil)
+        _ = try chunks.fillInput { span in
+            let count = min(a.count / 3, span.byteCount)
+            span.withUnsafeMutableBytes { target in
+                a.withUnsafeBytes { unsafe target.copyMemory(from: UnsafeRawBufferPointer(rebasing: $0[..<count])) }
+            }
+            return count
+        }
+        _ = try unsafe chunks.nextChunk(into: 0)
+        chunks.releaseMemory()
+        // The staged input is gone, and so is the decoder: nothing decodes until a stream starts.
+        #expect(unsafe chunks.pendingInput.isEmpty)
+        #expect(throws: BytesError.invalidValue) { _ = try unsafe chunks.nextChunk(into: 1) }
+        #expect(try Self.decodeStaged(&chunks, a, kind.format, cuts: [a.count / 3]) == Self.first)
+        chunks.releaseMemory()
+        // Borrowed input after a release.
+        try a.withUnsafeBytes { input in
+            unsafe chunks.borrowInput(input)
+            try chunks.start(kind.format, decodedSize: nil)
+            var output: [UInt8] = []
+            var target = 0
+            loop: while true {
+                switch try unsafe chunks.nextChunk(into: target) {
+                case let .chunk(bytes, finished):
+                    output.append(copying: unsafe RawSpan(_unsafeBytes: bytes))
+                    if finished { break loop }
+                    target ^= 1
+                case .needsInput:
+                    Issue.record("\(kind): borrowed input asked for more")
+                    break loop
+                }
+            }
+            #expect(output == Self.first)
+        }
+    }
+
     /// Decodes `stream` through staged input, in pieces ending at `cuts` (then the rest), alternating buffers.
     static func decodeStaged(
         _ chunks: inout ChunkedDecompressor, _ stream: [UInt8], _ format: DecompressionFormat, cuts: [Int]

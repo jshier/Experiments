@@ -10,6 +10,9 @@ with Xcode 27.3 (Swift 6.4.4). Numbers are instruction counts (static from `objd
 parallel). Fewer instructions can be slower: every performance item below needs cycles measured before it lands.
 **Verified by the lead** marks claims re-checked independently; the rest are the agents' probes or readings.
 
+**Status, 2026-11-25:** bugs 4 and 5 are done (BytesCompression/RESULTS.md, "Memory given back"). What's still open
+from this survey and the ones before it, checked against the code, is in `Open-Items-2026-11-25.md`.
+
 ## Bugs and correctness gaps (do first)
 
 1. **Extraction onto exFAT and FAT32 fails at the first hard link.** *Verified by the lead:* an `aa archive` of a tree

@@ -65,6 +65,13 @@ public struct BrotliEncoder: ~Copyable {
         flushed = false
     }
 
+    /// Starts the next stream's table positions at `base + 1`: tests start a stream just below 2^32 so its positions
+    /// wrap within it (`BrotliMatcher.streamBase` says why that's harmless), which would otherwise take 4 GiB of input.
+    /// Call on a new or reset encoder.
+    package mutating func setStreamBase(_ base: UInt32) {
+        engine.setStreamBase(base)
+    }
+
     /// An upper bound on the compressed size of `byteCount` bytes, for one ``compressAll(_:into:)`` call:
     /// the input in uncompressed meta-blocks, with their headers.
     ///
@@ -408,6 +415,12 @@ struct BrotliEngine: ~Copyable {
         matcher.prime(buffer, from: start, to: min(end, buffer.byteCount &- BrotliMatcher.margin(single: matcher.blockBits == 0)), origin: origin, &buckets, &counts, &tags)
     }
 
+    /// Starts the next stream's table positions at `base + 1`: tests start a stream just below 2^32 so its positions
+    /// wrap within it, which would otherwise take 4 GiB of input. Call on a new or reset engine.
+    mutating func setStreamBase(_ base: UInt32) {
+        matcher.streamBase = base
+    }
+
     /// Forgets the last distances, for a stream that continues another engine's: the decoder's are then
     /// unknown here. Each becomes a distance beyond any window, which no match equals or comes within 3 of,
     /// so no command refers to one until this engine's own distances have replaced it, and the stream decodes
@@ -442,6 +455,14 @@ struct BrotliMatcher {
     let windowSize: Int
     /// The absolute position of the current stream's byte 0: streams follow each other in the table's
     /// position space, so older streams' entries are out of every window and the table needn't be cleared.
+    ///
+    /// Positions are `UInt32`s, and a stream past 4 GiB wraps them. Every comparison of two is a wrapping difference
+    /// (`absolute &- entry`), which is the exact distance for anything a window apart, so the wrap is harmless: an
+    /// entry 2^32 or more back reads as a nearer position, but every candidate is a position in the window whose bytes
+    /// are compared before it's used (as for any stale entry). In the one-entry table (qualities 1 and 2) one position
+    /// in 2^32 is stored as 0 and read as empty; in buckets, empty slots that the tag path reaches read as near
+    /// positions for a window's worth after the wrap, and are compared like the rest. Tests:
+    /// `BrotliEncoderTests.positionsWrapWithinAStream` (from just below 2^32), and a 4.5 GiB stream in the bulk set.
     var streamBase: UInt32 = 0
     /// The last four distances, the most recent first.
     var distanceCache: InlineArray<4, Int> = [4, 11, 15, 16]

@@ -5,12 +5,13 @@ import BytesTestSupport
 import CZstd
 import Foundation
 
-// Zstandard decoding: Bytes' `ZstdDecoder` against libzstd 1.5.7 (Homebrew), single-threaded, on Silesia files
-// compressed by the `zstd` CLI at levels 1, 3, and 19 (and `--long=27 -19`), and on 1–64 KB inputs. Frames have
-// checksums, as the CLI writes them, and both decoders verify them.
+// Zstandard decoding: Bytes' `ZstdDecoder` against Homebrew's libzstd (1.5.7 until 2026-11-25, 1.6.0 since),
+// single-threaded, on Silesia files compressed by the `zstd` CLI at levels 1, 3, and 19 (and `--long=27 -19`), and on
+// 1–64 KB inputs. Frames have checksums, as the CLI writes them, and both decoders verify them.
 //
 // Fixtures are cached in the corpus directory under the names the CLI's output was saved with
-// (`dickens-10192446.zstd-1.5.7-19`); when missing they're made with libzstd's API and the CLI's settings.
+// (`dickens-10192446.zstd-1.5.7-19`), kept across libzstd versions (`ZstdFixtures.cacheKey`); when missing they're made
+// with the installed libzstd's API and the CLI's settings, named for its version.
 
 /// libzstd's decoder, its context reused across iterations as `ZstdDecoder` is.
 final class LibZstd {
@@ -60,6 +61,15 @@ final class LibZstd {
 
 enum ZstdFixtures {
     static let files = ["dickens", "mozilla", "xml", "x-ray", "samba"]
+
+    /// The cache name of a fixture libzstd compresses: the 1.5.7 one the rows were first measured on, when the cache has
+    /// it, so the decode rows' inputs stay fixed while Homebrew's libzstd changes (and the libzstd rows compare its
+    /// versions on the same frames); otherwise one named for the installed libzstd, which then makes it.
+    static func cacheKey(_ stem: String, _ variant: String) -> String {
+        let first = "\(stem).zstd-1.5.7-\(variant)"
+        if FileManager.default.fileExists(atPath: Fixtures.corpusRoot.appending(path: "cache").appending(path: first).path) { return first }
+        return "\(stem).zstd-\(String(cString: ZSTD_versionString()))-\(variant)"
+    }
 
     /// `zstd -LEVEL` (or `zstd --long=27 -LEVEL`) of `data`: checksum on, content size stated.
     static func compress(_ data: [UInt8], level: Int32, long: Bool = false) -> [UInt8] {
@@ -125,7 +135,7 @@ func registerZstdBenchmarks() {
         if name == "mozilla" { variants.append(("long=27 L19", "long27-19", 19, true)) }
         for variant in variants {
             let fixture = Lazy {
-                let compressed = Fixtures.cached("\(name)-\(sample.byteCount).zstd-1.5.7-\(variant.key)") {
+                let compressed = Fixtures.cached(ZstdFixtures.cacheKey("\(name)-\(sample.byteCount)", variant.key)) {
                     ZstdFixtures.compress(sample.bytes, level: variant.level, long: variant.long)
                 }
                 return DecodeFixture(original: sample.bytes, compressed: compressed, outputCount: sample.byteCount + 64, decoder: ZstdDecoder())
@@ -171,7 +181,7 @@ func registerZstdBenchmarks() {
             // Level 19's sequences differ from level 3's; one size shows it.
             for level: Int32 in kilobytes == 4 ? [3, 19] : [3] {
                 let fixture = Lazy {
-                    let compressed = Fixtures.cached("small/\(name)-\(kilobytes)k.zstd-1.5.7-\(level)") {
+                    let compressed = Fixtures.cached(ZstdFixtures.cacheKey("small/\(name)-\(kilobytes)k", "\(level)")) {
                         ZstdFixtures.compress(content.bytes, level: level)
                     }
                     return DecodeFixture(original: content.bytes, compressed: compressed, outputCount: content.byteCount + 64, decoder: ZstdDecoder())

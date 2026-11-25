@@ -186,9 +186,44 @@ The random row is the one where Bytes is clearly behind in the suite (+21% instr
 stored raw, copied into the staging buffer and then out (libzstd copies once, into the destination). Not measured
 apart; see "Not done".
 
+### libzstd 1.6.0 (2026-11-25, baseline `zstd160`; M1 Max, one agent)
+
+Homebrew moved libzstd from 1.5.7 to 1.6.0. **The frames are the same:** every `Zstd encode` row's setup compares our
+frame with libzstd's byte for byte, and all of them passed on 1.6.0 (levels 1–4, the HTTP window, the bodies, random);
+the 378 default tests, whose encoder tests compare frames too, pass. So the port stays exact, and libzstd's own work
+per byte is what moved: **2–18% fewer instructions** for the same frames. Ours is unchanged (the `Bytes` rows match
+`fix-E2-after`'s to 0.1%), so the instruction gap widened:
+
+| Benchmark | Bytes | libzstd 1.5.7 (`r2-zstd-encode`) | libzstd 1.6.0 | 1.6.0 change | Bytes ÷ 1.6.0 |
+|---|---:|---:|---:|---:|---:|
+| L1 dickens (9.7 MB) | 354 M | 319 M | 296 M | −7.2% | 1.20 |
+| L3 dickens | 379 M | 348 M | 340 M | −2.3% | 1.11 |
+| L1 mozilla (48.8 MB) | 1,286 M | 1,169 M | 1,083 M | −7.4% | 1.19 |
+| L3 mozilla | 1,574 M | 1,464 M | 1,387 M | −5.3% | 1.13 |
+| L1 x-ray (8.1 MB) | 130 M | 152 M | 124 M | −18.4% | 1.05 |
+| L3 x-ray | 512 M | 472 M | 438 M | −7.2% | 1.17 |
+| L1 xml (5.1 MB) | 68 M | 61 M | 58 M | −4.9% | 1.17 |
+| L1 Main.js (3.8 MB) | 83 M | 75 M | 71 M | −5.3% | 1.17 |
+| L1 body Main.js 1 KB | 46,000 | 53,000 | 49,000 | −7.5% | 0.94 |
+| L1 body dickens 64 KB | 2,247,000 | 2,169,000 | 2,010,000 | −7.3% | 1.12 |
+| L3 random (1.0 MB): raw blocks | 1,932,000 | 1,622,000 | 1,561,000 | −3.8% | 1.24 |
+
+Every libzstd encode row is 2–10.5% lower but x-ray level 1 (−18.4%, nearly all literals: its Huffman stage). In one
+run (`zstd160`, wall times p50), Bytes is now 2–9% behind libzstd on dickens, mozilla, and x-ray (L1 dickens 25.0
+against 23.0 ms, L1 mozilla 90 against 84, L1 x-ray 12 against 11, L3 dickens 45 against 43, L3 mozilla 134 against
+131, L3 x-ray 42 against 40), level with it on xml and Main.js (L1 xml 6.02 against 5.92, L3 xml 7.47 against 7.44, L1
+Main.js 7.72 against 7.48) and ahead at L3 Main.js (9.39 against 10.0), where against 1.5.7 it was within ±3% on most. The decoder side moved the same way (`fix-B-bc-after` → `zstd160`, libzstd's own
+decode rows): −0.5 to −4.4% instructions on most rows, x-ray −18.8% (level 1) and −8.4% (level 3), small inputs −2 to
+−12.5%, and wall times unchanged within the runs' spread. Bytes' decoder is still faster on every large file (L19 dickens
+7.75 against 8.59 ms, L1 mozilla 41 against 43).
+
+What to read next: libzstd 1.6.0's changes to `ZSTD_compressBlock_fast`/`doubleFast`, the Huffman encoder (x-ray), and
+`ZSTD_decompressSequences`, against ours (the port follows 1.5.7's source; its comments name the files). The decode fixtures
+stay the cached 1.5.7 frames (`ZstdFixtures.cacheKey`), so these rows keep comparing libzstd versions on the same input.
+
 ### Targets
 
-- Ratio within 2% of libzstd: **identical frames** at levels 1–4 (0.0%).
+- Ratio within 2% of libzstd: **identical frames** at levels 1–4 (0.0%), on 1.5.7 and 1.6.0.
 - Cycles within 15% at levels 1 and 3: **−14% to +5.4%** on every row (one call); parity within ±3% on most.
 - 0 mallocs after setup: the four gates pass.
 - Instructions remain **+7.5 to +11%** on large inputs (x-ray level 1: −14%): see "The gap that's left".

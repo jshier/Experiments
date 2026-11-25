@@ -4,11 +4,23 @@ import BytesReferenceCodecs
 import BytesTestSupport
 import CLZMA
 import Compression
+import Darwin
 import Testing
 
 // `Decompressor`: every format through one decoder, reset between them (the codecs' own tests cover their streams'
 // edges). Whole buffers with and without a stated size, streams in pieces, DEFLATE after history, the errors of the
-// wrong mode, and raw LZMA and xz taking turns with one window.
+// wrong mode, raw LZMA and xz taking turns with one window, and memory given back.
+
+/// The process's physical footprint in bytes (what Activity Monitor's Memory column shows).
+func physicalFootprint() -> Int {
+    var info = rusage_info_v4()
+    let result = withUnsafeMutablePointer(to: &info) { pointer in
+        // Unsafe: `proc_pid_rusage` writes a `rusage_info_v4` into `info`, which is one.
+        unsafe pointer.withMemoryRebound(to: rusage_info_t?.self, capacity: 1) { unsafe proc_pid_rusage(getpid(), RUSAGE_INFO_V4, $0) }
+    }
+    precondition(result == 0, "proc_pid_rusage")
+    return Int(info.ri_phys_footprint)
+}
 
 @Suite struct DecompressorTests {
     /// 200 KB of text: every encoder here takes it, and LZMA's and xz's windows matter at this size.
@@ -374,6 +386,114 @@ import Testing
         }
         // A preset dictionary is still zlib's header (the decoder refuses it).
         #expect(DeflateFormat(zlibOrRaw: [UInt8]([0x78, 0xBB]).span.bytes) == .zlib)
+    }
+
+    /// `releaseMemory()` frees every format's state and keeps the format: decoding throws until a reset, and then
+    /// every format decodes again, whole and streamed (`reset()` remaking the kept format, as a pipeline's next message
+    /// does). A stream in progress is discarded.
+    @Test func releaseMemoryForgetsEveryFormat() throws {
+        var decompressor = Decompressor()
+        for (format, stream, data) in Self.encodings {
+            // Its state made and used, then a stream left half decoded where it can be.
+            let first = Self.decodeAll(stream, format: format, decodedSize: data.count, capacity: data.count, with: &decompressor)
+            #expect(first.map(\.output) == .success(data), "\(format)")
+            var output = [UInt8](repeating: 0, count: 4096)
+            if format.isStreamable {
+                try decompressor.reset(for: format)
+                _ = try output.withOutputRawSpan { span throws(BytesError) in
+                    try decompressor.decompress(stream.span.bytes.extracting(0..<(stream.count / 2)), into: &span)
+                }
+            }
+            decompressor.releaseMemory()
+            let kept = decompressor.format, finished = decompressor.isFinished
+            #expect(kept == format && !finished, "\(format)")
+            #expect(throws: BytesError.invalidValue, "\(format)") {
+                _ = try output.withOutputRawSpan { span throws(BytesError) in try decompressor.decompressAll(stream.span.bytes, into: &span) }
+            }
+            if format.isStreamable {
+                #expect(throws: BytesError.invalidValue, "\(format)") {
+                    _ = try output.withOutputRawSpan { span throws(BytesError) in try decompressor.decompress(stream.span.bytes, into: &span) }
+                }
+                decompressor.reset()
+                let concatenated = if case .xz = format { true } else { format == .zstd() }
+                let split = if case .xz = format { [70_000, 3] } else { [7, 19, 1000] } // xz: at least a unit's worth
+                let streamed = streamDecode(stream, outputChunk: 4096, split: split, concatenated: concatenated) { input, output throws(BytesError) in
+                    try decompressor.decompress(input, into: &output)
+                }
+                #expect((try? streamed.get())?.output == data, "\(format), streamed after reset()")
+            }
+            let again = Self.decodeAll(stream, format: format, decodedSize: data.count, capacity: data.count, with: &decompressor)
+            #expect(again.map(\.output) == .success(data), "\(format), whole after reset(for:)")
+        }
+    }
+
+    /// A Zstandard frame that makes a streaming decoder reserve and touch a 32 MiB window: no content size, window log
+    /// 25, and 300 RLE blocks of 128 KiB of `0xAB` (37.5 MiB; tiny to decode, even in a debug build).
+    static func largeWindowFrame() -> (frame: [UInt8], decodedCount: Int) {
+        // Magic; frame header descriptor 0 (no content size, not single-segment); window descriptor exponent 15.
+        var frame: [UInt8] = [0x28, 0xB5, 0x2F, 0xFD, 0x00, 15 << 3]
+        let blocks = 300
+        for index in 0..<blocks {
+            let header = UInt32(index == blocks - 1 ? 1 : 0) | 1 << 1 | UInt32(128 << 10) << 3 // last, RLE, size
+            frame += [UInt8(truncatingIfNeeded: header), UInt8(truncatingIfNeeded: header >> 8), UInt8(truncatingIfNeeded: header >> 16), 0xAB]
+        }
+        return (frame, blocks * (128 << 10))
+    }
+
+    /// Streams `frame` through `decompressor` in 1 MiB pieces of output, checking every byte is `0xAB`.
+    static func streamLargeWindowFrame(_ frame: [UInt8], decodedCount: Int, with decompressor: inout Decompressor) throws(BytesError) {
+        try decompressor.reset(for: .zstd())
+        var output = [UInt8](repeating: 0, count: 1 << 20)
+        var consumed = 0
+        var produced = 0
+        while true {
+            let progress = try output.withOutputRawSpan { span throws(BytesError) in
+                try decompressor.decompress(frame.span.bytes.extracting(consumed...), into: &span)
+            }
+            consumed += progress.consumed
+            precondition(output[..<progress.produced].allSatisfy { $0 == 0xAB }, "the frame's bytes")
+            produced += progress.produced
+            if progress.status == .finished { break }
+        }
+        precondition(produced == decodedCount && consumed == frame.count, "the whole frame")
+    }
+
+    /// `releaseMemory()` gives a large window back to the system: the footprint falls by most of the 32 MiB zstd window
+    /// the frame touched, and so it does when the decompressor is dropped; and by most of an xz stream's 12 MiB window.
+    /// (malloc kept a freed window of any size in the footprint; windows of 9 MiB or more are mapped now.) In a
+    /// process of its own, so other tests' memory doesn't move the measurement; the frame decodes the same after the
+    /// release.
+    @Test func releaseMemoryGivesALargeWindowBack() async {
+        await #expect(processExitsWith: .success) {
+            let (frame, decodedCount) = DecompressorTests.largeWindowFrame()
+            var decompressor = Decompressor()
+            try! DecompressorTests.streamLargeWindowFrame(frame, decodedCount: decodedCount, with: &decompressor)
+            let held = physicalFootprint()
+            decompressor.releaseMemory()
+            let released = physicalFootprint()
+            precondition(held - released >= 24 << 20, "releaseMemory gave back \(held - released) bytes")
+            // Again after the release, then dropped.
+            try! DecompressorTests.streamLargeWindowFrame(frame, decodedCount: decodedCount, with: &decompressor)
+            let heldAgain = physicalFootprint()
+            _ = consume decompressor
+            let dropped = physicalFootprint()
+            precondition(heldAgain - dropped >= 24 << 20, "dropping the decompressor gave back \(heldAgain - dropped) bytes")
+
+            // xz with a 16 MiB dictionary over 12 MiB of zeros: the block headers state the size, so the window is
+            // 12 MiB (mapped), all of it touched.
+            let zeros = [UInt8](repeating: 0, count: 12 << 20)
+            let xz = xzCompress(zeros, options: lzmaOptions(preset: 0, dictionary: 16 << 20))
+            var decoder = Decompressor()
+            try! decoder.reset(for: .xz())
+            let streamed = try! streamDecode(xz, outputChunk: 1 << 20, split: nil, concatenated: true) { input, output throws(BytesError) in
+                try decoder.decompress(input, into: &output)
+            }.get()
+            precondition(streamed.output == zeros, "the xz stream's bytes")
+            let heldXZ = physicalFootprint()
+            decoder.releaseMemory()
+            let releasedXZ = physicalFootprint()
+            precondition(heldXZ - releasedXZ >= 8 << 20, "releaseMemory gave back \(heldXZ - releasedXZ) bytes of xz's window")
+        }
     }
 
     /// The decoder as a pipeline stage: `.finish` with the whole stream, and with it cut short (which never

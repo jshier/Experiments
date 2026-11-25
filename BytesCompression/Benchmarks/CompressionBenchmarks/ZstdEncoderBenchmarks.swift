@@ -4,18 +4,19 @@ import BytesCompression
 import BytesTestSupport
 import CZstd
 
-// Zstandard encoding: Bytes' `ZstdEncoder` against libzstd 1.5.7 (Homebrew; `ZSTD_versionNumber()` 10507) with the
-// same parameters set one by one (`ZSTD_c_strategy`, `ZSTD_c_windowLog`, `ZSTD_c_hashLog`, `ZSTD_c_chainLog`,
-// `ZSTD_c_searchLog`, `ZSTD_c_minMatch`, `ZSTD_c_targetLength`), so libzstd's tables for small inputs don't apply
-// (both still shrink the window and tables to a known content size, as libzstd always does). Both reuse their state
-// across iterations. Each setup checks the frames are identical, byte for byte. Results: RESULTS-zstd-encoder.md.
+// Zstandard encoding: Bytes' `ZstdEncoder` against Homebrew's libzstd (ported from 1.5.7; measured on 1.5.7 until
+// 2026-11-25, 1.6.0 since) with the same parameters set one by one (`ZSTD_c_strategy`, `ZSTD_c_windowLog`,
+// `ZSTD_c_hashLog`, `ZSTD_c_chainLog`, `ZSTD_c_searchLog`, `ZSTD_c_minMatch`, `ZSTD_c_targetLength`), so libzstd's tables
+// for small inputs don't apply (both still shrink the window and tables to a known content size, as libzstd always
+// does). Both reuse their state across iterations. Each setup checks the frames are identical, byte for byte: that, not
+// the version, is what the rows need, and a libzstd whose frames differ stops the run there (`wrong result`), saying
+// which. `ZSTD_versionString()` names the version measured; record it with the results. Results: RESULTS-zstd-encoder.md.
 
 /// libzstd's encoder, its context reused, parameters set explicitly.
 final class LibZstdEncoder {
     private let context = ZSTD_createCCtx()!
 
     init(parameters: ZstdEncoder.Parameters, checksum: Bool = false) {
-        precondition(ZSTD_versionNumber() == 10507, "the results are for libzstd 1.5.7")
         let settings: [(ZSTD_cParameter, Int32)] = [
             (ZSTD_c_strategy, Int32(parameters.strategy.rawValue)), (ZSTD_c_windowLog, Int32(parameters.windowLog)),
             (ZSTD_c_hashLog, Int32(parameters.hashLog)), (ZSTD_c_chainLog, Int32(parameters.chainLog)), (ZSTD_c_searchLog, 1),

@@ -202,6 +202,24 @@ public struct ChunkedDecompressor: ~Copyable {
         if isStaged { staging!.consume(count) } else { consumed &+= count }
     }
 
+    /// Frees every format's decoder state and the staged input's buffer, as ``Decompressor/releaseMemory()`` does: for
+    /// a decompressor that will sit idle, or after a stream with a large window. Keeps its two chunk buffers. It
+    /// discards a stream in progress and any input; set input and call ``start(_:decodedSize:)`` before decoding again.
+    public mutating func releaseMemory() {
+        decompressor.releaseMemory()
+        staging = nil
+        stagingSize = 0
+        isStaged = false
+        unsafe input = UnsafeRawBufferPointer(start: nil, count: 0)
+        consumed = 0
+        inputEnded = true
+        format = nil
+        atTentativeEnd = false
+        mode = .stream
+        lastEnd = 0
+        openBuffer = -1
+    }
+
     // MARK: Decoding
 
     /// Starts decoding a stream of `format` from the input (borrowed or staged, set first).
