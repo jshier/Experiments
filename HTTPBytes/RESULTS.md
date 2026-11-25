@@ -6,6 +6,139 @@ M1 Max (8 performance and 2 efficiency cores), macOS 27.2, Swift 6.4 (Xcode 27.3
 HTTP/3 traffic as HTTP/1 heads: 401 requests, 580 B average; 383 responses, 953 B average). References: picohttpparser
 (dd573d8) and llhttp (release 9.4.4), built -O3 with NDEBUG from `Tools/test-data fetch picohttpparser llhttp`.
 
+## 2026-11-24, E2: the dynamic table's ring on `MaskedTable`; docs (fix plan D9, D10; baselines `fix-E2-before` → `fix-E2-d9-http` → `fix-E2-after`)
+
+`Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D9: Bytes' `MaskedTable` (Bytes/Benchmarks/RESULTS.md, "E2"), tried on
+HPACK's and QPACK's tables, kept where the rows stayed flat.
+
+- **Kept: the dynamic table's ring of entries** (`DynamicFieldTable.entries`, a `MaskedTable<DynamicFieldTableEntry>`;
+  `entryMask` is its mask). `entry(at:)`, `entry(number:)`, and `insert`'s store index by insertion number with no
+  `unsafe` and no hand mask, and the table frees one allocation fewer. Every HPACK and QPACK row, decoders and encoders:
+  0.00% (one −0.09%).
+- **Tried and reverted: the encoders' index** (`DynamicFieldIndex`). Six tables, one per array: HPACK encode +0.5 to
+  +0.8%, QPACK encode +0.35 to +0.58% (each array's mask its own load, where one shared `bucketMask` and one `slot`
+  served all six). One table of per-slot structs and one of interleaved field and name buckets: HPACK encode −0.4 to
+  −0.6%, QPACK encode +0.17 to +0.36%. Not flat, so the index stays on its pointers. QPACK's history isn't a fit either
+  (its live mask is smaller than its allocation and changes with the capacity), nor the static entries (62 and 99
+  slots, not a power of two).
+- So the four coders stay `@unchecked Sendable`: the byte store, the index, the static entries, and QPACK's section
+  arrays are still raw allocations.
+- Break check: with `entry(number:)` reading `number + 1`, HPACKExampleTests (17 issues), QPACKExampleTests (83), and
+  QPACKRoundTripTests (11) fail.
+
+D10: `HTTPContentEncoder.init`'s doc states the levels as they run (DEFLATE 0 stores, Brotli 0 runs as 1, levels above a
+coding's highest run as it); `reset()`'s doc and the carry buffer's comment were already right (A3 and D10's first part).
+
+## 2026-11-24, E1: a decoder's limit is its own error (fix plan D3; baselines `fix-E1-before` → `fix-E1-after`)
+
+`Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D3 (review §3.7). `ContentDecodingStage` told zstd's window limit
+(RFC 9659's 8 MB) from a full output by looking at the output after the decoder threw `insufficientCapacity`: room
+left meant the limit (`tooLarge`), none meant `outOfRoom`. BytesCompression's decoders now throw
+`BytesError.limitExceeded` for the limits a caller sets (a window, a dictionary, a maximum size), and the stage maps the
+errors by case: `limitExceeded` → `tooLarge`, `insufficientCapacity` → `outOfRoom`, the rest `malformed`.
+`ContentCodingReviewTests.zstdWindowOverTheLimit` still reads `tooLarge` (with `limitExceeded` not mapped, it fails).
+
+Instructions and mallocs: BytesCompression's E1 also made decoders cheaper to make (BytesCompression/RESULTS.md),
+which the decoders made per body show: `Body 1 MB text, gzip, whole: HTTPBytes content decoder` 4,735 K → 4,694 K
+(−0.9%), the chunked forms −0.8%, `br` 23 M → 22 M (−4.3%, three significant digits); zstd and the encoders equal;
+mallocs unchanged (an intermediate version with the DEFLATE window allocated on first use made one more per body, and
+was dropped).
+
+## 2026-11-24, later: the content codings' decoding knowledge in BytesCompression (fix plan D5; baselines `fix-D-before` → `fix-D-after`)
+
+`Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D5 (review §3.9). What `ContentDecodingStage` knew about the codecs
+moved to BytesCompression, where the other containers' mappings are:
+
+- **`deflate`'s container**, zlib or raw DEFLATE (which some servers send under the name), is decided by
+  `DeflateFormat(zlibOrRaw:)` from the first two bytes: the same rules as the sniff it replaces (method 8, a window of
+  at most 32 KiB, a multiple of 31), shared with the DEFLATE decoder's zlib header check.
+- **Whether a stream's end may be followed by another** (gzip members, zstd frames) is
+  `DecompressionFormat.allowsConcatenation`, not a second list of codings here (`continuesAfterEnd` asks the format).
+- **The coding-to-format mapping is one property**, `HTTPContentCoding.decompressionFormat` (`nil` for identity and for
+  `deflate` until its bytes decide), used by the stage's reset; its untyped `do`/`catch` became `do throws(BytesError)`.
+- **gzip's and deflate's bodies share one DEFLATE decoder**: `Decompressor` keeps one for raw, zlib, and gzip
+  (`DeflateDecoder.reset(format:)`), 184 KiB each, so a connection that decodes both no longer holds two or three.
+
+Test: `resetForEachBody` decodes gzip, zlib, raw-under-`deflate`, Brotli, and stacked bodies in turn through one
+decoder, each first cut short, so every switch between DEFLATE's containers goes through the shared decoder mid-stream.
+
+Instructions and mallocs: every payload row the same (the gzip body decoder −0.1%, within its spread); the zero-malloc
+gates still zero.
+
+| Benchmark | `fix-D-before` | `fix-D-after` | Change |
+|---|---:|---:|---:|
+| Body 1 MB text, gzip, whole: HTTPBytes content decoder | 4,735 K | 4,735 K | 0.0% |
+| Body 1 MB text, gzip, chunked in 4 KB: HTTPBytes chunked → content decoder | 5,218 K | 5,218 K | 0.0% |
+| Body 1 MB text, gzip, chunked in 4 KB: HTTPBytes body decoder (one stage) | 5,235 K | 5,231 K | −0.1% |
+| Body 1 MB text, br, whole: HTTPBytes content decoder | 23.0 M | 23.0 M | 0.0% |
+| Body 1 MB text, zstd, whole: HTTPBytes content decoder | 10.0 M | 10.0 M | 0.0% |
+
+## 2026-11-24: A small body per message (baselines `fix-C-before` → `fix-C-after`)
+
+A new row, `Body 1.6 KB JSON, encoded gzip (level 6), per message: HTTPBytes content encoder, reused`: an API's 1.6 KB
+JSON response (BytesCompression's benchmarks' "JSON (1.6 KB)", made the same way) gzip-coded through one
+`HTTPContentEncoder` reset per message, one message an iteration. Small bodies are where the encoder's per-stream setup
+shows: BytesCompression's fix plan C2 (DEFLATE's reset clears only the tables a level reads, 64 bytes a store;
+BytesCompression/RESULTS.md, 2026-11-24) took it from 207 K to 183 K instructions a message (−11.6%), with no
+allocations before or after. The 1 MB rows are unchanged (gzip 138 M, br 182 M, zstd 26 M instructions). The library's
+sources didn't change.
+
+## 2026-11-24: `:status` below 100, HPACK's skipped literals in a loop, ranges read once (baselines `fix-B-http-before` → `fix-B-http-after`)
+
+Items of `Writeups/BytesCompression-Fix-Plan-2026-11-23.md` (B8), from the review of the unified compression package:
+
+- **`:status` 000–099 refused.** HTTP/2 and HTTP/3 field validation accepted any three digits, while `HTTPStatus(code:)`
+  reads 100–999: a client could take `000` for an interim response, and a proxy could forward `HTTP/1.1 000`. The first
+  digit must be 1–9 (`FieldValidationTests`).
+- **HPACK skips too-large literals in a loop.** Past the header list limit, each further literal too large for the
+  scratch was skipped by a recursive call (`literal(continuing:)` → `decodeNext` → `literal`), one frame per literal:
+  with both limits 0, a 1 MiB block of them (55,000 literals) overflowed a test's stack (signal 10 with the recursion
+  put back). Now `literal` returns an internal `skipped` status and `decodeNext` goes on in its loop
+  (`HardeningTests.manySkippedLiteralsDontRecurse`). HPACK decode rows: −0.6 to −0.9% instructions (1,906 K → 1,893 K
+  for 383 responses); encode unchanged.
+- **`HTTPRangeSet.resolve` reads the field once.** It swept the set by re-reading the field for every range it wrote
+  and every time one grew (about 500 times an 8 KB field's length). Now the satisfiable ranges go into an
+  `InlineArray<256, Range<Int>>` on the stack as they're read, kept sorted by insertion (at most 256), then one sweep
+  merges them into the caller's storage, which still only has to hold the answer (`RangeTests.largestSets`: 256 ranges
+  in descending order, merged and not; one more ignored; the random comparison with a plain sort-and-merge at every
+  storage size passes unchanged).
+
+All 62 tests pass (4 known issues, as before).
+
+## 2026-11-23, latest: zstd through `Decompressor`; the fills; the input-conversion sweep (baselines `stage3-before` → `stage3-after`)
+
+**zstd bodies through BytesCompression's `Decompressor`.** `DecompressionFormat.zstd` now carries a window limit
+(`.zstd(maximumWindowSize:)`, BytesCompression/RESULTS.md stage 3), so `ContentDecodingStage` dropped its own
+`ZstdDecoder?` and resets its one `Decompressor` for `.zstd(maximumWindowSize: 8 << 20)` (RFC 9659 §3); every coding
+now decodes through it. New rows, added before `stage3-before`: "Body 1 MB text, zstd, whole: HTTPBytes content decoder"
+(a decoder per body), the same with a decoder reset per body ("reused"), and the gate `Allocations:Body_zstd_reused`.
+
+| Row | before | after |
+|---|---:|---:|
+| Body 1 MB text, zstd, whole: content decoder (made per body) | 10.0 M instr., 4 mallocs | 10.0 M, 4 |
+| … reused (reset per body) | 10.0 M, 0 mallocs | 10.0 M, 0 |
+| `Allocations:Body_zstd_reused` | 0 | 0 |
+| Body rows gzip (whole, chunked, one stage), br; encode rows; every HPACK/QPACK row | | equal (within ±0.1%, references ±0.8%) |
+
+Equal at bench-table's resolution: the dispatch is one `switch` per call, about 16 calls per 1 MB body (64 KB of output
+each). The 16 MiB-window frame is still `tooLarge` (`ContentCodingTests`), now refused by `Decompressor`.
+
+**The non-zero fills** (the follow-ups' §2: `DynamicFieldIndex`'s -1 buckets, `StaticFieldEntries`' `noIndex`): nothing to
+convert. -1 in an `Int` and `0xFF` in a `UInt8` are byte splats, and LLVM already makes them `memset` calls:
+`Tools/calls … 'DynamicFieldIndex.init|StaticFieldEntries.init'` shows `_memset` (2 and 1), and `Tools/loops` finds no fill
+loop in either, in `HPACKEncoder.init`, or `reset`. Only multi-byte patterns that aren't splats (LZMA's `0x0400`) were
+filled an element at a time. The rest of HTTPBytes' `repeating:` uses are `SIMD16` splats or small `InlineArray`s.
+
+**The input-conversion sweep, HTTPBytes** (every checked conversion and checked arithmetic on peer input: prefix integers,
+QUIC varints, QPACK's Required Insert Count and Base, HTTP/2 and HTTP/3 frame lengths and settings, Content-Length, chunk
+sizes, ranges, dates, Structured Field numbers, cache directives): no reachable trap. Prefix integers stop at 5 bytes
+(HPACK, then `<= UInt32.max`) or 62 bits (QPACK); QPACK's `encoded <= fullRange` comes before the division (MaxEntries 0
+can't divide by zero) and its Base arithmetic is wrapping, then range-checked; Content-Length and chunk sizes are bounded by
+digit count before multiplying; ranges and delta-seconds saturate. Not conversions, reported for later: `HTTPRangeSet.resolve`
+re-parses the value per output range (a 64 KiB `Range` of 256 zero-padded ranges: about 500 full parses, CPU, not measured);
+HPACK's literal path recurses once per oversized Huffman literal after the list limit is exceeded (bounded by the 1 MiB field
+block buffer; a loop would remove it); HTTP/2 and HTTP/3 `:status` accept `000`–`099` (HTTP/1 requires a first digit of 1–9).
+
 ## 2026-11-23, later: safe forms where they're free (baselines `safe-http-before`, `safe-http-after-1`…`-5`, `safe-http-after`)
 
 The library survey's unsafe audit (Writeups/Library-Survey-2026-11-23.md, "Unsafe code") marked about 220 of HTTPBytes'

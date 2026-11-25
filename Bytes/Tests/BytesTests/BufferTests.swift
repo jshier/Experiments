@@ -69,7 +69,7 @@ import Testing
         #expect(result == prefix + source)
     }
 
-    @Test func withFreeCapacityCountsOnlyWhatIsReported() throws {
+    @Test func withFreeCapacityCountsOnlyWhatIsReported() {
         var buffer = [UInt8](repeating: 0, count: 16)
         let (produced, result) = buffer.withOutputRawSpan { output in
             output.append(1)
@@ -206,7 +206,9 @@ import Testing
         let lent = unsafe raw.withLentBytes { bytes in
             DispatchQueue.concurrentPerform(iterations: 4) { lane in
                 let quarter = unsafe UnsafeMutableRawBufferPointer(rebasing: bytes.buffer[(lane * 1_024)..<((lane + 1) * 1_024)])
-                for index in quarter.indices { unsafe quarter[index] = unsafe quarter[index] &* 3 &+ UInt8(lane) }
+                for index in quarter.indices {
+                    unsafe quarter[index] = unsafe quarter[index] &* 3 &+ UInt8(lane)
+                }
             }
             return unsafe bytes.buffer.count
         }

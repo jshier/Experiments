@@ -50,20 +50,20 @@ import Foundation
             case .alertDismissed:
                 if !state.alerts.isEmpty { state.alerts.removeFirst() }
 
-            case .archivesOpened(let archives):
+            case let .archivesOpened(archives):
                 for archive in archives {
                     state.expansions.append(Expansion.State(id: uuid(), archive: archive))
                 }
 
-            case .expansions(let id, .expansionFinished(let outcome)):
+            case let .expansions(id, .expansionFinished(outcome)):
                 guard let index = state.expansions.firstIndex(where: { $0.id == id }) else { return }
                 let archive = state.expansions.remove(at: index).archive
                 switch outcome {
-                case .expanded(let item):
+                case let .expanded(item):
                     store.addTask {
                         if workspace.revealsExpandedItems { await workspace.reveal(item) }
                     }
-                case .failed(let message):
+                case let .failed(message):
                     state.alerts.append(FailureAlert(id: uuid(), archive: archive, message: message))
                 case .cancelled:
                     break
@@ -82,7 +82,9 @@ import Foundation
             case .quitRequested:
                 // Each expansion's own trigger: nothing is sent on a row's behalf.
                 store.addTask {
-                    for expansion in store.expansions { try expansion.cancel() }
+                    for expansion in store.expansions {
+                        try expansion.cancel()
+                    }
                 }
             }
         }
@@ -93,29 +95,31 @@ import Foundation
         // modify empty features of their own: on the `forEach` above they cancelled and restarted every expansion when
         // the window appeared.
         Update { _, _ in }
-        .onMount(id: store.expansions.isEmpty) { state in
-            guard !state.expansions.isEmpty else {
-                state.isProgressWindowVisible = false
-                return
-            }
-            guard !state.isProgressWindowVisible else { return }
-            store.addTask {
-                try await clock.sleep(for: Self.windowDelay)
-                try store.modify { $0.isProgressWindowVisible = true }
-            }
-        }
-        Update { _, _ in }
-        .onMount(id: store.isProgressWindowVisible) { state in
-            guard state.isProgressWindowVisible else { return }
-            store.addTask {
-                // NB: As in TCA26's examples, the timer goes through `AnyClock`.
-                let clock = AnyClock(self.clock)
-                try pollProgress()
-                for await _ in clock.timer(interval: Self.pollInterval) {
-                    try pollProgress()
+            .onMount(id: store.expansions.isEmpty) { state in
+                guard !state.expansions.isEmpty else {
+                    state.isProgressWindowVisible = false
+                    return
+                }
+                guard !state.isProgressWindowVisible else { return }
+                store.addTask {
+                    try await clock.sleep(for: Self.windowDelay)
+                    try store.modify { $0.isProgressWindowVisible = true }
                 }
             }
-        }
+        Update { _, _ in }
+            .onMount(id: store.isProgressWindowVisible) { state in
+                guard state.isProgressWindowVisible else { return }
+                store.addTask {
+                    // NB: As in TCA26's examples, the timer goes through `AnyClock`.
+                    // (`self.` is needed: `AnyClock(clock)` doesn't type-check, and SwiftFormat's redundantSelf would drop it.)
+                    // swiftformat:disable:next redundantSelf
+                    let clock = AnyClock(self.clock)
+                    try pollProgress()
+                    for await _ in clock.timer(interval: Self.pollInterval) {
+                        try pollProgress()
+                    }
+                }
+            }
     }
 
     /// Reads every running expansion's counters: its progress, and one more sample of its bytes for the throughput (a

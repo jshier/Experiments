@@ -66,16 +66,16 @@ extension AEAKeys {
         case .signed:
             return mainKey(prologue, input: prologue.keyMaterial.span.bytes, salt: salt, signing: signing)
         case .symmetric, .symmetricSigned:
-            guard case .symmetric(let key) = decryptionKey else { throw .missingKey("a symmetric key") }
+            guard case let .symmetric(key) = decryptionKey else { throw .missingKey("a symmetric key") }
             guard key.count == 32 else { throw .missingKey("a 32-byte symmetric key (this one has \(key.count))") }
             return mainKey(prologue, input: key.span.bytes, salt: salt, signing: signing)
         case .ecdhe, .ecdheSigned:
-            guard case .recipientPrivateKey(let scalar) = decryptionKey else { throw .missingKey("the recipient's private key") }
+            guard case let .recipientPrivateKey(scalar) = decryptionKey else { throw .missingKey("the recipient's private key") }
             // HKDF(ECDH x-coordinate, salt, info … | ephemeral public | recipient public | signing public).
             let (secret, recipient) = try ecdh(scalar, ephemeralPublicKey: prologue.keyMaterial)
             return mainKey(prologue, input: secret.span.bytes, salt: salt, sender: prologue.keyMaterial, recipient: recipient, signing: signing)
         case .scrypt:
-            guard case .password(let password) = decryptionKey else { throw .missingKey("a password") }
+            guard case let .password(password) = decryptionKey else { throw .missingKey("a password") }
             // The salt extends to 64 bytes: the first half salts scrypt, the second the main key's HKDF.
             var extended = InlineArray<64, UInt8>(repeating: 0)
             var extendedSpan = extended.mutableSpan

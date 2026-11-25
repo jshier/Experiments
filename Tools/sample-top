@@ -7,49 +7,78 @@
 #        Tools/sample-top [--top N] --file SAMPLE.txt
 #
 #   --seconds N   how long to sample (default 3)
-#   --delay N     seconds to wait after launching before sampling, past startup (default 1)
+#   --delay N     seconds to wait after launching before sampling, past startup (default 1; decimals allowed)
 #   --top N       functions per thread (default 12)
-#   --keep FILE   keep sample's report
+#   --keep FILE   keep sample's report (a new file)
 #
 # Output, per thread with samples, busiest first, tab-separated: thread, samples, share of the thread's
 # samples, function (in module). Waiting in the kernel (workq, mach_msg, kevent, condition variables) is one
 # "(waiting)" line per thread, so busy threads stand out. A launched program must run past
-# --delay + --seconds; make the workload long enough (or loop it).
+# --delay + --seconds; make the workload long enough (or loop it). It runs as PROGRAM-debuggable (get-task-allow),
+# in a process group of its own, standard input /dev/null, and is stopped (TERM, then KILL after 5 s) once sampling
+# ends, so a long workload costs only the time sampled. A --pid process is left running. `sample` itself is
+# stopped 30 s past --seconds (it can wait on an authorization prompt to attach).
 #
 # For counter-level detail (cycles, front-end vs back-end stalls) use Tools/counters; for instruction-level
 # hot spots, Instruments' Time Profiler (xctrace record --template 'Time Profiler').
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
-seconds=3 delay=1 top=12 keep= pid= file=
+seconds=3 delay=1 top=12 keep='' pid='' file=''
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --seconds) seconds="$2"; shift ;;
-        --delay) delay="$2"; shift ;;
-        --top) top="$2"; shift ;;
-        --keep) keep="$2"; shift ;;
-        --pid) pid="$2"; shift ;;
-        --file) file="$2"; shift ;;
+        --seconds) need_value "$@"; need_number "$1" "$2"; seconds="$2"; shift ;;
+        --delay) need_value "$@"; need_decimal "$1" "$2"; delay="$2"; shift ;;
+        --top) need_value "$@"; need_number "$1" "$2"; top="$2"; shift ;;
+        --keep) need_value "$@"; keep="$2"; shift ;;
+        --pid) need_value "$@"; need_number "$1" "$2"; pid="$2"; shift ;;
+        --file) need_value "$@"; file="$2"; shift ;;
         -h|--help) usage ;;
         --) shift; break ;;
         *) die "unknown option $1" ;;
     esac
     shift
 done
+need_xcode_tools
+(( seconds > 0 )) || die "--seconds needs at least 1"
 scratch_dir
 if [[ -z "$file" ]]; then
+    if [[ -n "$keep" ]]; then
+        [[ ! -e "$keep" && ! -L "$keep" ]] || die "--keep $keep exists: refusing to replace it"
+        [[ -d "$(dirname "$keep")" ]] || die "no directory $(dirname "$keep") for --keep"
+    fi
     file="${keep:-$SCRATCH/sample.txt}"
+    launched='' started=''
     if [[ -z "$pid" ]]; then
         [[ $# -ge 1 ]] || usage 2
         program="$(debuggable "$1")"; shift
-        "$program" "$@" > "$SCRATCH/program.log" 2>&1 &
-        pid=$!
-        sleep "$delay"
+        perl -e 'setpgrp(0, 0); exec { $ARGV[0] } @ARGV or die "can\x27t run $ARGV[0]: $!\n"' "$program" "$@" \
+            > "$SCRATCH/program.log" 2>&1 < /dev/null &
+        pid=$! launched=1
+        started="$(process_start "$pid")"
+        # However the tool ends (a signal during with_timeout is raised again here), the program is stopped.
+        trap 'if [[ -n "$launched" ]]; then stop_group "$pid" "$started"; fi; rm -rf "$SCRATCH"' EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
+        trap 'exit 129' HUP
+        trap 'exit 131' QUIT
+        # (A pause a Ctrl-\ can't turn into a crash report, and that a signal ends at once.)
+        _wt_pause "$delay"
     fi
-    kill -0 "$pid" 2>/dev/null || die "process $pid isn't running (did it finish before sampling started?)"
-    sample "$pid" "$seconds" -mayDie -file "$file" > /dev/null 2>&1 || true
-    [[ -n "${!:-}" ]] && wait "$pid" 2>/dev/null || true
+    if ! kill -0 "$pid" 2>/dev/null; then
+        [[ -z "$launched" ]] || { tail -5 "$SCRATCH/program.log" >&2; wait "$pid" 2>/dev/null || true; }
+        die "process $pid isn't running (did it finish before sampling started?)"
+    fi
+    status=0
+    with_timeout $((seconds + 30)) sample "$pid" "$seconds" -mayDie -file "$file" > "$SCRATCH/sample.log" 2>&1 < /dev/null ||
+        status=$?
+    if [[ -n "$launched" ]]; then
+        stop_group "$pid" "$started"
+        wait "$pid" 2>/dev/null || true
+        launched=
+    fi
+    [[ $status != 124 ]] || fail "sample didn't finish in $((seconds + 30)) s and was stopped ($AUTH_HINT)"
 fi
-[[ -s "$file" ]] || die "no sample report"
+[[ -s "$file" ]] || { [[ ! -s "$SCRATCH/sample.log" ]] || tail -3 "$SCRATCH/sample.log" >&2; die "no sample report"; }
 
 # The call graph: each line is "<tree marks><count> <frame>  (in <module>) …", nested by indentation. A frame's
 # self samples are its count minus its children's.

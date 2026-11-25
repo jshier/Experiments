@@ -181,7 +181,9 @@ public struct TLSRecordProtection: Sendable {
         sequence &+= 1
         // The inner plaintext: content, then the type, then zero padding.
         var end = encryptedLength
-        while end > 0 && plaintext.bytes.load(fromByteOffset: end &- 1, as: UInt8.self) == 0 { end &-= 1 }
+        while end > 0 && plaintext.bytes.load(fromByteOffset: end &- 1, as: UInt8.self) == 0 {
+            end &-= 1
+        }
         guard end > 0, let type = TLSContentType(rawValue: plaintext.bytes.load(fromByteOffset: end &- 1, as: UInt8.self)),
               type != .changeCipherSpec else {
             throw .unexpectedMessage
@@ -283,8 +285,8 @@ public struct TLSRecordSealer: ~Copyable {
         _ content: RawSpan, type: TLSContentType, padding: Int, protection: inout TLSRecordProtection, into buffer: inout ByteBuffer
     ) throws(TLSAlert) {
         let size = TLSRecord.size(content: content.byteCount, padding: padding)
-        try buffer.fill { (output) throws(TLSAlert) in
-            try output.withFreeCapacity(byteCount: size) { (span, written) throws(TLSAlert) in
+        try buffer.fill { output throws(TLSAlert) in
+            try output.withFreeCapacity(byteCount: size) { span, written throws(TLSAlert) in
                 written = try protection.seal(content, type: type, padding: padding, into: &span)
             }
         }
@@ -348,7 +350,8 @@ extension TLSRecordSealer: ResettableByteTransform {
                         // Several full records at once, each sealed straight into its place in the output.
                         let batch = min(
                             available / count, output.freeCapacity / size,
-                            Int(clamping: protection.recordLimit &- 1 &- min(protection.sequence, protection.recordLimit &- 1)))
+                            Int(clamping: protection.recordLimit &- 1 &- min(protection.sequence, protection.recordLimit &- 1))
+                        )
                         if batch >= Self.minimumParallelRecords {
                             let bytes = input.extracting(consumed..<(consumed &+ batch &* count))
                             let (padding, lanes) = (padding, sealingLanes)
@@ -366,7 +369,7 @@ extension TLSRecordSealer: ResettableByteTransform {
                         // Straight into the output.
                         let bytes = input.extracting(consumed..<(consumed &+ count))
                         let padding = padding
-                        try output.withFreeCapacity(byteCount: size) { (span, written) throws(TLSAlert) in
+                        try output.withFreeCapacity(byteCount: size) { span, written throws(TLSAlert) in
                             written = try protection.seal(bytes, type: .applicationData, padding: padding, into: &span)
                         }
                         consumed &+= count
@@ -527,7 +530,7 @@ extension TLSRecordOpener: ResettableByteTransform {
                     return TransformProgress(consumed: consumed, produced: produced, status: .needsOutput)
                 }
                 // Opened in the output's free capacity; only authenticated application data is kept.
-                let (contentType, count) = try output.withFreeCapacity(byteCount: encryptedLength) { (span, written) throws(TLSAlert) in
+                let (contentType, count) = try output.withFreeCapacity(byteCount: encryptedLength) { span, written throws(TLSAlert) in
                     let opened = try protection.open(header: headerBytes, body: body, into: &span)
                     written = opened.type == .applicationData ? opened.count : 0
                     if opened.type == .alert {
@@ -537,8 +540,10 @@ extension TLSRecordOpener: ResettableByteTransform {
                         receivedAlert = true
                         alert = received
                     } else if opened.type == .handshake {
-                        guard opened.count > 0 else { throw TLSAlert.unexpectedMessage }
-                        try handleHandshake(span.bytes.extracting(first: opened.count))
+                        // (Through a local: SwiftFormat's isEmpty rule rewrites a tuple's `count > 0`.)
+                        let handshakeLength = opened.count
+                        guard handshakeLength > 0 else { throw TLSAlert.unexpectedMessage }
+                        try handleHandshake(span.bytes.extracting(first: handshakeLength))
                     }
                     return opened
                 }

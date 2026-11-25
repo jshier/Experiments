@@ -1,7 +1,7 @@
+@testable import NativeAEA
 import BytesCrypto
 import BytesTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -68,8 +68,8 @@ import Testing
         let encapsulated = sender.encapsulatedKey
         // Foundation's Base64 here: an encoder independent of the library's decoder.
         let response = """
-            {"enc-request": "\(Data(encapsulated).base64EncodedString())", "wrapped-key": "\(Data(wrapped).base64EncodedString())"}
-            """
+        {"enc-request": "\(Data(encapsulated).base64EncodedString())", "wrapped-key": "\(Data(wrapped).base64EncodedString())"}
+        """
         let responseFile = directory.path("response.json")
         try Data(response.utf8).write(to: responseFile)
         let keyURL = "https://example.com/keys/the-key.pem"
@@ -91,7 +91,7 @@ import Testing
         #expect(request.encapsulatedKey == encapsulated)
         #expect(request.wrappedKey == wrapped)
         let key = try WKMS.key(request, privateKeyPEM: recipient.pemRepresentation)
-        guard case .symmetric(let opened) = key else {
+        guard case let .symmetric(opened) = key else {
             Issue.record("not a symmetric key: \(key)")
             return
         }
@@ -101,14 +101,14 @@ import Testing
         defer { archive.close() }
         let output = directory.path("image.dmg.out")
         try await archive.decrypt(to: FilePath(output.path))
-        #expect(Array(try Data(contentsOf: output)) == contents)
+        #expect(try Array(Data(contentsOf: output)) == contents)
 
         // A wrong private key doesn't open the request.
         #expect(throws: AEAError.self) { _ = try WKMS.key(request, privateKeyPEM: P256.PrivateKey().pemRepresentation) }
     }
 
     /// Malformed responses in the auth data are the archive's error, not a crash or a silent `nil`.
-    @Test func rejectsAMalformedResponse() async throws {
+    @Test func rejectsAMalformedResponse() throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let input = directory.path("image.dmg")

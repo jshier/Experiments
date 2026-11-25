@@ -16,7 +16,7 @@ extension ArchiveKind {
             kind = try ArchiveKind(detecting: archive)
         } catch {
             // Disk's call and `errno`, with the archive's own path (the alert names the file, not Disk's path).
-            if case .disk(.system(let call, _, let code)) = error { throw .failure(.system(call: call, path: archive, code: code.rawValue)) }
+            if case let .disk(.system(call, _, code)) = error { throw .failure(.system(call: call, path: archive, code: code.rawValue)) }
             throw .appleArchive(error)
         }
         guard let kind else { throw .failure(.unrecognizedFormat(archive.lastComponent?.string ?? archive.string)) }
@@ -33,11 +33,11 @@ extension ArchiveKind {
             let (zip, password) = try ZipAdapter.open(archive, credentials: credentials)
             return .zip(zip, password: password)
         case .appleEncryptedArchive:
-            return .appleEncryptedArchive(try AppleArchiveAdapter.openEncryptedArchive(archive, credentials: credentials))
+            return try .appleEncryptedArchive(AppleArchiveAdapter.openEncryptedArchive(archive, credentials: credentials))
         case .appleArchive:
-            return .appleArchive(try AppleArchiveAdapter.openArchive(archive))
+            return try .appleArchive(AppleArchiveAdapter.openArchive(archive))
         case .xip:
-            return .xip(try AppleArchiveAdapter.openXIP(archive))
+            return try .xip(AppleArchiveAdapter.openXIP(archive))
         }
     }
 }
@@ -55,11 +55,11 @@ enum OpenedArchive: Sendable {
         switch self {
         case let .zip(zip, password):
             try await ZipAdapter.extract(zip, password: password, into: staging, progress: progress)
-        case .appleEncryptedArchive(let archive):
+        case let .appleEncryptedArchive(archive):
             try await Self.apple { () async throws(AEAError) in try await archive.extract(into: staging, options: options) }
-        case .appleArchive(let archive):
+        case let .appleArchive(archive):
             try await Self.apple { () async throws(AEAError) in try await archive.extract(into: staging, options: options) }
-        case .xip(let archive):
+        case let .xip(archive):
             try await Self.apple { () async throws(AEAError) in try await archive.extract(into: staging, options: options) }
         }
     }
@@ -78,9 +78,9 @@ enum OpenedArchive: Sendable {
     func close() {
         switch self {
         case .zip: break
-        case .appleEncryptedArchive(let archive): archive.close()
-        case .appleArchive(let archive): archive.close()
-        case .xip(let archive): archive.close()
+        case let .appleEncryptedArchive(archive): archive.close()
+        case let .appleArchive(archive): archive.close()
+        case let .xip(archive): archive.close()
         }
     }
 }

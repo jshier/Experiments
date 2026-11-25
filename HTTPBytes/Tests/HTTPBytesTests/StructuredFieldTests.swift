@@ -22,7 +22,7 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
     @Test func itemViews() throws {
         let field = sfBytes(#"  "a \"quoted\" \\ string";q=0.5;x;n=-42  "#)
         let item = try HTTPStructuredItem(parsing: field.span.bytes)
-        guard case .string(let string) = item.bareItem else { Issue.record("not a string"); return }
+        guard case let .string(string) = item.bareItem else { Issue.record("not a string"); return }
         let isEscaped = string.isEscaped, count = string.byteCount, value = String(string)
         #expect(isEscaped)
         let noUnescaped = string.unescapedBytes == nil
@@ -37,15 +37,15 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
         let parameters = item.parameters
         let hasParameters = !parameters.isEmpty
         #expect(hasParameters)
-        if case .decimal(let q)? = parameters.value(forKey: sfBytes("q").span.bytes) {
+        if case let .decimal(q)? = parameters.value(forKey: sfBytes("q").span.bytes) {
             #expect(q.thousandths == 500)
             #expect(q.doubleValue == 0.5)
             #expect(q.description == "0.5")
         } else {
             Issue.record("no q")
         }
-        if case .boolean(let x)? = parameters.value(forKey: sfBytes("x").span.bytes) { #expect(x) } else { Issue.record("no x") }
-        if case .integer(let n)? = parameters.value(forKey: sfBytes("n").span.bytes) { #expect(n == -42) } else { Issue.record("no n") }
+        if case let .boolean(x)? = parameters.value(forKey: sfBytes("x").span.bytes) { #expect(x) } else { Issue.record("no x") }
+        if case let .integer(n)? = parameters.value(forKey: sfBytes("n").span.bytes) { #expect(n == -42) } else { Issue.record("no n") }
         let missing = parameters.value(forKey: sfBytes("z").span.bytes) == nil
         #expect(missing)
     }
@@ -53,16 +53,16 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
     @Test func byteSequencesAndDisplayStrings() throws {
         let field = sfBytes(#"(:aGVsbG8=: :aGVsbG8: %"f%c3%bc%c3%bc" %"plain")"#)
         var list = HTTPStructuredList(field.span.bytes)
-        guard case .innerList(var inner)? = try list.next() else { Issue.record("no inner list"); return }
+        guard case var .innerList(inner)? = try list.next() else { Issue.record("no inner list"); return }
         var decoded: [String] = []
         while let item = inner.next() {
             switch item.bareItem {
-            case .byteSequence(let bytes):
+            case let .byteSequence(bytes):
                 let isBase64 = bytes.isBase64, count = bytes.byteCount
                 #expect(isBase64 && count == 5)
                 let output = try [UInt8](alignedByteCapacity: bytes.byteCount) { (writer) throws(BytesError) in try bytes.write(to: &writer) }
                 decoded.append(String(decoding: output, as: UTF8.self))
-            case .displayString(let text):
+            case let .displayString(text):
                 decoded.append(String(text))
                 if text.isPercentEncoded {
                     let noUTF8 = text.utf8 == nil
@@ -85,7 +85,7 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
     /// Decoding into a writer without room throws and writes nothing.
     @Test func decodingNeedsRoom() throws {
         let item = try HTTPStructuredItem(parsing: sfBytes(":aGVsbG8=:").span.bytes)
-        guard case .byteSequence(let bytes) = item.bareItem else { Issue.record("not bytes"); return }
+        guard case let .byteSequence(bytes) = item.bareItem else { Issue.record("not bytes"); return }
         var output = [UInt8](repeating: 0, count: 4)
         var span = output.mutableSpan
         var writer = AlignedBytesWriter(&span)
@@ -98,7 +98,7 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
         let joined = sfBytes("a=1, b=2;x, a=3" + "c=(1 2)")
         let all = joined.span.bytes
         var dictionary = HTTPStructuredDictionary(all.extracting(0..<15))
-        guard case .item(let a)? = try dictionary.lastValue(forKey: sfBytes("a").span.bytes), case .integer(3) = a.bareItem else {
+        guard case let .item(a)? = try dictionary.lastValue(forKey: sfBytes("a").span.bytes), case .integer(3) = a.bareItem else {
             Issue.record("a isn't 3")
             return
         }
@@ -167,7 +167,7 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
     @Test func encoder() throws {
         let key = sfBytes("key"), token = sfBytes("text/html"), text = sfBytes(#"say "hi" \o/"#), binary: [UInt8] = [0xFF, 0x00, 0x10]
         let display = "naïve 100%"
-        let output = try sfWritten { (writer) throws(HTTPStructuredFieldError) in
+        let output = try sfWritten { writer throws(HTTPStructuredFieldError) in
             try HTTPStructuredFieldEncoder.writeBareItem(.token(token.span.bytes), to: &writer)
             try HTTPStructuredFieldEncoder.writeParameter(key: key.span.bytes, value: .boolean(true), to: &writer)
             try HTTPStructuredFieldEncoder.writeParameter(key: key.span.bytes, value: .boolean(false), to: &writer)
@@ -185,7 +185,7 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
         #expect(output == #"text/html;key;key=?0, "say \"hi\" \\o/", (:/wAQ: %"na%c3%afve 100%25" @-1)"#)
 
         let bad = sfBytes("Key"), badToken = sfBytes("1abc")
-        let empty = try sfWritten { (writer) throws(HTTPStructuredFieldError) in
+        let empty = try sfWritten { writer throws(HTTPStructuredFieldError) in
             #expect(throws: HTTPStructuredFieldError.invalidKey) {
                 try HTTPStructuredFieldEncoder.writeParameter(key: bad.span.bytes, value: .integer(1), to: &writer)
             }
@@ -202,7 +202,7 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
 
         // Out of room partway: rewound.
         #expect(throws: HTTPStructuredFieldError.insufficientCapacity) {
-            _ = try sfWritten(capacity: 8) { (writer) throws(HTTPStructuredFieldError) in
+            _ = try sfWritten(capacity: 8) { writer throws(HTTPStructuredFieldError) in
                 try HTTPStructuredFieldEncoder.writeBareItem(.integer(1), to: &writer)
                 do throws(HTTPStructuredFieldError) {
                     try HTTPStructuredFieldEncoder.writeBareItem(.string(HTTPStructuredString(text.span.bytes)!), to: &writer)
@@ -217,12 +217,12 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
     /// Parsed fields re-serialize canonically, repeated keys merged in the place of the first.
     @Test func reserializing() throws {
         let field = sfBytes("a=1;x=1;y;x=?0,  b=(1   2);z, a=%\"%61%25\";p, c")
-        let output = try sfWritten { (writer) throws(HTTPStructuredFieldError) in
+        let output = try sfWritten { writer throws(HTTPStructuredFieldError) in
             try HTTPStructuredFieldEncoder.writeDictionary(HTTPStructuredDictionary(field.span.bytes), to: &writer)
         }
         #expect(output == #"a=%"a%25";p, b=(1 2);z, c"#)
         let item = sfBytes(":iZ==:;k=:aGVsbG8:")
-        let reserialized = try sfWritten { (writer) throws(HTTPStructuredFieldError) in
+        let reserialized = try sfWritten { writer throws(HTTPStructuredFieldError) in
             try HTTPStructuredFieldEncoder.write(HTTPStructuredItem(parsing: item.span.bytes), to: &writer)
         }
         #expect(reserialized == ":iQ==:;k=:aGVsbG8=:")
@@ -235,7 +235,7 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
             let plain = String(repeating: "x", count: length)
             for field in ["\"\(plain)\"", "t\(plain)", ":\(String(repeating: "QUJD", count: length / 4)):", "%\"\(plain)\""] {
                 let item = try HTTPStructuredItem(parsing: sfBytes(field).span.bytes)
-                let output = try sfWritten { (writer) throws(HTTPStructuredFieldError) in
+                let output = try sfWritten { writer throws(HTTPStructuredFieldError) in
                     try HTTPStructuredFieldEncoder.write(item, to: &writer)
                 }
                 #expect(output == field)
@@ -293,13 +293,13 @@ private func sfWritten(capacity: Int = 1024, _ body: (inout AlignedBytesWriter) 
     @Test func serializing() throws {
         for (priority, text) in [(HTTPPriority.default, ""), (HTTPPriority(urgency: 0), "u=0"),
                                  (HTTPPriority(isIncremental: true), "i"), (HTTPPriority(urgency: 7, isIncremental: true), "u=7, i")] {
-            let output = try sfWritten { (writer) throws(HTTPStructuredFieldError) in try priority.write(to: &writer) }
+            let output = try sfWritten { writer throws(HTTPStructuredFieldError) in try priority.write(to: &writer) }
             #expect(output == text)
             #expect(priority.description == text)
             #expect(try HTTPPriority(parsing: sfBytes(output).span.bytes) == priority)
         }
         #expect(throws: HTTPStructuredFieldError.insufficientCapacity) {
-            _ = try sfWritten(capacity: 5) { (writer) throws(HTTPStructuredFieldError) in try HTTPPriority(urgency: 7, isIncremental: true).write(to: &writer) }
+            _ = try sfWritten(capacity: 5) { writer throws(HTTPStructuredFieldError) in try HTTPPriority(urgency: 7, isIncremental: true).write(to: &writer) }
         }
     }
 }

@@ -13,7 +13,9 @@ import Testing
         queue.append(2)
         #expect(queue.popFirst() == 1)
         // Wraps, then grows past its capacity with the head mid-ring.
-        for value in 3...9 { queue.append(value) }
+        for value in 3...9 {
+            queue.append(value)
+        }
         #expect(queue.count == 8)
         #expect(queue.removeFirst { $0 == 5 } == 5)
         #expect(queue.removeFirst { $0 == 100 } == nil)
@@ -65,7 +67,9 @@ import Testing
         #expect(clashes.load(ordering: .relaxed) == 0 && taken.load(ordering: .relaxed) == 32 * 50)
         // Everything is back: four acquisitions without waiting, each index once.
         var indexes: Set<Int> = []
-        for _ in 0..<4 { indexes.insert(await pool.acquire()) }
+        for _ in 0..<4 {
+            await indexes.insert(pool.acquire())
+        }
         #expect(indexes == [0, 1, 2, 3])
     }
 
@@ -188,7 +192,9 @@ import Testing
         await withDiscardingTaskGroup { group in
             group.addTask {
                 var sent = 0
-                while await handoff.send(sent) { sent += 1 }
+                while await handoff.send(sent) {
+                    sent += 1
+                }
                 #expect(sent == 3)
                 #expect(await handoff.send(99) == false)
             }

@@ -54,7 +54,7 @@ import Testing
         #expect(!FileManager.default.fileExists(atPath: out.appending("text.txt").string))
 
         let collected = try await ZipExtractor.extract(into: FilePath(temporary.url.appending(path: "collected").path)) {
-            (extractor) async throws(ZipError) in try await extractor.add(archive)
+            extractor async throws(ZipError) in try await extractor.add(archive)
         }
         #expect(collected.count == 1 && isDecoding(collected.first?.error), "\(collected)")
         #expect(collected.first?.path == "text.txt")
@@ -82,7 +82,7 @@ import Testing
         // `two.txt` is a directory in the destination: the file can't replace it.
         let out = directory.appending(path: "out")
         try FileManager.default.createDirectory(at: out.appending(path: "two.txt/inside"), withIntermediateDirectories: true)
-        let failures = try await ZipExtractor.extract(into: FilePath(out.path)) { (extractor) async throws(ZipError) in
+        let failures = try await ZipExtractor.extract(into: FilePath(out.path)) { extractor async throws(ZipError) in
             try await extractor.add(archive)
         }
         #expect(failures.count == 1, "\(failures)")
@@ -100,12 +100,12 @@ import Testing
         try Self.zip(["plain.zip", "a.txt"], in: temporary.url)
         let archive = try ZipArchive(url: temporary.url.appending(path: "plain.zip"))
         #expect(throws: ZipContentsError<Stop>.body(Stop())) {
-            try archive.contents(of: archive.entries[0]) { (_) throws(Stop) in throw Stop() }
+            try archive.contents(of: archive.entries[0]) { _ throws(Stop) in throw Stop() }
         }
 
         let corrupt = try ZipArchive(url: Self.corruptDeflateArchive("text.txt", size: 20_000, in: temporary.url))
         let error = #expect(throws: ZipContentsError<Stop>.self) {
-            try corrupt.contents(of: corrupt.entries[0]) { (_) throws(Stop) in }
+            try corrupt.contents(of: corrupt.entries[0]) { _ throws(Stop) in }
         }
         if case .zip(.decoding(_, "text.txt"))? = error {} else { Issue.record("\(String(describing: error))") }
     }

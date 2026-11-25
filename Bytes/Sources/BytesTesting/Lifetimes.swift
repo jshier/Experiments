@@ -25,7 +25,7 @@ public struct LifetimeChecks: TestTrait, SuiteTrait, TestScoping {
         // Once per test case; a suite and a test function itself just run.
         guard testCase != nil else { return try await function() }
         let record = LifetimeRecord()
-        var thrown: (any Error)?
+        var thrown: any Error?
         var dropped = 0
         do {
             if let audit {
@@ -37,7 +37,9 @@ public struct LifetimeChecks: TestTrait, SuiteTrait, TestScoping {
             thrown = error
         }
         // At the test's own declaration: the problem is the test's (or the code it ran), not this trait's.
-        for problem in record.finish() { Issue.record(Comment(rawValue: "Lifetime: " + problem), sourceLocation: test.sourceLocation) }
+        for problem in record.finish() {
+            Issue.record(Comment(rawValue: "Lifetime: " + problem), sourceLocation: test.sourceLocation)
+        }
         if dropped != 0 {
             let what = auditName ?? "resources released at deinit"
             Issue.record(Comment(rawValue: "Lifetime: \(dropped) \(what) (no explicit close)"), sourceLocation: test.sourceLocation)

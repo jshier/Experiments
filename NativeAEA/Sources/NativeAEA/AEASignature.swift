@@ -49,7 +49,7 @@ public enum AEASigningKey: Sendable {
             return .publicKey(key.x963Representation)
         }
         // The same encodings as a symmetric key's.
-        guard case .symmetric(let bytes)? = try? AEADecryptionKey.symmetric(text: trimmed), bytes.count == 65,
+        guard case let .symmetric(bytes)? = try? AEADecryptionKey.symmetric(text: trimmed), bytes.count == 65,
               (try? P256.PublicKey(x963Representation: bytes.span.bytes)) != nil
         else { throw .untrustedSigningKey("not a P-256 public key") }
         return .publicKey(bytes)
@@ -113,10 +113,10 @@ enum AEASignature {
     static func signer(_ prologue: AEAPrologue, _ source: AEASigningKey) throws(AEAError) -> AEASigner {
         let anchors: [[UInt8]]?
         switch source {
-        case .publicKey(let key):
+        case let .publicKey(key):
             return AEASigner(publicKey: key, subject: nil, isTrusted: true)
         case .certificateChain: anchors = nil
-        case .certificateChainTrusting(let roots): anchors = roots
+        case let .certificateChainTrusting(roots): anchors = roots
         case .untrustedCertificateChain: anchors = []
         }
         guard let entry = prologue.authDataEntries?.first(where: { $0.key == certificateChainKey }) else {

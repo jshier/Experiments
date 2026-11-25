@@ -242,9 +242,9 @@ struct NUnzip: AsyncParsableCommand {
             case .notAZipArchive:
                 Console.error("nunzip:  cannot find zipfile directory in '\(path)': it is not a zip archive, or it is truncated.")
             // Info-ZIP's message for a file it can't open: the error alone (Disk's names the call and the path too).
-            case .disk(.system(_, _, let code)):
+            case let .disk(.system(_, _, code)):
                 Console.error("nunzip:  cannot open '\(path)': \(code).")
-            case .disk(let error):
+            case let .disk(error):
                 Console.error("nunzip:  cannot open '\(path)': \(error).")
             default:
                 Console.error("nunzip:  error in '\(path)': \(error)")
@@ -314,7 +314,7 @@ struct NUnzip: AsyncParsableCommand {
         // Archives are planned in order (opened, listed, asked about) while their files are being written.
         let failures: [ZipExtractionFailure]
         do throws(ZipError) {
-            failures = try await ZipExtractor.extract(into: destination, maxConcurrency: jobs) { (extractor) async throws(ZipError) in
+            failures = try await ZipExtractor.extract(into: destination, maxConcurrency: jobs) { extractor async throws(ZipError) in
                 for (index, path) in paths.enumerated() {
                     if index > 0, quiet < 2 { Console.out("") }
                     guard let zip = open(path, status: &status) else { continue }
@@ -557,7 +557,7 @@ struct NUnzip: AsyncParsableCommand {
         for entry in entries where entry.kind == .file {
             if withNames, quiet == 0 { Console.out("\(Self.label(for: entry).leftPadded(to: 11)): \(entry.path)") }
             do throws(ZipContentsError<Errno>) {
-                try zip.contents(of: entry, using: &decoder, password: password) { (chunk) throws(Errno) in
+                try zip.contents(of: entry, using: &decoder, password: password) { chunk throws(Errno) in
                     try Self.writeToStandardOutput(chunk)
                 }
             } catch {
@@ -578,7 +578,7 @@ struct NUnzip: AsyncParsableCommand {
     /// Writes all of `bytes` to standard output (`write(2)` until they're written, again after an interruption).
     private static func writeToStandardOutput(_ bytes: RawSpan) throws(Errno) {
         // Unsafe: `write` takes a pointer. Safe: within `buffer`, which is valid for the closure.
-        try bytes.withUnsafeBytes { (buffer) throws(Errno) in
+        try bytes.withUnsafeBytes { buffer throws(Errno) in
             var offset = 0
             while offset < buffer.count {
                 let written = unsafe Darwin.write(STDOUT_FILENO, buffer.baseAddress! + offset, buffer.count - offset)

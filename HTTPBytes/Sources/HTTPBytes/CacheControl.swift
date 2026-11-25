@@ -101,7 +101,7 @@ public struct HTTPCacheControl: Sendable, Hashable {
                 noCache = true
                 if let argument, argument.byteCount > 0 { noCacheHasFields = true }
             } else if named("no-store") { noStore = true }
-            else if named("s-maxage") { if sharedMaxAge == nil, let value = Self.seconds(argument) { sharedMaxAge = value } }
+            else if named("s-maxage"), sharedMaxAge == nil, let value = Self.seconds(argument) { sharedMaxAge = value }
         case 9:
             if named("max-stale") { if maxStale == nil { maxStale = argument == nil ? .max : Self.seconds(argument) } }
             else if named("min-fresh") { if minFresh == nil, let value = Self.seconds(argument) { minFresh = value } }
@@ -110,16 +110,14 @@ public struct HTTPCacheControl: Sendable, Hashable {
             if named("no-transform") { noTransform = true }
         case 14:
             if named("only-if-cached") { onlyIfCached = true }
-            else if named("stale-if-error") { if staleIfError == nil, let value = Self.seconds(argument) { staleIfError = value } }
+            else if named("stale-if-error"), staleIfError == nil, let value = Self.seconds(argument) { staleIfError = value }
         case 15:
             if named("must-revalidate") { mustRevalidate = true }
             else if named("must-understand") { mustUnderstand = true }
         case 16:
             if named("proxy-revalidate") { proxyRevalidate = true }
         case 22:
-            if named("stale-while-revalidate") {
-                if staleWhileRevalidate == nil, let value = Self.seconds(argument) { staleWhileRevalidate = value }
-            }
+            if named("stale-while-revalidate"), staleWhileRevalidate == nil, let value = Self.seconds(argument) { staleWhileRevalidate = value }
         default:
             break
         }
@@ -159,7 +157,7 @@ public enum HTTPRetryAfter: Sendable, Hashable {
         if let (seconds, end) = FieldGrammar.saturatingNumber(value, from: 0), end == value.byteCount {
             self = .seconds(seconds)
         } else {
-            self = .date(try HTTPDate(parsing: value))
+            self = try .date(HTTPDate(parsing: value))
         }
     }
 
@@ -167,9 +165,9 @@ public enum HTTPRetryAfter: Sendable, Hashable {
     @inlinable
     public func date(after now: HTTPDate) -> HTTPDate {
         switch self {
-        case .date(let date):
+        case let .date(date):
             return date
-        case .seconds(let seconds):
+        case let .seconds(seconds):
             let (sum, overflow) = now.secondsSince1970.addingReportingOverflow(Int64(seconds))
             return HTTPDate(secondsSince1970: overflow ? .max : sum)
         }

@@ -1,8 +1,8 @@
+@testable import NativeAEA
 import BytesTestSupport
 import Disk
 import DiskTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -127,7 +127,7 @@ import Testing
         let stagedArchive = try AEAArchive(url: url, signingKey: keys.signingKey)
         defer { stagedArchive.close() }
         try await stagedArchive.extract(into: staging, options: options)
-        let published = URL(filePath: try staging.publish(as: final).string)
+        let published = try URL(filePath: staging.publish(as: final).string)
         #expect(try readTree(published, including: parts, ignoringAttributes: ignored) == extracted)
         for path in extracted.keys.sorted() {
             #expect(extendedAttribute("com.apple.quarantine", of: published.appending(path: path)) == own.value, "\(path)")

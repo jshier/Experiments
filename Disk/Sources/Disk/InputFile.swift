@@ -24,6 +24,10 @@ public final class InputFile: Sendable {
     public let path: FilePath
     /// The file's size in bytes when it was opened (`fstat`): what reads are checked against.
     public let count: Int
+    /// Whether the file was empty when it was opened.
+    public var isEmpty: Bool {
+        count == 0
+    }
 
     /// Opens the file read-only.
     ///
@@ -55,7 +59,7 @@ public final class InputFile: Sendable {
     /// - Precondition: `offset` isn't negative.
     public func read(at offset: Int, into bytes: inout MutableRawSpan) throws(DiskError) {
         precondition(offset >= 0, "a negative file offset")
-        try bytes.withUnsafeMutableBytes { (buffer) throws(DiskError) in
+        try bytes.withUnsafeMutableBytes { buffer throws(DiskError) in
             // Unsafe: the span's memory, as a pointer, to `pread`. Safe: `buffer.count` writable bytes, valid inside
             // this closure, which the calls don't outlive.
             try unsafe readFully(buffer, at: offset)
@@ -67,7 +71,7 @@ public final class InputFile: Sendable {
     /// - Throws: As the span form; nothing is appended if it throws.
     /// - Precondition: `count` fits `output`'s free capacity; `offset` and `count` aren't negative.
     public func read(at offset: Int, count: Int, into output: inout OutputRawSpan) throws(DiskError) {
-        try output.withFreeCapacity(byteCount: count) { (span, written) throws(DiskError) in
+        try output.withFreeCapacity(byteCount: count) { span, written throws(DiskError) in
             try read(at: offset, into: &span)
             written = count
         }
@@ -152,7 +156,7 @@ public final class InputFile: Sendable {
             }
             let start = filled
             var span = bytes.mutableSpan
-            let got = try span.withUnsafeMutableBytes { (buffer) throws(DiskError) -> Int in
+            let got = try span.withUnsafeMutableBytes { buffer throws(DiskError) -> Int in
                 // Unsafe: the array's free bytes to `read`. Safe: `start < buffer.count` (grown above), so the
                 // `buffer.count - start` bytes from there are within the array, valid inside this closure.
                 try unsafe file.readSome(buffer.baseAddress! + start, count: buffer.count - start)

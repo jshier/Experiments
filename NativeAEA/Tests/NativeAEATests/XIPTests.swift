@@ -1,3 +1,5 @@
+@testable import NativeAEA
+
 // The test archives are made here: a cpio (odc) stream written below, in pbzx blocks (xz from libcompression, or
 // stored), in a XAR written below, as Xcode's `.xip`s are, signed with a test chain or not (this macOS's `xar` no
 // longer signs).
@@ -8,7 +10,6 @@ import CryptoKit
 import Disk
 import DiskTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -40,7 +41,9 @@ struct CpioBuilder {
     /// Two names of one file (`ditto` writes each name with the contents).
     mutating func hardLinks(_ names: [String], _ data: [UInt8]) {
         nextInode += 1
-        for name in names { entry(name, mode: 0o100644, inode: nextInode, links: names.count, mtime: 1_700_000_456, data: data) }
+        for name in names {
+            entry(name, mode: 0o100644, inode: nextInode, links: names.count, mtime: 1_700_000_456, data: data)
+        }
     }
 
     mutating func link(_ name: String, to target: String) { entry(name, mode: 0o120755, mtime: 1_700_000_000, data: Array(target.utf8)) }
@@ -112,7 +115,7 @@ struct XIPSigningChain {
             ])
         }
         leafKey = URL(fileURLWithPath: file("leaf.key"))
-        certificates = try ["leaf", "inter", "root"].map { Array(try Data(contentsOf: URL(fileURLWithPath: file("\($0).der")))) }
+        certificates = try ["leaf", "inter", "root"].map { try Array(Data(contentsOf: URL(fileURLWithPath: file("\($0).der")))) }
     }
 
     /// The RSA PKCS #1 v1.5 signature of a SHA-1 digest with the leaf's key, as `xar` signs a TOC checksum.
@@ -121,7 +124,7 @@ struct XIPSigningChain {
         let input = directory.path("digestinfo-\(UUID().uuidString)"), output = directory.path("signature-\(UUID().uuidString)")
         try Data(digestInfo).write(to: input)
         try ExternalTool.run("/usr/bin/openssl", ["pkeyutl", "-sign", "-inkey", leafKey.path, "-in", input.path, "-out", output.path])
-        return Array(try Data(contentsOf: output))
+        return try Array(Data(contentsOf: output))
     }
 }
 
@@ -165,7 +168,7 @@ func makeXIP(
     let plistFile = directory.path("metadata-\(UUID().uuidString)")
     try Data(plist).write(to: plistFile)
     try ExternalTool.run("/usr/bin/bzip2", ["-k", "-f", plistFile.path])
-    let metadata = Array(try Data(contentsOf: URL(fileURLWithPath: plistFile.path + ".bz2")))
+    let metadata = try Array(Data(contentsOf: URL(fileURLWithPath: plistFile.path + ".bz2")))
     let signatureSize = chain == nil ? 0 : 256
     let made = creationTime ?? {
         let formatter = DateFormatter()
@@ -296,7 +299,9 @@ func makeXIP(
             #expect(progress.expectedEntries == statistics.entries - 1)
             let tree = try readTree(output, including: .entries)
             #expect(tree == expected)
-            for path in compressed { #expect(decmpfsType(output.appending(path: path)) == 8, "\(path)") }
+            for path in compressed {
+                #expect(decmpfsType(output.appending(path: path)) == 8, "\(path)")
+            }
             // Files keep their times; both names of a hard link are one file.
             let metadata = try readTree(output, including: [.modification, .hardLinks])
             #expect(metadata["Xcode.app/Contents/compressible"]?.modification?.seconds == 1_700_000_123)
@@ -345,7 +350,7 @@ func makeXIP(
         let first = try XIPArchive(path: FilePath(url.path), signature: .none)
         let start = first.contentStart
         first.close()
-        var bytes = Array(try Data(contentsOf: url))
+        var bytes = try Array(Data(contentsOf: url))
         bytes[start + 12 + 16 + 200 + 5_000] ^= 1 // In the file's contents, past the headers.
         try Data(bytes).write(to: url)
         let archive = try XIPArchive(path: FilePath(url.path), signature: .none)
@@ -393,7 +398,7 @@ func makeXIP(
         // A changed signature byte.
         let archive = try XIPArchive(path: path, signature: .none)
         defer { archive.close() }
-        var bytes = Array(try Data(contentsOf: url))
+        var bytes = try Array(Data(contentsOf: url))
         bytes[archive.heapStart + 20 + 100] ^= 1
         try Data(bytes).write(to: url)
         for check in [XIPSignatureCheck.untrustedCertificateChain, .certificateChainTrusting([chain.root])] {
@@ -405,7 +410,7 @@ func makeXIP(
         let swapped = try makeXIP(content, in: directory, name: "swapped.xip", signedBy: XIPSigningChain(
             in: directory, name: "swapped-chain"
         ))
-        var swappedBytes = Array(try Data(contentsOf: swapped))
+        var swappedBytes = try Array(Data(contentsOf: swapped))
         let swappedArchive = try XIPArchive(path: FilePath(swapped.path), signature: .none)
         defer { swappedArchive.close() }
         let signedByOther = try other.sign(sha1: Array(swappedBytes[swappedArchive.heapStart..<swappedArchive.heapStart + 20]), in: directory)
@@ -429,7 +434,7 @@ func makeXIP(
     /// Xcode's own xips, wherever ~/Scratch has some (read for their TOC only): signed by Apple's software update key,
     /// with the chain to Apple Root CA.
     @Test(.enabled(if: !Self.downloadedXIPs.isEmpty, "no .xip in ~/Scratch"))
-    func verifiesXcodeSignatures() async throws {
+    func verifiesXcodeSignatures() throws {
         for url in Self.downloadedXIPs {
             let archive = try XIPArchive(path: FilePath(url.path))
             defer { archive.close() }
@@ -449,7 +454,7 @@ func makeXIP(
         defer { directory.remove() }
         let (cpio, _, _) = Self.tree()
         let url = try makeXIP(pbzx(cpio, blockSize: 65_536), in: directory)
-        let good = Array(try Data(contentsOf: url))
+        let good = try Array(Data(contentsOf: url))
         let archive = try XIPArchive(path: FilePath(url.path), signature: .none)
         defer { archive.close() }
 
@@ -507,7 +512,7 @@ func makeXIP(
     /// A 76-byte odc header with `mode` (six octal digits) and the other fields plausible.
     static func header(mode: String) -> [UInt8] {
         Array(("070707" + "000001" + "000002" + mode + "000765" + "000024" + "000001" + "000000" + "15000000000" + "000006"
-            + "00000000005").utf8)
+                + "00000000005").utf8)
     }
 
     /// A mode wider than 16 bits (six octal digits reach 0o777777) is an invalid archive; it trapped converting to

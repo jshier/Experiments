@@ -41,7 +41,7 @@ public extension GenericBytesReader {
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
     mutating func read(_ type: Int8.Type) throws(BytesError) -> Int8 {
-        Int8(bitPattern: try read(Byte.self).rawValue)
+        try Int8(bitPattern: read(Byte.self).rawValue)
     }
 }
 
@@ -90,7 +90,7 @@ public extension BytesReader {
         _ type: I.Type, as fieldType: Bits<width>.Type
     ) throws(BytesError) -> I {
         precondition(I.bitWidth - (I.isSigned ? 1 : 0) >= width, "\(I.self) can't hold every \(width)-bit value")
-        return I(truncatingIfNeeded: try read(Bits<width>.self).rawValue)
+        return try I(truncatingIfNeeded: read(Bits<width>.self).rawValue)
     }
 }
 
@@ -153,7 +153,7 @@ public extension BytesReader {
     mutating func read<I: FixedWidthInteger & SignedInteger, let width: Int>(
         _ type: I.Type, asSigned fieldType: Bits<width>.Type
     ) throws(BytesError) -> I {
-        I(try read(Bits<width>.self).signedValue)
+        try I(read(Bits<width>.self).signedValue)
     }
 }
 
@@ -351,7 +351,7 @@ public extension GenericBytesReader {
         guard remainingByteCount >= byteCount else { throw .insufficientData }
         var value: UInt64 = 0
         for index in 0..<byteCount {
-            let byte = UInt64(try read(UInt8.self)) // Can't throw: `byteCount` bytes remain.
+            let byte = try UInt64(read(UInt8.self)) // Can't throw: `byteCount` bytes remain.
             switch byteOrder {
             case .bigEndian: value = value &<< 8 | byte
             case .littleEndian: value |= byte &<< UInt64(8 &* index)
@@ -378,7 +378,7 @@ public extension GenericBytesReader {
     @_lifetime(self: copy self)
     mutating func read<I: FixedWidthInteger>(_ type: I.Type, byteCount: Int, _ byteOrder: ByteOrder) throws(BytesError) -> I {
         let start = position
-        guard let value = I(exactly: try _readUnsigned(byteCount: byteCount, byteOrder)) else {
+        guard let value = try I(exactly: _readUnsigned(byteCount: byteCount, byteOrder)) else {
             rewind(to: start)
             throw .invalidValue
         }

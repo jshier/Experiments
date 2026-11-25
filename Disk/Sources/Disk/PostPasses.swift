@@ -53,7 +53,7 @@ extension Planner {
             phaseStarted = now
         }
         arena.append(0) // Never empty: lanes take its base.
-        let arena = self.arena
+        let arena = arena
         let width = max(1, context.options.fileSystemWidth)
         let progress = context.options.progress?.slot(0)
         // Unsafe: the array's base address, taken out of `withUnsafeBytes` and kept for the passes. Safe: `arena` is a
@@ -82,7 +82,7 @@ extension Planner {
     private func inLanes(_ count: Int, width: Int, _ body: @escaping @Sendable (Int) throws(DiskError) -> Void) async throws(DiskError) {
         guard count > 0 else { return }
         let failure = FirstFailure()
-        let context = self.context
+        let context = context
         let lanes = max(1, min(width, count))
         await withDiscardingTaskGroup { group in
             for lane in 0..<lanes {
@@ -124,8 +124,8 @@ extension Planner {
     // MARK: Hard links
 
     private mutating func hardLinkPass(_ arena: SharedArena, width: Int, progress: ExtractionProgress.Slot?) async throws(DiskError) {
-        let links = hardLinks, destination = self.destination
-        let context = self.context
+        let links = hardLinks, destination = destination
+        let context = context
         let counter = RelaxedCounter(), skipped = RelaxedCounter()
         try await inLanes(links.count, width: width) { index throws(DiskError) in
             let link = links[index]
@@ -173,8 +173,8 @@ extension Planner {
     // MARK: Symbolic links
 
     private mutating func linkPass(_ arena: SharedArena, width: Int, progress: ExtractionProgress.Slot?) async throws(DiskError) {
-        let links = self.links, deferred = self.deferred, destination = self.destination
-        let context = self.context
+        let links = links, deferred = deferred, destination = destination
+        let context = context
         let counter = RelaxedCounter(), skipped = RelaxedCounter()
         try await inLanes(links.count, width: width) { index throws(DiskError) in
             let link = links[index]
@@ -203,8 +203,8 @@ extension Planner {
     /// Files that waited for the writers: extended attributes and ACLs, then mode, times, owner, and flags in one call.
     private func deferredPass(_ arena: SharedArena, width: Int) async throws(DiskError) {
         let files = deferred.filter { $0.kind == .file }
-        let destination = self.destination
-        let context = self.context
+        let destination = destination
+        let context = context
         try await inLanes(files.count, width: width) { index throws(DiskError) in
             let entry = files[index]
             // Unsafe: a C string from the arena, kept for this item. Safe: `entry.path` is the offset `storePath`
@@ -253,12 +253,14 @@ extension Planner {
     private func directoryPass(_ arena: SharedArena, width: Int) async throws(DiskError) {
         guard !fixes.isEmpty else { return }
         let sorted = fixes.sorted { $0.depth > $1.depth }
-        let context = self.context
-        let deferred = self.deferred, destination = self.destination
+        let context = context
+        let deferred = deferred, destination = destination
         var start = 0
         while start < sorted.count {
             var end = start
-            while end < sorted.count, sorted[end].depth == sorted[start].depth { end += 1 }
+            while end < sorted.count, sorted[end].depth == sorted[start].depth {
+                end += 1
+            }
             let level = Array(sorted[start..<end])
             try await inLanes(level.count, width: width) { index throws(DiskError) in
                 let fix = level[index]

@@ -41,12 +41,12 @@ public protocol ContentSource: Sendable {
     func withPiece<R>(_ contents: Contents, _ body: (inout MutableRawSpan) throws(DiskError) -> R) throws(DiskError) -> R
 }
 
-extension ContentSource {
+public extension ContentSource {
     /// Sources of whole files only: never called.
-    public func retain(_ contents: Contents) {}
+    func retain(_ contents: Contents) {}
 
     /// Sources of whole files only: never called (the large-file methods need a ``PieceSource``).
-    public func withPiece<R>(_ contents: Contents, _ body: (inout MutableRawSpan) throws(DiskError) -> R) throws(DiskError) -> R {
+    func withPiece<R>(_ contents: Contents, _ body: (inout MutableRawSpan) throws(DiskError) -> R) throws(DiskError) -> R {
         preconditionFailure("withPiece: not a PieceSource")
     }
 }
@@ -93,4 +93,3 @@ package struct MemorySource: ContentSource, @unchecked Sendable {
 
     public func release(_ contents: Range<Int>) {}
 }
-

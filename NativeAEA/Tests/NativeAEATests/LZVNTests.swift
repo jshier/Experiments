@@ -1,3 +1,5 @@
+@testable import NativeAEA
+
 // Apple's AppleArchive framework only makes the test archives (`aea encrypt -a` and `aa archive -a` don't offer LZVN,
 // but the library takes libcompression's LZVN constant, 0x900).
 import AppleArchive
@@ -5,7 +7,6 @@ import BytesTestSupport
 import CryptoKit
 import DiskTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -50,7 +51,7 @@ import Testing
             var options = AEAReadOptions()
             options.decodeThreads = threads
             try await archive.decrypt(to: FilePath(output.path), overwrite: true, options: options)
-            #expect(Array(try Data(contentsOf: output)) == contents)
+            #expect(try Array(Data(contentsOf: output)) == contents)
         }
     }
 

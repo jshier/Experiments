@@ -157,7 +157,6 @@ public struct HTTP1RequestParser: Sendable {
         return event
     }
 
-
     /// The request line. The usual one (`GET` or another common method, a target, `HTTP/1.1` and CR LF) takes word
     /// compares and one block-mask scan for the target's end; anything else takes `exactRequestLine`, with the same
     /// results and errors. Inlined (guaranteed) with `next(in:)`: a `mutating` call left out of line kept the whole
@@ -198,7 +197,8 @@ public struct HTTP1RequestParser: Sendable {
                     scanner.seed(block: block, stops: stops, count: count)
                     return .requestLine(HTTP1RequestLine(
                         method: bytes.slice(start, methodEnd), target: bytes.slice(targetStart, targetEnd),
-                        version: version == 0x312E_312F_5054_5448 ? .http1_1 : .http1_0))
+                        version: version == 0x312E_312F_5054_5448 ? .http1_1 : .http1_0
+                    ))
                 }
             }
         }

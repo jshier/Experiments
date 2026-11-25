@@ -1,53 +1,273 @@
 #!/bin/bash
 # Usage: Tools/corpus [fetch|path|list]
 #
-# The compression benchmark corpus, kept outside the repository in a cache directory
-# ($EXPERIMENTS_CORPUS, default ~/Library/Caches/Experiments/corpus).
+# The compression benchmark corpus, kept outside the repository ($EXPERIMENTS_CORPUS, default
+# ~/Scratch/corpus.noindex; BytesTestSupport's `Corpus.root` reads the same place).
 #
-#   fetch   Download and unpack the Silesia corpus (68 MB download, 212 MB unpacked) into silesia/, and copy
-#           web assets (WebKit's Web Inspector JavaScript and CSS, from this Mac) into web/. Idempotent.
+#   fetch   Make the corpus whole: the Silesia corpus (68 MB download, 212 MB unpacked) in silesia/, every file
+#           checked against its pinned SHA-256, and web assets (WebKit's Web Inspector JavaScript, CSS, and HTML,
+#           from this Mac) in web/, with web/SOURCE recording the macOS version they came from and their SHA-256s.
+#           Idempotent: files that match are kept. Any Silesia file missing or different brings a new download,
+#           itself checked by SHA-256, unzipped into a temporary directory in the corpus, checked file by file, and
+#           only then moved into place. web/ is copied again only when a file no longer matches web/SOURCE; files
+#           already there without a web/SOURCE are recorded as they are (macOS unknown), not replaced. A note says
+#           when the recorded macOS isn't this Mac's. A temporary directory (and web/'s partial copies) is removed when
+#           the fetch ends or is interrupted (INT, TERM, HUP, QUIT); one left by a fetch killed outright is removed by
+#           the next fetch.
+#           Exits 1 if the corpus can't be made whole.
 #   path    Print the corpus directory (what benchmarks read; they skip files that are missing).
-#   list    Print each file with its size, tab-separated.
+#   list    Print each file with its size, tab-separated, then a "(temporary)" row for each temporary directory.
+#
+# EXPERIMENTS_SILESIA_URL replaces the download's URL (a mirror; the SHA-256 is checked all the same).
 #
 # Silesia is the standard corpus for general-purpose compressors (libdeflate, zlib-ng, and brotli publish
 # results on it): https://sun.aei.polsl.pl/~sdeor/index.php?page=silesia
-source "$(dirname "$0")/lib/common.sh"
+# Exit if the library can't be read: without it this would run on without `set -e`.
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
-ROOT="${EXPERIMENTS_CORPUS:-$HOME/Library/Caches/Experiments/corpus}"
-SILESIA_URL="https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip"
-SILESIA_FILES="dickens mozilla mr nci ooffice osdb reymont samba sao webster x-ray xml"
+ROOT="${EXPERIMENTS_CORPUS:-$HOME/Scratch/corpus.noindex}"
+SILESIA_URL="${EXPERIMENTS_SILESIA_URL:-https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip}"
+SILESIA_ZIP_SHA256=0626e25f45c0ffb5dc801f13b7c82a3b75743ba07e3a71835a41e3d9f63c77af
+SILESIA_SUMS="
+b24c37886142e11d0ee687db6ab06f936207aa7f2ea1fd1d9a36763c7a507e6a  dickens
+657fc3764b0c75ac9de9623125705831ebbfbe08fed248df73bc2dc66e2a963b  mozilla
+68637ed52e3e4860174ed2dc0840ac77d5f1a60abbcb13770d5754e3774d53e6  mr
+fc63a31770947b8c2062d3b19ca94c00485a232bb91b502021948fee983e1635  nci
+e7ee013880d34dd5208283d0d3d91b07f442e067454276095ded14f322a656eb  ooffice
+60f027179302ca3ad87c58ac90b6be72ec23588aaa7a3b7fe8ecc0f11def3fa3  osdb
+0eac0114a3dfe6e2ee1f345a0f79d653cb26c3bc9f0ed79238af4933422b7578  reymont
+93ba07bc44d8267789c1d911992f40b089ffa2140b4a160fac11ccae9a40e7b2  samba
+c2d0ea2cc59d4c21b7fe43a71499342a00cbe530a1d5548770e91ecd6214adcc  sao
+6a68f69b26daf09f9dd84f7470368553194a0b294fcfa80f1604efb11143a383  webster
+7de9fce1405dc44ae5e6813ed21cd5751e761bd4265655a005d39b9685d1c9ad  x-ray
+0e82e54e695c1938e4193448022543845b33020c8be6bf3bf3ead2224903e08c  xml
+"
 WEB_SOURCE="/System/Library/PrivateFrameworks/WebInspectorUI.framework/Resources"
+WEB_FILES="Main.js Main.css Main.html CodeMirror.js Three.js"
+
+sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
+silesia_names() { echo "$SILESIA_SUMS" | perl -ane 'print "$F[1]\n" if @F'; }
+silesia_sum() { echo "$SILESIA_SUMS" | perl -sane 'print "$F[0]\n" if @F && $F[1] eq $name' -- -name="$1"; }
+
+# Prints the names of Silesia files in DIR that are missing or don't match their SHA-256.
+silesia_mismatches() {
+    local dir="$1" name
+    for name in $(silesia_names); do
+        if [[ ! -f "$dir/$name" || -L "$dir/$name" || "$(sha256 "$dir/$name")" != "$(silesia_sum "$name")" ]]; then
+            echo "$name"
+        fi
+    done
+}
+
+# Temporary directories (`.silesia.XXXXXX`) hold an `owner` file: the PID and start time of the fetch that made them.
+# INT, TERM, HUP, and QUIT exit through the EXIT trap, which removes this run's (ignoring those signals, so a second one
+# doesn't cut it short, nor stop its `rm`); one killed outright leaves its directory, and the next fetch removes those
+# whose owner is gone (`sweep_temporary`). The same for web/'s partial files (WEB_PARTIALS), which the next fetch
+# otherwise removes only after a minute.
+# process_start (common.sh) reads start times in the C locale and UTC, so fetches in different TZ or LC_* settings agree.
+OWNER_START="$(process_start $$)"
+OWNER="$$ $OWNER_START"
+# A sweep removes a leftover by renaming it aside first (to `DIR.trash.TRASH_TAG`: this fetch's PID and start time,
+# letters and digits only), so of fetches sweeping one leftover at once only one removes it and says so. TRASHING names
+# the one being removed, for the cleanup; a trash whose fetch is gone (or whose PID was reused) goes with the next sweep.
+TRASH_TAG="$$.${OWNER_START//[!A-Za-z0-9]/}"
+trash_tag() { local start; start="$(process_start "$1")"; echo "$1.${start//[!A-Za-z0-9]/}"; }
+SILESIA_TMP=""
+TRASHING=""
+WEB_PARTIALS=()
+cleanup() {
+    trap '' INT TERM HUP QUIT
+    if [[ -n "$SILESIA_TMP" ]]; then rm -rf "$SILESIA_TMP"; fi
+    if [[ -n "$TRASHING" ]]; then rm -rf "$TRASHING"; fi
+    if (( ${#WEB_PARTIALS[@]} )); then rm -f "${WEB_PARTIALS[@]}"; fi
+}
+trap cleanup EXIT
+trap 'exit 130' INT TERM HUP
+trap 'exit 131' QUIT
+
+owner_alive() {
+    local pid start
+    [[ -f "$1" ]] || return 1
+    { read -r pid start < "$1"; } 2> /dev/null || return 1 # gone meanwhile: another fetch removed it
+    [[ "$pid" =~ ^[0-9]+$ && -n "$start" && "$(process_start "$pid")" == "$start" ]]
+}
+
+# Removes temporary directories left by fetches that are gone (one with no owner file only after a minute: its maker
+# may be between `mktemp` and writing it). With `--report`, prints a row for each instead.
+sweep_temporary() {
+    local report="${1:-}" dir now mtime status tag
+    now="$(date +%s)"
+    # Another fetch may remove an entry while this one looks at it: one whose time can't be read is skipped.
+    for dir in "$ROOT"/.silesia.*; do
+        [[ -d "$dir" && ! -L "$dir" && "${dir##*/}" != *.trash.* ]] || continue # the name, not the corpus's path
+        if owner_alive "$dir/owner"; then
+            # Gone meanwhile: no error, and no failed assignment for `set -e` to end the run on.
+            status="in use by fetch $(cut -d' ' -f1 "$dir/owner" 2> /dev/null || true)"
+        elif ! mtime="$(stat -f %m "$dir" 2> /dev/null)"; then
+            continue
+        elif [[ ! -f "$dir/owner" ]] && (( now - mtime < 60 )); then
+            status="being made"
+        else
+            status="left over by a fetch that is gone (the next fetch removes it)"
+            if [[ -z "$report" ]]; then
+                # Claimed by a rename first: "removed" only from the fetch that removed it.
+                TRASHING="$dir.trash.$TRASH_TAG"
+                if perl -e 'rename($ARGV[0], $ARGV[1]) or exit 1' "$dir" "$TRASHING"; then
+                    rm -rf "$TRASHING" && note "removed $(basename "$dir"), left by a fetch that is gone"
+                fi
+                TRASHING=""
+                continue
+            fi
+        fi
+        [[ -z "$report" ]] || printf '(temporary)\t%s\t%s\n' "$(basename "$dir")" "$status"
+    done
+    # Directories a fetch was removing when it was killed (`.silesia.X.trash.PID.START`): removed unless that fetch is
+    # still running (the same PID, started at the same time).
+    for dir in "$ROOT"/.silesia.*.trash.*; do
+        tag="${dir##*.trash.}"
+        [[ -d "$dir" && ! -L "$dir" && "$tag" =~ ^[0-9]+(\..*)?$ ]] || continue
+        if [[ "$(trash_tag "${tag%%.*}")" == "$tag" ]]; then
+            [[ -z "$report" ]] || printf '(temporary)\t%s\tbeing removed by fetch %s\n' "$(basename "$dir")" "${tag%%.*}"
+        elif [[ -n "$report" ]]; then
+            printf '(temporary)\t%s\tleft over by a fetch that is gone (the next fetch removes it)\n' "$(basename "$dir")"
+        else
+            rm -rf "$dir"
+        fi
+    done
+    # web/'s half-copied files (`.NAME.XXXXXX`) from a fetch killed mid-copy, after a minute.
+    for dir in "$ROOT"/web/.?*.??????; do
+        [[ -f "$dir" && -z "$report" ]] || continue
+        mtime="$(stat -f %m "$dir" 2> /dev/null)" || continue
+        if (( now - mtime >= 60 )); then rm -f "$dir"; fi
+    done
+    return 0
+}
+
+# Downloads silesia.zip into a temporary directory inside the corpus (same volume, a name of its own), checks it and
+# every file it holds, then moves the files into silesia/. Nothing in silesia/ changes unless all of that passed.
+fetch_silesia() {
+    local tmp name bad
+    tmp="$(mktemp -d "$ROOT/.silesia.XXXXXX")" || { note "error: can't make a temporary directory in $ROOT"; return 1; }
+    SILESIA_TMP="$tmp"
+    # Written whole, then renamed: a sweep never reads half an owner file.
+    if ! echo "$OWNER" > "$tmp/owner.partial" || ! mv -f "$tmp/owner.partial" "$tmp/owner"; then
+        note "error: can't write $tmp/owner"
+        return 1
+    fi
+    note "Downloading $SILESIA_URL"
+    curl -fSL --retry 3 -o "$tmp/silesia.zip" "$SILESIA_URL" || { note "error: download of $SILESIA_URL failed"; return 1; }
+    [[ "$(sha256 "$tmp/silesia.zip")" == "$SILESIA_ZIP_SHA256" ]] ||
+        { note "error: silesia.zip's SHA-256 is $(sha256 "$tmp/silesia.zip"), not $SILESIA_ZIP_SHA256"; return 1; }
+    if ! mkdir "$tmp/files" || ! unzip -q "$tmp/silesia.zip" -d "$tmp/files"; then note "error: unzip failed"; return 1; fi
+    bad="$(silesia_mismatches "$tmp/files")"
+    [[ -z "$bad" ]] || { note "error: unzipped, these don't match their SHA-256: ${bad//$'\n'/ }"; return 1; }
+    for name in $(silesia_names); do
+        mv -f "$tmp/files/$name" "$ROOT/silesia/$name" || { note "error: can't move $name into $ROOT/silesia"; return 1; }
+    done
+    rm -rf "$tmp"
+    SILESIA_TMP=""
+}
+
+# The web files a fetch makes: those this Mac has of WEB_FILES (all of WEB_FILES without the source directory).
+web_expected() {
+    local file
+    for file in $WEB_FILES; do
+        if [[ -f "$WEB_SOURCE/$file" || ! -d "$WEB_SOURCE" ]]; then echo "$file"; fi
+    done
+}
+
+# web/SOURCE: "macOS VERSION (BUILD) from DIR", then "SHA-256  FILE" for each file copied. Intact when every expected
+# file has its line and matches it: a truncated SOURCE (listing fewer files) isn't intact, so damage can't hide behind
+# it.
+web_intact() {
+    local file sum
+    [[ -f "$ROOT/web/SOURCE" ]] || return 1
+    for file in $(web_expected); do
+        sum="$(perl -sne 'print "$1\n" if /^([0-9a-f]{64})  (.+)$/ && $2 eq $file' -- -file="$file" "$ROOT/web/SOURCE" | head -1)"
+        [[ -n "$sum" && -f "$ROOT/web/$file" && ! -L "$ROOT/web/$file" && "$(sha256 "$ROOT/web/$file")" == "$sum" ]] || return 1
+    done
+}
+
+# Copies each expected web file into web/ (under a name of its own, then renamed in), printing SOURCE's lines: SOURCE_LINE,
+# then each file's SHA-256. Fails at the first file that can't be copied, leaving no partial copy. A function of its
+# own, so its failure reaches the caller's handler (`return` inside a redirected `{ … } || …` group skips the handler).
+copy_web() {
+    local file copy
+    echo "$1"
+    for file in $(web_expected); do
+        copy="$(mktemp "$ROOT/web/.$file.XXXXXX")" || return 1
+        WEB_PARTIALS+=("$copy")
+        if ! cp "$WEB_SOURCE/$file" "$copy" || ! chmod 644 "$copy"; then rm -f "$copy"; return 1; fi
+        printf '%s  %s\n' "$(sha256 "$copy")" "$file"
+        mv -f "$copy" "$ROOT/web/$file" || { rm -f "$copy"; return 1; }
+    done
+}
+
+fetch_web() {
+    local file source partial
+    source="macOS $(sw_vers -productVersion) ($(sw_vers -buildVersion)) from $WEB_SOURCE"
+    if web_intact; then
+        if [[ "$(head -1 "$ROOT/web/SOURCE")" != "$source" ]]; then
+            note "web/ is from $(head -1 "$ROOT/web/SOURCE" | sed 's/ from .*//'); this Mac has $(sw_vers -productVersion): kept (remove web/ to take this Mac's)"
+        fi
+        return 0
+    fi
+    # Files already here with no SOURCE (a corpus from before SOURCE existed): recorded as they are, not replaced,
+    # since benchmarks measured them. Where they came from isn't known.
+    # Every file and SOURCE are written under names of their own (mktemp) and renamed into place, so fetches running at
+    # once never share a half-written file.
+    if [[ ! -f "$ROOT/web/SOURCE" ]] && web_complete; then
+        partial="$(mktemp "$ROOT/web/.SOURCE.XXXXXX")" || { note "error: can't write in $ROOT/web"; return 1; }
+        WEB_PARTIALS+=("$partial")
+        {
+            echo "macOS unknown: recorded from the files already in web/"
+            for file in $(web_expected); do printf '%s  %s\n' "$(sha256 "$ROOT/web/$file")" "$file"; done
+        } > "$partial" || { rm -f "$partial"; note "error: can't write web/SOURCE"; return 1; }
+        if ! chmod 644 "$partial" || ! mv -f "$partial" "$ROOT/web/SOURCE"; then rm -f "$partial"; return 1; fi
+        WEB_PARTIALS=()
+        note "web/: recorded the files already there in web/SOURCE (their macOS isn't known)"
+        return 0
+    fi
+    [[ -d "$WEB_SOURCE" ]] || { note "No $WEB_SOURCE on this system: web/ stays as it is"; return 0; }
+    mkdir -p "$ROOT/web" || return 1
+    partial="$(mktemp "$ROOT/web/.SOURCE.XXXXXX")" || { note "error: can't write in $ROOT/web"; return 1; }
+    WEB_PARTIALS+=("$partial")
+    copy_web "$source" > "$partial" || { rm -f "$partial"; note "error: can't copy web/ from $WEB_SOURCE"; return 1; }
+    if ! chmod 644 "$partial" || ! mv -f "$partial" "$ROOT/web/SOURCE"; then rm -f "$partial"; return 1; fi
+    WEB_PARTIALS=() # all renamed into place
+    note "web/: copied $(web_expected | wc -l | tr -d ' ') files from $source"
+}
+
+# Succeeds when web/ has every expected file.
+web_complete() {
+    local file
+    for file in $(web_expected); do
+        [[ -f "$ROOT/web/$file" && ! -L "$ROOT/web/$file" ]] || return 1
+    done
+}
 
 fetch() {
-    mkdir -p "$ROOT/silesia" "$ROOT/web"
-    local missing=0 name
-    for name in $SILESIA_FILES; do [[ -f "$ROOT/silesia/$name" ]] || missing=1; done
-    if (( missing )); then
-        local tmp
-        tmp="$(mktemp -d)"
-        [[ -n "$tmp" && -d "$tmp" ]] || die "mktemp failed"
-        note "Downloading $SILESIA_URL"
-        curl -fSL --retry 3 -o "$tmp/silesia.zip" "$SILESIA_URL" || { rm -rf "$tmp"; die "download failed"; }
-        unzip -q -o "$tmp/silesia.zip" -d "$ROOT/silesia" || { rm -rf "$tmp"; die "unzip failed"; }
-        rm -rf "$tmp"
+    local bad failed=0
+    mkdir -p "$ROOT/silesia" || die "can't create $ROOT/silesia"
+    sweep_temporary
+    fetch_web || { note "error: web/ couldn't be copied"; failed=1; }
+    bad="$(silesia_mismatches "$ROOT/silesia")"
+    if [[ -n "$bad" ]]; then
+        note "silesia/ needs fetching: ${bad//$'\n'/ }"
+        fetch_silesia || failed=1
+        bad="$(silesia_mismatches "$ROOT/silesia")"
+        [[ -z "$bad" ]] || { note "error: silesia/ doesn't match: ${bad//$'\n'/ }"; failed=1; }
     fi
-    for name in $SILESIA_FILES; do [[ -f "$ROOT/silesia/$name" ]] || die "silesia/$name missing after unpacking"; done
-    if [[ -d "$WEB_SOURCE" ]]; then
-        local file
-        for file in Main.js Main.css Main.html CodeMirror.js Three.js; do
-            if [[ -f "$WEB_SOURCE/$file" ]]; then cp "$WEB_SOURCE/$file" "$ROOT/web/$file"; fi
-        done
-    else
-        note "No $WEB_SOURCE on this system: web/ stays empty"
-    fi
+    (( failed == 0 )) || fail "the corpus at $ROOT isn't whole"
     list
 }
 
 list() {
     [[ -d "$ROOT" ]] || fail "no corpus at $ROOT (run Tools/corpus fetch)"
-    (cd "$ROOT" && find . -type f ! -name '.*' | sort | while read -r file; do
+    (cd "$ROOT" && find . -type f ! -name '.*' ! -path './.*' | sort | while read -r file; do
         printf '%s\t%s\n' "${file#./}" "$(stat -f %z "$file")"
     done)
+    sweep_temporary --report
 }
 
 case "${1:-}" in

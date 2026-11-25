@@ -1,6 +1,6 @@
 import BytesReferenceCodecs
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 @_spi(Benchmarking) import NativeZip
 import Testing
 import zlib

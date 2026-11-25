@@ -13,7 +13,7 @@ import Testing
     @Test func stringBuilderThrowsTheBodysError() {
         let expected = Payload(code: 0x1234_5678, text: "a payload long enough to need storage")
         do {
-            _ = try String(utf8Capacity: 32) { (writer) throws(Payload) in
+            _ = try String(utf8Capacity: 32) { writer throws(Payload) in
                 try? writer.write(0x41 as Byte)
                 throw expected
             }
@@ -25,14 +25,14 @@ import Testing
 
     @Test func stringBuilderThrowsBytesError() {
         #expect(throws: BytesError.insufficientCapacity) {
-            _ = try String(utf8Capacity: 2) { (writer) throws(BytesError) in
+            _ = try String(utf8Capacity: 2) { writer throws(BytesError) in
                 try writer.write(0x41_42_43 as Byte3)
             }
         }
     }
 
     @Test func stringBuilderWithoutAnError() throws {
-        let text = try String(utf8Capacity: 8) { (writer) throws(Payload) in
+        let text = try String(utf8Capacity: 8) { writer throws(Payload) in
             try? writer.write(0x41_42_43 as Byte3)
         }
         #expect(text == "ABC")

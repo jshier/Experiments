@@ -26,6 +26,11 @@ public final class MappedFile: Sendable {
     @usableFromInline nonisolated(unsafe) let base: UnsafeRawPointer?
     /// The mapping's size in bytes.
     public let count: Int
+    /// Whether the mapping holds no bytes (an empty file).
+    public var isEmpty: Bool {
+        count == 0
+    }
+
     /// Bytes mapped before `base`: a range's start rounded down to a page (`mmap` maps from page boundaries).
     private let lead: Int
 
@@ -258,7 +263,7 @@ public final class OutputFile: Sendable {
     /// Writes all of `bytes` at `offset`, with as many positioned writes as it takes. Ranges that don't overlap can be
     /// written from several tasks at once (the kernel serializes writes to one file, so that gains nothing).
     public func write(_ bytes: RawSpan, at offset: Int) throws(DiskError) {
-        try bytes.withUnsafeBytes { (buffer) throws(DiskError) in
+        try bytes.withUnsafeBytes { buffer throws(DiskError) in
             guard let base = buffer.baseAddress else { return }
             do throws(DiskError) {
                 // Unsafe: the span's bytes, as a pointer, to `pwrite`. Safe: `buffer.count` bytes, valid inside this
@@ -266,17 +271,17 @@ public final class OutputFile: Sendable {
                 try unsafe FileIO.writeFully(descriptor, base, count: buffer.count, at: offset, path: .none)
             } catch {
                 // The path, made only now that something failed.
-                if case .system(let operation, _, let code) = error { throw .system(operation, path: path.string, code) }
+                if case let .system(operation, _, code) = error { throw .system(operation, path: path.string, code) }
                 throw error
             }
         }
     }
 }
 
-extension Destination {
+public extension Destination {
     /// Whether the destination's volume tells names apart by case (APFS volumes usually don't): a client that plans
     /// two entries whose names differ only in case needs to know they're one item.
-    public var isCaseSensitive: Bool {
+    var isCaseSensitive: Bool {
         fpathconf(root, _PC_CASE_SENSITIVE) == 1
     }
 }

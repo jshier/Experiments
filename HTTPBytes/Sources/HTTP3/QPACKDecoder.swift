@@ -59,11 +59,11 @@ public struct QPACKField: ~Escapable {
     public var flags: UInt8 { isNeverIndexed ? HTTPFieldStore.neverIndexed : 0 }
 }
 
-extension HTTPFieldSectionValidator {
+public extension HTTPFieldSectionValidator {
     /// Checks a decoded QPACK field: its characters only if the decoder didn't (``QPACKField/hasValidCharacters``), then
     /// its place.
     @inlinable
-    public mutating func check(_ field: borrowing QPACKField) throws(HTTPFieldSectionError) {
+    mutating func check(_ field: borrowing QPACKField) throws(HTTPFieldSectionError) {
         try check(name: field.name, value: field.value, knownName: field.knownName, charactersChecked: field.hasValidCharacters)
     }
 }
@@ -266,10 +266,12 @@ public struct QPACKDecoder: ~Copyable {
         // Unsafe: spans over the entry's bytes in the table. Safe: they depend on the decoder (borrowed), which can't
         // change the table while they live.
         let value = unsafe _overrideLifetime(
-            RawSpan(_unsafeStart: table.address(entry.valueOffset), byteCount: Int(entry.valueCount)), borrowing: self)
+            RawSpan(_unsafeStart: table.address(entry.valueOffset), byteCount: Int(entry.valueCount)), borrowing: self
+        )
         // Unsafe and safe as for the value.
         let name = unsafe _overrideLifetime(
-            RawSpan(_unsafeStart: table.address(Int(entry.offset)), byteCount: Int(entry.nameCount)), borrowing: self)
+            RawSpan(_unsafeStart: table.address(Int(entry.offset)), byteCount: Int(entry.nameCount)), borrowing: self
+        )
         return HTTPFieldView(name: name, value: value, knownName: known)
     }
 
@@ -582,7 +584,8 @@ public struct QPACKDecoder: ~Copyable {
                 let entry = statics[index]
                 field = unsafe QPACKDecodedField(
                     name: entry.name, nameCount: Int(entry.nameCount), value: entry.value, valueCount: Int(entry.valueCount),
-                    knownName: entry.knownName, characters: 3, status: QPACKDecodedField.field)
+                    knownName: entry.knownName, characters: 3, status: QPACKDecodedField.field
+                )
             } else {
                 guard index < self.base else { return fail(.invalidIndex) }
                 let number = reference(self.base &- 1 &- index)
@@ -627,7 +630,8 @@ public struct QPACKDecoder: ~Copyable {
         return unsafe QPACKDecodedField(
             name: table.address(Int(entry.offset)), nameCount: Int(entry.nameCount),
             value: table.address(entry.valueOffset), valueCount: Int(entry.valueCount),
-            knownName: entry.knownName, characters: entry.flags, status: QPACKDecodedField.field)
+            knownName: entry.knownName, characters: entry.flags, status: QPACKDecodedField.field
+        )
     }
 
     /// A literal field line at `start`, whose first byte is `first`: its name a static reference (`nameReference` 1), a
@@ -691,7 +695,7 @@ public struct QPACKDecoder: ~Copyable {
                 characters = entry.flags & DynamicFieldTableEntry.nameIsValid
             }
         }
-        let value = unsafe self.string(base, count, &position, mask: 0x7F, scratchOffset: used)
+        let value = unsafe string(base, count, &position, mask: 0x7F, scratchOffset: used)
         if value.status != 0 { return fail(QPACKError(code: value.status)) }
         offset = position
         let address = unsafe value.address.unsafelyUnwrapped
@@ -700,7 +704,8 @@ public struct QPACKDecoder: ~Copyable {
         }
         return account(unsafe QPACKDecodedField(
             name: name, nameCount: nameCount, value: address, valueCount: value.count, knownName: known,
-            characters: characters, status: neverIndexed ? QPACKDecodedField.neverIndexedField : QPACKDecodedField.field))
+            characters: characters, status: neverIndexed ? QPACKDecodedField.neverIndexedField : QPACKDecodedField.field
+        ))
     }
 
     /// Adds a field to the section's size, failing past the limit.
@@ -821,7 +826,8 @@ public struct QPACKDecoder: ~Copyable {
             // Unsafe: the entry's own bytes, name then value, which `insert` moves together.
             _ = unsafe table.insert(
                 name: table.address(Int(entry.offset)), nameCount: Int(entry.nameCount), knownName: entry.knownName,
-                value: table.address(entry.valueOffset), valueCount: Int(entry.valueCount), flags: entry.flags)
+                value: table.address(entry.valueOffset), valueCount: Int(entry.valueCount), flags: entry.flags
+            )
             return position
         }
         var name: UnsafeRawPointer?

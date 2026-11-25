@@ -44,6 +44,7 @@ let package = Package(
     dependencies: [
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
         .package(path: "../Bytes"),
+        .package(path: "../BytesCompression"),
     ],
     targets: [
         .target(
@@ -53,7 +54,7 @@ let package = Package(
                 .product(name: "Bytes", package: "Bytes"),
                 // APFS compression's encoders (LZBITMAP, LZFSE, LZVN, zlib) and decoders (rewriting a fork that
                 // didn't pay).
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
                 // The waits: `Continuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`.
                 .product(name: "BytesAsync", package: "Bytes"),
             ],

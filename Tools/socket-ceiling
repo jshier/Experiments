@@ -11,45 +11,59 @@
 #   --buffer SIZE  SO_SNDBUF/SO_RCVBUF on both ends (default: the system's)
 #   --unix         a Unix-domain socketpair instead of loopback TCP
 #   --runs N       repeat, one line each (default 1)
-#   SIZE takes K, M, G suffixes (powers of 1024).
+#   SIZE takes K, M, G suffixes, powers of 1024 (1G = 1,073,741,824 bytes).
 #
-# Output, one line per run: pairs, GB transferred, milliseconds, GB/s.
+# Output, tab-separated, a header and then one line per run:
+#   pairs      connections
+#   bytes      bytes received over all connections (pairs × --bytes), exactly
+#   ms         milliseconds from the first connection's setup to the last receiver's end
+#   GB_per_s   bytes ÷ seconds ÷ 10^9 (decimal gigabytes: --bytes 1G over 1 s reads 1.07)
 #
-# Compiled with xcrun clang -O2 on first use (and when the source changes) into
-# ~/Library/Caches/experiments-tools/.
+# The soft descriptor limit is raised (up to the hard limit) when it leaves fewer free numbers below it than the run
+# needs (2 × pairs, plus a listening socket over TCP), counting the descriptors already open wherever they are. macOS
+# allows a process only 25 descriptors when its soft limit is 26 to 50, so such limits are stepped over to 51; with a
+# hard limit in that range only what fits in 25 runs (with just standard input, output, and error open: 10 pairs over
+# TCP, 11 with --unix), and more is refused with the reason. A socket call that fails prints its error and exits 2.
+#
+# Compiled with xcrun clang -O2 on first use (and when the source, arguments, or compiler change) into
+# ~/Scratch/tools-cache.noindex/ (EXPERIMENTS_TOOLS_CACHE).
 #
 # examples (SocketStream/RESULTS.md compares its transfers with these):
 #   Tools/socket-ceiling --pairs 1 --bytes 512M --write 256K
 #   Tools/socket-ceiling --pairs 4 --bytes 256M --unix --runs 3
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
-size() { perl -e 'my $s = shift; $s =~ /^(\d+)([KMG]?)B?$/i or exit 1; print $1 * {"" => 1, K => 1024, M => 1024**2, G => 1024**3}->{uc $2}' "$1" ||
-    die "bad size $1 (e.g. 4096, 256K, 1G)"; }
-pairs=1 bytes=1G write=256K buffer=0 unix= runs=1
+# SIZE in bytes: digits with an optional K, M, or G (and B); dies otherwise.
+size() {
+    perl -e 'my $s = shift; $s =~ /^(\d+)([KMG]?)B?$/i or exit 1; print $1 * {"" => 1, K => 1024, M => 1024**2, G => 1024**3}->{uc $2}' "$2" ||
+        die "$1 needs a size such as 4096, 256K, or 1G, not '$2'"
+}
+pairs=1 bytes=1G write=256K buffer=0 unix='' runs=1
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --pairs) pairs="$2"; shift ;;
-        --bytes) bytes="$2"; shift ;;
-        --write) write="$2"; shift ;;
-        --buffer) buffer="$2"; shift ;;
+        --pairs) need_value "$@"; need_number "$1" "$2"; pairs="$2"; shift ;;
+        --bytes) need_value "$@"; bytes="$2"; shift ;;
+        --write) need_value "$@"; write="$2"; shift ;;
+        --buffer) need_value "$@"; buffer="$2"; shift ;;
         --unix) unix=u ;;
-        --runs) runs="$2"; shift ;;
+        --runs) need_value "$@"; need_number "$1" "$2"; runs="$2"; shift ;;
         -h|--help) usage ;;
         *) die "unknown option $1" ;;
     esac
     shift
 done
 # One per line: in `a="$(…)" b="$(…)"` only the last substitution's failure counts.
-bytes="$(size "$bytes")"
-write="$(size "$write")"
-buffer="$(size "$buffer")"
+bytes="$(size --bytes "$bytes")"
+write="$(size --write "$write")"
+buffer="$(size --buffer "$buffer")"
+(( pairs >= 1 && pairs <= 256 )) || die "--pairs must be 1 to 256, not $pairs"
+(( runs >= 1 )) || die "--runs needs at least 1"
+(( bytes >= 1 )) || die "--bytes needs at least 1 byte"
+(( write >= 1 && write <= 2147483647 )) || die "--write must be 1 byte to 2G - 1"
+(( buffer <= 2147483647 )) || die "--buffer must be under 2G"
 
-source_file="$TOOLS_DIR/lib/socket-ceiling.c"
-binary="$HOME/Library/Caches/experiments-tools/socket-ceiling"
-if [[ ! -x "$binary" || "$source_file" -nt "$binary" ]]; then
-    mkdir -p "$(dirname "$binary")"
-    xcrun clang -O2 -o "$binary" "$source_file" || die "couldn't compile $source_file"
-fi
+binary="$(compiled_tool socket-ceiling "$TOOLS_DIR/lib/socket-ceiling.c" -O2)"
+printf 'pairs\tbytes\tms\tGB_per_s\n'
 for ((run = 0; run < runs; run++)); do
-    "$binary" "$pairs" "$bytes" "$write" "$buffer" $unix
+    "$binary" "$pairs" "$bytes" "$write" "$buffer" ${unix:+"$unix"} || exit 2
 done

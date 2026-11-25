@@ -107,7 +107,7 @@ import Testing
     ]
 
     static func verdict(_ outcome: Conformance.Outcome) -> String {
-        if case .accept(let message) = outcome { return "accept@\(message.end)" }
+        if case let .accept(message) = outcome { return "accept@\(message.end)" }
         return outcome.verdict
     }
 

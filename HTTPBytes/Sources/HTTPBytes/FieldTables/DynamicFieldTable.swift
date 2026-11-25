@@ -1,9 +1,11 @@
 // HPACK's and QPACK's dynamic table (RFC 7541 §2.3.2, §4; RFC 9204 §3.2), as their decoders and encoders keep it.
 
+public import Bytes
+
 /// One dynamic table entry: where its bytes are (name, then value), and its name's ``HTTPFieldName`` index when it's a known
 /// name.
 @frozen @usableFromInline
-package struct DynamicFieldTableEntry: Sendable {
+package struct DynamicFieldTableEntry: Sendable, BitwiseCopyable {
     /// The offset of the entry's bytes (its name's, then its value's) in the table's byte store.
     @usableFromInline package var offset: UInt32
     /// The name's length.
@@ -50,9 +52,10 @@ package struct DynamicFieldTableEntry: Sendable {
 package struct DynamicFieldTable: ~Copyable {
     @usableFromInline package let bytes: UnsafeMutableRawPointer
     @usableFromInline package let byteCapacity: Int
-    @usableFromInline package let entries: UnsafeMutablePointer<DynamicFieldTableEntry>
+    /// The ring of entries, indexed by insertion number (masked into the ring: Bytes' `MaskedTable`).
+    @usableFromInline package var entries: MaskedTable<DynamicFieldTableEntry>
     /// The ring's slot count less 1 (a power of two less 1).
-    @usableFromInline package let entryMask: Int
+    @inlinable package var entryMask: Int { entries.mask }
     /// The largest size the table may have (the HPACK or QPACK setting this memory was made for).
     @usableFromInline package let capacity: Int
     /// The oldest entry's insertion number.
@@ -76,17 +79,18 @@ package struct DynamicFieldTable: ~Copyable {
         byteCapacity = Swift.max(2 &* capacity, 8)
         // At most one entry per 32 bytes of size, plus one: the ring never wraps onto a live entry.
         var slots = 2
-        while slots <= capacity / 32 &+ 1 { slots &<<= 1 }
-        entryMask = slots &- 1
-        // Unsafe: allocations owned by this table and freed in `deinit`.
+        while slots <= capacity / 32 &+ 1 {
+            slots &<<= 1
+        }
+        // Each slot is written by an insertion before it's read (`contains(number:)`).
+        entries = MaskedTable(uninitializedCount: slots)
+        // Unsafe: an allocation owned by this table and freed in `deinit`.
         unsafe bytes = UnsafeMutableRawPointer.allocate(byteCount: byteCapacity, alignment: 16)
-        unsafe entries = UnsafeMutablePointer<DynamicFieldTableEntry>.allocate(capacity: slots)
     }
 
     deinit {
-        // Unsafe: frees this table's own allocations, which nothing else holds (the table is noncopyable).
+        // Unsafe: frees this table's own allocation, which nothing else holds (the table is noncopyable).
         unsafe bytes.deallocate()
-        unsafe entries.deallocate()
     }
 
     /// The number of entries.
@@ -95,15 +99,13 @@ package struct DynamicFieldTable: ~Copyable {
     /// The entry at HPACK's dynamic index `index` (1 is the newest). The caller checks `1 <= index <= count`.
     @inlinable @inline(__always)
     package func entry(at index: Int) -> DynamicFieldTableEntry {
-        // Unsafe: an unchecked read. Safe: the slot is masked into the ring, and the caller checked the index.
-        unsafe entries[(inserted &- index) & entryMask]
+        entries[inserted &- index]
     }
 
     /// The entry inserted as number `number` (QPACK's absolute index).
     @inlinable @inline(__always)
     package func entry(number: Int) -> DynamicFieldTableEntry {
-        // Unsafe: an unchecked read. Safe: the slot is masked into the ring.
-        unsafe entries[number & entryMask]
+        entries[number]
     }
 
     /// Whether entry `number` is in the table (inserted and not evicted).
@@ -132,7 +134,9 @@ package struct DynamicFieldTable: ~Copyable {
     @inlinable
     package mutating func setMaximumSize(_ newValue: Int) {
         maximumSize = newValue
-        while size > newValue { evictOldest() }
+        while size > newValue {
+            evictOldest()
+        }
     }
 
     /// Removes every entry.
@@ -176,7 +180,9 @@ package struct DynamicFieldTable: ~Copyable {
             removeAll()
             return -1
         }
-        while size &+ entrySize > maximumSize { evictOldest() }
+        while size &+ entrySize > maximumSize {
+            evictOldest()
+        }
         let storedName = nameCount
         let at = place(storedName &+ valueCount)
         // Unsafe: compares addresses only.
@@ -196,11 +202,11 @@ package struct DynamicFieldTable: ~Copyable {
             }
         }
         let number = inserted
-        // Unsafe: an unchecked store into the ring. Safe: the slot is masked; at most `capacity / 32` entries are live,
-        // fewer than the ring's slots, so it isn't a live entry's.
-        unsafe entries[number & entryMask] = DynamicFieldTableEntry(
+        // At most `capacity / 32` entries are live, fewer than the ring's slots, so the slot isn't a live entry's.
+        entries[number] = DynamicFieldTableEntry(
             offset: UInt32(truncatingIfNeeded: at), nameCount: UInt32(truncatingIfNeeded: nameCount),
-            valueCount: UInt32(truncatingIfNeeded: valueCount), knownName: knownName, flags: flags)
+            valueCount: UInt32(truncatingIfNeeded: valueCount), knownName: knownName, flags: flags
+        )
         inserted &+= 1
         head = at &+ storedName &+ valueCount
         size &+= entrySize

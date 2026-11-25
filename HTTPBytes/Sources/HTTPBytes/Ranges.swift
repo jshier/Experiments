@@ -31,9 +31,9 @@ public enum HTTPByteRange: Sendable, Hashable {
     @inlinable
     public func resolved(length: Int) -> Range<Int>? {
         switch self {
-        case .closed(let first, let last): first < length ? first..<Swift.min(last, length &- 1) &+ 1 : nil
-        case .from(let first): first < length ? first..<length : nil
-        case .suffix(let count): count > 0 && length > 0 ? Swift.max(0, length &- count)..<length : nil
+        case let .closed(first, last): first < length ? first..<Swift.min(last, length &- 1) &+ 1 : nil
+        case let .from(first): first < length ? first..<length : nil
+        case let .suffix(count): count > 0 && length > 0 ? Swift.max(0, length &- count)..<length : nil
         }
     }
 }
@@ -102,55 +102,51 @@ public struct HTTPRangeSet: ~Escapable {
     /// ranges, sorted, with overlapping or adjacent ranges merged, written to `ranges` (at most `ranges.count` of them;
     /// more is ``HTTPRangeResolution/ignore``).
     ///
-    /// The union is found by sweeping the set rather than by inserting its ranges in order, so the storage only has to
-    /// hold the answer: each range written starts at the lowest range not yet covered and grows while any range overlaps
-    /// or touches it (the set re-read each time: no copy of it is kept). At most ``maximumRangeCount`` ranges.
+    /// The set is read once into storage on the stack (at most ``maximumRangeCount`` ranges, kept sorted as they're
+    /// read), then swept: each range written grows while the next overlaps or touches it. So `ranges` only has to hold the
+    /// answer, and the work is linear in the field (sorting 256 ranges at most). (It re-read the field for every range it
+    /// wrote and every time one grew: about 500 times an 8 KB field's length.)
     @inlinable
     public static func resolve(_ value: RawSpan, length: Int, into ranges: inout MutableSpan<Range<Int>>) -> HTTPRangeResolution {
-        // Syntax, size, and whether anything is satisfiable.
         guard var set = try? HTTPRangeSet(parsing: value) else { return .ignore }
+        // The satisfiable ranges, sorted by their lower bounds (insertion: at most 256).
+        var sorted = InlineArray<256, Range<Int>>(repeating: 0..<0)
         var total = 0, satisfiable = 0
         do throws(HTTPFieldValueError) {
             while let range = try set.next() {
                 total &+= 1
-                if range.resolved(length: length) != nil { satisfiable &+= 1 }
+                guard total <= maximumRangeCount else { return .ignore }
+                guard let bytes = range.resolved(length: length) else { continue }
+                var index = satisfiable
+                while index > 0, sorted[index &- 1].lowerBound > bytes.lowerBound {
+                    sorted[index] = sorted[index &- 1]
+                    index &-= 1
+                }
+                sorted[index] = bytes
+                satisfiable &+= 1
             }
         } catch {
             return .ignore
         }
-        guard total > 0, total <= maximumRangeCount else { return .ignore }
+        guard total > 0 else { return .ignore }
         guard satisfiable > 0 else { return .unsatisfiable }
-        // `cursor`: the end of the last range written; every range of the set lies wholly before it or wholly after it
-        // (anything overlapping or touching a written range was merged into it).
         var count = 0
-        var cursor = Int.min
-        // `try!` below: the first pass read the whole set without an error, and reading it again can't differ.
-        while true {
-            var start = Int.max, end = Int.min
-            var pass = try! HTTPRangeSet(parsing: value)
-            while let range = try! pass.next() {
-                guard let bytes = range.resolved(length: length), cursor == .min || bytes.lowerBound > cursor else { continue }
-                if bytes.lowerBound < start || bytes.lowerBound == start && bytes.upperBound > end {
-                    (start, end) = (bytes.lowerBound, bytes.upperBound)
-                }
-            }
-            guard start != .max else { return .ranges(count) }
-            var grew = true
-            while grew {
-                grew = false
-                var again = try! HTTPRangeSet(parsing: value)
-                while let range = try! again.next() {
-                    guard let bytes = range.resolved(length: length), bytes.lowerBound >= start, bytes.lowerBound <= end,
-                          bytes.upperBound > end else { continue }
-                    end = bytes.upperBound
-                    grew = true
-                }
+        var start = sorted[0].lowerBound, end = sorted[0].upperBound
+        for index in 1..<satisfiable {
+            let next = sorted[index]
+            if next.lowerBound <= end {
+                // Overlapping or touching: merged.
+                end = Swift.max(end, next.upperBound)
+                continue
             }
             guard count < ranges.count else { return .ignore }
             ranges[count] = start..<end
             count &+= 1
-            cursor = end
+            (start, end) = (next.lowerBound, next.upperBound)
         }
+        guard count < ranges.count else { return .ignore }
+        ranges[count] = start..<end
+        return .ranges(count &+ 1)
     }
 }
 
@@ -221,7 +217,9 @@ public struct HTTPContentRange: Sendable, Hashable {
     @inlinable
     static func writeNumber(_ value: Int, to writer: inout AlignedBytesWriter) throws(BytesError) {
         var divisor = 1
-        while divisor <= value / 10 { divisor &*= 10 }
+        while divisor <= value / 10 {
+            divisor &*= 10
+        }
         repeat {
             try writer.write(UInt8(truncatingIfNeeded: 0x30 &+ value / divisor % 10))
             divisor /= 10

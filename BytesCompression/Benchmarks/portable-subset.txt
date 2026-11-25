@@ -1,0 +1,20 @@
+# The rows `./bench portable` and `./bench portable-no-c` run when given no --filter: what the C modules' fallbacks and
+# the Swift-only paths change (checksums, the codecs' Bytes rows, AES, ChaCha20, SHA), not the reference libraries or
+# the machine's memory. One regex per line, each matching whole benchmark names, passed as --filter; lines starting
+# with # and blank lines are skipped. Pass a --filter of your own (`--filter '.*'` for every row) to run something
+# else. (Was the CompressionBenchmarks part of Bytes' Benchmarks/portable-subset.txt until the package moved out.)
+
+# CompressionBenchmarks: the rows its portable baselines have, and the checksums and ciphers.
+Adler-32 .*: Bytes
+CRC-(32|64) .*: Bytes
+XXH64 .*: Bytes
+Brotli (encode|decode) q[15] (dickens \(9\.7 MB\)|JSON \(1\.6 KB\)): Bytes(, streaming 64 KB)?
+Deflate [16] (dickens \(9\.7 MB\)|Main\.js \(3\.8 MB\)): Bytes(, streaming 64 KB)?
+Inflate (gzip )?(dickens \(9\.7 MB\)|Main\.js \(3\.8 MB\)|JSON \(1\.6 KB\)): Bytes(, streaming 64 KB)?
+Parallel (deflate 1|inflate) dickens \(256\.0 KB\): Bytes, \d+ lanes, (sync|async task group)
+Pipeline (deflate 1|brotli 5|TLS \+ inflate|TLS \+ brotli) .*(JSON \(1\.6 KB\)|Main\.js \(3\.8 MB\)): Bytes
+AES-(128|256)-CTR 1 MB: Bytes
+AES-(128|256)-GCM (seal|open) .*: Bytes
+ChaCha20-Poly1305 (seal|open) .*: Bytes
+SHA-(1|256|512) .*: Bytes
+TLS (seal|open) 4 MB .*\(1 lanes?\): Bytes

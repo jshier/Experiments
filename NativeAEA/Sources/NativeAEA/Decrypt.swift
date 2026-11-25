@@ -1,9 +1,10 @@
 import BytesAsync
+import BytesCompressionAsync
 import Disk
 import Foundation
 import System
 
-extension AEAArchive {
+public extension AEAArchive {
     /// Decrypts (and decompresses) the archive's contents to a file, as `aea decrypt` does: the raw stream, whatever
     /// it is (an Apple Archive, a disk image, any file).
     ///
@@ -19,7 +20,7 @@ extension AEAArchive {
     ///   - options: Decoder threads, buffers, and which checks to run.
     /// - Returns: Counts and timings.
     @concurrent @discardableResult
-    public func decrypt(
+    func decrypt(
         to destination: FilePath, range: Range<Int>? = nil, overwrite: Bool = false, options: AEAReadOptions = .init()
     ) async throws(AEAError) -> AEAStatistics {
         let started = MonotonicClock.now
@@ -39,21 +40,19 @@ extension AEAArchive {
         }
         defer { try? output.close() }
 
-        // At least one decoder, and a buffer beyond the one being written (fewer would wait forever).
-        let decoders = max(1, options.decodeThreads)
-        let pool = SegmentBufferPool(count: decoders + max(0, options.extraBuffers) + 1, segmentCapacity: rootHeader.segmentSize)
-        let stream = try SegmentStream(
-            archive: self, pool: pool, decoders: decoders,
-            verifyMACs: options.verifyMACs, verifyChecksums: options.verifyChecksums, input: options.input, segments: needed
-        )
+        // The engine's pool: a buffer per decoder, the extra ones, and one beyond the one being written. No carry region:
+        // segments are written as they are, never walked.
+        let stream = try segmentStream(options, segments: needed, carryCapacity: 0)
+        let pool = stream.pool
         var written = 0
         var writeNanoseconds = 0
         let failure: AEAError? = await stream.withDecoding { _ in
             do throws(AEAError) {
-                for index in needed {
-                    let buffer = try await stream.next(index)
+                // The segments in order, `needed` first to last.
+                while let block = try await stream.nextBlock() {
+                    let buffer = block.buffer
                     defer { pool.release(buffer) }
-                    let segment = segments[index]
+                    let segment = segments[block.index]
                     // The part of this segment inside the range.
                     let low = max(wanted.lowerBound, segment.rawOffset), high = min(wanted.upperBound, segment.rawOffset + segment.rawSize)
                     let start = MonotonicClock.now

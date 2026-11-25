@@ -78,16 +78,18 @@ public final class LifetimeRecord: Sendable {
             defer { list.removeAll() }
             return list
         }
-        for directory in remaining { check(directory, when: "when the test ended") }
+        for directory in remaining {
+            check(directory, when: "when the test ended")
+        }
         return problems.withLock { $0 }
     }
 }
 
-extension TemporaryDirectory {
+public extension TemporaryDirectory {
     /// The current test's lifetime record (set by `BytesTesting`'s `LifetimeChecks` trait), or `nil` outside one.
     ///
     /// A fixture shared by tests (a `static let` made lazily, from inside whichever test reads it first) makes its
     /// directory with this set to `nil` (`$lifetimeRecord.withValue(nil) { … }`): otherwise that first test is held to
     /// account for files other tests, running in parallel, have open in it.
-    @TaskLocal public static var lifetimeRecord: LifetimeRecord?
+    @TaskLocal static var lifetimeRecord: LifetimeRecord?
 }

@@ -50,10 +50,11 @@ public struct FileOutput: ~Copyable {
     /// The file's descriptor, or -1 when none is open.
     var descriptor: Int32 {
         switch file {
-        case .some(let open): open.raw
+        case let .some(open): open.raw
         case .none: -1
         }
     }
+
     // Streaming compressed:
     var policy: StoragePolicy?
     var forkOffset = 0
@@ -79,7 +80,7 @@ public struct FileOutput: ~Copyable {
         self.directory = directory
         self.leaf = leaf
         self.pathCount = pathCount
-        self.expectedSize = size
+        expectedSize = size
         self.metadata = metadata
         self.storage = storage
         self.deferred = deferred
@@ -121,7 +122,7 @@ public struct FileOutput: ~Copyable {
                 // The whole file at once, in place.
                 // Unsafe (both lines): the span's memory as a pointer to `writeWhole`, across the write's waits. Safe:
                 // the span is borrowed for this call, so its `count` bytes stay put until `writeWhole` returns.
-                try await unsafe bytes.withUnsafeBytesAsync { (buffer) throws(DiskError) in
+                try await unsafe bytes.withUnsafeBytesAsync { buffer throws(DiskError) in
                     try await unsafe writeWhole(buffer.baseAddress, count: count)
                 }
                 bytesWritten = count
@@ -161,7 +162,7 @@ public struct FileOutput: ~Copyable {
         }
         // Unsafe (both lines): the span's memory as a pointer to `stream`, across its waits. Safe: the span is borrowed
         // for this call, so its `count` bytes stay put until `stream` returns.
-        try await unsafe bytes.withUnsafeBytesAsync { (buffer) throws(DiskError) in
+        try await unsafe bytes.withUnsafeBytesAsync { buffer throws(DiskError) in
             try await unsafe stream(buffer.baseAddress, count: count)
         }
         progress?.add(entries: 0, bytes: count)
@@ -230,7 +231,7 @@ public struct FileOutput: ~Copyable {
         let form = unsafe core.prepare(data, count: count, storage: storage)
         timings?.add(.compress, since: started)
         // Unsafe: reads the optional pointer. Safe: only its value, tested for `nil`.
-        if case .batches(let policy) = form, let data = unsafe data {
+        if case let .batches(policy) = form, let data = unsafe data {
             // Unsafe: `data` to `writeBatches`, across its waits. Safe: the caller's `count` bytes, valid until this
             // function returns, which `writeBatches` does first.
             try await unsafe writeBatches(data, count: count, policy: policy)
@@ -336,7 +337,7 @@ public struct FileOutput: ~Copyable {
             return
         }
         file = OwnedDescriptor(adopting: created, kind: .fileBeingWritten)
-        if case .compressed(let policy) = storage, let size = expectedSize, size < 1 << 32, policy.codec.types.fork != 0,
+        if case let .compressed(policy) = storage, let size = expectedSize, size < 1 << 32, policy.codec.types.fork != 0,
            !policy.skips(size: size, first: first.extracting(first: min(first.byteCount, 8))) {
             self.policy = policy
             let chunkCount = (size + Decmpfs.chunkSize - 1) / Decmpfs.chunkSize
@@ -482,12 +483,12 @@ struct Writer<Source: ContentSource>: ~Copyable {
     /// The scratch, made on first use; the caller gives it back (`core = consume …`) when it's done.
     mutating func takeCore() -> WriterCore {
         switch core.take() {
-        case .some(let core):
-            return core
+        case let .some(core):
+            core
         case .none:
             // Unsafe: the path buffer's pointer to the core's initializer, which keeps it. Safe: `pathCapacity` bytes
             // within `context.writerPaths` (`init`), which is passed along for the core to keep alive.
-            return unsafe WriterCore(context.destination, stagingCapacity: context.options.stagingCapacity, path: pathBuffer, in: context.writerPaths)
+            unsafe WriterCore(context.destination, stagingCapacity: context.options.stagingCapacity, path: pathBuffer, in: context.writerPaths)
         }
     }
 
@@ -510,11 +511,13 @@ struct Writer<Source: ContentSource>: ~Copyable {
                 await pieceDone(job.largeFile)
             }
             source.release(job.contents)
-            for index in 0..<job.bridge.count { source.release(job.bridge[index].contents) }
+            for index in 0..<job.bridge.count {
+                source.release(job.bridge[index].contents)
+            }
         }
     }
 
-    nonisolated(nonsending) private mutating func writeFile(_ job: WriteJob<Source.Contents>, pathCount: Int) async {
+    private nonisolated(nonsending) mutating func writeFile(_ job: WriteJob<Source.Contents>, pathCount: Int) async {
         var output = FileOutput(
             core: takeCore(), limiter: context.fileSystem, timings: timings, progress: slot, directory: job.directory,
             leaf: job.leaf, pathCount: pathCount, size: job.size >= 0 ? job.size : nil, metadata: job.metadata,
@@ -551,7 +554,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
     /// A chunk may start in earlier pieces (the job's bridge). A piece only overwrites input before its last chunk's
     /// end, so the bridges' bytes are intact. Whether compressing paid is decided on the whole file when the last piece
     /// is written (``finishLargeFile(_:)``): a fork that doesn't pay is read back into a plain file.
-    nonisolated(nonsending) private mutating func writePiece(_ job: WriteJob<Source.Contents>) async {
+    private nonisolated(nonsending) mutating func writePiece(_ job: WriteJob<Source.Contents>) async {
         let state = context.largeFiles[job.largeFile]
         do throws(DiskError) {
             try await writePiece(job, state)
@@ -568,13 +571,13 @@ struct Writer<Source: ContentSource>: ~Copyable {
         // Unsafe: the piece's address escapes `withPiece`'s closure (and the span's own, below). Safe: `PieceSource`'s
         // contract keeps the bytes at this address until the piece's last release, and `Writer.run` releases a job's
         // piece and its bridge's only after the job's work; at least `count > 0` bytes are there (checked): not `nil`.
-        try unsafe source.withPiece(contents) { (span) throws(DiskError) -> UnsafeMutableRawPointer in
+        try unsafe source.withPiece(contents) { span throws(DiskError) -> UnsafeMutableRawPointer in
             guard span.byteCount >= count, count > 0 else { throw .invalidMetadata("a piece shorter than its count") }
             return span.withUnsafeMutableBytes { $0.baseAddress! }
         }
     }
 
-    nonisolated(nonsending) private mutating func writePiece(_ job: WriteJob<Source.Contents>, _ state: LargeFile) async throws(DiskError) {
+    private nonisolated(nonsending) mutating func writePiece(_ job: WriteJob<Source.Contents>, _ state: LargeFile) async throws(DiskError) {
         let pieceStart = job.fileOffset
         // Unsafe: the address of the piece's bytes, kept in `data`. Safe: `job.count` bytes (`pieceBase` checked) that
         // the job holds, at that address, until `run` releases its contents after this returns.
@@ -603,7 +606,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
     }
 
     /// A compressed piece: compressed in place, then written in its turn.
-    nonisolated(nonsending) private static func writeCompressedPiece(
+    private nonisolated(nonsending) static func writeCompressedPiece(
         _ job: WriteJob<Source.Contents>, _ state: LargeFile, _ data: UnsafeMutableRawPointer, policy: StoragePolicy,
         core: inout WriterCore, context: ExtractionContext<Source>, timings: WorkTimings?
     ) async throws(DiskError) {
@@ -766,7 +769,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
         written = forkOffset
     }
 
-    nonisolated(nonsending) private mutating func pieceDone(_ index: Int) async {
+    private nonisolated(nonsending) mutating func pieceDone(_ index: Int) async {
         let state = context.largeFiles[index]
         if state.outstanding.subtract(1, ordering: .acquiringAndReleasing).newValue == 0 {
             await finishLargeFile(index)
@@ -774,7 +777,7 @@ struct Writer<Source: ContentSource>: ~Copyable {
     }
 
     /// The last piece is written (or the file failed): finish it, close it, and free its slot.
-    nonisolated(nonsending) private mutating func finishLargeFile(_ index: Int) async {
+    private nonisolated(nonsending) mutating func finishLargeFile(_ index: Int) async {
         let state = context.largeFiles[index]
         let started = timings != nil ? MonotonicClock.now : 0
         await context.fileSystem.acquire()

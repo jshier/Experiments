@@ -1,0 +1,5 @@
+# shellcheck settings for Tools/ (found from any script below this directory).
+# SC1091: the tools source their helpers by a path computed at run time (`source "$(dirname "$0")/lib/common.sh"`),
+#   which shellcheck can't follow without -x and a known working directory.
+# SC2016: jq and Perl programs are written in single quotes on purpose; their `$name`s are theirs, not the shell's.
+disable=SC1091,SC2016

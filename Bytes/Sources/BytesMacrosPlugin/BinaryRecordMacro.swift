@@ -75,27 +75,27 @@ public struct BinaryRecordMacro: MemberMacro, ExtensionMacro {
         conformingTo protocols: [TypeSyntax], in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
         try context.reportingAtProperties {
-        let fields = try fields(of: declaration)
-        let access = declaration.accessPrefix
-        let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
-        let parameters = fields.map { field in
-            if let expected = field.expected { return "\(field.name): \(field.type) = \(expected)" }
-            if field.isFiller { return "\(field.name): \(field.type) = .init()" }
-            return "\(field.name): \(field.type)"
-        }.joined(separator: ", ")
-        let assignments = fields.map { "self.\($0.name) = \($0.name)" }.joined(separator: "\n")
-        let sum = fields.map(\.byteCount).joined(separator: " + ")
-        return [
-            """
-            \(raw: inlinable)\(raw: access)init(\(raw: parameters)) {
-            \(raw: assignments)
-            }
-            """,
-            """
-            /// The record's size in bytes.
-            \(raw: inlinable)\(raw: access)static var byteCount: Int { \(raw: sum.isEmpty ? "0" : sum) }
-            """,
-        ]
+            let fields = try fields(of: declaration)
+            let access = declaration.accessPrefix
+            let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
+            let parameters = fields.map { field in
+                if let expected = field.expected { return "\(field.name): \(field.type) = \(expected)" }
+                if field.isFiller { return "\(field.name): \(field.type) = .init()" }
+                return "\(field.name): \(field.type)"
+            }.joined(separator: ", ")
+            let assignments = fields.map { "self.\($0.name) = \($0.name)" }.joined(separator: "\n")
+            let sum = fields.map(\.byteCount).joined(separator: " + ")
+            return [
+                """
+                \(raw: inlinable)\(raw: access)init(\(raw: parameters)) {
+                \(raw: assignments)
+                }
+                """,
+                """
+                /// The record's size in bytes.
+                \(raw: inlinable)\(raw: access)static var byteCount: Int { \(raw: sum.isEmpty ? "0" : sum) }
+                """,
+            ]
         }
     }
 
@@ -113,18 +113,18 @@ public struct BinaryRecordMacro: MemberMacro, ExtensionMacro {
         case ("Byte", .integer("UInt8")), ("Byte", .integer("Int8")):
             value = "try record.read(\(field.type).self)"
             write = "try writer.write(\(name))"
-        case ("Byte", .integer(let type)):
+        case let ("Byte", .integer(type)):
             // Fixed-width signed types are two's complement fields; `Int` and unsigned types, unsigned values.
             let byte = ["Int16", "Int32", "Int64"].contains(type) ? "Int8" : "UInt8"
             value = "\(type)(try record.read(\(byte).self))"
             write = """
-                guard let \(name) = \(byte)(exactly: \(name)) else { throw .invalidValue }
-                try writer.write(\(name))
-                """
+            guard let \(name) = \(byte)(exactly: \(name)) else { throw .invalidValue }
+            try writer.write(\(name))
+            """
         case ("Byte", _):
             value = "try record.read(\(field.type).self, as: Byte.self)"
             write = "try writer.write(\(name), as: Byte.self)"
-        case (_, .integer(let type)):
+        case let (_, .integer(type)):
             let label = ["Int8", "Int16", "Int32", "Int64"].contains(type) ? "asSigned" : "as"
             value = "try record.read(\(type).self, \(label): \(group).self\(order))"
             write = "try writer.write(\(name), \(label): \(group).self\(order))"
@@ -134,10 +134,10 @@ public struct BinaryRecordMacro: MemberMacro, ExtensionMacro {
         }
         guard let expected = field.expected else { return ("self.\(name) = \(value)", write) }
         return ("""
-            let \(name) = \(value)
-            guard \(name) == \(expected) else { throw .mismatch }
-            self.\(name) = \(name)
-            """, write)
+        let \(name) = \(value)
+        guard \(name) == \(expected) else { throw .mismatch }
+        self.\(name) = \(name)
+        """, write)
     }
 
     public static func expansion(
@@ -146,17 +146,17 @@ public struct BinaryRecordMacro: MemberMacro, ExtensionMacro {
     ) throws -> [ExtensionDeclSyntax] {
         // Errors are reported once, by the member expansion: here they just mean no extension.
         do {
-        let order = byteOrder(of: node)
-        let fields = try fields(of: declaration)
-        let access = declaration.accessPrefix
-        let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
-        let code = fields.map { Self.code(for: $0, order: order.map { ", \($0)" } ?? "") }
-        // A fixed order reads from a byte-aligned cursor over the record, from any reader; the cursor's order,
-        // from a cursor in the same (byte-ordered) mode.
-        let (conformances, mode, recordReader) = order == nil
-            ? ("ByteOrderedParsable, ByteOrderedWritable", "ByteOrderedCursorMode", "GenericBytesReader<Mode>")
-            : ("BinaryParsable, BinaryWritable", "BytesCursorMode", "AlignedBytesReader")
-        let declaration: DeclSyntax = """
+            let order = byteOrder(of: node)
+            let fields = try fields(of: declaration)
+            let access = declaration.accessPrefix
+            let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
+            let code = fields.map { Self.code(for: $0, order: order.map { ", \($0)" } ?? "") }
+            // A fixed order reads from a byte-aligned cursor over the record, from any reader; the cursor's order,
+            // from a cursor in the same (byte-ordered) mode.
+            let (conformances, mode, recordReader) = order == nil
+                ? ("ByteOrderedParsable, ByteOrderedWritable", "ByteOrderedCursorMode", "GenericBytesReader<Mode>")
+                : ("BinaryParsable, BinaryWritable", "BytesCursorMode", "AlignedBytesReader")
+            let declaration: DeclSyntax = """
             extension \(type.trimmed): \(raw: conformances), FixedSizeBinary {
             /// Reads the record: its bytes with one bounds check, then each field once. Consumes nothing if it throws.
             \(raw: inlinable)\(raw: access)init<Mode: \(raw: mode)>(parsing reader: inout GenericBytesReader<Mode>) throws(BytesError) {
@@ -175,7 +175,7 @@ public struct BinaryRecordMacro: MemberMacro, ExtensionMacro {
             }
             }
             """
-        return [declaration.cast(ExtensionDeclSyntax.self)]
+            return [declaration.cast(ExtensionDeclSyntax.self)]
         } catch {
             return []
         }

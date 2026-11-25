@@ -16,9 +16,9 @@ internal import Bytes
 /// Reads an AlgorithmIdentifier for an EC key on curve `C`: SEQUENCE { id-ecPublicKey, namedCurve }. Explicit curve
 /// parameters (RFC 5480 forbids them) are rejected.
 func readECAlgorithm<C: PrimeCurve>(_ reader: inout AlignedBytesReader, curve: C.Type) throws(BytesError) {
-    var algorithm = AlignedBytesReader(try reader.readASN1Contents(.sequence))
-    guard ASN1ObjectIdentifier.ecPublicKey.matches(try algorithm.readASN1Contents(.objectIdentifier)),
-          C.objectIdentifier.matches(try algorithm.readASN1Contents(.objectIdentifier))
+    var algorithm = try AlignedBytesReader(reader.readASN1Contents(.sequence))
+    guard try ASN1ObjectIdentifier.ecPublicKey.matches(algorithm.readASN1Contents(.objectIdentifier)),
+          try C.objectIdentifier.matches(algorithm.readASN1Contents(.objectIdentifier))
     else { throw .invalidValue }
     try algorithm.expectASN1End()
 }
@@ -29,10 +29,14 @@ func readECAlgorithm<C: PrimeCurve>(_ reader: inout AlignedBytesReader, curve: C
 /// - Throws: ``BytesError/invalidValue`` if the value doesn't fit.
 func leftPad(_ magnitude: RawSpan, to count: Int, into output: inout MutableRawSpan) throws(BytesError) {
     var start = 0
-    while start < magnitude.byteCount, magnitude.byteOffsetLoad(start) == 0 { start &+= 1 }
+    while start < magnitude.byteCount, magnitude.byteOffsetLoad(start) == 0 {
+        start &+= 1
+    }
     let significant = magnitude.byteCount &- start
     guard significant <= count else { throw .invalidValue }
-    for index in 0..<(count &- significant) { output.storeBytes(of: 0, toByteOffset: index, as: UInt8.self) }
+    for index in 0..<(count &- significant) {
+        output.storeBytes(of: 0, toByteOffset: index, as: UInt8.self)
+    }
     output.copyBytes(from: magnitude.extracting(droppingFirst: start), toByteOffset: count &- significant)
 }
 
@@ -48,10 +52,10 @@ struct ECPublicKeyCore<C: PrimeCurve>: Sendable {
     /// SubjectPublicKeyInfo (RFC 5480): SEQUENCE { AlgorithmIdentifier, BIT STRING (the X9.63 point) }.
     init(subjectPublicKeyInfo der: RawSpan) throws(BytesError) {
         var outer = AlignedBytesReader(der)
-        var info = AlignedBytesReader(try outer.readASN1Contents(.sequence))
+        var info = try AlignedBytesReader(outer.readASN1Contents(.sequence))
         try outer.expectASN1End()
         try readECAlgorithm(&info, curve: C.self)
-        point = try AffinePoint(x963: try info.readASN1BitString())
+        point = try AffinePoint(x963: info.readASN1BitString())
         try info.expectASN1End()
     }
 
@@ -154,7 +158,7 @@ struct ECSignatureCore<C: PrimeCurve>: Sendable {
     /// An ECDSA-Sig-Value: SEQUENCE { INTEGER r, INTEGER s }, optionally followed by zero bytes.
     init(der: RawSpan, allowingZeroPadding: Bool) throws(BytesError) {
         var outer = AlignedBytesReader(der)
-        var sequence = AlignedBytesReader(try outer.readASN1Contents(.sequence))
+        var sequence = try AlignedBytesReader(outer.readASN1Contents(.sequence))
         if allowingZeroPadding {
             let rest = outer.remainingBytes
             for index in 0..<rest.byteCount where rest.byteOffsetLoad(index) != 0 {
@@ -163,8 +167,8 @@ struct ECSignatureCore<C: PrimeCurve>: Sendable {
         } else {
             try outer.expectASN1End()
         }
-        r = try Self.scalar(try sequence.readASN1UnsignedInteger())
-        s = try Self.scalar(try sequence.readASN1UnsignedInteger())
+        r = try Self.scalar(sequence.readASN1UnsignedInteger())
+        s = try Self.scalar(sequence.readASN1UnsignedInteger())
         try sequence.expectASN1End()
     }
 
@@ -226,7 +230,9 @@ struct ECPrivateKeyCore<C: PrimeCurve>: Sendable {
         var bytes = InlineArray<48, UInt8>(repeating: 0)
         while true {
             // Rejection sampling: uniform in [1, n − 1] (n is close to 2^bits on both curves, so this rarely loops).
-            for index in 0..<C.byteCount { bytes[index] = generator.next() }
+            for index in 0..<C.byteCount {
+                bytes[index] = generator.next()
+            }
             if let key = try? Self(scalar: bytes.span.bytes.extracting(first: C.byteCount)) {
                 self = key
                 return
@@ -275,14 +281,14 @@ struct ECPrivateKeyCore<C: PrimeCurve>: Sendable {
         try self.init(scalar: padded.span.bytes.extracting(first: C.byteCount))
         let parametersTag = ASN1Tag.contextSpecific(0, constructed: true)
         if key.nextASN1Tag == parametersTag {
-            var parameters = AlignedBytesReader(try key.readASN1Contents(parametersTag))
-            guard C.objectIdentifier.matches(try parameters.readASN1Contents(.objectIdentifier)) else { throw .invalidValue }
+            var parameters = try AlignedBytesReader(key.readASN1Contents(parametersTag))
+            guard try C.objectIdentifier.matches(parameters.readASN1Contents(.objectIdentifier)) else { throw .invalidValue }
             try parameters.expectASN1End()
         }
         let publicKeyTag = ASN1Tag.contextSpecific(1, constructed: true)
         if key.nextASN1Tag == publicKeyTag {
-            var wrapper = AlignedBytesReader(try key.readASN1Contents(publicKeyTag))
-            try checkPublicKey(try wrapper.readASN1BitString())
+            var wrapper = try AlignedBytesReader(key.readASN1Contents(publicKeyTag))
+            try checkPublicKey(wrapper.readASN1BitString())
             try wrapper.expectASN1End()
         }
         try key.expectASN1End()
@@ -292,24 +298,24 @@ struct ECPrivateKeyCore<C: PrimeCurve>: Sendable {
     /// [0] attributes OPTIONAL, [1] publicKey OPTIONAL }.
     init(pkcs8 der: RawSpan) throws(BytesError) {
         var outer = AlignedBytesReader(der)
-        var info = AlignedBytesReader(try outer.readASN1Contents(.sequence))
+        var info = try AlignedBytesReader(outer.readASN1Contents(.sequence))
         try outer.expectASN1End()
         let version = try info.readASN1SmallInteger()
         guard version == 0 || version == 1 else { throw .invalidValue }
         try readECAlgorithm(&info, curve: C.self)
-        try self.init(sec1: try info.readASN1Contents(.octetString))
+        try self.init(sec1: info.readASN1Contents(.octetString))
         let attributesTag = ASN1Tag.contextSpecific(0, constructed: true)
         if info.nextASN1Tag == attributesTag { _ = try info.readASN1Contents(attributesTag) }
         // OneAsymmetricKey's publicKey: [1] IMPLICIT BIT STRING, so primitive.
         let publicKeyTag = ASN1Tag.contextSpecific(1, constructed: false)
-        if version == 1, info.nextASN1Tag == publicKeyTag { try checkPublicKey(try info.readASN1BitString(publicKeyTag)) }
+        if version == 1, info.nextASN1Tag == publicKeyTag { try checkPublicKey(info.readASN1BitString(publicKeyTag)) }
         try info.expectASN1End()
     }
 
     /// SEC 1 or PKCS #8 DER, told apart by PKCS #8's AlgorithmIdentifier after the version.
     init(der: RawSpan) throws(BytesError) {
         var outer = AlignedBytesReader(der)
-        var probe = AlignedBytesReader(try outer.readASN1Contents(.sequence))
+        var probe = try AlignedBytesReader(outer.readASN1Contents(.sequence))
         _ = try probe.readASN1SmallInteger()
         if probe.nextASN1Tag == .sequence {
             try self.init(pkcs8: der)
@@ -379,7 +385,9 @@ enum ECVerification<C: PrimeCurve> {
         if (rField * zSquared).equalMask(sum.x) != 0 { return true }
         var rPlusN = InlineArray<6, UInt64>(repeating: 0)
         var carry: UInt64 = 0
-        for index in 0..<6 { (rPlusN[index], carry) = addWithCarry(rWords[index], C.order[index], carry) }
+        for index in 0..<6 {
+            (rPlusN[index], carry) = addWithCarry(rWords[index], C.order[index], carry)
+        }
         guard carry == 0, let wrapped = C.Field(canonicalWords: rPlusN) else { return false }
         return (wrapped * zSquared).equalMask(sum.x) != 0
     }
@@ -399,7 +407,9 @@ enum ECVerification<C: PrimeCurve> {
         var qTable = InlineArray<8, Point>(repeating: .identity)
         qTable[0] = Point(point)
         let twice = qTable[0].doubled
-        for index in 1..<8 { qTable[index] = qTable[index &- 1] + twice }
+        for index in 1..<8 {
+            qTable[index] = qTable[index &- 1] + twice
+        }
         let gTable = C.generatorTable
         var accumulator = Point.identity
         for index in (0...bits).reversed() {

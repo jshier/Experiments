@@ -38,7 +38,7 @@ public enum P256 {
         ///   point not on the curve.
         public init(x963Representation: RawSpan) throws(BytesError) {
             guard x963Representation.byteCount == 65 else { throw .invalidValue }
-            core = ECPublicKeyCore(point: try AffinePoint(x963: x963Representation))
+            core = try ECPublicKeyCore(point: AffinePoint(x963: x963Representation))
         }
 
         /// A key from the compressed form, 02 or 03 (y's parity) ‖ x (33 bytes).
@@ -47,7 +47,7 @@ public enum P256 {
         /// - Throws: ``BytesError/invalidValue`` for another length or form, or an x with no point.
         public init(compressedRepresentation: RawSpan) throws(BytesError) {
             guard compressedRepresentation.byteCount == 33 else { throw .invalidValue }
-            core = ECPublicKeyCore(point: try AffinePoint(x963: compressedRepresentation))
+            core = try ECPublicKeyCore(point: AffinePoint(x963: compressedRepresentation))
         }
 
         /// A key from a DER SubjectPublicKeyInfo naming P-256 (either point form).
@@ -82,7 +82,7 @@ public enum P256 {
         }
 
         /// Whether two keys are the same point.
-        public static func == (a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
+        public static func ==(a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
 
         /// Whether `signature` is this key's ECDSA signature of `message`, hashed with SHA-256.
         ///
@@ -136,7 +136,7 @@ public enum P256 {
         public var derRepresentation: [UInt8] { core.der }
 
         /// Whether two signatures have the same r and s.
-        public static func == (a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
+        public static func ==(a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
     }
 
     /// A private key d in [1, n − 1], with its public key dG.
@@ -231,7 +231,7 @@ public enum P384 {
         /// - Throws: ``BytesError/invalidValue`` for another length or form, or a point not on the curve.
         public init(x963Representation: RawSpan) throws(BytesError) {
             guard x963Representation.byteCount == 97 else { throw .invalidValue }
-            core = ECPublicKeyCore(point: try AffinePoint(x963: x963Representation))
+            core = try ECPublicKeyCore(point: AffinePoint(x963: x963Representation))
         }
 
         /// A key from the compressed form, 02 or 03 ‖ x (49 bytes).
@@ -240,7 +240,7 @@ public enum P384 {
         /// - Throws: ``BytesError/invalidValue`` for another length or form, or an x with no point.
         public init(compressedRepresentation: RawSpan) throws(BytesError) {
             guard compressedRepresentation.byteCount == 49 else { throw .invalidValue }
-            core = ECPublicKeyCore(point: try AffinePoint(x963: compressedRepresentation))
+            core = try ECPublicKeyCore(point: AffinePoint(x963: compressedRepresentation))
         }
 
         /// A key from a DER SubjectPublicKeyInfo naming P-384 (either point form): a certificate's key.
@@ -275,7 +275,7 @@ public enum P384 {
         }
 
         /// Whether two keys are the same point.
-        public static func == (a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
+        public static func ==(a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
 
         /// Whether `signature` is this key's ECDSA signature of `message`, hashed with SHA-384.
         ///
@@ -328,7 +328,7 @@ public enum P384 {
         public var derRepresentation: [UInt8] { core.der }
 
         /// Whether two signatures have the same r and s.
-        public static func == (a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
+        public static func ==(a: Self, b: Self) -> Bool { a.core.isEqual(to: b.core) }
     }
 
     /// A private key d in [1, n − 1], with its public key dG.

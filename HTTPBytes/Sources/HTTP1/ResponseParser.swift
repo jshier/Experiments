@@ -118,7 +118,8 @@ public struct HTTP1ResponseParser: Sendable {
                     return .statusLine(HTTP1StatusLine(
                         version: version == 0x312E_312F_5054_5448 ? .http1_1 : .http1_0,
                         status: HTTPStatus(uncheckedCode: Int(first &* 100 &+ second &* 10 &+ third)),
-                        reasonPhrase: bytes.slice(reasonStart, stop)))
+                        reasonPhrase: bytes.slice(reasonStart, stop)
+                    ))
                 }
             }
         }

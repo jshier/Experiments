@@ -209,7 +209,9 @@ public struct ASN1ObjectIdentifier: Hashable, Sendable, CustomStringConvertible 
         try Self.validate(contents)
         storage = InlineArray(repeating: 0)
         count = UInt8(contents.byteCount)
-        for index in 0..<contents.byteCount { storage[index] = contents.byteOffsetLoad(index) }
+        for index in 0..<contents.byteCount {
+            storage[index] = contents.byteOffsetLoad(index)
+        }
     }
 
     /// An identifier from contents that were checked when parsed (a certificate's): invalid ones are a bug here.
@@ -240,7 +242,9 @@ public struct ASN1ObjectIdentifier: Hashable, Sendable, CustomStringConvertible 
     init<let n: Int>(known bytes: InlineArray<n, UInt8>) {
         storage = InlineArray(repeating: 0)
         count = UInt8(n)
-        for index in 0..<n { storage[index] = bytes[index] }
+        for index in 0..<n {
+            storage[index] = bytes[index]
+        }
     }
 
     /// An identifier from its dotted form, such as `"2.5.29.19"`.
@@ -267,7 +271,9 @@ public struct ASN1ObjectIdentifier: Hashable, Sendable, CustomStringConvertible 
             bytes.append(contentsOf: groups.reversed())
         }
         append(arcs[0] * 40 + arcs[1])
-        for arc in arcs.dropFirst(2) { append(arc) }
+        for arc in arcs.dropFirst(2) {
+            append(arc)
+        }
         try self.init(contents: bytes.span.bytes)
     }
 
@@ -284,21 +290,27 @@ public struct ASN1ObjectIdentifier: Hashable, Sendable, CustomStringConvertible 
     @inlinable
     public func matches(_ contents: RawSpan) -> Bool {
         guard contents.byteCount == Int(count) else { return false }
-        for index in 0..<Int(count) where storage[index] != contents.byteOffsetLoad(index) { return false }
+        for index in 0..<Int(count) where storage[index] != contents.byteOffsetLoad(index) {
+            return false
+        }
         return true
     }
 
     @inlinable
-    public static func == (a: Self, b: Self) -> Bool {
+    public static func ==(a: Self, b: Self) -> Bool {
         guard a.count == b.count else { return false }
-        for index in 0..<Int(a.count) where a.storage[index] != b.storage[index] { return false }
+        for index in 0..<Int(a.count) where a.storage[index] != b.storage[index] {
+            return false
+        }
         return true
     }
 
     @inlinable
     public func hash(into hasher: inout Hasher) {
         hasher.combine(count)
-        for index in 0..<Int(count) { hasher.combine(storage[index]) }
+        for index in 0..<Int(count) {
+            hasher.combine(storage[index])
+        }
     }
 
     /// The dotted decimal form, such as `"1.2.840.10045.2.1"`. Arcs of more than 128 bits (only UUID-based
@@ -481,7 +493,7 @@ public struct X509Time: Hashable, Comparable, Sendable, CustomStringConvertible 
         UTCDateTime.secondsSince1970(year: year, month: month, day: day, hour: hour, minute: minute, second: second)
     }
 
-    public static func < (a: Self, b: Self) -> Bool {
+    public static func <(a: Self, b: Self) -> Bool {
         (a.year, a.month, a.day, a.hour, a.minute, a.second) < (b.year, b.month, b.day, b.hour, b.minute, b.second)
     }
 

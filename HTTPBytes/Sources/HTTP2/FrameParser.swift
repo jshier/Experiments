@@ -184,7 +184,7 @@ public struct HTTP2FrameParser: Sendable {
         case .priority:
             guard streamValue != 0 else { throw .connection(.protocolError) }
             guard length == 5 else { throw .stream(stream, .frameSizeError) }
-            frame = .priority(stream: stream, try Self.priority(payload, of: stream))
+            frame = try .priority(stream: stream, Self.priority(payload, of: stream))
         case .rstStream:
             guard streamValue != 0 else { throw .connection(.protocolError) }
             guard length == 4 else { throw .connection(.frameSizeError) }

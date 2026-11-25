@@ -82,9 +82,13 @@ public enum HTTPRequestTarget {
         let count = target.byteCount
         // The port: digits after the last colon.
         var colon = count &- 1
-        while colon >= 0, target.load(fromByteOffset: colon, as: UInt8.self) != 0x3A { colon &-= 1 }
+        while colon >= 0, target.load(fromByteOffset: colon, as: UInt8.self) != 0x3A {
+            colon &-= 1
+        }
         guard colon > 0, colon < count &- 1 else { throw .invalidForm }
-        for offset in (colon &+ 1)..<count where !target.load(fromByteOffset: offset, as: UInt8.self).isASCIIDigit { throw .invalidForm }
+        for offset in (colon &+ 1)..<count where !target.load(fromByteOffset: offset, as: UInt8.self).isASCIIDigit {
+            throw .invalidForm
+        }
         let host = target.extracting(0..<colon)
         if host.load(fromByteOffset: 0, as: UInt8.self) == 0x5B {
             guard host.load(fromByteOffset: colon &- 1, as: UInt8.self) == 0x5D, colon > 2 else { throw .invalidForm }
@@ -121,7 +125,9 @@ public enum HTTPRequestTarget {
         if start &+ 1 < count, target.load(fromByteOffset: start, as: UInt8.self) == 0x2F,
            target.load(fromByteOffset: start &+ 1, as: UInt8.self) == 0x2F {
             start &+= 2
-            while start < count, case let byte = target.load(fromByteOffset: start, as: UInt8.self), byte != 0x2F && byte != 0x3F { start &+= 1 }
+            while start < count, case let byte = target.load(fromByteOffset: start, as: UInt8.self), byte != 0x2F && byte != 0x3F {
+                start &+= 1
+            }
         }
         guard !target.extracting(droppingFirst: start).containsByte(where: { $0.matching(0x5B) | $0.matching(0x5D) }) else {
             throw .invalidCharacter

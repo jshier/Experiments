@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTestSupport
 import CryptoKit
 import Testing
@@ -79,8 +79,8 @@ func expanded<H: BytesCrypto.HashFunction>(_ expander: BytesCrypto.HKDF<H>.Expan
 @Suite struct TLSExpandLabelTests {
     /// The longest label, 249 bytes (255 with `"tls13 "`).
     static let longestLabel: StaticString = """
-        abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmno
-        """
+    abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmno
+    """
 
     /// HKDF-Expand-Label with the longest label and context (an HkdfLabel of 514 bytes, which trapped in a
     /// 320-byte buffer), against the HkdfLabel built by hand and `HKDF.expand`.

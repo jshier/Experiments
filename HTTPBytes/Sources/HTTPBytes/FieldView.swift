@@ -21,7 +21,7 @@ public struct HTTPFieldView: ~Escapable {
     public init(name: RawSpan, value: RawSpan, knownName: HTTPFieldName?) {
         self.name = name
         self.value = value
-        self.knownIndex = knownName?.index ?? Self.notKnown
+        knownIndex = knownName?.index ?? Self.notKnown
     }
 
     /// A field of `name` and `value` whose known name is looked up only when ``knownName`` is read: what the HTTP/1
@@ -32,7 +32,7 @@ public struct HTTPFieldView: ~Escapable {
     public init(name: RawSpan, value: RawSpan) {
         self.name = name
         self.value = value
-        self.knownIndex = Self.notLookedUp
+        knownIndex = Self.notLookedUp
     }
 
     /// The name, if it's one HTTPBytes knows.

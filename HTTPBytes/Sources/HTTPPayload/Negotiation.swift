@@ -34,16 +34,15 @@ extension HTTPContentCoding {
         }
         var best: HTTPContentCoding? = nil, bestWeight = 0
         for coding in available {
-            let weight: Int
-            if malformed {
-                weight = coding == .identity ? 1000 : 0
+            let weight: Int = if malformed {
+                coding == .identity ? 1000 : 0
             } else if weights[coding.slot] >= 0 {
-                weight = weights[coding.slot]
+                weights[coding.slot]
             } else if any >= 0 {
-                weight = any
+                any
             } else {
                 // Not named: only `identity` stays acceptable (RFC 9110 §12.5.3).
-                weight = coding == .identity ? 1000 : 0
+                coding == .identity ? 1000 : 0
             }
             if weight > bestWeight { (best, bestWeight) = (coding, weight) }
         }

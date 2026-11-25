@@ -97,13 +97,13 @@ public enum PCAPNG {
         }
         guard blockLength > 28 else { throw .invalidValue } // The example requires options.
         var options = try reader.readSection(byteCount: Int(blockLength) &- 28)
-        let parsedOptions = try readOptions(&options) { (code, value) throws(BytesError) -> ExampleSectionHeader.Option in
+        let parsedOptions = try readOptions(&options) { code, value throws(BytesError) -> ExampleSectionHeader.Option in
             switch code {
             case 0: .end
-            case 1: .comment(try text(&value))
-            case 2: .hardware(try text(&value))
-            case 3: .os(try text(&value))
-            case 4: .application(try text(&value))
+            case 1: try .comment(text(&value))
+            case 2: try .hardware(text(&value))
+            case 3: try .os(text(&value))
+            case 4: try .application(text(&value))
             default: throw .invalidValue
             }
         }
@@ -119,12 +119,12 @@ public enum PCAPNG {
         let code = try reader.read(UInt32.self)
         switch code {
         case 0x0A0D_0D0A: throw .invalidValue // Another section: not supported, as in the example.
-        case 0x0000_0001: return .interfaceDescription(try readInterfaceDescription(&reader))
-        case 0x0000_0006: return .enhancedPacket(try readEnhancedPacket(&reader))
+        case 0x0000_0001: return try .interfaceDescription(readInterfaceDescription(&reader))
+        case 0x0000_0006: return try .enhancedPacket(readEnhancedPacket(&reader))
         default:
             let blockLength = try reader.read(UInt32.self)
             // Under 12 bytes, the length is negative: `invalidValue`.
-            let buffer = [UInt8](copying: try reader.read(byteCount: Int(blockLength) &- 12))
+            let buffer = try [UInt8](copying: reader.read(byteCount: Int(blockLength) &- 12))
             try reader.expect(blockLength)
             return .custom(code: String(code, radix: 16), buffer: buffer)
         }
@@ -141,24 +141,24 @@ public enum PCAPNG {
         let snapshotLength = try fields.read(Int.self, as: Byte4.self)
         // Under 20 bytes, the length is negative: `invalidValue` (the example traps, on a `UInt32` subtraction).
         var options = try reader.readSection(byteCount: Int(blockLength) &- 20)
-        let parsedOptions = try readOptions(&options) { (code, value) throws(BytesError) -> ExampleInterfaceDescription.Option in
+        let parsedOptions = try readOptions(&options) { code, value throws(BytesError) -> ExampleInterfaceDescription.Option in
             switch code {
             case 0: .end
-            case 1: .comment(try text(&value))
-            case 2: .name(try text(&value))
-            case 3: .description(try text(&value))
-            case 4: .ipv4Address(try value.read(UInt64.self))
-            case 5: .ipv6Address(try value.read(UInt64.self), try value.read(UInt64.self), try value.read(UInt8.self))
+            case 1: try .comment(text(&value))
+            case 2: try .name(text(&value))
+            case 3: try .description(text(&value))
+            case 4: try .ipv4Address(value.read(UInt64.self))
+            case 5: try .ipv6Address(value.read(UInt64.self), value.read(UInt64.self), value.read(UInt8.self))
             // 8 bytes from a 6-byte option, as in the example (so a well-formed one throws).
-            case 6: .macAddress(try value.read(UInt64.self) >> 16)
-            case 7: .euiAddress(try value.read(UInt64.self))
-            case 8: .interfaceSpeed(try value.read(UInt64.self))
-            case 9: .timestampResolution(ExampleTimestampResolution(_resolutionByte: try value.read(UInt8.self)))
-            case 10: .timeZone(String(copying: try value.readUTF8(byteCount: 4)))
+            case 6: try .macAddress(value.read(UInt64.self) >> 16)
+            case 7: try .euiAddress(value.read(UInt64.self))
+            case 8: try .interfaceSpeed(value.read(UInt64.self))
+            case 9: try .timestampResolution(ExampleTimestampResolution(_resolutionByte: value.read(UInt8.self)))
+            case 10: try .timeZone(String(copying: value.readUTF8(byteCount: 4)))
             case 11: .filter([UInt8](copying: value.readRemainingBytes()))
-            case 12: .os(try text(&value))
-            case 13: .fcsLength(Int(try value.read(UInt8.self)))
-            case 14: .timestampOffset(try value.read(Int.self, as: Byte8.self))
+            case 12: try .os(text(&value))
+            case 13: try .fcsLength(Int(value.read(UInt8.self)))
+            case 14: try .timestampOffset(value.read(Int.self, as: Byte8.self))
             default: throw .invalidValue
             }
         }
@@ -185,18 +185,18 @@ public enum PCAPNG {
 
         // A negative length (a block too short for its packet) is `invalidValue`.
         var options = try reader.readSection(byteCount: Int(blockLength) &- 32 &- paddedLength)
-        let parsedOptions = try readOptions(&options) { (code, value) throws(BytesError) -> ExampleEnhancedPacket.Option in
+        let parsedOptions = try readOptions(&options) { code, value throws(BytesError) -> ExampleEnhancedPacket.Option in
             if code[PCAPNGFields.customOption] { return .custom(code, [UInt8](copying: value.readRemainingBytes())) }
             return switch code {
             case 0: .end
-            case 1: .comment(try text(&value))
-            case 2: .flags(try value.read(UInt32.self))
-            case 3: .hash(try readHashAlgorithm(&value))
-            case 4: .dropCount(try value.read(UInt64.self))
-            case 5: .packetID(try value.read(UInt64.self))
-            case 6: .queue(try value.read(UInt32.self))
+            case 1: try .comment(text(&value))
+            case 2: try .flags(value.read(UInt32.self))
+            case 3: try .hash(readHashAlgorithm(&value))
+            case 4: try .dropCount(value.read(UInt64.self))
+            case 5: try .packetID(value.read(UInt64.self))
+            case 6: try .queue(value.read(UInt32.self))
             case 7: .verdict([UInt8](copying: value.readRemainingBytes()))
-            case 8: .processIDthreadID(try value.read(UInt64.self))
+            case 8: try .processIDthreadID(value.read(UInt64.self))
             default: throw .invalidValue
             }
         }
@@ -218,7 +218,7 @@ public enum PCAPNG {
         let source = try header.read(UInt64.self, as: Byte6.self)
         let type = try header.read(UInt16.self)
         guard packet.remainingByteCount >= 4 else { throw .insufficientData }
-        let data = [UInt8](copying: try packet.read(byteCount: packet.remainingByteCount &- 4))
+        let data = try [UInt8](copying: packet.read(byteCount: packet.remainingByteCount &- 4))
         let fcs = try packet.read(UInt32.self)
         return ExampleEnhancedPacket.Packet(
             hasPreamble: hasPreamble, destinationAddress: ExampleEnhancedPacket.MACAddress(address: destination),
@@ -233,10 +233,10 @@ public enum PCAPNG {
         switch try value.read(UInt8.self) {
         case 0: .twosComplement
         case 1: .xor
-        case 2: .crc32(try value.read(UInt32.self))
-        case 3: .md5(try value.read(UInt64.self), try value.read(UInt64.self))
-        case 4: .sha1(try value.read(UInt64.self), try value.read(UInt64.self), try value.read(UInt8.self))
-        case 5: .toeplitz(try value.read(UInt32.self))
+        case 2: try .crc32(value.read(UInt32.self))
+        case 3: try .md5(value.read(UInt64.self), value.read(UInt64.self))
+        case 4: try .sha1(value.read(UInt64.self), value.read(UInt64.self), value.read(UInt8.self))
+        case 5: try .toeplitz(value.read(UInt32.self))
         default: throw .invalidValue
         }
     }
@@ -255,7 +255,7 @@ public enum PCAPNG {
         _ parse: (UInt16, inout GenericBytesReader<Mode>) throws(BytesError) -> Option
     ) throws(BytesError) -> [Option] {
         var options: [Option] = []
-        try section.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { (code, value) throws(BytesError) in
+        try section.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { code, value throws(BytesError) in
             try options.append(parse(code, &value))
         }
         // Trailing bytes too few for an option's code and length: the example reads them and throws.
@@ -267,7 +267,7 @@ public enum PCAPNG {
     /// text).
     @inline(__always)
     static func text<Mode: ByteOrderedCursorMode>(_ value: inout GenericBytesReader<Mode>) throws(BytesError) -> String {
-        String(copying: try value.readUTF8(byteCount: value.remainingByteCount))
+        try String(copying: value.readUTF8(byteCount: value.remainingByteCount))
     }
 }
 
@@ -287,6 +287,7 @@ public func makePCAPNG(packetCount: Int, bigEndian: Bool = false) -> [UInt8] {
         mutating func append<T: FixedWidthInteger>(_ value: T) {
             withUnsafeBytes(of: bigEndian ? value.bigEndian : value.littleEndian) { bytes.append(contentsOf: $0) }
         }
+
         mutating func pad() { bytes += repeatElement(0, count: bytes.count.roundedUpToMultipleOf4 - bytes.count) }
         mutating func option(_ code: UInt16, _ value: [UInt8]) {
             append(code)
@@ -294,6 +295,7 @@ public func makePCAPNG(packetCount: Int, bigEndian: Bool = false) -> [UInt8] {
             bytes += value
             pad()
         }
+
         mutating func option(_ code: UInt16, _ text: String) { option(code, Array(text.utf8)) }
     }
     var capture: [UInt8] = []

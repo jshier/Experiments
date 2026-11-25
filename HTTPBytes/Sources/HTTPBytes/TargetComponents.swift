@@ -104,13 +104,17 @@ public struct HTTPTargetComponents: ~Escapable {
         // absolute-form: `scheme ":"`, then `//authority` if it's there, then the path and query.
         form = .absolute
         var colon = 0
-        while colon < end, FieldGrammar.byte(target, colon) != 0x3A { colon &+= 1 }
+        while colon < end, FieldGrammar.byte(target, colon) != 0x3A {
+            colon &+= 1
+        }
         scheme = target.extracting(0..<colon)
         let rest = colon < end ? colon &+ 1 : end
         if rest &+ 1 < end, FieldGrammar.byte(target, rest) == 0x2F, FieldGrammar.byte(target, rest &+ 1) == 0x2F {
             let authorityStart = rest &+ 2
             var authorityEnd = authorityStart
-            while authorityEnd < end, case let byte = FieldGrammar.byte(target, authorityEnd), byte != 0x2F, byte != 0x3F { authorityEnd &+= 1 }
+            while authorityEnd < end, case let byte = FieldGrammar.byte(target, authorityEnd), byte != 0x2F, byte != 0x3F {
+                authorityEnd &+= 1
+            }
             authority = target.extracting(authorityStart..<authorityEnd)
             (path, query) = Self.pathAndQuery(target.extracting(droppingFirst: authorityEnd))
         } else {
@@ -202,7 +206,9 @@ public struct HTTPQueryItems: ~Escapable {
     @inlinable
     @_lifetime(copy self)
     public mutating func next() -> HTTPQueryItem? {
-        while position < bytes.byteCount, FieldGrammar.byte(bytes, position) == 0x26 { position &+= 1 }
+        while position < bytes.byteCount, FieldGrammar.byte(bytes, position) == 0x26 {
+            position &+= 1
+        }
         guard position < bytes.byteCount else { return nil }
         let rest = bytes.extracting(droppingFirst: position)
         let length = rest.firstByteOffset(where: { $0.matching(0x26) }) ?? rest.byteCount
@@ -272,7 +278,7 @@ public struct HTTPContentDisposition: ~Escapable {
         // Checked by the initializer: the parameters don't throw.
         if let extended = try? parameters.value(of: "filename*") {
             switch extended {
-            case .token(let text):
+            case let .token(text):
                 let start = writer.position
                 do throws(HTTPFieldValueError) {
                     try HTTPExtendedValue.decode(text, to: &writer)
@@ -290,8 +296,8 @@ public struct HTTPContentDisposition: ~Escapable {
         // The same rule for the plain name's text: UTF-8 without controls (a quoted string may hold tabs and obs-text).
         var check = FileNameTextCheck()
         let (text, escaped): (RawSpan, Bool) = switch plain {
-        case .token(let token): (token, false)
-        case .quoted(let string): (string.escaped, string.hasEscapes)
+        case let .token(token): (token, false)
+        case let .quoted(string): (string.escaped, string.hasEscapes)
         }
         var position = 0
         while position < text.byteCount {

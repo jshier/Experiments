@@ -50,12 +50,16 @@ func registerCoreAdditionsBenchmarks() {
         let label = count < 1 << 10 ? "\(count) B" : "\(count >> 10) KB"
         register("Hex: String(hexadecimal:), \(label) (×4 K)", bytes) { bytes in
             var total = 0
-            for _ in 0..<4_096 { total &+= String(hexadecimal: bytes.span.bytes).utf8.count }
+            for _ in 0..<4_096 {
+                total &+= String(hexadecimal: bytes.span.bytes).utf8.count
+            }
             return total
         }
         register("Hex: [UInt8](hexadecimal:), \(label) (×4 K)", text, check: { _, total in total == 4_096 * count }) { text in
             var total = 0
-            for _ in 0..<4_096 { total &+= try [UInt8](hexadecimal: text.span.bytes).count }
+            for _ in 0..<4_096 {
+                total &+= try [UInt8](hexadecimal: text.span.bytes).count
+            }
             return total
         }
     }

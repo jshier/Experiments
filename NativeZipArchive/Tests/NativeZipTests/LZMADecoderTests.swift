@@ -1,6 +1,6 @@
 import BytesReferenceCodecs
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 import Compression
 import Foundation
 @_spi(Testing) import NativeZip
@@ -207,6 +207,19 @@ enum LZMAOutcome: Equatable {
         }
     }
 
+    /// A stream ending with its marker (flag bit 1) that decodes past its recorded size: the decoder stops at the first
+    /// byte past it (BytesCompression's `.lzma(maximumSize:)`), a size mismatch one byte past. (Decoded whole here, as a
+    /// small unencrypted entry is; `StagedInputTests` streams one.)
+    @Test func endMarkerStreamPastItsSizeStopsThere() {
+        for name in ["text-marker", "records-lc0-lp4-pb0", "sentences-1m-dict4k"] {
+            let vector = LZMAVector.named(name)
+            for size in [vector.size - 1, vector.size / 2, 1] {
+                let outcome = Result { () throws(ZipError) in try lzmaDecode(vector.payload, size: size, hasEndMarker: true) }
+                #expect(outcome == .failure(.sizeMismatch("payload", expected: UInt64(size), actual: UInt64(size + 1))), "\(name), size \(size)")
+            }
+        }
+    }
+
     /// Sizes that don't match the stream: a marker before the size, output past it, or a stream that
     /// continues past it.
     @Test func wrongSizes() {
@@ -222,7 +235,7 @@ enum LZMAOutcome: Equatable {
     /// Small unencrypted LZMA and xz entries (at most the decoder's 1 MiB chunk) decode in one call straight into the
     /// output buffer, with no window: at their recorded size they decode, at any other (one short, one over, half,
     /// over 1 MiB as recorded for a stream that isn't) they're corrupt.
-    @Test func smallEntriesDecodeWhole() throws {
+    @Test func smallEntriesDecodeWhole() {
         let text = LZMAVector.named("text-marker").expected
         let xz = AppleCompression.encode(text, COMPRESSION_LZMA)
         var decoder = ZipDecoder()
@@ -402,8 +415,8 @@ enum LZMAOutcome: Equatable {
         }
         let environment = ProcessInfo.processInfo.environment
         if let path = environment["LZMA_PERF_PAYLOAD"], let original = environment["LZMA_PERF_ORIGINAL"] {
-            let payload = [UInt8](try Data(contentsOf: URL(filePath: path)))
-            let expected = [UInt8](try Data(contentsOf: URL(filePath: original)))
+            let payload = try [UInt8](Data(contentsOf: URL(filePath: path)))
+            let expected = try [UInt8](Data(contentsOf: URL(filePath: original)))
             #expect(try lzmaDecode(payload, size: expected.count, hasEndMarker: false) == expected)
             cases.append((path, payload, expected.count, false))
         }

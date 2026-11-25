@@ -3,72 +3,122 @@
 # For runtime events static counts can't show: actual executor hops, allocations, retains, page faults in a
 # loop. DTrace would be faster but is blocked by SIP on system libraries.
 #
-# usage: Tools/runtime-count [--break SYMBOL[@MODULE]]... [--who SYMBOL=REGISTER] -- PROGRAM [ARGS...]
+# usage: Tools/runtime-count [--break SYMBOL[@MODULE]]... [--who SYMBOL=REGISTER]... [--timeout S] -- PROGRAM [ARGS...]
 #
-#   --break   a function to count: a C/runtime name (swift_task_switch, swift_retain, malloc,
-#             swift_allocObject), or a mangled Swift name (quote the $). @MODULE limits it to one image
-#             (swift_task_switch@libswift_Concurrency.dylib), which also avoids counting stubs.
-#   --who     at each hit of SYMBOL, tally what REGISTER points at, symbolized: for swift_task_switch, x0 is
-#             the resume function (which async function is switching); lr is the caller (tail calls hide it).
-#             Implies --break SYMBOL.
+#   --break    a function to count: a C/runtime name (swift_task_switch, swift_retain, malloc,
+#              swift_allocObject), or a mangled Swift name (quote the $). @MODULE limits it to one image
+#              (swift_task_switch@libswift_Concurrency.dylib), which also avoids counting stubs.
+#   --who      at each hit of SYMBOL, tally what REGISTER points at, symbolized: for swift_task_switch, x0 is
+#              the resume function (which async function is switching); lr is the caller (tail calls hide it).
+#              Implies --break SYMBOL. Several --who for one symbol (x0 and lr) are tallied apart.
+#   --timeout  stop LLDB and PROGRAM after S seconds (default 300) and fail
 #
-# Output, tab-separated: "hits", symbol, count; then for --who: "who", symbol, count, symbolized value.
+# Output, tab-separated: "hits", symbol, count (a breakpoint that never resolved to code: "0 (unresolved)"); then
+# for each --who: "who", SYMBOL=REGISTER as given, count, symbolized value (the hex value when it isn't an address in
+# an image).
+#
+# Exit status: 0 when PROGRAM exited with status 0 and every breakpoint resolved. 1 when a breakpoint never
+# resolved (a misspelled name, a module that isn't loaded), or PROGRAM didn't exit normally (a crash: the counts
+# up to it are printed, then the reason) or exited with another status, or the timeout passed.
 #
 # Each hit stops the process briefly (tens of microseconds): use small workloads, and compare two sizes to
-# separate per-iteration counts from fixed ones (e.g. 20,000 and 80,000 packets).
+# separate per-iteration counts from fixed ones (e.g. 20,000 and 80,000 packets). PROGRAM's standard input is
+# /dev/null, and it runs as PROGRAM-debuggable (get-task-allow; lib/common.sh).
+#
+# With several threads hitting breakpoints at the same moment, LLDB can miss a hit (8 threads × 300 calls read 2,397 to
+# 2,399 of 2,400, before these changes too): counts from multithreaded code are lower bounds, and the --who rows sum to
+# at most the hits. Each --who value is read on the thread that hit, so what's tallied is attributed correctly.
 #
 # examples:
 #   Tools/runtime-count --break swift_task_switch@libswift_Concurrency.dylib --break swift_job_run \
 #       -- .build/release/socket-stream --packets 20000 --runs 1
 #   Tools/runtime-count --who swift_task_switch=x0 -- ./server --requests 100
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
-breaks=() whos=()
+breaks=() whos=() timeout=300
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --break) breaks+=("$2"); shift ;;
-        --who) whos+=("$2"); breaks+=("${2%%=*}"); shift ;;
+        --break) need_value "$@"; breaks+=("$2"); shift ;;
+        --who)
+            need_value "$@"
+            [[ "$2" =~ ^[^=]+=[A-Za-z0-9]+$ ]] || die "--who takes SYMBOL=REGISTER (swift_task_switch=x0), not '$2'"
+            whos+=("$2"); breaks+=("${2%%=*}"); shift ;;
+        --timeout) need_value "$@"; need_number "$1" "$2"; timeout="$2"; shift ;;
         -h|--help) usage ;;
         --) shift; break ;;
         *) die "unknown option $1" ;;
     esac
     shift
 done
+need_xcode_tools # once here, not in every `| demangle` subshell, and before LLDB runs
 [[ $# -ge 1 && ${#breaks[@]} -ge 1 ]] || usage 2
 # One breakpoint per symbol, even if it's given with both --break and --who.
-breaks=($(printf '%s\n' "${breaks[@]}" | perl -ne 'print unless $seen{$_}++'))
+unique=()
+while IFS= read -r spec; do unique+=("$spec"); done < <(printf '%s\n' "${breaks[@]}" | perl -ne 'print unless $seen{$_}++')
+breaks=("${unique[@]}")
 scratch_dir
+program="$(debuggable "$1")"; shift
 
+# Each --who's register read is preceded by a marker line ("@who N", N its index in whos), printed by the
+# breakpoint's own commands, so every register line is attributed to the --who that asked for it.
 {
-    index=0
     for spec in "${breaks[@]}"; do
-        index=$((index + 1))
         name="${spec%%@*}" module=
         [[ "$spec" == *@* ]] && module="${spec#*@}"
-        who=
-        for w in "${whos[@]+"${whos[@]}"}"; do [[ "${w%%=*}" == "$spec" ]] && who="${w#*=}"; done
         line="breakpoint set -n '$name' -G true"
         [[ -n "$module" ]] && line+=" -s '$module'"
-        [[ -n "$who" ]] && line+=" -C 'register read $who'"
+        for ((w = 0; w < ${#whos[@]}; w++)); do
+            [[ "${whos[w]%%=*}" == "$spec" ]] || continue
+            line+=" -C \"script print('@who $w')\" -C 'register read ${whos[w]#*=}'"
+        done
         echo "$line"
     done
     echo "run"
     echo "breakpoint list"
     echo "quit"
 } > "$SCRATCH/commands"
+# After a crash, `lldb --batch` would stop at its prompt: these run instead.
+printf '%s\n' "breakpoint list" "process kill" "quit" > "$SCRATCH/on-crash"
 
-program="$(debuggable "$1")"; shift
-xcrun lldb --batch -s "$SCRATCH/commands" -- "$program" "$@" > "$SCRATCH/log" 2>&1 || true
+status=0
+with_timeout "$timeout" xcrun lldb --batch -s "$SCRATCH/commands" -K "$SCRATCH/on-crash" \
+    -- "$program" "$@" > "$SCRATCH/log" 2>&1 < /dev/null || status=$?
+[[ $status != 124 ]] || fail "$(basename "$program") didn't finish in ${timeout} s (--timeout); LLDB and it were stopped (or LLDB waited on a prompt: $AUTH_HINT)"
 grep -qE "^[0-9]+: name" "$SCRATCH/log" || { tail -20 "$SCRATCH/log" >&2; die "lldb didn't run the program ($AUTH_HINT)"; }
 
 # "1: name = 'swift_task_switch', module = libswift_Concurrency.dylib, locations = 2, resolved = 1, hit count = 85"
-perl -ne 'print "hits\t$1\t$2\n" if /^\d+: name = \x27([^\x27]+)\x27.*hit count = (\d+)/' "$SCRATCH/log" | demangle
-for w in "${whos[@]+"${whos[@]}"}"; do
-    register="${w#*=}"
-    # "     x0 = 0x0000000100f67ac0  mqtt-socket-stream`(2) suspend resume partial function for …"
-    REGISTER="$register" SYMBOL="${w%%=*}" perl -ne '
-        next unless /^\s*\Q$ENV{REGISTER}\E = 0x[0-9a-f]+\s*(.*)$/;
-        my $s = $1; $s =~ s/^[^`]*`//; $s =~ s/\s+at\s+.*$//; $s =~ s/ \+ \d+$//; $s = "(no symbol)" unless length $s;
+# "2: name = 'nothing', locations = 0 (pending)"
+perl -ne '
+    next unless /^\d+: name = \x27([^\x27]+)\x27(.*)$/;
+    my ($name, $rest) = ($1, $2);
+    if ($rest =~ /hit count = (\d+)/ && $rest !~ /resolved = 0\b/) { print "hits\t$name\t$1\n" }
+    else { print "hits\t$name\t0 (unresolved)\n" }' "$SCRATCH/log" > "$SCRATCH/hits"
+demangle < "$SCRATCH/hits"
+for ((w = 0; w < ${#whos[@]}; w++)); do
+    # "@who 0", then "     x0 = 0x0000000100f67ac0  mqtt-socket-stream`(2) suspend resume partial function for …"
+    INDEX="$w" SPEC="${whos[w]}" perl -ne '
+        if (/^\@who (\d+)$/) { $mine = $1 == $ENV{INDEX}; next }
+        next unless $mine && /^\s*\w+ = (0x[0-9a-f]+)\s*(.*)$/;
+        $mine = 0;
+        my ($value, $s) = ($1, $2);
+        $s =~ s/^[^`]*`//; $s =~ s/\s+at\s+.*$//; $s =~ s/ \+ \d+$//;
+        $s = $value unless length $s; # not an address in an image (a count, a heap pointer): the value itself
         $count{$s}++;
-        END { print "who\t$ENV{SYMBOL}\t$count{$_}\t$_\n" for sort { $count{$b} <=> $count{$a} } keys %count }' "$SCRATCH/log" | demangle
+        END { print "who\t$ENV{SPEC}\t$count{$_}\t$_\n" for sort { $count{$b} <=> $count{$a} } keys %count }' "$SCRATCH/log" | demangle
 done
+
+result=0
+if grep -q '(unresolved)$' "$SCRATCH/hits"; then
+    note "a breakpoint never resolved to code: check the name and module ($(perl -ne 'push @n, $1 if /^hits\t(.*)\t0 \(unresolved\)$/; END { print join(", ", @n) }' "$SCRATCH/hits"))"
+    result=1
+fi
+exit_line="$(grep -E '^Process [0-9]+ exited with status = ' "$SCRATCH/log" | tail -1 || true)"
+if [[ -z "$exit_line" ]]; then
+    reason="$(grep -m1 -E 'stop reason = ' "$SCRATCH/log" | perl -pe 's/^.*stop reason = //' || true)"
+    note "$(basename "$program") didn't exit normally (${reason:-no exit seen}): the counts are up to that point"
+    result=1
+elif [[ ! "$exit_line" =~ "status = 0 " ]]; then
+    note "$(basename "$program") ${exit_line#Process * }"
+    result=1
+fi
+exit "$result"

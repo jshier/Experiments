@@ -1,8 +1,9 @@
+@testable import NativeAEA
 import Bytes
 import BytesCrypto
 import BytesTestSupport
 import Foundation
-@testable import NativeAEA
+
 // Security only checks BytesCrypto's verdict on a chain.
 import Security
 import System
@@ -31,7 +32,7 @@ import Testing
         return (directory, keys, url, writer)
     }
 
-    @Test func readsTheContainer() async throws {
+    @Test func readsTheContainer() throws {
         let (directory, keys, url, writer) = try archive()
         defer { directory.remove() }
         let archive = try AEAArchive(url: url, signingKey: keys.signingKey)
@@ -44,7 +45,7 @@ import Testing
         #expect(archive.segments.map(\.rawSize).reduce(0, +) == writer.bytes.count)
         #expect(archive.segments.count == (writer.bytes.count + 65_535) / 65_536)
         // The identifier is what `aea id` prints.
-        let id = String(decoding: try ExternalTool.output("/usr/bin/aea", ["id", "-i", url.path]), as: UTF8.self)
+        let id = try String(decoding: ExternalTool.output("/usr/bin/aea", ["id", "-i", url.path]), as: UTF8.self)
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let identifier = archive.identifier
         #expect(String(hexadecimal: identifier.span.bytes) == id)
@@ -85,7 +86,7 @@ import Testing
         #expect(statistics.files == 3)
     }
 
-    @Test func readsTheCertificateChain() async throws {
+    @Test func readsTheCertificateChain() throws {
         let (directory, keys, url, _) = try archive(withCertificateChain: true)
         defer { directory.remove() }
         // Self-signed: not trusted, but usable when asked.
@@ -106,7 +107,7 @@ import Testing
     }
 
     /// RFC 5280's rules on chains openssl makes: a valid root, intermediate, and leaf; then one violation each.
-    @Test func enforcesTheChainRules() async throws {
+    @Test func enforcesTheChainRules() throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         func run(_ arguments: [String]) throws { try ExternalTool.run("/usr/bin/openssl", arguments) }
@@ -167,12 +168,15 @@ import Testing
         #expect(throws: AEAError.self) { try CertificateChain.verify([underNotCA, notCA, root], anchors: [root], at: Date()) }
     }
 
+    /// Xcode's archive in ~/Scratch (the user's download, read only, for its prologue): not in the repository, so the
+    /// test that needs it is skipped, visibly, where it isn't.
+    static let xcodeArchive = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Scratch/Xcode_27.3_beta_2.aea")
+
     /// Xcode's chain (leaf, Apple Platform Signing ECC CA 1 - G1, Apple Root CA - G3), verified with BytesCrypto, as
     /// Security evaluates it; and with any byte of a signature or a name changed, rejected.
-    @Test func verifiesXcodesCertificateChain() async throws {
-        let path = FileManager.default.homeDirectoryForCurrentUser.appending(path: "Scratch/Xcode_27.3_beta_2.aea").path
-        guard FileManager.default.fileExists(atPath: path) else { return } // Not on this machine.
-        let prologue = try AEAArchive.prologue(at: FilePath(path))
+    @Test(.enabled(if: FileManager.default.fileExists(atPath: Self.xcodeArchive.path), "no ~/Scratch/Xcode_27.3_beta_2.aea"))
+    func verifiesXcodesCertificateChain() throws {
+        let prologue = try AEAArchive.prologue(at: FilePath(Self.xcodeArchive.path))
         let entry = try #require(prologue.authDataEntries?.first { $0.key == AEASignature.certificateChainKey })
         let chain = try X509Certificate.decodePEM(entry.value.span.bytes)
         #expect(chain.count == 3)
@@ -182,7 +186,7 @@ import Testing
         let certificates = chain.compactMap { SecCertificateCreateWithData(nil, Data($0) as CFData) }
         var trust: SecTrust?
         #expect(SecTrustCreateWithCertificates(certificates as CFArray, SecPolicyCreateBasicX509(), &trust) == errSecSuccess)
-        #expect(SecTrustEvaluateWithError(try #require(trust), nil))
+        #expect(try SecTrustEvaluateWithError(#require(trust), nil))
 
         // Damage: the intermediate's signature (its last bytes), the leaf's issuer name, and the root's key.
         for (index, offset) in [(1, chain[1].count - 5), (0, 60), (2, chain[2].count - 120)] {
@@ -195,7 +199,7 @@ import Testing
         #expect(throws: AEAError.self) { try CertificateChain.verify(chain, anchors: nil, at: Date(timeIntervalSince1970: 0)) }
     }
 
-    @Test func rejectsAnotherKey() async throws {
+    @Test func rejectsAnotherKey() throws {
         let (directory, _, url, _) = try archive()
         defer { directory.remove() }
         let other = try SigningKeys(in: directory)
@@ -221,23 +225,32 @@ import Testing
         let prologue = archive.prologue.byteCount
 
         // In the signed prologue (the root header): the signature fails.
-        #expect(throws: AEAError.invalidSignature) { _ = try AEAArchive(url: try corrupt(url, at: prologue - 40), signingKey: key) }
+        #expect(throws: AEAError.invalidSignature) { _ = try AEAArchive(url: corrupt(url, at: prologue - 40), signingKey: key) }
         // In the first cluster header: its MAC fails.
         #expect(throws: AEAError.authenticationFailed("cluster 0 header")) {
-            _ = try AEAArchive(url: try corrupt(url, at: prologue + 3), signingKey: key)
+            _ = try AEAArchive(url: corrupt(url, at: prologue + 3), signingKey: key)
         }
         // In a segment: its MAC fails when it's read.
         let segment = archive.segments[2]
-        let tampered = try AEAArchive(url: try corrupt(url, at: segment.fileOffset + 10), signingKey: key)
+        let tampered = try AEAArchive(url: corrupt(url, at: segment.fileOffset + 10), signingKey: key)
         defer { tampered.close() }
         await #expect(throws: AEAError.authenticationFailed("segment 2")) { try await tampered.forEachEntry { _ in } }
-        // Without MACs, the checksum (or the decoder) catches it.
+        // Without MACs, the checksum (or the decoder) catches it, naming the segment (every time: failures come in
+        // segment order).
         var options = AEAReadOptions()
         options.verifyMACs = false
-        await #expect(throws: AEAError.self) { try await tampered.forEachEntry(options: options) { _ in } }
+        await #expect {
+            try await tampered.forEachEntry(options: options) { _ in }
+        } throws: { error in
+            switch error as? AEAError {
+            case .checksumMismatch(segment: 2)?: true
+            case .decompressionFailed(segment: 2, _)?: "\(error)".hasPrefix("segment 2 failed to decompress")
+            default: false
+            }
+        }
     }
 
-    @Test func detectsTruncation() async throws {
+    @Test func detectsTruncation() throws {
         let (directory, keys, url, _) = try archive()
         defer { directory.remove() }
         var bytes = try Data(contentsOf: url)
@@ -252,7 +265,7 @@ import Testing
         }
     }
 
-    @Test func parsesHeaderFields() async throws {
+    @Test func parsesHeaderFields() throws {
         var writer = ArchiveStreamWriter()
         writer.file("a/b", [1, 2, 3], mode: 0o4755, diskCompression: 14, flags: 0x20)
         let bytes = writer.bytes
@@ -265,5 +278,25 @@ import Testing
         #expect(header.data?.count == 3)
         #expect(header.path?.count == 3)
         #expect(count + 3 == bytes.count)
+    }
+
+    /// Blob sizes add up below 2^62, as each is bounded: three `XATC` blobs of 2^62 − 1 bytes overflowed the header's
+    /// total (a trap) before the sum was bounded. A total of 2^62 − 1 is accepted, 2^62 refused.
+    @Test func blobSizesAreBoundedInTotal() throws {
+        func header(_ blobs: [UInt64]) -> [UInt8] {
+            var fields: [UInt8] = []
+            for size in blobs {
+                fields += Array("XATC".utf8) + (0..<8).map { UInt8(truncatingIfNeeded: size >> (8 * UInt64($0))) }
+            }
+            let count = 6 + fields.count
+            return Array("AA01".utf8) + [UInt8(count & 0xFF), UInt8(count >> 8)] + fields
+        }
+        let largest: UInt64 = (1 << 62) - 1
+        for blobs in [[largest, largest, largest], [largest, 1], [1 << 61, 1 << 61]] {
+            let bytes = header(blobs)
+            #expect(throws: AEAError.invalidArchive("blob sizes")) { _ = try AppleArchive.parseHeader(bytes.span.bytes) }
+        }
+        let accepted = header([largest - 1, 1])
+        #expect(try AppleArchive.parseHeader(accepted.span.bytes).blobByteCount == Int(largest))
     }
 }

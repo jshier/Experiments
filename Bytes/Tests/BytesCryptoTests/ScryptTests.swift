@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTesting
 import BytesTestSupport
 import Foundation
@@ -18,7 +18,7 @@ func scrypt(
         try Scrypt.deriveKey(password: password.span.bytes, salt: salt.span.bytes, cost: n, blockSize: r, parallelism: p,
                              lanes: lanes, into: &keyBytes)
     } else {
-        var scratch = [UInt8](repeating: 0xA5, count: try Scrypt.scratchByteCount(cost: n, blockSize: r, parallelism: p, lanes: lanes))
+        var scratch = try [UInt8](repeating: 0xA5, count: Scrypt.scratchByteCount(cost: n, blockSize: r, parallelism: p, lanes: lanes))
         var scratchSpan = scratch.mutableSpan
         var scratchBytes = MutableRawSpan(mutating: &scratchSpan)
         try Scrypt.deriveKey(password: password.span.bytes, salt: salt.span.bytes, cost: n, blockSize: r, parallelism: p,
@@ -48,20 +48,23 @@ func referenceScrypt(_ cases: [(password: [UInt8], salt: [UInt8], n: Int, r: Int
 @Suite struct ScryptTests {
     @Test func rfc7914Vectors() throws {
         #expect(try scrypt([], [], n: 16, r: 1, p: 1, length: 64) == hex(
-            "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"))
+            "77d6576238657b203b19ca42c18a0497f16b4844e3074ae8dfdffa3fede21442fcd0069ded0948f8326a753a0fc81f17e8d3e0fb2e0d3628cf35e20c38d18906"
+        ))
         let nacl = hex("fdbabe1c9d3472007856e7190d01e9fe7c6ad7cbc8237830e77376634b3731622eaf30d92e22a3886ff109279d9830dac727afb94a83ee6d8360cbdfa2cc0640")
         #expect(try scrypt(Array("password".utf8), Array("NaCl".utf8), n: 1024, r: 8, p: 16, length: 64) == nacl)
         #expect(try scrypt(Array("password".utf8), Array("NaCl".utf8), n: 1024, r: 8, p: 16, lanes: 4, length: 64) == nacl)
         #expect(try scrypt(Array("password".utf8), Array("NaCl".utf8), n: 1024, r: 8, p: 16, lanes: 16, length: 64, allocating: true) == nacl)
         #expect(try scrypt(Array("pleaseletmein".utf8), Array("SodiumChloride".utf8), n: 16384, r: 8, p: 1, length: 64, allocating: true) == hex(
-            "7023bdcb3afd7348461c06cd81fd38ebfda8fbba904f8e3ea9b543f6545da1f2d5432955613f0fcf62d49705242a9af9e61e85dc0d651e40dfcf017b45575887"))
+            "7023bdcb3afd7348461c06cd81fd38ebfda8fbba904f8e3ea9b543f6545da1f2d5432955613f0fcf62d49705242a9af9e61e85dc0d651e40dfcf017b45575887"
+        ))
     }
 
     /// RFC 7914's last vector: N = 2²⁰, a 1 GiB table. Optimized builds only (`swift test -c release`): 30 seconds
     /// in a debug build.
     @Test(.optimizedOnly) func rfc7914LargeVector() throws {
         #expect(try scrypt(Array("pleaseletmein".utf8), Array("SodiumChloride".utf8), n: 1 << 20, r: 8, p: 1, length: 64, allocating: true) == hex(
-            "2101cb9b6a511aaeaddbbe09cf70f881ec568d574a2ffd4dabe5ee9820adaa478e56fd8f4ba5d09ffa1c6d927c40f4c337304049e8a952fbcbf45c6fa77a41a4"))
+            "2101cb9b6a511aaeaddbbe09cf70f881ec568d574a2ffd4dabe5ee9820adaa478e56fd8f4ba5d09ffa1c6d927c40f4c337304049e8a952fbcbf45c6fa77a41a4"
+        ))
     }
 
     @Test func matchesOpenSSL() throws {

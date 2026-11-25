@@ -134,7 +134,7 @@ public final class Destination: Sendable {
     private init(root: Int32, path: FilePath, options: DestinationOptions, staging: (parent: Int32, name: [UInt8])?) throws(DiskError) {
         rootSlot = DescriptorSlot(OwnedDescriptor(adopting: root, kind: .destination))
         stagingParent = if let staging { DescriptorSlot(OwnedDescriptor(adopting: staging.parent, kind: .stagingParent)) }
-            else { DescriptorSlot(empty: .stagingParent) }
+        else { DescriptorSlot(empty: .stagingParent) }
         stagingName = staging?.name
         unquarantined = RelaxedCounter()
         self.path = path
@@ -515,7 +515,9 @@ public final class Destination: Sendable {
         // The caller's contract: `path` has `count` bytes and then a NUL, valid and unchanged for this call.
         var slash = count - 1
         // Unsafe: reads byte `slash` of `path`. Safe: `0 <= slash < count` (tested first), within the path's bytes.
-        while slash >= 0, unsafe path.advanced(by: slash).pointee != 0x2F { slash -= 1 }
+        while slash >= 0, unsafe path.advanced(by: slash).pointee != 0x2F {
+            slash -= 1
+        }
         // Unsafe: `path` to `body`, as the name. Safe: the caller's NUL-terminated path, valid for this call, which
         // `body` (non-escaping) returns within.
         guard slash > 0 else { return try unsafe body(root, path) }
@@ -577,7 +579,7 @@ public final class Destination: Sendable {
                 // copy (`prefix`) to `makeDirectory`, with a `PathRef` over the same bytes of `path`. Safe: `index <
                 // count`, within the path; the copy is valid inside the body, and the reference is read only
                 // during `makeDirectory`, while the caller keeps `path`.
-                try unsafe CString.with(UnsafeRawPointer(path), count: index) { (prefix) throws(DiskError) in
+                try unsafe CString.with(UnsafeRawPointer(path), count: index) { prefix throws(DiskError) in
                     _ = try unsafe makeDirectory(root, prefix, mode: 0o755, path: PathRef(UnsafeRawPointer(path), count: index))
                 }
             }
@@ -593,7 +595,7 @@ public final class Destination: Sendable {
         guard !path.isRoot else { return }
         // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes (an
         // `EntryPath` has no NUL, so `byteCount` bytes before it), valid inside the body, which keeps nothing.
-        try unsafe CString.with(path.bytes) { (name) throws(DiskError) in
+        try unsafe CString.with(path.bytes) { name throws(DiskError) in
             let count = path.bytes.byteCount
             // Unsafe: `name` to `makeParents`. Safe: `count` bytes and a NUL (above), valid for the call.
             try unsafe makeParents(of: name, count: count)
@@ -607,7 +609,7 @@ public final class Destination: Sendable {
     package func finishDirectory(_ path: EntryPath, metadata: EntryMetadata) throws(DiskError) {
         // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes (just a NUL
         // for the destination itself), valid inside the body, which keeps nothing.
-        try unsafe CString.with(path.bytes) { (name) throws(DiskError) in
+        try unsafe CString.with(path.bytes) { name throws(DiskError) in
             // Unsafe (the next two lines): a C string to `openat`. Safe: a literal's, or `name` (NUL-terminated,
             // valid in this body); read only during the call.
             let descriptor = path.isRoot
@@ -635,8 +637,8 @@ public final class Destination: Sendable {
         // Unsafe (the next two lines): `CString.with` hands each body a pointer. Safe: NUL-terminated copies of the
         // path's bytes (`byteCount` of them before the NUL: an `EntryPath` has none) and of the target's, each valid
         // inside its body; nothing below keeps either.
-        try unsafe CString.with(path.bytes) { (name) throws(DiskError) in
-            try unsafe CString.with(target) { (target) throws(DiskError) in
+        try unsafe CString.with(path.bytes) { name throws(DiskError) in
+            try unsafe CString.with(target) { target throws(DiskError) in
                 // Unsafe: `name` to `makeParents`. Safe: `byteCount` bytes and a NUL (above), valid for the call.
                 try unsafe makeParents(of: name, count: path.bytes.byteCount)
                 // Unsafe: `name` and `target` to `makeSymbolicLink`. Safe: both NUL-terminated and valid for the call,
@@ -657,7 +659,9 @@ public final class Destination: Sendable {
         // Depth of the link's directory, then walk the target's components.
         var depth = 0
         // Unsafe: reads byte `index` of `path`. Safe: `index < count`, within the path's bytes.
-        for index in 0..<count where unsafe path.advanced(by: index).pointee == 0x2F { depth += 1 }
+        for index in 0..<count where unsafe path.advanced(by: index).pointee == 0x2F {
+            depth += 1
+        }
         var start = 0
         for index in 0...targetCount {
             // Unsafe: reads byte `index` of `target`. Safe: only when `index < targetCount` (the condition before it).
@@ -695,7 +699,7 @@ public final class Destination: Sendable {
         }
         // Unsafe: `path` to `withParent`, which hands the body `name`. Safe: `count` bytes and a NUL, as above; `name`
         // is NUL-terminated (a pointer into `path`, or the whole of it), valid inside the body.
-        return try unsafe withParent(of: path, count: count) { (directory, name) throws(DiskError) -> Bool in
+        return try unsafe withParent(of: path, count: count) { directory, name throws(DiskError) -> Bool in
             // Unsafe: `target` and `name` to `symlinkat`. Safe: both NUL-terminated, valid in this body; read only
             // during the call.
             var created = unsafe Sys.symlinkat(target, directory, name) == 0
@@ -743,8 +747,8 @@ public final class Destination: Sendable {
         // Unsafe (the next two lines): `CString.with` hands each body a pointer. Safe: NUL-terminated copies of the
         // two paths' bytes (`byteCount` of them before the NUL: an `EntryPath` has none), each valid inside its body;
         // nothing below keeps either.
-        try unsafe CString.with(path.bytes) { (name) throws(DiskError) in
-            try unsafe CString.with(existing.bytes) { (target) throws(DiskError) in
+        try unsafe CString.with(path.bytes) { name throws(DiskError) in
+            try unsafe CString.with(existing.bytes) { target throws(DiskError) in
                 // Unsafe: `name` to `makeParents`. Safe: `byteCount` bytes and a NUL (above), valid for the call.
                 try unsafe makeParents(of: name, count: path.bytes.byteCount)
                 // Unsafe: `name` and `target` to `makeHardLink`. Safe: both NUL-terminated and valid for the call,
@@ -784,7 +788,7 @@ public final class Destination: Sendable {
         guard !path.isRoot else { throw .unsafePath("") }
         // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes
         // (`byteCount` of them before the NUL: an `EntryPath` has none), valid inside the body, which keeps nothing.
-        return try unsafe CString.with(path.bytes) { (name) throws(DiskError) -> Bool in
+        return try unsafe CString.with(path.bytes) { name throws(DiskError) -> Bool in
             // Unsafe: `name` to `makeParents`. Safe: `byteCount` bytes and a NUL (above), valid for the call.
             try unsafe makeParents(of: name, count: path.bytes.byteCount)
             // Unsafe: `name` to `makeSpecialFile`. Safe: the same string, valid for the call.
@@ -803,14 +807,14 @@ public final class Destination: Sendable {
         let mode = finalMode(metadata.mode, default: 0o644)
         // Unsafe: `path` to `withParent`, which hands the body `name`. Safe: `count` bytes and a NUL, as above; `name`
         // is NUL-terminated (a pointer into `path`, or the whole of it), valid inside the body.
-        return try unsafe withParent(of: path, count: count) { (directory, name) throws(DiskError) -> Bool in
+        return try unsafe withParent(of: path, count: count) { directory, name throws(DiskError) -> Bool in
             func make() -> Int32 {
                 // Unsafe (the three calls): `name` to `mkfifoat` or `mknodat`. Safe: NUL-terminated, valid in the
                 // body, where `make` is called; read only during the call.
                 switch kind {
                 case .fifo: unsafe Sys.mkfifoat(directory, name, mode & 0o777)
-                case .characterDevice(let device): unsafe Sys.mknodat(directory, name, S_IFCHR | (mode & 0o777), dev_t(truncatingIfNeeded: device))
-                case .blockDevice(let device): unsafe Sys.mknodat(directory, name, S_IFBLK | (mode & 0o777), dev_t(truncatingIfNeeded: device))
+                case let .characterDevice(device): unsafe Sys.mknodat(directory, name, S_IFCHR | (mode & 0o777), dev_t(truncatingIfNeeded: device))
+                case let .blockDevice(device): unsafe Sys.mknodat(directory, name, S_IFBLK | (mode & 0o777), dev_t(truncatingIfNeeded: device))
                 }
             }
             var result = make()
@@ -850,7 +854,7 @@ public final class Destination: Sendable {
     public func existingItem(at path: EntryPath) throws(DiskError) -> ExistingItem? {
         // Unsafe: `CString.with` hands the body a pointer. Safe: its NUL-terminated copy of the path's bytes (just a NUL
         // for the destination itself), valid inside the body, which keeps nothing.
-        try unsafe CString.with(path.bytes) { (name) throws(DiskError) -> ExistingItem? in
+        try unsafe CString.with(path.bytes) { name throws(DiskError) -> ExistingItem? in
             var info = stat()
             // Unsafe (the next two lines): a C string to `fstatat`, which fills `info`. Safe: a literal's, or `name`
             // (NUL-terminated, valid in this body); `info` is a local `stat`.

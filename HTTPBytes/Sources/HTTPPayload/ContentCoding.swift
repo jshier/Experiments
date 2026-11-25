@@ -39,6 +39,23 @@ public enum HTTPContentCoding: Sendable, Hashable {
         case .zstd: "zstd"
         }
     }
+
+    /// RFC 9659 §3: a zstd content coding's window is at most 8 MB, so a decoder may refuse larger ones.
+    @inlinable static var zstdWindowLimit: Int { 8 << 20 }
+
+    /// The format the coding's streams decode as, where the coding alone decides it: the one mapping from content
+    /// codings to BytesCompression's `DecompressionFormat`. gzip is DEFLATE in gzip's container, br Brotli, zstd
+    /// Zstandard with RFC 9659's 8 MB window. `nil` for identity (nothing to decode), and for deflate, which is zlib or
+    /// raw DEFLATE by its first two bytes (`DeflateFormat(zlibOrRaw:)`, once they've arrived). Whether a stream's end
+    /// can be followed by another (gzip members, zstd frames) is the format's (`allowsConcatenation`).
+    @inlinable var decompressionFormat: DecompressionFormat? {
+        switch self {
+        case .gzip: .deflate(.gzip)
+        case .brotli: .brotli
+        case .zstd: .zstd(maximumWindowSize: Self.zstdWindowLimit)
+        case .deflate, .identity: nil
+        }
+    }
 }
 
 /// Why a body couldn't be decoded or encoded.
@@ -65,7 +82,6 @@ public enum HTTPPayloadError: Error, Sendable, Hashable {
 struct ContentDecodingStage: ~Copyable {
     @usableFromInline var coding: HTTPContentCoding
     @usableFromInline var decompressor = Decompressor()
-    @usableFromInline var zstd: ZstdDecoder?
     /// For `deflate`: whether the stream's container has been decided (zlib, or raw DEFLATE).
     @usableFromInline var decided = false
     /// At the end of a stream: for gzip and zstd, the end of a member or frame (more may follow: RFC 1952 §2.2, RFC
@@ -73,13 +89,11 @@ struct ContentDecodingStage: ~Copyable {
     @usableFromInline var finished = false
 
     /// Whether the coding's streams may be concatenated (gzip members, zstd frames): data after an end is the next one.
-    @inlinable var continuesAfterEnd: Bool { coding == .gzip || coding == .zstd }
+    /// The format's to say (deflate's zlib and raw streams don't, so its undecided `nil` reads right).
+    @inlinable var continuesAfterEnd: Bool { coding.decompressionFormat?.allowsConcatenation ?? false }
 
     /// At an end after which no more data may come: the body's data must end here.
     @inlinable var isClosed: Bool { finished && !continuesAfterEnd }
-
-    /// RFC 9659 §3: a zstd content coding's window is at most 8 MB, so a decoder may refuse larger ones.
-    @inlinable static var zstdWindowLimit: Int { 8 << 20 }
 
     @inlinable
     init(_ coding: HTTPContentCoding) throws(HTTPPayloadError) {
@@ -87,20 +101,19 @@ struct ContentDecodingStage: ~Copyable {
         try reset(coding)
     }
 
-    /// Prepares for a new stream coded with `coding`, keeping the codecs' state made for earlier streams.
+    /// Prepares for a new stream coded with `coding`, keeping the codecs' state made for earlier streams (one decoder
+    /// per format: gzip's and deflate's streams share `Decompressor`'s DEFLATE decoder).
     @inlinable
     mutating func reset(_ coding: HTTPContentCoding) throws(HTTPPayloadError) {
         self.coding = coding
         decided = false
         finished = false
-        do {
-            switch coding {
-            case .gzip: try decompressor.reset(for: .deflate(.gzip))
-            case .brotli: try decompressor.reset(for: .brotli)
-            case .zstd: if zstd == nil { zstd = ZstdDecoder(maximumWindowSize: Self.zstdWindowLimit) } else { zstd!.reset() }
-            case .deflate, .identity: break
-            }
-        } catch { throw .unsupportedCoding }
+        guard let format = coding.decompressionFormat else { return }
+        do throws(BytesError) {
+            try decompressor.reset(for: format)
+        } catch {
+            throw .unsupportedCoding
+        }
     }
 
     @inlinable
@@ -117,15 +130,10 @@ struct ContentDecodingStage: ~Copyable {
                 let take = Swift.min(input.byteCount, output.freeCapacity)
                 output.append(copying: input.extracting(0..<take))
                 return TransformProgress(consumed: take, produced: take, status: take < input.byteCount ? .needsOutput : .needsInput)
-            case .zstd:
-                progress = try zstd!.decompress(input, into: &output)
             case .deflate where !decided:
-                // zlib's two-byte header: CM 8, a window of at most 32 KiB, and a check making CMF·256 + FLG a multiple
-                // of 31 (RFC 1950 §2.2). Anything else is raw DEFLATE, which browsers accept under this name.
-                guard input.byteCount >= 2 else { return TransformProgress(consumed: 0, produced: 0, status: .needsInput) }
-                let cmf = UInt16(input.load(fromByteOffset: 0, as: UInt8.self)), flg = UInt16(input.load(fromByteOffset: 1, as: UInt8.self))
-                let isZlib = cmf & 0x0F == 8 && cmf &>> 4 <= 7 && (cmf &<< 8 | flg) % 31 == 0
-                try decompressor.reset(for: .deflate(isZlib ? .zlib : .raw))
+                // zlib or raw DEFLATE (which browsers accept under this name), by the first two bytes.
+                guard let container = DeflateFormat(zlibOrRaw: input) else { return TransformProgress(consumed: 0, produced: 0, status: .needsInput) }
+                try decompressor.reset(for: .deflate(container))
                 decided = true
                 progress = try decompressor.decompress(input, into: &output)
             default:
@@ -134,10 +142,13 @@ struct ContentDecodingStage: ~Copyable {
             if progress.status == .finished { finished = true }
             return progress
         } catch {
-            // `insufficientCapacity` with room left in the output is a decoder's own limit (zstd's window above RFC
-            // 9659's 8 MB): reporting it as `outOfRoom` would send a caller that drains the output round forever.
-            guard error == .insufficientCapacity else { throw .malformed }
-            throw output.freeCapacity == 0 ? .outOfRoom : .tooLarge
+            switch error {
+            // A decoder's own limit (zstd's window above RFC 9659's 8 MB): not `outOfRoom`, which would send a caller
+            // that drains the output round forever.
+            case .limitExceeded: throw .tooLarge
+            case .insufficientCapacity: throw .outOfRoom
+            default: throw .malformed
+            }
         }
     }
 }
@@ -173,8 +184,17 @@ public struct HTTPContentDecoder: ~Copyable {
     /// Input a codec left unconsumed at the end of a piece, kept for the next piece (made the first time it's needed).
     @usableFromInline var carry: RawStorage?
     @usableFromInline var carryCount = 0
-    /// The carry buffer's size: more than any codec here holds back (Zstandard's largest block is 128 KiB).
-    @inlinable static var carryCapacity: Int { 132 << 10 }
+    /// The carry buffer's size: twice the most unconsumed input any codec here needs before it can make progress
+    /// (`DecompressionFormat.maximumUnitByteCount`), so a unit it holds back and the bytes that complete it fit. That's
+    /// Brotli's 451 bytes (a command tree's prefix code: a meta-block's header is read a code at a time); DEFLATE's is 289
+    /// (a dynamic block's header), and Zstandard keeps partial units itself. 902 bytes.
+    @inlinable static var carryCapacity: Int {
+        // The formats HTTP's codings decode as (gzip and deflate are DEFLATE's containers).
+        let deflate = DecompressionFormat.deflate(.raw).maximumUnitByteCount ?? 0
+        let brotli = DecompressionFormat.brotli.maximumUnitByteCount ?? 0
+        let zstd = DecompressionFormat.zstd().maximumUnitByteCount ?? 0
+        return 2 &* Swift.max(brotli, Swift.max(deflate, zstd))
+    }
 
     @inlinable static var middleCapacity: Int { 64 << 10 }
 
@@ -371,45 +391,43 @@ public struct HTTPContentDecoder: ~Copyable {
         guard last.coding == .identity || last.finished else { throw .malformed }
         // A `~Copyable` optional: borrowed with `switch` (`if let` would consume it).
         switch first {
-        case .some(let stage): if stage.coding != .identity, !stage.finished { throw .malformed }
+        case let .some(stage): if stage.coding != .identity, !stage.finished { throw .malformed }
         case .none: break
         }
     }
 }
 
-/// A body coded with one content coding, as it's produced: Bytes' DEFLATE (gzip, zlib), Brotli, and Zstandard encoders.
+/// A body coded with one content coding, as it's produced: BytesCompression's `Compressor` (its DEFLATE (gzip, zlib),
+/// Brotli, and Zstandard encoders), the coding mapped to its `CompressionFormat`.
 public struct HTTPContentEncoder: ~Copyable {
     /// The coding.
     public let coding: HTTPContentCoding
-    @usableFromInline var deflate: DeflateEncoder?
-    @usableFromInline var brotli: BrotliEncoder?
-    @usableFromInline var zstd: ZstdEncoder?
+    @usableFromInline var compressor = Compressor()
 
-    /// An encoder for `coding` at `level` (DEFLATE 1–9; Brotli quality 0–11; Zstandard libzstd's levels 1–4, with a
-    /// 512 KiB window: RFC 9659 limits a `zstd` content coding's window to 8 MB, and a smaller one keeps memory per
-    /// response down, at 0–4% in size).
+    /// An encoder for `coding` at `level` (DEFLATE 1–9, or 0 for stored blocks; Brotli quality 0–11, 0 running as 1;
+    /// Zstandard libzstd's levels 1–4, or 0 for its default, 3, with a 512 KiB window: RFC 9659 limits a `zstd` content
+    /// coding's window to 8 MB, and a smaller one keeps memory per response down, at 0–4% in size).
     ///
-    /// - Throws: Nothing now (every coding encodes); kept for codings a future build may not.
+    /// - Throws: ``HTTPPayloadError/unsupportedCoding`` for a negative level (higher levels than a coding has run as its
+    ///   highest: DEFLATE's above 9 as 9, Brotli's 10 and 11 as 9, Zstandard's above 4 as 4).
     public init(_ coding: HTTPContentCoding, level: Int? = nil) throws(HTTPPayloadError) {
         self.coding = coding
-        switch coding {
-        case .gzip: deflate = DeflateEncoder(format: .gzip, level: level ?? 6)
-        case .deflate: deflate = DeflateEncoder(format: .zlib, level: level ?? 6)
-        case .brotli: brotli = BrotliEncoder(quality: level ?? 5)
-        case .identity: break
-        case .zstd: zstd = ZstdEncoder(level: level ?? 3, windowLog: ZstdEncoder.Parameters.httpWindowLog)
+        do throws(BytesError) {
+            switch coding {
+            case .gzip: try compressor.reset(for: .deflate(.gzip, level: level ?? 6))
+            case .deflate: try compressor.reset(for: .deflate(.zlib, level: level ?? 6))
+            case .brotli: try compressor.reset(for: .brotli(quality: level ?? 5))
+            case .identity: break
+            case .zstd: try compressor.reset(for: .zstd(level: level ?? 3, windowLog: ZstdEncoder.Parameters.httpWindowLog))
+            }
+        } catch {
+            throw .unsupportedCoding
         }
     }
 
-    /// Starts another body with the same coding and level, keeping the encoder's memory (Zstandard's; DEFLATE and
-    /// Brotli start over).
+    /// Starts another body with the same coding and level, keeping the encoder's memory.
     public mutating func reset() {
-        switch coding {
-        case .gzip, .deflate: deflate!.reset()
-        case .brotli: brotli!.reset()
-        case .zstd: zstd!.reset()
-        case .identity: break
-        }
+        compressor.reset()
     }
 
     /// Encodes as much of `input` as fits into `output`; `flush` `.finish` ends the stream (`.flush` makes everything so
@@ -417,9 +435,7 @@ public struct HTTPContentEncoder: ~Copyable {
     public mutating func encode(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(HTTPPayloadError) -> TransformProgress {
         do {
             switch coding {
-            case .gzip, .deflate: return try deflate!.compress(input, into: &output, flush: flush)
-            case .brotli: return try brotli!.compress(input, into: &output, flush: flush)
-            case .zstd: return try zstd!.compress(input, into: &output, flush: flush)
+            case .gzip, .deflate, .brotli, .zstd: return try compressor.compress(input, into: &output, flush: flush)
             default:
                 let take = Swift.min(input.byteCount, output.freeCapacity)
                 output.append(copying: input.extracting(0..<take))

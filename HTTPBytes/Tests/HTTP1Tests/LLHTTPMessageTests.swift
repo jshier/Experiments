@@ -57,10 +57,10 @@ import Testing
     ]
 
     static let chunkExtensions = """
-        chunk extensions aren't parsed: after the size, anything but a control character is skipped to the line end, so \
-        `2 erf`, `2;`, `a ` (whitespace with no `;`), and an unclosed quoted string are accepted (RFC 9112 §7.1.1: chunk-ext = \
-        *( BWS ";" BWS chunk-ext-name [ BWS "=" BWS chunk-ext-val ] ))
-        """
+    chunk extensions aren't parsed: after the size, anything but a control character is skipped to the line end, so \
+    `2 erf`, `2;`, `a ` (whitespace with no `;`), and an unclosed quoted string are accepted (RFC 9112 §7.1.1: chunk-ext = \
+    *( BWS ";" BWS chunk-ext-name [ BWS "=" BWS chunk-ext-val ] ))
+    """
 
     @Test func agreesWithLLHTTPOnWholeMessages() throws {
         try #require(!Self.cases.isEmpty, "run Tools/test-data fetch llhttp-tests llhttp-cases")

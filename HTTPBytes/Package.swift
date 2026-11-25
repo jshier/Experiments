@@ -38,6 +38,7 @@ let package = Package(
     ],
     dependencies: [
         .package(path: "../Bytes"),
+        .package(path: "../BytesCompression"),
         .package(url: "https://github.com/apple/swift-http-types", from: "1.8.0"),
     ],
     targets: [
@@ -73,7 +74,7 @@ let package = Package(
                 "HTTPBytes",
                 "HTTP1",
                 .product(name: "Bytes", package: "Bytes"),
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
             ],
             swiftSettings: strictSettings
         ),
@@ -127,7 +128,7 @@ let package = Package(
             dependencies: [
                 "HTTPPayload", "HTTP1", "HTTPBytes",
                 .product(name: "Bytes", package: "Bytes"),
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
             ],

@@ -355,7 +355,7 @@ A ``ByteTransform`` is one stage (input span in, output span out, flush semantic
 ``ByteTransform/transform(_:appending:flush:growth:)`` runs a stage until it has taken all its input:
 
 ```swift
-import BytesCompression
+import BytesCompression    // the BytesCompression package's codecs
 
 func gzip(_ message: [UInt8]) throws(BytesError) -> [UInt8] {
     var encoder = DeflateEncoder(format: .gzip, level: 6)

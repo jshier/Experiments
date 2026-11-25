@@ -1,6 +1,6 @@
 import Bytes
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 import HTTP3
 import HTTPBytes
 import Testing
@@ -26,23 +26,23 @@ import Testing
     }
 
     @Test(arguments: [
-        ("0d00", QPACKError.invalidRequiredInsertCount),     // encoded 13 > 2 × MaxEntries
-        ("0381", .invalidRequiredInsertCount),                // Base 0, no lines: a larger Required Insert Count than needed
-        ("0382", .invalidBase),                              // Delta Base ≥ Required Insert Count
-        ("0081", .invalidBase),                              // Sign with a Required Insert Count of 0
-        ("030081", .invalidRequiredInsertCount),             // needs only Required Insert Count 1
-        ("020180", .invalidIndex),                           // Base 2: absolute index 1 ≥ Required Insert Count 1
-        ("038112", .invalidIndex),                           // post-base index past the Required Insert Count
-        ("030082", .invalidIndex),                           // relative index ≥ Base
-        ("0000ff24", .invalidIndex),                         // static index 99
-        ("00005f54", .invalidIndex),                         // static name index 99
-        ("03004201", .invalidIndex),                         // dynamic name relative index 2 ≥ Base 2
+        ("0d00", QPACKError.invalidRequiredInsertCount), // encoded 13 > 2 × MaxEntries
+        ("0381", .invalidRequiredInsertCount), // Base 0, no lines: a larger Required Insert Count than needed
+        ("0382", .invalidBase), // Delta Base ≥ Required Insert Count
+        ("0081", .invalidBase), // Sign with a Required Insert Count of 0
+        ("030081", .invalidRequiredInsertCount), // needs only Required Insert Count 1
+        ("020180", .invalidIndex), // Base 2: absolute index 1 ≥ Required Insert Count 1
+        ("038112", .invalidIndex), // post-base index past the Required Insert Count
+        ("030082", .invalidIndex), // relative index ≥ Base
+        ("0000ff24", .invalidIndex), // static index 99
+        ("00005f54", .invalidIndex), // static name index 99
+        ("03004201", .invalidIndex), // dynamic name relative index 2 ≥ Base 2
         ("03", .truncated),
-        ("0300", .invalidRequiredInsertCount),               // no lines: references nothing
+        ("0300", .invalidRequiredInsertCount), // no lines: references nothing
         ("000051", .truncated),
         ("0000510b2f696e", .truncated),
-        ("0000518100", .invalidHuffmanCode),                 // padding that isn't all ones
-        ("00005184ffffffff", .invalidHuffmanCode),           // EOS
+        ("0000518100", .invalidHuffmanCode), // padding that isn't all ones
+        ("00005184ffffffff", .invalidHuffmanCode), // EOS
         ("0000ffffffffffffffffffff7f", .integerOverflow),
     ] as [(String, QPACKError)])
     func malformedSection(_ section: String, _ expected: QPACKError) throws {
@@ -50,7 +50,7 @@ import Testing
         #expect(Self.error(&decoder, section) == expected, "\(section)")
     }
 
-    @Test func requiredInsertCountWithoutATable() throws {
+    @Test func requiredInsertCountWithoutATable() {
         // MaxEntries 0: any nonzero Required Insert Count is invalid.
         var decoder = QPACKDecoder(maximumTableCapacity: 0)
         #expect(Self.error(&decoder, "0100") == .invalidRequiredInsertCount)
@@ -61,7 +61,7 @@ import Testing
         // 20 insertions into a 64-byte table (MaxEntries 2, encoded counts wrap every 4): the newest entry, absolute
         // index 19, needs Required Insert Count 20, encoded 20 % 4 + 1 = 1.
         var decoder = QPACKDecoder(maximumTableCapacity: 64)
-        try applyEncoderStream(&decoder, hexBytes("3f21") + Array(repeating: hexBytes("c000"), count: 20).flatMap { $0 })
+        try applyEncoderStream(&decoder, hexBytes("3f21") + Array(repeating: hexBytes("c000"), count: 20).flatMap(\.self))
         #expect(decoder.insertCount == 20)
         #expect(try decodeSection(&decoder, hexBytes("0100 80"), stream: 0) == [Field(":authority", "")])
         // Encoded 2 would be Required Insert Count 21: blocked, not an error.
@@ -97,14 +97,14 @@ import Testing
     }
 
     @Test(arguments: [
-        ("3fbe01", QPACKError.tableCapacityTooLarge),        // capacity 221 > 220
-        ("3fbd01c07f49", .entryTooLarge),                    // a 200-byte value with a 10-byte name: known from the length
-        ("3fbd01c08100", .invalidEncoderInstruction),        // Huffman padding that isn't all ones
-        ("3fbd0101", .invalidEncoderInstruction),            // Duplicate of an entry that isn't there
-        ("3fbd0181", .invalidEncoderInstruction),            // dynamic name reference to an entry that isn't there
-        ("3fbd01ff24", .invalidEncoderInstruction),          // static name index 99
+        ("3fbe01", QPACKError.tableCapacityTooLarge), // capacity 221 > 220
+        ("3fbd01c07f49", .entryTooLarge), // a 200-byte value with a 10-byte name: known from the length
+        ("3fbd01c08100", .invalidEncoderInstruction), // Huffman padding that isn't all ones
+        ("3fbd0101", .invalidEncoderInstruction), // Duplicate of an entry that isn't there
+        ("3fbd0181", .invalidEncoderInstruction), // dynamic name reference to an entry that isn't there
+        ("3fbd01ff24", .invalidEncoderInstruction), // static name index 99
         ("3fbd01ffffffffffffffffffff7f", .invalidEncoderInstruction),
-        ("c000", .entryTooLarge),                            // capacity 0
+        ("c000", .entryTooLarge), // capacity 0
     ] as [(String, QPACKError)])
     func malformedEncoderStream(_ stream: String, _ expected: QPACKError) {
         var decoder = QPACKDecoder(maximumTableCapacity: 220)
@@ -200,7 +200,9 @@ import Testing
             var validator = HTTP3FieldValidator(section)
             let span = encoded.span.bytes
             _ = try decoder.begin(span, stream: 0)
-            while let field = try decoder.next(in: span) { try validator.check(field) }
+            while let field = try decoder.next(in: span) {
+                try validator.check(field)
+            }
             return try validator.finish()
         }
         let request = [Field(":method", "GET"), Field(":scheme", "https"), Field(":path", "/"), Field(":authority", "a"), Field("accept", "*/*")]

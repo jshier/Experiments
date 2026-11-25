@@ -72,7 +72,7 @@ flowchart LR
     end
     subgraph Source["ChunkSource (decoder child tasks)"]
         SS["SegmentStream<br/>AEA segments"]
-        BS["BlockStream<br/>pbz / pbzx blocks"]
+        BS["FileBlocks / PBZInSegments<br/>pbz / pbzx blocks"]
     end
     subgraph Walk["Walker (the calling task)"]
         AW["ArchiveWalker<br/>Apple Archive"]
@@ -96,10 +96,12 @@ flowchart LR
 
 There are three abstractions, and each format plugs into them:
 
-- **`ChunkSource`** (`SegmentStream.swift`):
+- **`ChunkSource`**: BytesCompressionAsync's `OrderedBlockSource` with `AEAError` as its failure (a typealias in
+  `SegmentStream.swift`; since 2026-11-23 the protocol, the engine behind it, and the buffer pool are BytesCompression's:
+  [its ARCHITECTURE.md](../BytesCompression/ARCHITECTURE.md) §3):
   - `run() async` decodes with child tasks of its own and returns when they've all ended.
   - `prepare() async throws(AEAError)` is the consumer's first call; only `AEAPayload` (§4) does anything in it.
-  - `nextChunk() async throws(AEAError) -> DecodedChunk?` returns chunks strictly in order. A `DecodedChunk` names a
+  - `nextBlock() async throws(AEAError) -> DecodedBlock?` returns chunks strictly in order. A `DecodedBlock` names a
     buffer in the pool and that chunk's position in the decoded stream (`rawOffset`, `rawSize`).
   - `stop(_ failure:)` (any thread, any number of times) and `releaseUnconsumed()` (after `run()` has returned).
   - `pool`, `pools` (every pool it decodes into, for leak checks), and `counters` (busy, read, and wait time).
@@ -137,8 +139,8 @@ Opening runs synchronously on the caller and reads only headers. The content is 
    recipient key, scrypt from a password, or an HPKE-opened key for IPSWs (`WKMS.swift`). Then
    `AEASignature.verify` checks the ECDSA signature over the prologue.
 4. **Root header.** Its MAC (HMAC-SHA256 under the `AEA_RHEK` key) is checked, then it's decrypted (AES-CTR with
-   Apple's 64-bit big-endian counter) and parsed into `AEARootHeader`: segment size, total raw size, compression,
-   checksum kind.
+   Apple's 64-bit big-endian counter) and parsed into `AEARootHeader`: segment size (at most 256 MiB, `aea`'s largest:
+   every decoded segment takes a buffer that size), total raw size, compression, checksum kind.
 5. **Clusters.** Each cluster header is read, its MAC is checked against the value carried in the previous one
    (a chain starting at the prologue), and it's decrypted. The result is `segments: [AEASegment]`: each segment's
    file offset, stored and raw sizes, and raw offset, plus its checksum, its MAC, and its per-segment key
@@ -152,7 +154,10 @@ checksums are left to the decoders.
 1. **Header and TOC.** Read the 28-byte `XARHeaderRecord` (a `@BinaryRecord` read with `AlignedBytesReader`).
    Inflate the TOC with Bytes' `DeflateDecoder(format: .zlib)`, and parse it with `XAR.parseTableOfContents`, a
    small streaming XML scanner, into `XARTableOfContents`: the checksum's place, the signature's place and
-   certificates, `creation-time`, and the members.
+   certificates, `creation-time`, and the members. The scanner reports each element's path from the root, kept as
+   bytes it appends a name to and cuts back at the end tag, and made into a string only up to 128 bytes (the readers'
+   deepest is 51; longer ones read `""`): linear in the TOC however deep it nests. (Joined from the open elements for
+   every event, a 511-byte TOC 40,000 deep took 42.8 s, all before the checksum is checked: 2026-11-24.)
 2. **TOC checksum.** The SHA-1 of the compressed TOC must equal the heap's first 20 bytes, compared in constant
    time.
 3. **Signature.** `verifySignature` builds `RSA.PublicKey(certificate:)` from the leaf certificate and checks the
@@ -166,19 +171,32 @@ checksums are left to the decoders.
 
 ### `.aar`: `AppleArchiveFile` (`Payload.swift`)
 
-This only checks for a `pbz` header (`PBZ.compression`) or the `AA01`/`YAA1` magic, and records the block size.
+This only checks for a `pbz` header (BytesCompression's `PBZ.header`: the compression and block size, `nil` for
+bytes that don't start one, `headerCutShort` for one cut short; the `.xip`'s content and a `pbz` stream inside AEA
+segments read theirs the same way) or the `AA01`/`YAA1` magic, and records the block size.
 
 ## 4. Chunk sources: decoding in parallel
+
+Since 2026-11-23 every source is one engine, BytesCompressionAsync's `ParallelBlockDecoder<Stage>`
+([BytesCompression/ARCHITECTURE.md](../BytesCompression/ARCHITECTURE.md) §3), which was this package's `SegmentStream`
+and `BlockStream`; the buffer pool (§5) moved with it, as `BlockBufferPool`. What stayed here is AEA's: the stage around
+each segment (`AEASegmentStage` in `SegmentStream.swift`: since 2026-11-24 (fix plan A4) only hooks around the engine's
+reading and decoding: the segment's description, the mapping, MAC and decryption, checksum), the file stage
+(`ArchiveFileStage`: reads through Disk's `InputFile`), and `AEAPayload`. The names below are the typealiases NativeAEA
+gives the engine's instances: `SegmentStream` (`ParallelBlockDecoder<AEASegmentStage>`, an indexed stream),
+`PBZInSegments` (`<UpstreamBlocks<AEAError>>`), `FileBlocks` (`<ArchiveFileStage>`). The design below is unchanged by
+the move, except where it says so: A4 gave each block source its own initializer, made the engine size its pools,
+ordered failures by block, and made stops unable to hang (BytesCompression's ARCHITECTURE.md §3).
 
 ### Which source, and how they chain
 
 | Archive | Source | Built in |
 |---|---|---|
 | `.aea` holding an Apple Archive | `AEAPayload` → its `SegmentStream` | `AEAArchive.payload` |
-| `.aea` holding a `pbz` stream (IPSW images, `aa` with `-a`) | `AEAPayload` → `BlockStream(.upstream(SegmentStream))` | `AEAPayload.prepare`: it looks at the first decoded segment for a `pbz` header |
-| `.aar`, plain | `BlockStream(.file, .plain(sliceSize:))` | `AppleArchiveFile.source` |
-| `.aar`, `pbz` | `BlockStream(.file, .pbz(…))` | `AppleArchiveFile.source` |
-| `.xip` | `BlockStream(.file(descriptor, start: contentStart, end: …), .pbz(.lzma, blockSize:))` | `XIPArchive.source` |
+| `.aea` holding a `pbz` stream (IPSW images, `aa` with `-a`) | `AEAPayload` → `PBZInSegments(pbz:blockSize:upstream: SegmentStream)` | `AEAPayload.prepare`: it looks at the first decoded segment for a `pbz` header |
+| `.aar`, plain | `FileBlocks(stage:slices:file:)` | `AppleArchiveFile.source` |
+| `.aar`, `pbz` | `FileBlocks(stage:pbz:blockSize:file:)` | `AppleArchiveFile.source` |
+| `.xip` | `FileBlocks(stage:pbz: .lzma, blockSize:file: contentStart..<…)` | `XIPArchive.source` |
 
 ```mermaid
 flowchart TB
@@ -187,54 +205,66 @@ flowchart TB
         NS["nextSegment (atomic)"] --> D1["decoder task 1"] & D2["decoder task 2"] & DN["decoder task N"]
         D1 & D2 & DN -->|"publish; resume the consumer<br/>if it waits for this one"| SL["slots by segment"]
     end
-    subgraph BlockStream
+    subgraph FileBlocks
         direction LR
         P["producer task<br/>reads block headers"] -->|"job queue, 2N + 2"| E1["decoder task 1"] & E2["decoder task 2"] & EN["decoder task N"]
         E1 & E2 & EN -->|"publish; resume the consumer<br/>if it waits for this one"| BSL["ring of pool.count slots"]
     end
-    SL -->|"nextChunk() suspends"| C["consumer (walker)"]
-    BSL -->|"nextChunk() suspends"| C
+    SL -->|"nextBlock() suspends"| C["consumer (walker)"]
+    BSL -->|"nextBlock() suspends"| C
 ```
 
-### `SegmentStream` (`SegmentStream.swift`)
+### `SegmentStream`: the engine's indexed form, with `AEASegmentStage`
 
-AEA segments are all described up front, in `archive.segments`, so the decoders need no producer:
+AEA segments are all described up front, in `archive.segments` (the stage's `block(_:)`), so the decoders need no
+producer:
 
 - **`run()`** adds `decoders` (default `activeProcessorCount`: 32) child tasks to a `DiscardingTaskGroup`, each
   running `decodeTask()`, and returns when they've all ended.
-- **`decodeTask()`** makes its own `SegmentCodec` (decoder state allocated once per task) and read buffer, then
-  loops: `await pool.acquire()` (suspending only when no buffer is free; `nil` once the pool is closed), then
-  `decodeNext(into:…)`. It checks the stream's `cancelled` flag and `Task.isCancelled` once per segment.
+- **`decodeTask()`** makes its own `BlockContext` (a `Decompressor` for `DecompressionFormat(aeaSegment:)`, allocated
+  once per task, and the read buffer), then loops: `await pool.acquire()` (suspending only when no buffer is free;
+  `nil` once the pool is closed), then claims the next segment and has the stage decode it. It checks the stream's
+  limit (the lowest failing segment's index, or below every index once stopped: it was a `cancelled` flag until
+  2026-11-24) and `Task.isCancelled` once per segment: a segment below a failing one is still decoded.
   - **The order of those two steps prevents a deadlock.** A decoder takes a free buffer first and only then claims
-    the next segment index (`nextSegment.add(1)`). A decoder holding a segment number therefore always has somewhere
+    the next segment index (`nextIndex.claim(below:)`). A decoder holding a segment number therefore always has somewhere
     to put it, and the segment the walker waits for can never be starved by decoders that took later numbers and
     are waiting for buffers.
-- **`decode(_:into:codec:readBuffer:)`** does one segment, synchronously:
-  1. A positioned read into the task's read buffer (`AEAArchive.readFully`, `pread`), or a pointer into the
-     mapping with `--input mapped` (Disk's `MappedFile`, read `.sequential`: `mmap` with `MADV_SEQUENTIAL`).
-  2. `SegmentChecks.verifyMAC`: HMAC-SHA256 under the segment's key.
-  3. For encrypted profiles, AES-CTR decryption, in place in the read buffer.
-  4. `SegmentCodec.decode` into the pool buffer: Bytes' LZMA2/xz, LZFSE, LZBITMAP, LZ4, LZRAVEN, LZVN, or zlib
+- **One segment**, synchronously, is the engine's reading stage flow (`BlockReadingStage`'s default `decode`) with
+  `AEASegmentStage`'s hooks (until 2026-11-24 the stage overrode the whole `decode`, repeating the engine's reading,
+  read-buffer reuse, timing, and stored fast path):
+  1. A positioned read into the task's read buffer (the stage's `read(at:into:)`: `AEAArchive.readFully`, `pread`), or
+     a pointer into the mapping with `--input mapped` (its `storedBytes(of:)`: Disk's `MappedFile`, read `.sequential`,
+     `mmap` with `MADV_SEQUENTIAL`).
+  2. `prepare(_:stored:into:)`: `SegmentChecks.verifyMAC` (HMAC-SHA256 under the segment's key), then for encrypted
+     profiles AES-CTR decryption, in place in the read buffer (from the mapping, into it).
+  3. `BlockContext.decompress` into the pool buffer (the engine's: `Decompressor.decompressAll` to exactly the raw
+     size, all the input consumed): BytesCompression's LZMA2/xz, LZFSE, LZBITMAP, LZ4, LZRAVEN, LZVN, or zlib
      decoder. (Compression's, once chosen with `--decoder system`, went 2026-11-22: the benchmarks keep it as a
      reference row.)
-  5. `SegmentChecks.verifyChecksum`: SHA-256 or Murmur64 of the raw bytes, whichever the root header names (or
-     none).
+  4. `verify(_:raw:)`: `SegmentChecks.verifyChecksum`, SHA-256 or Murmur64 of the raw bytes, whichever the root header
+     names (or none).
 
   A segment stored as is (stored size equal to its raw size; `aea -a copy`, or data that didn't compress) is read
   straight into the pool buffer instead, and MACed, decrypted in place, and checked there: the read buffer isn't
-  touched (with `--input mapped` it's decrypted from the mapping into the pool buffer, or copied).
+  touched (with `--input mapped` it's decrypted from the mapping into the pool buffer, or copied). `prepare` gets the
+  pool buffer as its destination then, the read buffer otherwise.
 - **The read buffer** holds the largest stored segment (16 MiB for Xcode's). Its pages past the first 2 MiB are given
   back after every segment that used them (Bytes' `RawStorage.giveBack`, `madvise(MADV_FREE_REUSABLE)`) and taken back
   before the next (`reuse`, `MADV_FREE_REUSE`), so between segments a decoder keeps 2 MiB resident, not the largest
   segment it has seen. The kernel takes the pages only under memory pressure, so reusing them costs no faults
   otherwise. Segments of a large incompressible file come together, so 32 decoders can still hold 32 large segments
   at once: Xcode's `.aea` has 32 consecutive segments totalling 487 MiB stored.
-- **Publishing:** under the stream's `Mutex<State>` (`slots`, one per segment, allocated once; the first failure; the
-  consumer's continuation and the index it waits for) the decoder sets `slots[index] = buffer`; it takes the
-  consumer's continuation only if the consumer waits for exactly this index, and resumes it after the lock.
-- **`next(_:)`** (behind `nextChunk()`) takes the slot under the lock if it's published (no suspension), throws the
-  first failure, or stores its continuation and suspends, checking again under the same lock so no publish is
-  missed. The time spent in it is `counters.wait`. `peek()` waits the same way without taking the slot.
+- **Publishing:** under the stream's `Mutex<State>` (`slots`, a ring of `pool.count` allocated once, as the block
+  stream's below (until 2026-11-23, one slot per segment); the lowest failing segment's failure and index; the
+  consumer's continuation and the index it waits for) the decoder fills the segment's slot; it takes the consumer's
+  continuation only if the consumer waits for exactly this index, and resumes it after the lock.
+- **`next(_:taking:)`** (behind `nextBlock()`) takes the slot under the lock if it's published (no suspension), throws the
+  failure once it reaches the failing segment (or at once once stopped), or stores its continuation and suspends,
+  checking again under the same lock so no publish is missed. The time spent in it is `counters.wait`. `peek()` waits
+  the same way without taking the slot. Since 2026-11-24 the segments before a failing one come first, so the error is
+  always the lowest failing segment's (`authenticationFailed("segment 5")` every run, whichever decoder failed first),
+  and a failing `pbz` block is named as one (`blockDecompressionFailed(block:_:)`, "block N"; it read "segment N").
 
 ### `AEAPayload` (`Payload.swift`)
 
@@ -244,12 +274,13 @@ bytes. `AEAPayload` wraps the `SegmentStream`:
 - **`run()`** starts the segments' decoders at once, then waits (a continuation) for the decision; for a `pbz` stream
   it then runs the block stream's producer and decoders in the same group.
 - **`prepare()`** (the consumer's first call) `peek()`s the first segment, decoded in parallel with the others, reads
-  its first 12 bytes, and decides: the segments themselves, or a `BlockStream(.upstream(segments))` sized from the
+  its first 12 bytes, and decides: the segments themselves, or a `PBZInSegments(.upstream(segments))` sized from the
   `pbz` header. The first segment stays published, so the block stream's producer takes it as its first chunk: it's
   decoded once.
 - **The segments' pool** is made before the decision, sized for writers holding segment buffers (the plain case:
   `decoders + extraBuffers + held + 1`), but only `decoders + extraBuffers + 2` of its buffers are handed out until
-  then (`SegmentBufferPool(count:segmentCapacity:active:)`): what a `pbz` stream needs, since there the writers hold
+  then (the engine sizes it: `segmentStream(options, heldBuffers: held, heldUntilActivated: 1)`, BytesCompressionAsync's
+  `BlockBufferPool.sized`, until 2026-11-24 written out here and in `decrypt`): what a `pbz` stream needs, since there the writers hold
   the block stream's buffers and the segments' only consumer is the block stream's producer, which holds one segment
   at a time. `prepare()` activates the rest (`activateAll()`: to waiting decoders first, then to the bottom of the free
   list) only when the segments hold the archive itself. A `pbz` stream's segments never touch the inactive buffers,
@@ -258,50 +289,73 @@ bytes. `AEAPayload` wraps the `SegmentStream`:
   the decision instead was too late: stored segments decode so fast that the decoders, holding every thread, had
   touched all 65 buffers before the walker's task ran `prepare()`.
 - `stop`, `releaseUnconsumed`, `pool`, and `counters` go to the block stream once there is one (it stops and releases
-  its upstream too), to the segments otherwise; `stop` before the decision also ends `run()`'s wait.
+  its upstream too), to the segments otherwise; `stop` before the decision also ends `run()`'s wait. The block stream
+  stops the segments with a failure even when it's stopped with none (`stop(nil)`, after the walk): the segments' one
+  consumer is its producer, which may be in the middle of a block spanning more segments than are in flight, waiting
+  for a segment no decoder will decode. Until 2026-11-24 it passed the `nil` on, and listing, verifying, or extracting
+  such an archive (blocks of 32 MiB or more: `aa -b`, the review's `big.aea`) hung when the walk ended early.
 
 Decoding the first segment on the caller's task before starting the decoders (the first design) cost every `.aea`
 operation one segment's decoding time: listing Xcode's `.aea` took 2.82–2.87 s against 2.66–2.69 s without it.
 
-### `BlockStream` (`BlockStream.swift`)
+### `PBZInSegments` and `FileBlocks`: the engine's framed form
 
-Block boundaries in `pbz` and pbzx streams are known only by reading each block's 16-byte header, so a
-**producer** task reads them in sequence and queues jobs (`Job`: index, raw offset and size, stored size, and
-either a file offset or a staging buffer):
+Block boundaries in `pbz` and pbzx streams are known only by reading each block's 16-byte header (BytesCompression's
+`PBZ`), so a **producer** task reads them in sequence and queues jobs (`BlockJob`: index, raw offset and size, stored
+size, and either a file offset or a staging buffer):
 
-- **From a file** (`produce(from: descriptor…)`): only the headers are read. Each decoder then `pread`s its own
-  block: straight into the output buffer when the block is stored, or into its read buffer for decoding (whose pages
-  past 2 MiB are given back after each block, as `SegmentStream`'s are).
-- **From an upstream source** (`produce(from: upstream…)`, a `pbz` stream inside AEA segments): blocks cross
+- **From a file** (`init(stage:pbz:blockSize:file:…)`): only the headers are read, through the stage
+  (`ArchiveFileStage.read`). Each decoder then `pread`s its own block (the stage's default `decode`): straight into the
+  output buffer when the block is stored, or into its read buffer for decoding (whose pages past 2 MiB are given back
+  after each block, as the segments' are).
+- **From an upstream source** (`init(pbz:blockSize:upstream:…)`, a `pbz` stream inside AEA segments): blocks cross
   segment boundaries freely, so the producer copies each block's stored bytes into a **staging pool** buffer
-  through `UpstreamReader`, which takes upstream chunks with `nextChunk()` and releases them as it passes them.
-- **The job queue** is BytesAsync's `AsyncQueue<Job>` with capacity `2 × decoders + 2`. Each decoder does `await pool.acquire()`,
+  through `UpstreamReader`, which takes upstream chunks with `nextBlock()` and releases them as it passes them.
+- **The job queue** is BytesAsync's `AsyncQueue<BlockJob>` with capacity `2 × decoders + 2`. Each decoder does `await pool.acquire()`,
   then `await jobs.pop()`: buffer first, then job, for the same reason as above. It decodes, releases the staging
   buffer, and publishes.
 - **Slots** are a ring of `pool.count` entries, each carrying (index, buffer, raw offset, raw size), allocated once:
   block `i` goes in slot `i % pool.count`. Decoders take jobs in order, each holding a buffer until the block is
   consumed, so every block between the consumer's and a published one holds a buffer: at most `pool.count` are
   published at once, and none overwrites another.
-- **`blockCount`** is set by the producer when it reaches the end (resuming the consumer if it waits past it).
-  `nextChunk()` returns `nil` once it has taken that many.
+- **`endIndex`** is set by the producer when it reaches the end (resuming the consumer if it waits past it).
+  `nextBlock()` returns `nil` once it has taken that many.
 
 For a xip, this means 32 decoders working through 617 blocks of 16 MiB, each block an xz stream decoded by
-`LZMA2Decoder.decompressXZ`. Bytes' decoder takes 16% less time than Compression's here.
+`LZMA2Decoder.decompressAll(_:into:)` (`decompressXZ` before 2026-11-24). Bytes' decoder takes 16% less time than Compression's here.
 
 ## 5. The buffer pool and its references
 
-`SegmentBufferPool` (`Buffers.swift`, all that file holds now) is the one large allocation. It's a single `RawStorage`
+`BlockBufferPool` (BytesCompressionAsync's `BlockBufferPool.swift`; until 2026-11-23 this package's `SegmentBufferPool`,
+the same code, inlinable) is the one large allocation. It's a single `RawStorage`
 (Bytes': page-aligned, allocated once) divided into `count` buffers. Each buffer is laid out as:
 
 ```
 [ carry region: 64 KiB ][ chunk: up to segment/block size ][ 64 bytes slack ]   (rounded to 16 KiB)
 ```
 
-- **Count:** `decoders + extraBuffers + held + 1`. Here `held` is the number of writers for extraction (each
-  writer may hold one buffer through a job) and 0 for listing. For Xcode that's 32 + 8 + 24 + 1 = **65 buffers of
-  16 MiB**, about 1.1 GB, most of the peak memory footprint: 1.21 GB extracting the xip, 1.37 GB the `.aea` (whose
-  decoders' read buffers can hold 32 large stored segments at once, §4), 0.82 and 1.08 GB listing them. The `+ 1`
-  ensures a decoder can always get a buffer while the consumer holds its own.
+The carry region's size is this package's (`AppleArchive.headerCarryCapacity`, passed to every engine a walker reads;
+the pool's default is none, since 2026-11-24, fix plan D8): decryption to a file and a `pbz` stream's staging have none.
+
+- **Count:** `decoders + extraBuffers + held + walk` (BytesCompressionAsync's `BlockBufferPool.sizing`, which every
+  engine initializer uses). Here `held` is the number of writers for extraction (each
+  writer may hold one buffer through a job) and 0 for listing. `walk` (the engine's `consumerBuffers`,
+  `ExtractionSink.walkBuffers`) is what the walk holds while it waits for its next block: the one it read, and for an
+  extraction in blocks under 64 KiB also the earlier pieces of a compressed large file whose chunk it ends in, which
+  the planner keeps until the chunk's end arrives (Disk's bridges; four in `aea`'s 16 KiB segments). It's 1 otherwise,
+  and it ensures a decoder can always get a buffer for the block the walk waits for: with 1 in 16 KiB segments, one
+  decoder, one writer, and no extra buffers (or a budget that cuts to them) waited forever (2026-11-24). For Xcode
+  that's 32 + 8 + 24 + 1 = **65 buffers of 16 MiB**, about 1.1 GB, most of the peak memory footprint: 1.21 GB
+  extracting the xip, 1.37 GB the `.aea` (whose decoders' read buffers can hold 32 large stored segments at once, §4),
+  0.82 and 1.08 GB listing them.
+- **Budget:** all of that (and the decoders' read buffers, and a `pbz` stream's staging inside segments, which gets
+  what the segments leave) within `AEAReadOptions.bufferBudget`, 64 MiB per core and at least 1 GiB by default. Over it (blocks of 64 MiB and up:
+  `pbz` and AEA allow 256 MiB), the writers come down first to as many as fit beside one decoder (and the extraction
+  runs no more than the pool's `heldBuffers`), then the extra buffers, then the decoders; never below one decoder, one
+  writer, and the walk's. A 256 MiB-block `.aar` listed in 5.1 GB before this; in about 0.8 GB now (one decoder, two
+  buffers and a read buffer). With 16 MiB blocks the default counts fit on machines up to about 20 cores; on the M3
+  Ultra (32 decoders, 24 writers: 1,557 MiB with the read buffers) the budget cuts them to 19 decoders and no extra
+  buffers.
 - **References:** `references`, BytesAsync's `RelaxedCounters`: one count per buffer, all in one allocation.
   - `acquire() async -> Int?` takes the last freed buffer under the pool's `Mutex` (free list, waiters, `closed`) and
     sets its count to 1; that reference belongs to the walker while it reads the chunk. With none free it stores its
@@ -325,12 +379,15 @@ decoders haven't caught up.
 
 Both walkers (`ArchiveWalker.walk`, `CpioWalker.walk`) are the same loop over chunks:
 
-1. `await source.nextChunk()` returns the next buffer.
+1. `await source.nextBlock()` returns the next buffer.
 2. If the previous chunk ended inside a header (`carry > 0`), copy those bytes into the carry region before this
    chunk, then release the previous buffer. The walker holds at most two buffers.
 3. Parse headers in place:
    - **Apple Archive:** `AppleArchive.headerByteCount`, then `parseHeader` into `AAEntryHeader`, which records
-     offsets (`AAHeaderRange`) for the path, link target, and blobs, not copies.
+     offsets (`AAHeaderRange`) for the path, link target, and blobs, not copies. It refuses a `T` time whose
+     nanoseconds aren't below a second, and an entry whose `XAT` and `ACL` blobs together are over the sink's
+     `maximumMetadataByteCount` (an extraction's `AEAExtractionOptions.maximumMetadataByteCount`, 256 MiB by default;
+     listing takes any size): what an extraction holds until the entry ends, refused before any of it is read.
    - **cpio:** `Cpio.parseHeader` reads the 76-byte octal header. The name, and a symbolic link's target, are kept
      contiguous with it. `entryHeader` converts it to an `AAEntryHeader`.
 4. Call `await sink.entry(…)` with a pointer to the header in the buffer. Then, for each piece of the entry's blobs in
@@ -359,7 +416,7 @@ the pool, Disk's `Extraction.run`, whose plan closure is the walk:
 sequenceDiagram
     autonumber
     participant D as Decoder tasks (32)
-    participant P as SegmentBufferPool
+    participant P as BlockBufferPool
     participant W as Walker + ExtractionSink (calling task)
     participant PL as Disk Planner
     participant R as Disk writers (24)
@@ -367,7 +424,7 @@ sequenceDiagram
     D->>P: await acquire() (suspends if none free)
     D->>D: claim next index, read, MAC, decrypt, decode, checksum
     D->>W: publish slots[index], resume the walker if it waits for it
-    W->>W: await nextChunk(), parse header in place, copy the path
+    W->>W: await nextBlock(), parse header in place, copy the path
     W->>PL: directory (mkdirat now), symbolicLink / hardLink / specialFile (recorded)
     W->>P: retain(data buffer) for each file or piece
     W->>PL: await file(path, contents: buffer ranges) or beginLargeFile + piece
@@ -430,7 +487,9 @@ needs a lock. Per entry:
   - **Large file:** `planner.beginLargeFile` on the first piece (Disk opens it there, so pieces can be written in any
     order; `minimumPieceSize` is the segment size, so a 64 KiB chunk spans at most 8 pieces), then `planner.piece` per
     chunk. Disk decides the fork from the first bytes and bridges pieces in which no chunk ends.
-- **`metadata(…)`** gathers an entry's `XAT` and `ACL` blobs (they can come before its data); **`endEntry()`** plans an
+- **`metadata(…)`** gathers an entry's `XAT` and `ACL` blobs (they can come before its data) into one array, reserved
+  at the first blob from their declared sizes (bounded at the header) and given back after an entry that took more
+  than 1 MiB (grown by doubling, one 80 MB attribute peaked at 380 MB); **`endEntry()`** plans an
   empty file, then adds the blobs to the entry (`addExtendedAttributes`, `addAccessControlList`): Disk applies them
   after the writers, then the mode, times, and flags.
 - **`finish(walked:)`** releases a `pending` first range after a failure and, after a full walk, sets the progress's
@@ -526,7 +585,7 @@ flowchart LR
     subgraph T0["calling task (@concurrent entry)"]
         WK["walker + ExtractionSink + Disk Planner<br/>mkdirat, open large files"]
     end
-    subgraph TP["1 producer task<br/>(BlockStream)"]
+    subgraph TP["1 producer task<br/>(FileBlocks)"]
         PR["read block headers"]
     end
     subgraph TD["32 decoder tasks"]
@@ -543,7 +602,7 @@ flowchart LR
     WK -->|"Disk JobQueue (16,384 + path ring): push/pop suspend"| WR
     WR -->|"Disk AsyncLimiter (6)"| FS[("APFS")]
     WK -.->|"mkdirat, openat"| FS
-    POOL[["SegmentBufferPool<br/>Mutex: free list + waiters<br/>RelaxedCounters refs"]]
+    POOL[["BlockBufferPool<br/>Mutex: free list + waiters<br/>RelaxedCounters refs"]]
     DE -.->|"await acquire"| POOL
     WR -.->|"release"| POOL
     WK -.->|"retain, release"| POOL
@@ -551,10 +610,10 @@ flowchart LR
 
 | Primitive | Where | What it protects or signals |
 |---|---|---|
-| `DiscardingTaskGroup` | `ChunkSource.withDecoding`, `SegmentStream.run`, `BlockStream.run`, `AEAPayload.run`; Disk's `Extraction.run` and its passes' lanes | The operation's child tasks: decoders, the producer; Disk's writers and the lanes of each pass after the walk |
+| `DiscardingTaskGroup` | `ChunkSource.withDecoding`, `ParallelBlockDecoder.run` (segments and blocks), `AEAPayload.run`; Disk's `Extraction.run` and its passes' lanes | The operation's child tasks: decoders, the producer; Disk's writers and the lanes of each pass after the walk |
 | `async let` | `XIPArchive.extract`, `forEachEntry` | The content check, cancelled if the extraction throws |
 | `withTaskCancellationHandler` | `ChunkSource.withDecoding`; Disk's `Extraction.run` | Cancellation: stops the source; stops Disk's planner and writers (§11) |
-| `Mutex` + continuations, waiters in a `WaiterQueue` reserved up front (BytesAsync) | `SegmentBufferPool`, `AsyncQueue` (the block stream's), `SegmentStream`/`BlockStream` slots, `AEAPayload` decision; Disk's queue, limiter, large-file slots and turns, latch | Free buffers; the block queue's ring; published chunks and the first failure; Disk: the write queue, file-system permits, whose turn it is to write a fork, writers ending |
+| `Mutex` + continuations, waiters in a `WaiterQueue` reserved up front (BytesAsync) | `BlockBufferPool`, `AsyncQueue` (the block stream's), the engine's slots, `AEAPayload` decision; Disk's queue, limiter, large-file slots and turns, latch | Free buffers; the block queue's ring; published chunks and the lowest failing chunk's failure; Disk: the write queue, file-system permits, whose turn it is to write a fork, writers ending |
 | `Atomic<Int>` / `Atomic<Bool>` | `nextSegment`, `cancelled`, `peakInUse`, source counters; Disk's stop flag, `outstanding`, counters, `ExtractionProgress` slots | Claiming the next segment without a lock; stopping; counts read across tasks |
 | `RelaxedCounters` (BytesAsync: N atomics in one allocation) | Pool `references` | One reference count per buffer |
 
@@ -562,10 +621,10 @@ flowchart LR
 
 All of them follow one pattern, and since 2026-11-21 share one implementation of its parts: BytesAsync's
 `Continuation` and `withContinuation`, `WaiterQueue`, `AsyncQueue` (this package's block queue, moved there),
-`AsyncLimiter`, `AsyncIndexPool`, and `AsyncLatch` (Disk's, moved there), and Bytes' `RawStorage`. What stays here is
-what's this pipeline's own: `SegmentBufferPool` (its carry regions, reference counts, and activation), and the slot
-rings of `SegmentStream` and `BlockStream`; Disk keeps its write queue (jobs plus a ring of path bytes, and a low-water
-wake). The moves changed no count (RESULTS.md, 2026-11-21). The pattern:
+`AsyncLimiter`, `AsyncIndexPool`, and `AsyncLatch` (Disk's, moved there), and Bytes' `RawStorage`. What's the
+decoding pipeline's own, `BlockBufferPool` (its carry regions, reference counts, and activation) and the engine's slot
+ring, is BytesCompressionAsync's since 2026-11-23 (shared by every block format); Disk keeps its write queue (jobs plus
+a ring of path bytes, and a low-water wake). The moves changed no count (RESULTS.md, 2026-11-21). The pattern:
 
 - **A synchronous fast path under the lock.** `acquire`, `push`, `pop`, `waitForTurn`, and `next` take what they need
   under a `Mutex` and return without suspending when they can; a task suspends only where a thread used to block.
@@ -579,7 +638,7 @@ wake). The moves changed no count (RESULTS.md, 2026-11-21). The pattern:
   allocates nothing. Release builds use `UnsafeContinuation` (in a `@safe` wrapper, `Continuation`); debug builds use
   `CheckedContinuation`, which checks every continuation is resumed once (it allocates a canary per wait, so release
   builds don't use it: Disk's writers wait for the file system about once per file).
-- **Closing.** `SegmentBufferPool.close()` and `AsyncQueue.close()` resume every waiter (with `nil`, or `false` for a
+- **Closing.** `BlockBufferPool.close()` and `AsyncQueue.close()` resume every waiter (with `nil`, or `false` for a
   producer whose job wasn't added); the source's `stop` closes its pools and queue, so every decoder and producer
   ends without polling.
 
@@ -604,11 +663,11 @@ wake). The moves changed no count (RESULTS.md, 2026-11-21). The pattern:
 
 ### `Sendable`
 
-The primitives hold only `Mutex` and `Atomic` state, so they're checked `Sendable` (`SegmentBufferPool`, `AEAPayload`,
+The primitives hold only `Mutex` and `Atomic` state, so they're checked `Sendable` (`BlockBufferPool`, `AEAPayload`,
 BytesAsync's `AsyncQueue` and limits, and Disk's). Classes with fields only one task touches are `final class …: @unchecked Sendable`
-(`SegmentStream` and `BlockStream`: the consumer's position; `RawStorage`). Their mutable state is in a `Mutex`, or is
+(`ParallelBlockDecoder`: the consumer's position; `RawStorage`). Their mutable state is in a `Mutex`, or is
 touched by one task only (the consumer's position), as stated beside it. Values crossing tasks (`SegmentContents` and
-its `Contents`, `Job`, `DecodedChunk`) are `Sendable` structs of integers and the pool's reference.
+its `Contents`, `BlockJob`, `DecodedBlock`) are `Sendable` structs of integers and the pool's reference.
 
 ### Ordering guarantees, and how they're kept
 
@@ -670,7 +729,7 @@ rest of the process's ~2,800 are argument parsing, the runtime's metadata caches
   `Task.isCancelled` once per segment or block), and Disk's `Extraction.run` stops its planner and writers (writers
   skip what's left, releasing its references; the planner's next call throws `.cancelled`).
 
-  The walker then throws `.cancelled` from its next `nextChunk()` or entry. Disk's write queue isn't closed early: the
+  The walker then throws `.cancelled` from its next `nextBlock()` or entry. Disk's write queue isn't closed early: the
   writers drain it (skipping the work), so the walker's pushes land and every reference is released. Disk's passes
   after the walk check for cancellation per item, and the xip's content check per 4 MiB read.
 - **After the tasks end, everything is released.** `withDecoding` releases published but unconsumed buffers (and a

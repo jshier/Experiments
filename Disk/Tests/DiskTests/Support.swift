@@ -1,7 +1,7 @@
-import BytesTestSupport
-import BytesTesting
-import Darwin
 @testable import Disk
+import BytesTesting
+import BytesTestSupport
+import Darwin
 import DiskTestSupport
 import Foundation
 import Synchronization
@@ -88,7 +88,9 @@ final class ArraySource: ContentSource, PieceSource, @unchecked Sendable {
     }
 
     deinit {
-        for buffer in pieceStorage { buffer.deallocate() }
+        for buffer in pieceStorage {
+            buffer.deallocate()
+        }
     }
 
     /// A file (`index >= 0`) or a piece (`-1 - index`).

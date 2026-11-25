@@ -165,7 +165,7 @@ struct PayloadDecryptor {
         let count = min(output.byteCount, ciphertext.upperBound - position)
         let piece = payload.extracting(position..<(position + count))
         switch cipher {
-        case .traditional(var traditional):
+        case var .traditional(traditional):
             traditional.decrypt(piece, into: &output)
             cipher = .traditional(traditional)
         case .aes(let aes, var counter):

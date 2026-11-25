@@ -86,7 +86,9 @@ public struct HTTPCredentials: ~Escapable {
             // The scheme alone.
             return HTTPCredentials(scheme: scheme, token68: nil, parameterBytes: bytes.extracting(schemeEnd..<schemeEnd))
         }
-        while position < count, FieldGrammar.byte(bytes, position) == 0x20 { position &+= 1 }
+        while position < count, FieldGrammar.byte(bytes, position) == 0x20 {
+            position &+= 1
+        }
         if position == count || FieldGrammar.byte(bytes, position) == 0x2C {
             // The scheme, then spaces and no parameters (`Negotiate , Basic realm="x"`).
             return HTTPCredentials(scheme: scheme, token68: nil, parameterBytes: bytes.extracting(schemeEnd..<schemeEnd))
@@ -94,10 +96,14 @@ public struct HTTPCredentials: ~Escapable {
         let restStart = position
         // A token68: its characters, then any `=` padding, then the end or a comma.
         var end = position
-        while end < count, isToken68(FieldGrammar.byte(bytes, end)) { end &+= 1 }
+        while end < count, isToken68(FieldGrammar.byte(bytes, end)) {
+            end &+= 1
+        }
         if end > position {
             var padded = end
-            while padded < count, FieldGrammar.byte(bytes, padded) == 0x3D { padded &+= 1 }
+            while padded < count, FieldGrammar.byte(bytes, padded) == 0x3D {
+                padded &+= 1
+            }
             let after = FieldGrammar.whitespaceEnd(bytes, from: padded)
             if after == count || FieldGrammar.byte(bytes, after) == 0x2C {
                 position = after
@@ -127,7 +133,9 @@ public struct HTTPCredentials: ~Escapable {
             guard FieldGrammar.byte(bytes, cursor) == 0x2C else { throw .invalidCredentials }
             // Past commas and whitespace: another parameter (a token, then `=`), or, in a challenge list, a new challenge.
             var next = cursor
-            while next < count, case let byte = FieldGrammar.byte(bytes, next), byte == 0x2C || FieldGrammar.isWhitespace(byte) { next &+= 1 }
+            while next < count, case let byte = FieldGrammar.byte(bytes, next), byte == 0x2C || FieldGrammar.isWhitespace(byte) {
+                next &+= 1
+            }
             guard next < count else { position = next; break }
             let tokenEnd = FieldGrammar.tokenEnd(bytes, from: next)
             let afterToken = FieldGrammar.whitespaceEnd(bytes, from: tokenEnd)
@@ -148,7 +156,9 @@ public struct HTTPCredentials: ~Escapable {
     @inlinable
     static func endsToken68(_ bytes: RawSpan, from start: Int) -> Bool {
         var position = start
-        while position < bytes.byteCount, FieldGrammar.byte(bytes, position) == 0x3D { position &+= 1 }
+        while position < bytes.byteCount, FieldGrammar.byte(bytes, position) == 0x3D {
+            position &+= 1
+        }
         position = FieldGrammar.whitespaceEnd(bytes, from: position)
         return position == bytes.byteCount || FieldGrammar.byte(bytes, position) == 0x2C
     }

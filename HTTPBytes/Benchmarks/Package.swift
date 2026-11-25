@@ -19,6 +19,7 @@ let package = Package(
     dependencies: [
         .package(path: ".."),
         .package(path: "../../Bytes"),
+        .package(path: "../../BytesCompression"),
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
         .package(url: "https://github.com/apple/swift-http-types", from: "1.8.0"),
         // NIOHPACK: HPACK as Swift servers do it today.
@@ -34,8 +35,8 @@ let package = Package(
                 .define("NDEBUG"),
                 .define("XXH_HEADER_NAME", to: "\"xxhash.h\""),
                 .unsafeFlags(["-O3", "-I\(testData)/llhttp/include", "-I\(testData)/picohttpparser",
-                               "-I\(testData)/ls-hpack", "-I\(testData)/ls-hpack/deps/xxhash",
-                               "-I\(testData)/ls-qpack"]),
+                              "-I\(testData)/ls-hpack", "-I\(testData)/ls-hpack/deps/xxhash",
+                              "-I\(testData)/ls-qpack"]),
             ]
         ),
         .executableTarget(
@@ -52,9 +53,9 @@ let package = Package(
                 .product(name: "NIOHPACK", package: "swift-nio-http2"),
                 .product(name: "RawStructuredFieldValues", package: "swift-http-structured-headers"),
                 .product(name: "HTTPPayload", package: "HTTPBytes"),
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
                 // System zlib, the reference row for content decoding.
-                .product(name: "BytesReferenceCodecs", package: "Bytes"),
+                .product(name: "BytesReferenceCodecs", package: "BytesCompression"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/HTTPBytesBenchmarks",

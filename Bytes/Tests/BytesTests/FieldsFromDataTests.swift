@@ -74,7 +74,7 @@ import Testing
         let value = try reader.read(UInt32.self, byteCount: 3, .bigEndian)
         var check = BytesReader(Self.bytes.span)
         try check.skip(bitCount: 4)
-        #expect(value == UInt32(try check.read(Byte3.self, .bigEndian)))
+        #expect(try value == UInt32(check.read(Byte3.self, .bigEndian)))
         #expect(reader.bitPosition == 28)
     }
 
@@ -106,7 +106,9 @@ import Testing
             // none can look like a match).
             var bytes = (0..<count).map { UInt8(truncatingIfNeeded: 0x70 &+ $0 &* 37) | 1 }
             if target >= 0 {
-                for index in stride(from: target, to: count, by: 3) { bytes[index] = 0 }
+                for index in stride(from: target, to: count, by: 3) {
+                    bytes[index] = 0
+                }
             }
             #expect(bytes.span.bytes.firstByteOffset { $0.matching(0) } == (target >= 0 ? target : nil), "\(count), \(target)")
         }
@@ -115,8 +117,8 @@ import Testing
     @Test func terminatedText() throws {
         let bytes: [UInt8] = Array("name\0.text\0\0unterminated".utf8)
         var reader = AlignedBytesReader(bytes.span)
-        #expect(String(copying: try reader.read(utf8TerminatedBy: 0)) == "name")
-        #expect(String(copying: try reader.read(utf8TerminatedBy: 0)) == ".text")
+        #expect(try String(copying: reader.read(utf8TerminatedBy: 0)) == "name")
+        #expect(try String(copying: reader.read(utf8TerminatedBy: 0)) == ".text")
         #expect(try reader.read(bytesTerminatedBy: 0).byteCount == 0)
         let before = reader.byteOffset
         #expect(throws: BytesError.insufficientData) { _ = try reader.read(bytesTerminatedBy: 0) }
@@ -145,7 +147,7 @@ import Testing
         let options: [UInt8] = [1, 0, 3, 0, 0x61, 0x62, 0x63, 0xEE, 2, 0, 4, 0, 1, 2, 3, 4, 0, 0, 0, 0]
         var reader = LittleEndianBytesReader(options.span)
         var seen: [(UInt16, Int)] = []
-        try reader.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { (code, value) throws(BytesError) in
+        try reader.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { code, value throws(BytesError) in
             seen.append((code, value.remainingByteCount))
         }
         #expect(seen.map(\.0) == [1, 2, 0] && seen.map(\.1) == [3, 4, 0])
@@ -155,7 +157,7 @@ import Testing
         let cut: [UInt8] = [1, 0, 3, 0, 0x61, 0x62, 0x63]
         var cutReader = LittleEndianBytesReader(cut.span)
         #expect(throws: BytesError.insufficientData) {
-            try cutReader.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { (_, _) throws(BytesError) in }
+            try cutReader.forEachRecord(tag: Byte2.self, length: Byte2.self, paddedTo: 4) { _, _ throws(BytesError) in }
         }
         #expect(cutReader.byteOffset == 0)
     }

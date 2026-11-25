@@ -131,7 +131,9 @@ public struct HTTPSetCookie: ~Escapable {
         if value.byteCount >= 2, FieldGrammar.byte(value, 0) == 0x22, FieldGrammar.byte(value, value.byteCount &- 1) == 0x22 {
             octets = value.extracting(1..<value.byteCount &- 1)
         }
-        for offset in 0..<octets.byteCount where !Self.isCookieOctet(FieldGrammar.byte(octets, offset)) { throw .invalidCookie }
+        for offset in 0..<octets.byteCount where !Self.isCookieOctet(FieldGrammar.byte(octets, offset)) {
+            throw .invalidCookie
+        }
         if sameSite == SameSite.none, !isSecure { throw .invalidCookie }
         try FieldGrammar.write(name, to: &writer)
         try FieldGrammar.write(0x3D, to: &writer)

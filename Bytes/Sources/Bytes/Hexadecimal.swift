@@ -17,7 +17,7 @@ public extension [UInt8] {
     @inlinable
     init(hexadecimal text: RawSpan) throws(BytesError) {
         guard text.byteCount & 1 == 0 else { throw .invalidValue }
-        try self.init(alignedByteCapacity: text.byteCount &>> 1) { (writer) throws(BytesError) in
+        try self.init(alignedByteCapacity: text.byteCount &>> 1) { writer throws(BytesError) in
             try writer._write(hexadecimalDigits: text)
         }
     }

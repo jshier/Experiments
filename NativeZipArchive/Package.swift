@@ -28,6 +28,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
         .package(path: "../Bytes"),
+        .package(path: "../BytesCompression"),
         // Writing the tree: files, directories, links, metadata, in parallel (and its call counts, with the trait).
         .package(path: "../Disk", traits: [.trait(name: "SyscallCounting", condition: .when(traits: ["SyscallCounting"]))]),
     ],
@@ -39,7 +40,7 @@ let package = Package(
                 .product(name: "BytesMacros", package: "Bytes"),
                 .product(name: "BytesFoundation", package: "Bytes"),
                 // Every compression method: DEFLATE and Deflate64, bzip2, LZMA, xz, Zstandard.
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
                 // WinZip AES: AES, HMAC-SHA1, PBKDF2.
                 .product(name: "BytesCrypto", package: "Bytes"),
                 // The handoff between a large entry's decoding task and its writer (`AsyncHandoff`).
@@ -70,7 +71,8 @@ let package = Package(
                 .product(name: "DiskTestSupport", package: "Disk"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
-                .product(name: "BytesReferenceCodecs", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
+                .product(name: "BytesReferenceCodecs", package: "BytesCompression"),
             ],
             // Archives and vectors the tests load from their own directory (#filePath).
             exclude: ["Fixtures"],
@@ -89,7 +91,7 @@ let package = Package(
                 .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 // Compression's one-shot DEFLATE decoder, the reference row.
-                .product(name: "BytesReferenceCodecs", package: "Bytes"),
+                .product(name: "BytesReferenceCodecs", package: "BytesCompression"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],
             path: "Benchmarks/NativeZipBenchmarks",

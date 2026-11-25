@@ -1,6 +1,9 @@
 import Benchmark
 import Bytes
 import BytesReferenceCodecs
+
+// `TestData`, for the archive-coverage row.
+import BytesTestSupport
 import Compression
 @_spi(Benchmarking) import Disk
 import Foundation
@@ -146,6 +149,23 @@ let benchmarks: @Sendable () -> Void = {
         }
     }
 
+    // The same 2,000 files as LZMA and xz entries: every entry starts a stream, which resets the probability model.
+    for method in [Fixtures.Method.lzma, .xz] {
+        Benchmark("Inflate + CRC 2,000 small files: \(method.label)", configuration: large) { benchmark in
+            let archive = try ZipArchive(url: Fixtures.smallMethodArchive(method))
+            let files = archive.entries.filter { $0.kind == .file }
+            var decoder = ZipDecoder()
+            benchmark.startMeasurement()
+            for _ in benchmark.scaledIterations {
+                for entry in files {
+                    try archive.contents(of: entry, using: &decoder) { blackHole($0.byteCount) }
+                }
+            }
+        } setup: {
+            try Fixtures.prepareSmallMethod(method)
+        }
+    }
+
     Benchmark("Verify 2,000 small files (parallel): Bytes") { benchmark in
         let archive = try ZipArchive(url: Fixtures.smallFiles)
         benchmark.startMeasurement()
@@ -260,8 +280,9 @@ let benchmarks: @Sendable () -> Void = {
     // skips). Many small files are removed after each sample, outside the measurement; one large file is kept until
     // teardown (see `Fixtures.remove(_:)` for the measurements behind each).
     func extractionBenchmark(_ name: String, archive url: URL, maxConcurrency: Int? = nil, progress: Bool = false,
+                             removesEachSample: Bool = false,
                              configuration: Benchmark.Configuration, setup: (@Sendable () throws -> Void)? = nil) {
-        let removeEachSample = url == Fixtures.smallFiles
+        let removeEachSample = removesEachSample || url == Fixtures.smallFiles
         var configuration = configuration
         configuration.metrics = extractionMetrics
         Benchmark(name, configuration: configuration) { benchmark in
@@ -310,6 +331,16 @@ let benchmarks: @Sendable () -> Void = {
                         progress: true, configuration: files)
     extractionBenchmark("Extract 2,000 small files: Bytes, progress", archive: Fixtures.smallFiles, progress: true, configuration: files)
     extractionBenchmark("Extract 32 MB text: Bytes, progress", archive: Fixtures.largeText, progress: true, configuration: large)
+
+    // The archive-coverage set's `ditto -c -k --sequesterRsrc` archive (`Tools/test-data fetch archive-coverage`; the
+    // tests' tree, so this row moves with the set, not with `Fixtures.version`): 2,000 small files and a few large ones
+    // (8 MB), with what the rows above lack: AppleDouble entries under `__MACOSX` merged into their items (extended
+    // attributes, resource forks, ACLs, Finder info, flags), symbolic links of every kind, read-only and special modes,
+    // 24 levels, long and Unicode names. (Its hard links are copies: ZIP has none.) Removed after each sample.
+    let coverage = TestData.directory(set: "archive-coverage").appending(path: "tree-ditto.zip")
+    extractionBenchmark("Extract coverage tree: ditto AppleDouble", archive: coverage, removesEachSample: true, configuration: files) {
+        _ = try TestData.file(set: "archive-coverage", name: "tree-ditto.zip") // Says which fetch to run.
+    }
 
     // The kernel cost of creating the same files with no decoding at all: a floor for extraction.
     Benchmark("Floor: create + write 2,000 files (no decoding)", configuration: files) { benchmark in
@@ -406,8 +437,10 @@ let benchmarks: @Sendable () -> Void = {
         let destinations = benchmark.scaledIterations.map { _ in FilePath(Fixtures.outputDirectory().path) }
         benchmark.startMeasurement()
         for index in benchmark.scaledIterations {
-            let failures = try await ZipExtractor.extract(into: destinations[index], stopOnFirstError: true) { (extractor) async throws(ZipError) in
-                for archive in archives { try await extractor.add(archive) }
+            let failures = try await ZipExtractor.extract(into: destinations[index], stopOnFirstError: true) { extractor async throws(ZipError) in
+                for archive in archives {
+                    try await extractor.add(archive)
+                }
             }
             precondition(failures.isEmpty)
         }

@@ -40,10 +40,10 @@ public struct XIPMetadata: Sendable {
         var key: String?
         while let event = try scanner.next() {
             switch event {
-            case .text("plist/dict/key", let text, _): key = text
-            case .text("plist/dict/string", let text, _):
+            case let .text("plist/dict/key", text, _): key = text
+            case let .text("plist/dict/string", text, _):
                 if key == "FileSystemCompressionFormat" { fileSystemCompressionFormat = text }
-            case .text("plist/dict/integer", let text, _):
+            case let .text("plist/dict/integer", text, _):
                 if key == "UncompressedSize" { uncompressedSize = try XAR.integer(text) }
                 if key == "Version" { version = try XAR.integer(text) }
             default: break
@@ -104,14 +104,11 @@ public final class XIPArchive: Sendable {
             }
             let compressed = try AEAArchive.read(file, at: header.headerSize, count: header.tocCompressedSize)
             tocCompressed = compressed
-            var xml = [UInt8](repeating: 0, count: header.tocSize)
+            let xml: [UInt8]
             do throws(BytesError) {
-                var decoder = DeflateDecoder(format: .zlib)
-                let written = try xml.withOutputRawSpan { span throws(BytesError) -> Int in
-                    _ = try decoder.decompressAll(compressed.span.bytes, into: &span)
-                    return span.byteCount
-                }
-                guard written == header.tocSize else { throw BytesError.mismatch }
+                // XAR's TOC: zlib, exactly its recorded size (checked above to be at most 64 MiB).
+                var decoder = try Decompressor(for: .deflate(.zlib))
+                xml = try decoder.decompressAll(compressed.span.bytes, maximumSize: 64 << 20, decodedSize: header.tocSize)
             } catch {
                 throw AEAError.invalidArchive("the XAR TOC doesn't decompress (\(error))")
             }
@@ -149,10 +146,16 @@ public final class XIPArchive: Sendable {
             }
             contentChecksum = content.archivedChecksum.flatMap { $0.style == "sha1" ? (try? [UInt8](hexadecimal: $0.hex)) : nil }
             let pbz = try AEAArchive.read(file, at: contentStart, count: PBZ.headerSize)
-            guard PBZ.compression(pbz.span.bytes) == .lzma else { // "pbzx"
+            let contentHeader: (compression: AppleArchiveCompression, blockSize: Int)?
+            do throws(PBZError) {
+                contentHeader = try PBZ.header(pbz.span.bytes)
+            } catch {
+                throw AEAError(.framing(error))
+            }
+            guard let contentHeader, contentHeader.compression == .lzma else { // "pbzx"
                 throw AEAError.invalidArchive("the xip's Content isn't a pbzx stream")
             }
-            blockSize = try PBZ.blockSize(pbz.span.bytes)
+            blockSize = contentHeader.blockSize
             if let member = toc.files.first(where: { $0.name == "Metadata" }) {
                 metadata = try Self.readMetadata(member, file: file, heapStart: header.headerSize + header.tocCompressedSize, fileSize: fileSize)
             } else {
@@ -182,7 +185,7 @@ public final class XIPArchive: Sendable {
         switch check {
         case .none: return (nil, false)
         case .certificateChain: anchors = nil
-        case .certificateChainTrusting(let roots): anchors = roots
+        case let .certificateChainTrusting(roots): anchors = roots
         case .untrustedCertificateChain: anchors = []
         }
         guard let signature = toc.signature, let leafDER = signature.certificates.first else {
@@ -231,18 +234,13 @@ public final class XIPArchive: Sendable {
         let decoded: [UInt8]
         switch member.encoding {
         case "application/x-bzip2":
-            var plist = [UInt8](repeating: 0, count: member.size)
             do throws(BytesError) {
-                var decoder = BZip2Decoder()
-                let written = try plist.withOutputRawSpan { span throws(BytesError) -> Int in
-                    _ = try decoder.decompressAll(stored.span.bytes, decodedSize: member.size, into: &span)
-                    return span.byteCount
-                }
-                guard written == member.size else { throw BytesError.mismatch }
+                // At most 1 MiB (checked above), exactly its recorded size.
+                var decoder = try Decompressor(for: .bzip2)
+                decoded = try decoder.decompressAll(stored.span.bytes, maximumSize: 1 << 20, decodedSize: member.size)
             } catch {
                 throw .invalidArchive("the xip's Metadata doesn't decompress (\(error))")
             }
-            decoded = plist
         case "application/octet-stream":
             guard member.length == member.size else { throw .invalidArchive("the xip's Metadata sizes") }
             decoded = stored
@@ -270,12 +268,14 @@ public final class XIPArchive: Sendable {
         }
     }
 
-    /// The decoded content as a chunk source (not yet running): a ``BlockStream`` over the pbzx stream's place in the
-    /// file.
-    private func source(_ options: AEAReadOptions, heldBeyondDecoding held: Int) -> BlockStream {
-        BlockStream(
-            .file(file, start: contentStart, end: contentStart + contentSize), layout: .pbz(.lzma, blockSize: blockSize),
-            decoders: options.decodeThreads, extraBuffers: options.extraBuffers + held
+    /// The decoded content as a chunk source (not yet running): BytesCompressionAsync's engine over the pbzx stream's
+    /// place in the file. The cpio walker reads the blocks: they carry its headers and names.
+    private func source(_ options: AEAReadOptions, heldBeyondDecoding held: Int) -> FileBlocks {
+        FileBlocks(
+            stage: ArchiveFileStage(file: file), pbz: .lzma, blockSize: blockSize, file: contentStart..<(contentStart + contentSize),
+            decoders: options.decodeThreads, extraBuffers: options.extraBuffers, heldBuffers: held,
+            consumerBuffers: ExtractionSink.walkBuffers(held: held, blockCapacity: blockSize),
+            carryCapacity: AppleArchive.headerCarryCapacity, budget: options.bufferBudget
         )
     }
 
@@ -302,7 +302,7 @@ public final class XIPArchive: Sendable {
     }
 
     /// The extraction into a destination opened with the options' policies, with the content's check beside it.
-    nonisolated(nonsending) private func extract(opened target: Destination, options: AEAExtractionOptions) async throws(AEAError) -> AEAStatistics {
+    private nonisolated(nonsending) func extract(opened target: Destination, options: AEAExtractionOptions) async throws(AEAError) -> AEAStatistics {
         let check = options.read.verifyChecksums ? contentCheck() : nil
         // If the extraction throws, leaving the scope cancels the check (and waits for it).
         async let mismatch = check?.run()
@@ -328,7 +328,7 @@ public final class XIPArchive: Sendable {
         try await list(options, nil)
     }
 
-    nonisolated(nonsending) private func list(_ options: AEAReadOptions, _ body: ((AAEntry) -> Void)?) async throws(AEAError) -> AEAStatistics {
+    private nonisolated(nonsending) func list(_ options: AEAReadOptions, _ body: ((AAEntry) -> Void)?) async throws(AEAError) -> AEAStatistics {
         let check = options.verifyChecksums ? contentCheck() : nil
         async let mismatch = check?.run()
         let statistics = try await Lister.list(source(options, heldBeyondDecoding: 0), format: .cpio, body)
@@ -364,7 +364,7 @@ struct ContentCheck: Sendable {
             if Task.isCancelled { return .cancelled }
             let piece = min(4 << 20, count - offset)
             do throws(DiskError) {
-                try buffer.withOutputRawSpan { (output) throws(DiskError) in try file.read(at: start + offset, count: piece, into: &output) }
+                try buffer.withOutputRawSpan { output throws(DiskError) in try file.read(at: start + offset, count: piece, into: &output) }
             } catch {
                 return AEAError(error)
             }

@@ -215,8 +215,8 @@ import Testing
             var version = HTTPVersion.http1_1
             while true {
                 switch try parser.next(in: bytes.span.bytes) {
-                case .requestLine(let line): version = line.version
-                case .field(let field): try framing.observe(field)
+                case let .requestLine(line): version = line.version
+                case let .field(field): try framing.observe(field)
                 case .end, .needsMore: return (framing, version)
                 }
             }

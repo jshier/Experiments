@@ -88,7 +88,7 @@ enum JSON {
                 case 0x6E: text.append(0x0A) // \n
                 case 0x72: text.append(0x0D) // \r
                 case 0x74: text.append(0x09) // \t
-                case 0x75: appendUTF8(try scalar(&bytes), to: &text) // \uXXXX
+                case 0x75: try appendUTF8(scalar(&bytes), to: &text) // \uXXXX
                 default: throw .invalidValue
                 }
             }

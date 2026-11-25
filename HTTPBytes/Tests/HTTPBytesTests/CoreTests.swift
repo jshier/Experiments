@@ -80,7 +80,9 @@ func text(_ span: RawSpan) -> String {
             try store.append(.host, value: bytes("example.com").span.bytes)
             try store.append(name: bytes("X-Custom").span.bytes, value: bytes("one").span.bytes)
             try store.append(name: bytes("content-TYPE").span.bytes, value: bytes("text/plain").span.bytes, flags: HTTPFieldStore.neverIndexed)
-            for index in 0..<20 { try store.append(name: bytes("X-\(index)").span.bytes, value: bytes("\(index)").span.bytes) }
+            for index in 0..<20 {
+                try store.append(name: bytes("X-\(index)").span.bytes, value: bytes("\(index)").span.bytes)
+            }
             try store.append(.setCookie, value: bytes("a=1").span.bytes)
             try store.append(.setCookie, value: bytes("b=2").span.bytes)
             #expect(store.count == 25)

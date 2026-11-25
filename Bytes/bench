@@ -12,7 +12,7 @@
 #   ./bench portable-no-c --filter '.*CRC.*'
 #
 # The portable builds run only the rows in Benchmarks/portable-subset.txt (one --filter per line: what the
-# builds change, about 240 rows) unless given a --filter of their own; `--filter '.*'` runs every row.
+# builds change; the codecs' and ciphers' rows are BytesCompression's, ../BytesCompression/bench) unless given a --filter of their own; `--filter '.*'` runs every row.
 # Plain `swift package --disable-sandbox benchmark` is the optimized build.
 set -euo pipefail
 cd "$(dirname "$0")"

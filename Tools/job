@@ -1,0 +1,489 @@
+#!/bin/bash
+# job — run a long command so that it can be waited for reliably: it always leaves an exit status, a wait always ends,
+# and nobody matches log text or trusts a bare PID.
+#
+# usage: Tools/job start NAME -- COMMAND ARGS...   start COMMAND detached; returns once it runs (output to NAME.log)
+#        Tools/job run NAME -- COMMAND ARGS...     run COMMAND here and exit with its status (output to NAME.log)
+#        Tools/job wait NAME [--timeout SECONDS]   until NAME ends (default 540 s, under the Bash tool's 10 minutes)
+#        Tools/job status NAME                     at once: running, exit N, orphaned PID, died, or none
+#        Tools/job log NAME                        prints the log's path
+#
+# Files go in $EXPERIMENTS_JOBS_DIR (default ~/Scratch/jobs.noindex): NAME.pid, NAME.log, NAME.status, and two lock
+# files, NAME.lock and NAME.run.
+#
+# The runner (`run`, or the detached process `start` launches) starts COMMAND in a process group of its own, with
+# INT and QUIT at their defaults, and waits for it; TERM, INT, and HUP sent to the runner are passed on to COMMAND's
+# group, and the runner still waits for COMMAND to end (a `run` that was itself started with `&` from a script has INT
+# ignored, which bash can't undo: send it TERM). A signal that reaches the runner before COMMAND exists ends it with
+# 128 + N. NAME.status holds COMMAND's own exit status (128 + N when a signal N ended it), written atomically when the
+# runner ends, from an EXIT trap, so a runner that fails still leaves one. NAME.log gets COMMAND's output and the
+# runner's own errors. COMMAND gets exactly the caller's descriptors: the job's own three are picked at run time from
+# the highest numbers below the soft limit (at most 256) that aren't open, so a low limit (64) works too.
+#
+# NAME.pid holds the runner's PID and start time, then COMMAND's PID and start time (in the C locale and UTC, as
+# common.sh's process_start reads them, so shells with other locales and time zones agree); a PID whose start time
+# differs is a reused one: that process counts as gone. `start` clears the old status and writes NAME.pid, then returns
+# once the runner has started COMMAND (milliseconds; it fails if the runner ends without starting it), so a `wait`,
+# `status`, or signal right after it never meets the previous run's result or a runner too young to pass a signal on;
+# a status file older than the PID file is ignored for the same reason.
+#
+# Locks (flock(2); the kernel drops one when its holder exits, however it ends; the files stay):
+#   NAME.lock  held by `start` and `run` from their idle check through writing NAME.pid, so of any number of them at
+#              once exactly one runs NAME and the others refuse (exit 2; one waiting for the lock refuses as soon as
+#              NAME.pid names a live runner, without waiting its turn). A lock file deleted or replaced while held is
+#              noticed (its inode, compared when the lock is taken and again after the idle check) and everything is
+#              done again on the new file; only a replacement in the milliseconds between that check and NAME.pid's
+#              write goes unseen. While it's held, `status` reads `running`. A runner `start`
+#              launched waits for it (with no time limit: `start` holds it only until NAME.pid names the runner, and
+#              the kernel frees it if `start` dies), then runs COMMAND only if NAME.pid names it. A NAME.lock directory
+#              left by an older version of this tool is removed when it holds nothing but its owner file.
+#   NAME.run   held by the runner for its whole life, so `wait` blocks on it and wakes the moment the runner ends,
+#              using next to no CPU meanwhile; its --timeout is kept to about 0.1 s, and a `wait` killed outright leaves
+#              no waiter behind (it checks every 0.1 s whether its parent is gone).
+#
+# `status` prints one of:
+#   running         the runner is alive (or a `start` or `run` is setting it up)
+#   exit N          the job ended; COMMAND's exit status was N
+#   orphaned PID    the runner is gone (killed outright) but COMMAND, PID, still runs: it will leave no status
+#   died            the runner and COMMAND are gone and left no status (killed outright), or NAME.status can't be
+#                   read or holds no exit status, 0 to 255 written plainly (written by something else; a note names
+#                   it, and a `start` replaces it)
+#   none            no job of that name
+#
+# `wait` prints the outcome the same way on stdout and exits with:
+#   N     COMMAND's exit status, when the job ended ("exit N")
+#   124   still running at the timeout (it isn't stopped); the printed line is "running"
+#   125   died, or orphaned: no status will come
+#   2     bad usage, or no job of that name
+# A COMMAND that exits 124 or 125 itself is told apart by the printed line.
+#
+# The preferred way to wait is no waiting: start `Tools/job run …` with the Bash tool's background mode, and the harness
+# notifies when it exits. Use `start` then `wait` when a step can't continue without the result (not `run … &` then
+# `wait`: the `wait` can look before the backgrounded `run` has begun), and `status` to look in.
+#
+# examples:
+#   Tools/job start conformance -- swift test --package-path NativeAEA -c release --filter XcodeConformanceTests/
+#   Tools/job wait conformance --timeout 300
+#   Tools/job status conformance
+source "$(dirname "$0")/lib/common.sh" || exit 2
+
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
+dir="${EXPERIMENTS_JOBS_DIR:-$HOME/Scratch/jobs.noindex}"
+[[ $# -ge 2 ]] || usage 2
+action="$1"
+name="$2"
+shift 2
+[[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "job names are letters, digits, '.', '_', '-': $name"
+pid_file="$dir/$name.pid"
+log_file="$dir/$name.log"
+status_file="$dir/$name.status"
+lock_file="$dir/$name.lock"
+run_file="$dir/$name.run"
+
+# The job's own descriptors: the three highest numbers below the soft descriptor limit (at most 256) that this process
+# doesn't have open, picked when it starts. So a caller with a low limit can use the tool, and every descriptor the
+# caller has open reaches COMMAND, whatever its number. LOCK_FD holds NAME.lock, RUN_FD NAME.run, IN_FD the runner's
+# copy of its standard input. Bash 3.2 takes only literal numbers in redirections, so they're opened and closed through
+# `eval`, and Perl passes them on.
+pick_fds() {
+    local limit n picked=()
+    limit="$(ulimit -Sn)"
+    # Below 16, bash's own redirections, Perl's modules, and the runner's command substitutions run out of descriptors
+    # in ways that print errors or record a wrong status: refuse at once instead.
+    if [[ "$limit" =~ ^[0-9]+$ ]] && (( limit < 16 )); then
+        die "a soft descriptor limit of $limit is too low for Tools/job: it needs at least 16 (ulimit -Sn 16)"
+    fi
+    [[ "$limit" =~ ^[0-9]+$ && "$limit" -le 256 ]] || limit=256
+    for ((n = limit - 1; n > 2 && ${#picked[@]} < 3; n--)); do
+        [[ -e "/dev/fd/$n" ]] || picked+=("$n")
+    done
+    [[ ${#picked[@]} == 3 ]] || die "no three free descriptors below the soft limit ($(ulimit -Sn))"
+    LOCK_FD="${picked[0]}" RUN_FD="${picked[1]}" IN_FD="${picked[2]}"
+}
+pick_fds
+fd_close() { eval "exec $1>&-"; }
+# Output that a closed stdout or stderr (`start 2>&-`, `wait >&-`, `status >&-`), or a reader that has gone (`wait
+# NAME 2>&1 | head -1`: SIGPIPE), mustn't end the tool or change its status, nor print bash's "write error". Both echo
+# in a subshell, which takes the SIGPIPE, and whose buffer goes with it (bash's builtin echo keeps a line it couldn't
+# write, and the next echo to the other stream would flush it there).
+say() { (note "$@") || true; }
+put() { (echo "$@") 2>/dev/null || true; }
+
+# A process's start time (common.sh's process_start: in C and UTC), nothing when the process is gone.
+started() { process_start "$1"; }
+# Whether PID (with START, its recorded start time) is still that process.
+alive() { [[ -n "$1" && -n "$2" && "$(started "$1")" == "$2" ]]; }
+
+# Writes NAME.pid atomically: the runner's PID and start time, then COMMAND's (when known).
+write_pid_file() {
+    if ! { printf '%s\n' "$@" > "$pid_file.tmp.$$" && mv -f "$pid_file.tmp.$$" "$pid_file"; }; then
+        die "can't write $pid_file"
+    fi
+}
+
+# Whether another process holds NAME.lock now (a `start` or `run` between its idle check and NAME.pid). Not this one.
+lock_held_elsewhere() {
+    [[ $locked == 0 && -f "$lock_file" ]] || return 1
+    perl -MFcntl=:flock -e 'open(my $f, "<", $ARGV[0]) or exit 1; exit(flock($f, LOCK_SH | LOCK_NB) ? 1 : 0)' "$lock_file"
+}
+
+# "exit N" from NAME.status; "again" when it's gone (removed by a `start` after it was seen); "garbled" when it's there
+# but can't be read or holds no exit status, 0 to 255 written plainly (this tool writes it whole, by rename: something
+# else wrote it).
+# The bytes themselves are checked (a command substitution would drop NUL bytes and trailing newlines): the number and
+# at most one newline, as `finish` writes it; only 5 bytes are read (one more than "255\n"), whatever the file's size.
+# Perl exits 3 when it can't open the file, 4 when it holds anything else.
+ended() {
+    local code rc=0
+    code="$(perl -e 'open(my $f, "<", $ARGV[0]) or exit 3; my $s;
+        if (defined(read($f, $s, 5)) && $s =~ /\A(0|[1-9]\d?|1\d\d|2[0-4]\d|25[0-5])\n?\z/) { print $1; exit 0 } exit 4' \
+        "$status_file" 2>/dev/null)" || rc=$?
+    if [[ $rc == 0 ]]; then
+        echo "exit $code"
+    elif [[ $rc == 3 && ! -e "$status_file" ]]; then
+        echo again
+    else
+        echo garbled
+    fi
+}
+
+# Whether NAME.pid names a live runner (or the `start` standing in for one): the job plainly runs.
+runner_alive() {
+    local pid='' start=''
+    { read -r pid; read -r start; } 2>/dev/null < "$pid_file" || true
+    alive "$pid" "$start"
+}
+
+# One look: running, exit N, orphaned PID, died, none, garbled (NAME.status unreadable or holding no exit status), or
+# again (look again).
+state_once() {
+    local pid='' start='' command='' command_start=''
+    if [[ -f "$status_file" && ! ( -f "$pid_file" && "$pid_file" -nt "$status_file" ) ]]; then
+        # A `start` or `run` holding the lock is about to replace this status with a new run's.
+        if lock_held_elsewhere; then echo running; else ended; fi
+        return
+    fi
+    if [[ ! -f "$pid_file" ]]; then
+        if lock_held_elsewhere; then echo running; else echo none; fi
+        return
+    fi
+    { read -r pid; read -r start; read -r command; read -r command_start; } 2>/dev/null < "$pid_file" || true
+    if alive "$pid" "$start"; then
+        echo running
+    elif [[ -f "$status_file" && ! "$pid_file" -nt "$status_file" ]]; then
+        ended # It ended between the checks.
+    elif lock_held_elsewhere; then
+        echo running # A `start` or `run` is between removing the old status and writing NAME.pid.
+    elif alive "$command" "$command_start"; then
+        echo "orphaned $command"
+    else
+        echo died
+    fi
+}
+
+# What a `start` or `run` changes: NAME.pid's contents, and whether NAME.status exists.
+snapshot() {
+    cat "$pid_file" 2>/dev/null || true
+    if [[ -f "$status_file" ]]; then echo status; fi
+}
+
+# Prints running, exit N, orphaned PID, died, or none. One look reads NAME.pid once, then checks the runner, the
+# status, and the lock in turn, so a restart in between can make a running job look died, orphaned, or gone: those
+# count only when NAME.pid and NAME.status are as they were before the look. Otherwise (and for a status removed as it
+# was read) it looks again, up to 5 times; a job that keeps changing that fast is being started: running. A NAME.status
+# that can't be read or holds no exit status (empty, text, a sign, a space, a leading zero, above 255) reads as died,
+# with a note naming it, so `wait` ends (125) and `start` runs the job again (replacing the file).
+state() {
+    local before after verdict attempt
+    for ((attempt = 0; attempt < 5; attempt++)); do
+        before="$(snapshot)"
+        verdict="$(state_once)"
+        case "$verdict" in
+            again) continue ;;
+            died | orphaned* | none | garbled)
+                after="$(snapshot)"
+                [[ "$before" == "$after" ]] || continue ;;
+        esac
+        if [[ "$verdict" == garbled ]]; then
+            say "job $name: $status_file can't be read or holds no exit status (0 to 255): read as died"
+            verdict=died
+        fi
+        put "$verdict"
+        return
+    done
+    put running
+}
+
+# Refuses to start NAME again while its runner or an orphaned command is still running.
+check_idle() {
+    local current
+    current="$(state)"
+    case "$current" in
+        running) die "job $name is already running" ;;
+        orphaned*) die "job $name's command (PID ${current#orphaned }) is still running without its runner: stop it first" ;;
+    esac
+}
+
+# Takes NAME.lock on LOCK_FD: within SECONDS (dies after), or with no limit when SECONDS is 0. Perl takes the
+# flock on the shared descriptor (flock locks belong to the open file, so this shell keeps holding it after Perl
+# exits), then checks that the path still names the file it locked: a NAME.lock deleted or replaced meanwhile would
+# let another process lock a new file, so then it opens the path again and retries. With REFUSE, it waits in half-second
+# slices and refuses as soon as the job plainly runs (NAME.pid names a live runner): starts that will refuse don't
+# queue behind each other's idle checks, which on a loaded machine outlast the 10 s.
+locked=0
+lock() {
+    local seconds="$1" refuse="${2:-}" holder='' attempt=0 rc entries slice="$1" end
+    if [[ -d "$lock_file" ]]; then
+        # An older version of this tool locked with a directory holding an `owner` file.
+        entries="$(ls -A "$lock_file" 2>/dev/null || true)"
+        if [[ -z "$entries" || "$entries" == owner ]]; then
+            rm -f "$lock_file/owner"
+            rmdir "$lock_file" 2>/dev/null || true
+        fi
+        [[ ! -d "$lock_file" ]] ||
+            die "$lock_file is a directory (an older Tools/job's lock?) holding more than its owner file: remove it"
+    fi
+    [[ -z "$refuse" || "$seconds" == 0 ]] || slice=0.5
+    end=$((SECONDS + seconds))
+    while ((attempt < 10)); do
+        eval "exec $LOCK_FD>> \"\$lock_file\"" || die "can't open $lock_file"
+        rc=0
+        perl -MFcntl=:flock -MTime::HiRes=time -e 'my ($path, $seconds, $fd) = @ARGV;
+            open(my $fh, ">>&=", $fd) or exit 2;
+            if ($seconds == 0) { flock($fh, LOCK_EX) or exit 2 }
+            else {
+                my $end = time + $seconds;
+                until (flock($fh, LOCK_EX | LOCK_NB)) { exit 1 if time > $end; select(undef, undef, undef, 0.02) }
+            }
+            my @held = stat($fh);
+            my @now = stat($path);
+            exit(@now && $now[0] == $held[0] && $now[1] == $held[1] ? 0 : 3)' "$lock_file" "$slice" "$LOCK_FD" || rc=$?
+        case "$rc" in
+            0) locked=1; printf '%s\n' "$$" > "$lock_file" || true; return 0 ;;
+            3) fd_close "$LOCK_FD"; attempt=$((attempt + 1)) ;; # The path names another file now: lock that one.
+            1)
+                fd_close "$LOCK_FD"
+                if [[ -n "$refuse" ]] && runner_alive; then die "job $name is already running"; fi
+                ((SECONDS >= end)) || continue
+                holder="$(head -1 "$lock_file" 2>/dev/null || true)"
+                die "job $name is locked by PID ${holder:-?} ($lock_file) and stayed locked for $seconds s" ;;
+            *) fd_close "$LOCK_FD"; die "couldn't lock $lock_file" ;;
+        esac
+    done
+    die "$lock_file kept being replaced while it was locked"
+}
+unlock() {
+    [[ $locked == 1 ]] || return 0
+    locked=0
+    fd_close "$LOCK_FD"
+}
+# Whether NAME.lock at its path is still the file this process locked (deleting it while it's held would let another
+# process lock a new one and find the job idle).
+lock_still_ours() {
+    perl -e 'open(my $fh, ">>&=", $ARGV[1]) or exit 1; my @held = stat($fh); my @now = stat($ARGV[0]);
+        exit(@now && $now[0] == $held[0] && $now[1] == $held[1] ? 0 : 1)' "$lock_file" "$LOCK_FD"
+}
+# The lock and the idle check together: checked again after the idle check that the lock file wasn't replaced
+# meanwhile (then everything is done again on the new file), so a `start` or `run` that finds NAME idle is the only one.
+claim() {
+    local attempt
+    for ((attempt = 0; attempt < 10; attempt++)); do
+        lock 10 refuse
+        check_idle
+        lock_still_ours && return 0
+        unlock
+    done
+    die "$lock_file kept being replaced while it was locked"
+}
+
+# The runner's state (globals: the EXIT trap reads them). owned: NAME.pid names this runner, so its end writes
+# NAME.status.
+rc=1 command='' signalled=0 owned=0
+# Whatever ends the runner (COMMAND's exit, `set -e`, a signal, even one before COMMAND exists), the lock is released
+# and, once the job is this runner's, the status written.
+finish() {
+    unlock
+    if [[ $owned == 1 ]]; then
+        printf '%s\n' "$rc" > "$status_file.tmp.$$" && mv -f "$status_file.tmp.$$" "$status_file"
+    fi
+}
+# TERM, INT, and HUP: passed on to COMMAND's group once it exists; before that, the runner ends with 128 + N.
+on_signal() {
+    signalled=1
+    if [[ -n "$command" ]]; then
+        kill -"$1" -- "-$command" 2>/dev/null || kill -"$1" "$command" 2>/dev/null || true
+    else
+        rc="$2"
+        exit "$2"
+    fi
+}
+
+# The runner: holds NAME.run for its life (`wait` blocks on it), starts COMMAND, records its PID, passes signals on, and
+# records its exit status.
+runner() {
+    set +e
+    eval "exec $RUN_FD>> \"\$run_file\"" || die "can't open $run_file"
+    # A background command gets INT and QUIT ignored from a non-interactive shell: the Perl wrapper restores them,
+    # and gives COMMAND a process group of its own, so signals passed on reach everything it starts. First it takes
+    # NAME.run on RUN_FD, which it shares with this runner (a lock belongs to the open file, so the runner holds it
+    # until it exits), and fails the run if it can't: `wait` blocks on that lock. Then it gives COMMAND the runner's
+    # standard input (IN_FD) and closes the job's own descriptors: COMMAND gets exactly the caller's. (Each `my` is its
+    # own statement: a variable declared in an expression isn't visible until the next one, so `open(my $f, …) and
+    # flock($f, …)` locks nothing.)
+    perl -MPOSIX -MFcntl=:flock -e 'my ($run_fd, $in_fd, $lock_fd) = splice(@ARGV, 0, 3);
+        my $run;
+        unless (open($run, ">>&=", $run_fd) && flock($run, LOCK_EX)) { print STDERR "job: couldn\x27t lock NAME.run: $!\n"; exit 126 }
+        close($run);
+        POSIX::dup2($in_fd, 0) or do { print STDERR "job: couldn\x27t pass standard input on: $!\n"; exit 126 };
+        POSIX::close($in_fd);
+        POSIX::close($lock_fd);
+        $SIG{INT} = $SIG{QUIT} = "DEFAULT"; setpgrp(0, 0);
+        exec { $ARGV[0] } @ARGV or do { print STDERR "job: can\x27t run $ARGV[0]: $!\n"; exit 127 }' \
+        "$RUN_FD" "$IN_FD" "$LOCK_FD" "$@" >> "$log_file" 2>&1 &
+    command=$!
+    fd_close "$IN_FD"
+    # Both start times from one `ps` (as process_start gives them: the C locale, UTC, padding collapsed).
+    local pid rest runner_start='' command_start=''
+    while read -r pid rest; do
+        rest="${rest//  / }" # lstart pads a one-digit day with a second space
+        if [[ "$pid" == "$$" ]]; then runner_start="$rest"; else command_start="$rest"; fi
+    done < <(LC_ALL=C TZ=UTC0 ps -o pid=,lstart= -p "$$,$command" 2>/dev/null || true)
+    write_pid_file "$$" "$runner_start" "$command" "$command_start"
+    while :; do
+        signalled=0
+        wait "$command"
+        rc=$?
+        # `wait` returns early (above 128) when a trapped signal arrives: wait again until COMMAND has ended.
+        [[ $signalled == 1 ]] || break
+        kill -0 "$command" 2>/dev/null || { wait "$command"; rc=$?; break; }
+    done
+    exit "$rc"
+}
+
+case "$action" in
+    run)
+        [[ "${1:-}" == "--" ]] || die "usage: Tools/job run NAME -- COMMAND ARGS..."
+        shift
+        [[ $# -ge 1 ]] || die "no command"
+        mkdir -p "$dir" || die "can't create $dir"
+        trap finish EXIT
+        trap 'on_signal TERM 143' TERM
+        trap 'on_signal INT 130' INT
+        trap 'on_signal HUP 129' HUP
+        if [[ "${JOB_STARTED_BY:-}" == "$name:"* ]]; then
+            # Launched by `start`, which holds the lock until NAME.pid names this runner. Taking the lock waits for
+            # that, however long it takes; the job is this runner's only if NAME.pid then names it. A `start` killed
+            # before writing it (or a later `start` that found it dead and launched a runner of its own) leaves this one
+            # nothing to run.
+            unset JOB_STARTED_BY
+            lock 0
+            if [[ "$(head -1 "$pid_file" 2>/dev/null)" != "$$" ]]; then
+                unlock
+                say "job $name: NAME.pid doesn't name this runner ($$): another start owns the job; nothing run"
+                exit 0
+            fi
+            owned=1
+            unlock
+        else
+            me="$(started $$)" # before the lock: nothing slow between claim's last check and NAME.pid
+            claim
+            : > "$log_file"
+            rm -f "$status_file"
+            write_pid_file "$$" "$me"
+            owned=1
+            unlock
+        fi
+        # COMMAND's standard input: the runner's, or /dev/null when the caller closed it (`run … <&-`).
+        if [[ -e /dev/fd/0 ]]; then eval "exec $IN_FD<&0"; else eval "exec $IN_FD</dev/null"; fi
+        runner "$@"
+        ;;
+    start)
+        [[ "${1:-}" == "--" ]] || die "usage: Tools/job start NAME -- COMMAND ARGS..."
+        shift
+        [[ $# -ge 1 ]] || die "no command"
+        mkdir -p "$dir" || die "can't create $dir"
+        trap unlock EXIT
+        me="$(started $$)" # before the lock: nothing slow between claim's last check and NAME.pid
+        claim
+        : > "$log_file"
+        rm -f "$status_file"
+        # This process stands in as the runner until the real one exists, so the job reads as running throughout.
+        write_pid_file "$$" "$me"
+        # The runner doesn't inherit NAME.lock's descriptor (it takes the lock itself, once this process lets go).
+        JOB_STARTED_BY="$name:$$" EXPERIMENTS_JOBS_DIR="$dir" \
+            perl -MPOSIX -e 'POSIX::close(shift); $SIG{INT} = $SIG{QUIT} = "DEFAULT"; POSIX::setsid();
+                exec { $ARGV[0] } @ARGV or die "job: can\x27t start the runner: $!\n"' \
+            "$LOCK_FD" "$TOOLS_DIR/job" run "$name" -- "$@" < /dev/null > /dev/null 2>> "$log_file" &
+        runner_pid=$!
+        when="$(started "$runner_pid")"
+        [[ -n "$when" ]] || die "the runner for $name ended before it could be recorded (log: $log_file)"
+        write_pid_file "$runner_pid" "$when"
+        unlock
+        # Return once the runner has started COMMAND (NAME.pid gains its lines), so it's ready for signals: a runner
+        # still starting up (bash, before its traps) would die of a TERM and leave no status.
+        for ((tries = 0; ; tries++)); do
+            [[ -n "$(sed -n 3p "$pid_file" 2>/dev/null)" || -f "$status_file" ]] && break
+            kill -0 "$runner_pid" 2>/dev/null ||
+                die "the runner for $name ended without starting COMMAND (log: $log_file)"
+            if (( tries < 100 )); then sleep 0.01; else sleep 0.1; fi
+        done
+        say "job $name started (runner $runner_pid); log: $log_file"
+        ;;
+    wait)
+        timeout=540
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --timeout) need_value "$@"; need_number "$1" "$2"; timeout="$2"; shift ;;
+                *) die "unknown option $1" ;;
+            esac
+            shift
+        done
+        # The deadline in seconds since the epoch, to the millisecond: --timeout is kept to about 0.1 s.
+        deadline="$(perl -MTime::HiRes=time -e 'printf "%.3f", time + $ARGV[0]' "$timeout")"
+        while :; do
+            current="$(state)"
+            case "$current" in
+                "exit "*)
+                    put "$current"
+                    say "job $name: $current (log: $log_file)"
+                    exit "${current#exit }" ;;
+                none) die "no job named $name in $dir" ;;
+                died)
+                    put died
+                    say "job $name: its runner and command are gone and left no status (killed outright?); log: $log_file"
+                    exit 125 ;;
+                orphaned*)
+                    put "$current"
+                    say "job $name: its runner is gone (killed outright?) and its command, PID ${current#orphaned }, still runs; it will leave no status. Log: $log_file"
+                    exit 125 ;;
+            esac
+            # Block on NAME.run, which the runner holds for its life: this wakes the moment it ends, using no CPU while
+            # it waits. The waiter wakes every 0.1 s at most, to keep the deadline and to exit if this `wait` is gone (its
+            # parent then is launchd). Exit 4: the deadline passed; 5: orphaned; 3: the lock was free at once (the
+            # runner doesn't hold it yet, a `start` is still setting up, or it's an older job): look again shortly.
+            waited=0
+            perl -MFcntl=:flock -MTime::HiRes=time,ualarm -e 'my ($path, $deadline) = @ARGV;
+                my $t0 = time;
+                exit 4 if $t0 >= $deadline;
+                my $f;
+                unless (open($f, "<", $path)) { select(undef, undef, undef, 0.05); exit 3 }
+                my $tick = sub { my $left = $deadline - time; ualarm(1e6 * ($left < 0.1 ? ($left > 0.001 ? $left : 0.001) : 0.1)) };
+                $SIG{ALRM} = sub { exit 5 if getppid() == 1; exit 4 if time >= $deadline; $tick->() };
+                $tick->();
+                until (flock($f, LOCK_SH)) { exit 3 unless $!{EINTR} }
+                ualarm(0);
+                exit(time - $t0 > 0.05 ? 0 : 3)' "$run_file" "$deadline" || waited=$?
+            case "$waited" in
+                3) sleep 0.05 ;;
+                4)
+                    put running
+                    say "job $name: still running after ${timeout} s (not stopped); log: $log_file"
+                    exit 124 ;;
+                5) exit 129 ;;
+            esac
+        done
+        ;;
+    status) state ;;
+    log) put "$log_file" ;;
+    *) usage 2 ;;
+esac

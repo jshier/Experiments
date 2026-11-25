@@ -12,7 +12,7 @@ import Testing
         var decoder = HPACKDecoder()
         var output = [UInt8](repeating: 0, count: 4_096)
         do {
-            let written = try output.withOutputRawSpan { (span) throws(HPACKError) -> Int in
+            let written = try output.withOutputRawSpan { span throws(HPACKError) -> Int in
                 for (name, value) in pairs {
                     try encoder.encode(name: latin1(name).span.bytes, value: latin1(value).span.bytes, indexing: .avoid, into: &span)
                 }
@@ -22,7 +22,9 @@ import Testing
             let block = Array(output[0..<written])
             let span = block.span.bytes
             do {
-                while let field = try decoder.next(in: span) { try validator.check(field) }
+                while let field = try decoder.next(in: span) {
+                    try validator.check(field)
+                }
                 _ = try validator.finish()
                 return nil
             } catch let error as HTTP2FieldError {
@@ -61,7 +63,7 @@ import Testing
             #expect(validate(Self.request + [("x-custom", bad)], .request) == .invalidValue, "\(bad.debugDescription)")
         }
         #expect(validate(Self.request + [("x-custom", "")], .request) == nil)
-        #expect(validate(Self.request + [("x-custom", "a b\u{7F}\u{FF}")], .request) == nil)   // only NUL, CR, LF are excluded
+        #expect(validate(Self.request + [("x-custom", "a b\u{7F}\u{FF}")], .request) == nil) // only NUL, CR, LF are excluded
         // Long values, so the vector scan sees every position.
         for position in [0, 15, 16, 17, 40, 63] {
             var value = Array(repeating: Character("v"), count: 64)
@@ -88,13 +90,18 @@ import Testing
         #expect(validate([(":method", "CONNECT"), (":authority", "a"), (":path", "/")], .request) == .missingPseudoHeader)
         #expect(validate([(":method", "CONNECT")], .request) == .missingPseudoHeader)
         #expect(validate([(":method", "CONNECT"), (":protocol", "websocket"), (":scheme", "https"), (":path", "/"),
-                          (":authority", "a")], .request) == .invalidPseudoHeader)   // not enabled
+                          (":authority", "a")], .request) == .invalidPseudoHeader) // not enabled
         #expect(validate([(":method", "GET"), (":protocol", "websocket"), (":scheme", "https"), (":path", "/"),
                           (":authority", "a")], .request, extendedConnect: true) == .invalidPseudoHeaderValue)
         #expect(validate([(":method", "CONNECT"), (":protocol", "websocket"), (":authority", "a")], .request, extendedConnect: true) == .missingPseudoHeader)
         #expect(validate([("content-type", "x")], .response) == .missingPseudoHeader)
         #expect(validate([(":status", "2000")], .response) == .invalidPseudoHeaderValue)
         #expect(validate([(":status", "2x0")], .response) == .invalidPseudoHeaderValue)
+        // Below 100: no status code (`HTTPStatus(code:)` reads 100–999), never an interim response.
+        for status in ["000", "099", "010"] {
+            #expect(validate([(":status", status)], .response) == .invalidPseudoHeaderValue)
+        }
+        #expect(validate([(":status", "100")], .response) == nil && validate([(":status", "999")], .response) == nil)
         #expect(validate([(":path", "/")], .response) == .invalidPseudoHeader)
         #expect(validate([(":status", "200")], .trailers) == .invalidPseudoHeader)
         #expect(HTTP2FieldError.invalidName.http2Error(stream: HTTP2StreamID(3)) == .stream(HTTP2StreamID(3), .protocolError))
@@ -106,11 +113,11 @@ import Testing
                                ("\u{1}\u{7F}\u{FF}", true), ("", true)] {
             var coded = [UInt8](repeating: 0, count: 64)
             let bytes = latin1(value)
-            let count = try coded.withOutputRawSpan { (span) throws(HPACKHuffmanError) -> Int in
+            let count = try coded.withOutputRawSpan { span throws(HPACKHuffmanError) -> Int in
                 try HPACKHuffman.encode(bytes.span.bytes, into: &span)
                 return span.byteCount
             }
-            let block = [0x40, 0x01, 0x61, 0x80 | UInt8(count)] + coded[0..<count]   // a: value, indexed
+            let block = [0x40, 0x01, 0x61, 0x80 | UInt8(count)] + coded[0..<count] // a: value, indexed
             var decoder = HPACKDecoder()
             func first(_ block: [UInt8]) throws(HPACKError) -> (Bool, [UInt8])? {
                 let span = block.span.bytes
@@ -132,9 +139,9 @@ import Testing
     @Test func cachedVerdicts() throws {
         var encoder = HPACKEncoder()
         var decoder = HPACKDecoder()
-        for _ in 0..<2 {   // a literal with indexing, then the index
+        for _ in 0..<2 { // a literal with indexing, then the index
             var output = [UInt8](repeating: 0, count: 256)
-            let written = try output.withOutputRawSpan { (span) throws(HPACKError) -> Int in
+            let written = try output.withOutputRawSpan { span throws(HPACKError) -> Int in
                 for (name, value) in [("x-good", "fine"), ("x-bad", "a\rb"), ("X-Upper", "v"), ("accept", " lead")] {
                     try encoder.encode(name: latin1(name).span.bytes, value: latin1(value).span.bytes, indexing: .prefer, into: &span)
                 }
@@ -192,7 +199,9 @@ import Testing
             var decoder = HPACKDecoder()
             var decoded: [String] = []
             let joined = buffer.block
-            while let field = try decoder.next(in: joined) { decoded.append(text(field.value)) }
+            while let field = try decoder.next(in: joined) {
+                decoded.append(text(field.value))
+            }
             #expect(decoded == ["Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "text/html,application/xhtml+xml"])
         }
         var small = HTTP2FieldBlockBuffer(maximumByteCount: 8)

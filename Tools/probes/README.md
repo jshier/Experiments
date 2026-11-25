@@ -14,8 +14,9 @@ of throwaway probes run on an M1 Max (2026-11-19) and repeated on the M3 Ultra (
 | `compare.pl` | `Tools/probe compare`'s engine |
 | `results/CHIP-DATE/` | reference result sets, one TSV per table |
 
-The C probes are compiled with `xcrun clang -O2 -mcpu=apple-m1` into `~/Library/Caches/experiments-tools/probe/`
-(again when a source or the compiler changes). BytesProbe is built release in `BytesProbe/.build` (ignored by git).
+The C probes are compiled with `xcrun clang -O2 -mcpu=apple-m1 -Wall` into `~/Scratch/tools-cache.noindex/`
+(`EXPERIMENTS_TOOLS_CACHE`), named by a hash of the source, the flags, and the compiler, so they're compiled again
+when any of those change. BytesProbe is built release in `BytesProbe/.build` (ignored by git).
 
 ## Running it on a Mac
 
@@ -139,11 +140,15 @@ which). Fixed parameters, so rows compare across machines:
   Decoding: a stream encoded once with independent chunks (so the decoder can split it), checked to round-trip, then
   the median of 9. ms per call.
 - **Segments** (`segments.tsv`): the decoder's `lastSegmentCount` and time (median of 5) at **every** lane count from 1
-  to `hw.ncpu`, for mozilla, dickens, samba, x-ray, and ooffice at levels 1 and 6. A segment count of 1 means the
-  decoder fell back to decoding sequentially (a false `00 00 FF FF` marker at one of its `4 × lanes` split points):
-  mozilla level 1 does at 11, 22, 25, 28, 29, 30, 31, and 32 lanes (the first probe, at 8, 16, 20, 24-28, and 32,
-  found only 25, 28, and 32), on any machine, since the split points depend only on the lane count. Probe every count,
-  not just round ones.
+  to `hw.ncpu`, for mozilla, dickens, samba, x-ray, and ooffice at levels 1 and 6. A segment count of 1 at more than
+  one lane would mean the decoder fell back to decoding sequentially. Before 2026-11-20 it did whenever one of its
+  `4 × lanes` split points was a false `00 00 FF FF` marker: mozilla level 1 at 11, 22, 25, and 28–32 lanes (the
+  first probe, at 8, 16, 20, 24–28, and 32, found only 25, 28, and 32). Now a false marker fails only its own segment,
+  which is decoded again in place, and the reference set (`results/M3-Ultra-2026-11-20/`) has no such row: every
+  file's count is at or a little under `4 × lanes` (mozilla level 1: 98 segments at 25 lanes, 124 at 32), and some
+  stop growing (dickens and x-ray at 96, ooffice at about 72, samba from 9 lanes up below `4 × lanes`). The split
+  points depend only on the lane count, so these counts are the same on any machine. Probe every count, not just
+  round ones.
 - **E cores in lane counts**: lanes beyond the P cores land on E cores. The encoder takes chunks from a queue, so
   slow cores cost nothing at the end and it gains (M1 Max 8 → 10 lanes: 10-13%; M3 Ultra 24 → 32: 14%); a decoder that
   splits work evenly waits for its slowest segment. The P-core count and one more are always in `steps` for this.

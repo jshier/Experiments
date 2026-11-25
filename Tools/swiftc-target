@@ -4,57 +4,99 @@
 #
 # usage: Tools/swiftc-target [--debug] [--refresh] [--print] PACKAGE_DIR TARGET -- SWIFTC_ARGS...
 #
-#   Captures the `swiftc` command SwiftPM runs for TARGET (release unless --debug) from `swift build -v`,
-#   removes its outputs (object, module, dependency and diagnostics files), adds `-num-threads 0` (one output
-#   file for the whole module), and runs it with SWIFTC_ARGS, which must say what to produce:
-#     -emit-sil -o out.sil       optimized SIL
-#     -emit-ir -o out.ll         optimized LLVM IR (add `-Xfrontend -disable-llvm-optzns` for unoptimized)
-#     -S -o out.s                assembly
-#     -c -o out.o -save-optimization-record=yaml -save-optimization-record-path r.yaml
-#                                -save-optimization-record-passes 'loop-vectorize|sil-inliner'
-#                                remarks (see Tools/remarks)
-#   Dependencies must already be built: the command reads their modules from .build.
+#   Builds TARGET (`swift build -c CONF --target TARGET`: quick when nothing changed, and it brings the target's
+#   dependencies and file lists up to date), then runs the `swiftc` command SwiftPM uses for TARGET (release unless
+#   --debug), captured from `swift build -v`, with its outputs removed (object, module, dependency and diagnostics
+#   files), `-num-threads 0` (one output file for the whole module), the working directory set to yours (relative
+#   `-o` paths land where you are), and SWIFTC_ARGS, which must say what to produce:
+#     -emit-sil -o /abs/out.sil      optimized SIL
+#     -emit-ir -o /abs/out.ll        optimized LLVM IR (add `-Xfrontend -disable-llvm-optzns` for unoptimized)
+#     -S -o /abs/out.s               assembly
+#     -c -o /abs/out.o -save-optimization-record=yaml -save-optimization-record-path /abs/r.yaml
+#                                    -save-optimization-record-passes 'loop-vectorize|sil-inliner'
+#                                    remarks (see Tools/remarks)
 #
 #   --debug     the debug configuration's command
-#   --refresh   capture the command again (it's cached in .build/agent-tools/; capture touches one of the
-#               target's sources, mtime only, to make SwiftPM recompile it)
+#   --refresh   capture the command again. It's cached in PACKAGE_DIR/.build/agent-tools/, one per target,
+#               configuration, and toolchain (the `swiftc` that `xcrun --find swiftc` names, so TOOLCHAINS picks
+#               another), and captured again on its own when Package.swift is newer than it, when the target's set
+#               of Swift files changed, or when the cached command's swiftc is gone (an Xcode renamed or deleted).
+#               Capturing touches one of the target's sources (mtime only) to make SwiftPM recompile it.
 #   --print     print the rewritten command instead of running it
+#   -h, --help  this text
 #
-# The toolchain is whatever `swift build` used: set TOOLCHAINS for another.
+# The toolchain is whatever `swift build` uses: set TOOLCHAINS for another.
 #
 # example:
-#   Tools/swiftc-target Bytes BytesBase64 -- -emit-ir -o /tmp/BytesBase64.ll
-source "$(dirname "$0")/lib/common.sh"
+#   Tools/swiftc-target Bytes BytesBase64 -- -emit-ir -o /private/tmp/BytesBase64.ll
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
-configuration=release refresh= print=
-while [[ $# -gt 0 && "$1" == --* ]]; do
+configuration=release refresh='' print=''
+while [[ $# -gt 0 && "$1" == -* ]]; do
     case "$1" in
         --debug) configuration=debug ;;
         --refresh) refresh=1 ;;
         --print) print=1 ;;
-        --help) usage ;;
+        -h|--help) usage ;;
         *) die "unknown option $1" ;;
     esac
     shift
 done
 [[ $# -ge 2 ]] || usage 2
+[[ -f "$1/Package.swift" ]] || die "$1 isn't a package (no Package.swift)"
 package="$(cd "$1" && pwd)" target="$2"; shift 2
 [[ "${1:-}" == "--" ]] && shift
-cache="$package/.build/agent-tools/$target.$configuration.command"
+swiftc="$(xcrun --find swiftc 2>/dev/null)" || die "xcrun can't find swiftc (is Xcode selected? xcode-select -p)"
+toolchain_key="$(printf '%s' "$swiftc" | shasum -a 256 | cut -c1-12)"
+cache="$package/.build/agent-tools/$target.$configuration.$toolchain_key.command"
+sources="$cache.sources"   # the target's directory, then its Swift files, as when the command was captured
+scratch_dir
+
+# The target's Swift files, sorted, under DIRECTORY.
+swift_files() { find "$1" -name '*.swift' 2>/dev/null | LC_ALL=C sort; }
+
+build() { # build [-v]: swift build of the target into $SCRATCH/build.log; stops with its errors
+    note "building $target ($configuration)${1:+ to capture its compile command}…"
+    (cd "$package" && swift build -c "$configuration" --target "$target" "$@") > "$SCRATCH/build.log" 2>&1 ||
+        { perl -ne 'print STDERR if /error:/ && ++$n <= 20' "$SCRATCH/build.log"; die "swift build --target $target failed"; }
+}
 
 capture() {
-    local source
-    source="$(cd "$package" && swift package describe --type json 2>/dev/null |
-        jq -r --arg t "$target" '.targets[] | select(.name == $t) | .path + "/" + (.sources[0] // "")')"
-    [[ -n "$source" && -f "$package/$source" ]] || die "no target $target with Swift sources in $package"
-    touch "$package/$source"
-    note "building $target ($configuration) to capture its compile command…"
+    local directory source
+    directory="$(cd "$package" && swift package describe --type json 2>/dev/null |
+        jq -r --arg t "$target" '.targets[] | select(.name == $t) | .path')"
+    [[ -n "$directory" && -d "$package/$directory" ]] || die "no target $target in $package"
+    # The first file, read to the end (a reader that stops early would make sort die of SIGPIPE under pipefail).
+    source="$(swift_files "$package/$directory" | perl -ne 'print unless $done++')"
+    source="${source%$'\n'}"
+    [[ -n "$source" ]] || die "target $target has no Swift sources in $package/$directory"
+    touch "$source"
+    build -v
     mkdir -p "$(dirname "$cache")"
-    (cd "$package" && swift build -c "$configuration" --target "$target" -v 2>&1) |
-        perl -ne 'if (/builtin-Swift-Compilation -- (.*\bswiftc .*-module-name '"$target"' .*)$/ || /^\s*(\S*swiftc .*-module-name '"$target"' .*)$/) { print "$1\n"; exit }' > "$cache"
+    # From the saved log, not a pipe: a reader that stops at the first match makes `swift build` die of SIGPIPE.
+    TARGET="$target" perl -ne '
+        if (/builtin-Swift-Compilation -- (.*\bswiftc .*-module-name \Q$ENV{TARGET}\E .*)$/ || /^\s*(\S*swiftc .*-module-name \Q$ENV{TARGET}\E .*)$/) {
+            print "$1\n"; exit }' "$SCRATCH/build.log" > "$cache"
     [[ -s "$cache" ]] || { rm -f "$cache"; die "didn't find $target's swiftc command in the build log"; }
+    { echo "$package/$directory"; swift_files "$package/$directory"; } > "$sources"
 }
-[[ -n "$refresh" || ! -s "$cache" ]] && capture
+
+reason='' cached=() original=()   # the arrays are filled by eval below
+if [[ -n "$refresh" ]]; then reason="asked to"
+elif [[ ! -s "$cache" || ! -s "$sources" ]]; then reason="no cached command"
+elif [[ "$package/Package.swift" -nt "$cache" ]]; then reason="Package.swift changed"
+elif [[ "$(head -1 "$sources")" != "$package/"* ]] ||
+    [[ "$(swift_files "$(head -1 "$sources")")" != "$(tail -n +2 "$sources")" ]]; then reason="the target's files changed"
+else
+    eval "cached=( $(cat "$cache") )"
+    [[ -x "${cached[0]}" ]] || reason="its swiftc is gone (${cached[0]})"
+fi
+if [[ -n "$reason" ]]; then
+    note "capturing $target's command: $reason"
+    capture
+else
+    build
+fi
 
 # The command is printed shell-escaped; let bash split it.
 eval "original=( $(cat "$cache") )"
@@ -65,15 +107,16 @@ for argument in "${original[@]}"; do
     case "$argument" in
         -output-file-map|-emit-module-path|-emit-objc-header-path|-const-gather-protocols-list|\
         -dependency-scan-serialize-diagnostics-path|-num-threads|-emit-module-interface-path|-emit-module-source-info-path|\
-        -emit-abi-descriptor-path|-index-store-path)
+        -emit-abi-descriptor-path|-index-store-path|-working-directory)
             skip=1 ;;
+        -working-directory=*) ;;
         -emit-module|-emit-objc-header|-emit-dependencies|-emit-const-values|-serialize-diagnostics|-save-temps|-c|\
         -color-diagnostics|-emit-module-interface|-index-ignore-system-modules|-incremental|-enable-batch-mode)
             ;;
         *) command+=("$argument") ;;
     esac
 done
-command+=(-num-threads 0 "$@")
+command+=(-num-threads 0 -working-directory "$PWD" "$@")
 
 if [[ -n "$print" ]]; then printf '%q ' "${command[@]}"; echo; exit 0; fi
 "${command[@]}"

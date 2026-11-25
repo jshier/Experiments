@@ -44,7 +44,7 @@ import Testing
              verdict: "reject"),
         Case(name: "CONNECT with a domain name", input: b("CONNECT www.google.com:443 HTTP/1.1\r\n\r\n"), verdict: "accept", body: [], persistent: true),
         Case(name: "CONNECT with an IP address", input: b("CONNECT 127.0.0.1:6060 HTTP/1.1\r\n\r\n"), verdict: "accept", body: [], persistent: true),
-        Case(name: "CONNECT for RPC", input: b("CONNECT /_goRPC_ HTTP/1.1\r\n\r\n"), verdict: "accept", body: []),  // Neither checks that CONNECT's target is authority-form (RFC 9112 §3.2.3).
+        Case(name: "CONNECT for RPC", input: b("CONNECT /_goRPC_ HTTP/1.1\r\n\r\n"), verdict: "accept", body: []), // Neither checks that CONNECT's target is authority-form (RFC 9112 §3.2.3).
 
         Case(name: "SSDP NOTIFY *", input: b("NOTIFY * HTTP/1.1\r\nServer: foo\r\n\r\n"), verdict: "accept", body: [], persistent: true),
         Case(name: "OPTIONS *", input: b("OPTIONS * HTTP/1.1\r\nServer: foo\r\n\r\n"), verdict: "accept", body: [], persistent: true),
@@ -117,7 +117,7 @@ import Testing
         response("Issue 4767", "HTTP/1.1 206 Partial Content\r\nConnection: close\r\nContent-Type: multipart/byteranges; boundary=18a75608c8f47cef\r\n\r\nsome body",
                  body: "some body", persistent: false),
         response("206 Partial Content", "HTTP/1.1 206 Partial Content\r\nContent-Type: text/plain; charset=utf-8\r\nAccept-Ranges: bytes\r\n"
-                 + "Content-Range: bytes 0-5/1862\r\nContent-Length: 6\r\n\r\nfoobar", body: "foobar", persistent: true),
+            + "Content-Range: bytes 0-5/1862\r\nContent-Length: 6\r\n\r\nfoobar", body: "foobar", persistent: true),
         response("Both keep-alive and close, on the same Connection line",
                  "HTTP/1.1 200 OK\r\nContent-Length: 256\r\nConnection: keep-alive, close\r\n\r\n", method: .head, body: "", persistent: false),
         response("Both keep-alive and close, on different Connection lines",
@@ -206,12 +206,12 @@ import Testing
         chunked("TestChunkInvalidInputs: bare LF in chunk data", b("1\r\na\n0\r\n\r\n"), verdict: "reject"),
         chunked("TestChunkInvalidInputs: bare LF in chunk extension", b("1;\na\r\n0\r\n\r\n"), verdict: "reject"),
         // TestChunkReaderByteAtATime, at 100,000 one-byte chunks rather than 2²⁰.
-        chunked("TestChunkReaderByteAtATime", Array(repeating: b("1\r\nX\r\n"), count: 100_000).flatMap { $0 } + b("0\r\n\r\n"),
+        chunked("TestChunkReaderByteAtATime", Array(repeating: b("1\r\nX\r\n"), count: 100_000).flatMap(\.self) + b("0\r\n\r\n"),
                 verdict: "accept", decoded: String(repeating: "X", count: 100_000)),
         // TestChunkReaderTooMuchOverhead, at 1,000 chunks (Go's limit, 16 KiB of overhead beyond 16 bytes a chunk, trips at
         // about 190).
         chunked("TestChunkReaderTooMuchOverhead", Array(repeating: b("1;" + String(repeating: "a", count: 100) + "\r\nX\r\n"), count: 1_000)
-                .flatMap { $0 } + b("0\r\n\r\n"), verdict: "reject"),
+            .flatMap(\.self) + b("0\r\n\r\n"), verdict: "reject"),
     ]
 
     /// TestIncompleteChunk: every prefix of a valid body is incomplete.

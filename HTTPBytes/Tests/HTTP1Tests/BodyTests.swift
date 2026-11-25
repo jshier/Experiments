@@ -72,7 +72,9 @@ import Testing
             offset += size
         }
         output += Array("0\r\n".utf8)
-        for trailer in trailers { output += Array("\(trailer)\r\n".utf8) }
+        for trailer in trailers {
+            output += Array("\(trailer)\r\n".utf8)
+        }
         return output + [0x0D, 0x0A]
     }
 
@@ -88,8 +90,10 @@ import Testing
             // The event borrows `buffer`: handle it in a scope that ends before `buffer` changes.
             do {
                 switch try decoder.next(in: buffer.span.bytes, consumed: &consumed) {
-                case .data(let data): for offset in 0..<data.byteCount { body.append(data.load(fromByteOffset: offset, as: UInt8.self)) }
-                case .trailer(let field): trailers.append("\(string(field.name)): \(string(field.value))")
+                case let .data(data): for offset in 0..<data.byteCount {
+                        body.append(data.load(fromByteOffset: offset, as: UInt8.self))
+                    }
+                case let .trailer(field): trailers.append("\(string(field.name)): \(string(field.value))")
                 case .end: return (body, trailers, total + consumed)
                 case .needsMore: needsMore = true
                 }
@@ -127,12 +131,12 @@ import Testing
         var offset = 0
         for size in [1, 9, 10, 15, 16, 17, 255, 256, 65_536, 4_000] where offset < body.count {
             let take = min(size, body.count - offset)
-            try coded.append(alignedByteCapacity: 32) { (writer) throws(BytesError) in try HTTP1ChunkedEncoder.writeSizeLine(take, to: &writer) }
+            try coded.append(alignedByteCapacity: 32) { writer throws(BytesError) in try HTTP1ChunkedEncoder.writeSizeLine(take, to: &writer) }
             coded += body[offset..<offset + take]
-            try coded.append(alignedByteCapacity: 2) { (writer) throws(BytesError) in try HTTP1ChunkedEncoder.writeChunkEnd(to: &writer) }
+            try coded.append(alignedByteCapacity: 2) { writer throws(BytesError) in try HTTP1ChunkedEncoder.writeChunkEnd(to: &writer) }
             offset += take
         }
-        try coded.append(alignedByteCapacity: 5) { (writer) throws(BytesError) in try HTTP1ChunkedEncoder.writeLastChunk(to: &writer) }
+        try coded.append(alignedByteCapacity: 5) { writer throws(BytesError) in try HTTP1ChunkedEncoder.writeLastChunk(to: &writer) }
         #expect(try Self.decode(coded, step: 1_000).body == Array(body[..<offset]))
         #expect(Array(coded.suffix(5)) == Array("0\r\n\r\n".utf8))
     }

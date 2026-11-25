@@ -154,8 +154,8 @@ public enum HTTPStructuredFieldEncoder {
     @inlinable
     public static func write(_ member: HTTPStructuredMember, to writer: inout AlignedBytesWriter) throws(HTTPStructuredFieldError) {
         switch member {
-        case .item(let item): try write(item, to: &writer)
-        case .innerList(let list): try write(list, to: &writer)
+        case let .item(item): try write(item, to: &writer)
+        case let .innerList(list): try write(list, to: &writer)
         }
     }
 
@@ -173,10 +173,10 @@ public enum HTTPStructuredFieldEncoder {
                 if !first { try writeMemberSeparator(to: &writer) }
                 first = false
                 switch member {
-                case .item(let item):
+                case let .item(item):
                     try bareItem(item.bareItem, to: &writer)
                     try parameters(item.parameters, to: &writer)
-                case .innerList(let innerList):
+                case let .innerList(innerList):
                     try Self.innerList(innerList, to: &writer)
                 }
             }
@@ -215,10 +215,10 @@ public enum HTTPStructuredFieldEncoder {
                 }
                 try capacity { () throws(BytesError) in try writer.write(member.key) }
                 switch last.value {
-                case .item(let item):
+                case let .item(item):
                     try valueAfterKey(item.bareItem, to: &writer)
                     try parameters(item.parameters, to: &writer)
-                case .innerList(let innerList):
+                case let .innerList(innerList):
                     try capacity { () throws(BytesError) in try writer.write(0x3D as UInt8) }
                     try Self.innerList(innerList, to: &writer)
                 }
@@ -306,29 +306,29 @@ public enum HTTPStructuredFieldEncoder {
     @inlinable
     static func bareItem(_ item: HTTPStructuredBareItem, to writer: inout AlignedBytesWriter) throws(HTTPStructuredFieldError) {
         switch item {
-        case .integer(let value):
+        case let .integer(value):
             guard value >= -HTTPStructuredDecimal.limit, value <= HTTPStructuredDecimal.limit else { throw .valueOutOfRange }
             try capacity { () throws(BytesError) in try integer(value, to: &writer) }
-        case .decimal(let value):
+        case let .decimal(value):
             try capacity { () throws(BytesError) in try decimal(value, to: &writer) }
-        case .string(let value):
+        case let .string(value):
             try capacity { () throws(BytesError) in try string(value, to: &writer) }
-        case .token(let value):
+        case let .token(value):
             guard value.byteCount > 0, case let first = value.load(fromByteOffset: 0, as: UInt8.self),
                   (first | 0x20) &- 0x61 < 26 || first == 0x2A,
                   !value.extracting(droppingFirst: 1).containsByte(where: StructuredFieldScan.tokenStop) else { throw .invalidToken }
             try capacity { () throws(BytesError) in try writer.write(value) }
-        case .byteSequence(let value):
+        case let .byteSequence(value):
             try capacity { () throws(BytesError) in try byteSequence(value, to: &writer) }
-        case .boolean(let value):
+        case let .boolean(value):
             try capacity { () throws(BytesError) in try writer.write(value ? 0x313F as UInt16 : 0x303F, as: Byte2.self, .littleEndian) }
-        case .date(let value):
+        case let .date(value):
             guard value >= -HTTPStructuredDecimal.limit, value <= HTTPStructuredDecimal.limit else { throw .valueOutOfRange }
             try capacity { () throws(BytesError) in
                 try writer.write(0x40 as UInt8)
                 try integer(value, to: &writer)
             }
-        case .displayString(let value):
+        case let .displayString(value):
             try capacity { () throws(BytesError) in try displayString(value, to: &writer) }
         }
     }

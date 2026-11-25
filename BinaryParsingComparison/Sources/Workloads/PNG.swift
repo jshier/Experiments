@@ -77,7 +77,7 @@ public enum PNG {
     public static func parseWithBytes(_ data: RawSpan) throws(BytesError) -> ExamplePNG {
         var reader = BigEndianBytesReader(data)
         try reader.expect(0x8950_4E47_0D0A_1A0A as UInt64)
-        guard case .header(let header) = try readChunk(&reader) else { throw .invalidValue }
+        guard case let .header(header) = try readChunk(&reader) else { throw .invalidValue }
         var order = PNGChunkOrder()
         var chunks: [ExampleChunk] = []
         while !reader.isAtEnd {
@@ -128,16 +128,16 @@ public enum PNG {
 
     @inline(__always)
     static func readText(_ body: inout BigEndianBytesReader) throws(BytesError) -> ExampleChunk.InternationalText {
-        let keyword = String(copying: try body.read(utf8TerminatedBy: 0))
+        let keyword = try String(copying: body.read(utf8TerminatedBy: 0))
         guard keyword.count < 80 else { throw .invalidValue }
         let compressionFlag = try body.read(UInt8.self)
         guard compressionFlag <= 1 else { throw .invalidValue }
         let compressionMethod = try body.read(UInt8.self)
         guard compressionMethod == 0 else { throw .invalidValue }
-        let languageTag = String(copying: try body.read(utf8TerminatedBy: 0))
-        let translatedKeyword = String(copying: try body.read(utf8TerminatedBy: 0))
+        let languageTag = try String(copying: body.read(utf8TerminatedBy: 0))
+        let translatedKeyword = try String(copying: body.read(utf8TerminatedBy: 0))
         // Validated, where the example repairs invalid UTF-8 (`String(parsingUTF8:)`): the same for valid text.
-        let text = String(copying: try body.readUTF8(byteCount: body.remainingByteCount))
+        let text = try String(copying: body.readUTF8(byteCount: body.remainingByteCount))
         return ExampleChunk.InternationalText(
             keyword: keyword, compressionFlag: compressionFlag, compressionMethod: compressionMethod,
             languageTag: languageTag, translatedKeyword: translatedKeyword, text: text

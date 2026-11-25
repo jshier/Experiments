@@ -15,24 +15,26 @@ func describe(_ parser: inout HTTP2FrameParser, _ bytes: [UInt8]) throws(HTTP2Er
     var consumed = 0
     let description: String
     switch try parser.next(in: bytes.span.bytes, consumed: &consumed) {
-    case .data(let stream, let payload, let endStream, let total): description = "DATA \(stream.rawValue) \(payload.byteCount) \(endStream) \(total)"
-    case .headers(let stream, let block, let endStream, let endHeaders, let priority):
+    case let .data(stream, payload, endStream, total): description = "DATA \(stream.rawValue) \(payload.byteCount) \(endStream) \(total)"
+    case let .headers(stream, block, endStream, endHeaders, priority):
         description = "HEADERS \(stream.rawValue) \(block.byteCount) \(endStream) \(endHeaders) \(priority.map { "\($0.dependency.rawValue)/\($0.weight)/\($0.exclusive)" } ?? "-")"
-    case .rejectedHeaders(let stream, let block, let endHeaders, let error):
+    case let .rejectedHeaders(stream, block, endHeaders, error):
         description = "REJECTED HEADERS \(stream.rawValue) \(block.byteCount) \(endHeaders) \(error)"
-    case .priority(let stream, let priority): description = "PRIORITY \(stream.rawValue) \(priority.weight)"
-    case .resetStream(let stream, let code): description = "RST_STREAM \(stream.rawValue) \(code)"
-    case .settings(let settings):
+    case let .priority(stream, priority): description = "PRIORITY \(stream.rawValue) \(priority.weight)"
+    case let .resetStream(stream, code): description = "RST_STREAM \(stream.rawValue) \(code)"
+    case let .settings(settings):
         var pairs: [String] = []
-        for index in 0..<settings.count { let (id, value) = settings.setting(at: index); pairs.append("\(id.rawValue)=\(value)") }
+        for index in 0..<settings.count {
+            let (id, value) = settings.setting(at: index); pairs.append("\(id.rawValue)=\(value)")
+        }
         description = "SETTINGS \(settings.isAcknowledgment) \(pairs.joined(separator: ","))"
-    case .pushPromise(let stream, let promised, let block, let endHeaders): description = "PUSH_PROMISE \(stream.rawValue) \(promised.rawValue) \(block.byteCount) \(endHeaders)"
-    case .ping(let ack, let data): description = "PING \(ack) \(String(data, radix: 16))"
-    case .goaway(let last, let code, let debug): description = "GOAWAY \(last.rawValue) \(code) \(debug.byteCount)"
-    case .windowUpdate(let stream, let increment): description = "WINDOW_UPDATE \(stream.rawValue) \(increment)"
-    case .continuation(let stream, let block, let endHeaders): description = "CONTINUATION \(stream.rawValue) \(block.byteCount) \(endHeaders)"
-    case .priorityUpdate(let stream, let value): description = "PRIORITY_UPDATE \(stream.rawValue) \(value.byteCount)"
-    case .unknown(let type, _, let stream, let payload): description = "UNKNOWN \(type.rawValue) \(stream.rawValue) \(payload.byteCount)"
+    case let .pushPromise(stream, promised, block, endHeaders): description = "PUSH_PROMISE \(stream.rawValue) \(promised.rawValue) \(block.byteCount) \(endHeaders)"
+    case let .ping(ack, data): description = "PING \(ack) \(String(data, radix: 16))"
+    case let .goaway(last, code, debug): description = "GOAWAY \(last.rawValue) \(code) \(debug.byteCount)"
+    case let .windowUpdate(stream, increment): description = "WINDOW_UPDATE \(stream.rawValue) \(increment)"
+    case let .continuation(stream, block, endHeaders): description = "CONTINUATION \(stream.rawValue) \(block.byteCount) \(endHeaders)"
+    case let .priorityUpdate(stream, value): description = "PRIORITY_UPDATE \(stream.rawValue) \(value.byteCount)"
+    case let .unknown(type, _, stream, payload): description = "UNKNOWN \(type.rawValue) \(stream.rawValue) \(payload.byteCount)"
     case .needsMore: description = "MORE"
     }
     return (description, consumed)
@@ -86,20 +88,20 @@ func describe(_ bytes: [UInt8]) throws(HTTP2Error) -> String {
     }
 
     @Test(arguments: [
-        (frame(0, [1]), HTTP2Error.connection(.protocolError)),                       // DATA on stream 0
-        (frame(0, flags: 8, stream: 1, [3, 1, 1]), .connection(.protocolError)),      // padding fills the payload
-        (frame(1, [1]), .connection(.protocolError)),                                 // HEADERS on stream 0
+        (frame(0, [1]), HTTP2Error.connection(.protocolError)), // DATA on stream 0
+        (frame(0, flags: 8, stream: 1, [3, 1, 1]), .connection(.protocolError)), // padding fills the payload
+        (frame(1, [1]), .connection(.protocolError)), // HEADERS on stream 0
         (frame(2, stream: 1, [0, 0, 0, 0]), .stream(HTTP2StreamID(1), .frameSizeError)), // PRIORITY of 4 bytes
         (frame(3, stream: 1, [0, 0, 0]), .connection(.frameSizeError)),
-        (frame(4, stream: 1, []), .connection(.protocolError)),                       // SETTINGS on a stream
-        (frame(4, flags: 1, [0, 0, 0, 0, 0, 0]), .connection(.frameSizeError)),       // ACK with a payload
-        (frame(4, [0, 0, 0, 0, 0]), .connection(.frameSizeError)),                    // not a multiple of 6
+        (frame(4, stream: 1, []), .connection(.protocolError)), // SETTINGS on a stream
+        (frame(4, flags: 1, [0, 0, 0, 0, 0, 0]), .connection(.frameSizeError)), // ACK with a payload
+        (frame(4, [0, 0, 0, 0, 0]), .connection(.frameSizeError)), // not a multiple of 6
         (frame(6, [1, 2, 3, 4, 5, 6, 7]), .connection(.frameSizeError)),
         (frame(6, stream: 1, [1, 2, 3, 4, 5, 6, 7, 8]), .connection(.protocolError)),
         (frame(7, [0, 0, 0, 0]), .connection(.frameSizeError)),
-        (frame(8, [0, 0, 0, 0]), .connection(.protocolError)),                        // connection increment 0
+        (frame(8, [0, 0, 0, 0]), .connection(.protocolError)), // connection increment 0
         (frame(8, stream: 5, [0, 0, 0, 0]), .stream(HTTP2StreamID(5), .protocolError)),
-        (frame(0x10, [0, 0, 0, 0]), .connection(.protocolError)),                     // prioritizes stream 0
+        (frame(0x10, [0, 0, 0, 0]), .connection(.protocolError)), // prioritizes stream 0
         (frame(0, stream: 1, [UInt8](repeating: 0, count: 16_385)), .connection(.frameSizeError)),
     ])
     func malformedFramesAreRejected(bytes: [UInt8], error: HTTP2Error) {
@@ -109,7 +111,7 @@ func describe(_ bytes: [UInt8]) throws(HTTP2Error) -> String {
     @Test func settingsRanges() throws {
         var settings = HTTP2Settings()
         try settings.apply(.maxFrameSize, 16_777_215)
-        try settings.apply(HTTP2SettingID(rawValue: 0x99), 7)   // unknown: ignored
+        try settings.apply(HTTP2SettingID(rawValue: 0x99), 7) // unknown: ignored
         #expect(settings.maxFrameSize == 16_777_215)
         #expect(throws: HTTP2Error.connection(.protocolError)) { try settings.apply(.maxFrameSize, 16_383) }
         #expect(throws: HTTP2Error.connection(.protocolError)) { try settings.apply(.enablePush, 2) }

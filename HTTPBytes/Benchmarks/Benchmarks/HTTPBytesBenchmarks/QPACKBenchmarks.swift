@@ -73,7 +73,7 @@ final class QPACKFixture: @unchecked Sendable {
         var acknowledgments: [UInt8] = [], acknowledgmentEnds: [Int] = []
         for index in sets.indices {
             var ack = [UInt8](repeating: 0, count: 16)
-            let n = ack.withOutputRawSpan { (span) -> Int in
+            let n = ack.withOutputRawSpan { span -> Int in
                 try! HPACKPrefixInteger.write(index * 4, prefixBits: 7, flags: 0x80, into: &span)
                 return span.byteCount
             }
@@ -103,7 +103,7 @@ final class QPACKFixture: @unchecked Sendable {
         let data = try! [UInt8](Data(contentsOf: TestData.file(set: "qifs", name: "encoded/\(path)")))
         var bytes: [UInt8] = [], instructionEnds: [Int] = [], sectionEnds: [Int] = [], sets: [[(name: [UInt8], value: [UInt8])]] = []
         var capacityInstruction = [UInt8](repeating: 0, count: 8)
-        let n = capacityInstruction.withOutputRawSpan { (span) -> Int in
+        let n = capacityInstruction.withOutputRawSpan { span -> Int in
             try! HPACKPrefixInteger.write(capacity, prefixBits: 5, flags: 0x20, into: &span)
             return span.byteCount
         }
@@ -155,8 +155,8 @@ func qpackEncodeConnection(sets: [HTTPFieldStore], capacity: Int, acknowledgment
     var ackStart = 0
     for (index, store) in sets.enumerated() {
         var instructionCount = 0
-        let sectionCount = try! section.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
-            try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+        let sectionCount = try! section.withOutputRawSpan { sectionSpan throws(QPACKError) -> Int in
+            try instructions.withOutputRawSpan { instructionSpan throws(QPACKError) -> Int in
                 try encoder.encode(store, stream: UInt64(index * 4), into: &sectionSpan, instructions: &instructionSpan)
                 instructionCount = instructionSpan.byteCount
                 return sectionSpan.byteCount
@@ -210,8 +210,8 @@ final class QPACKFlight: @unchecked Sendable {
         var decoded = 0, start = 0
         for (index, store) in fixture.stores.enumerated() {
             var instructionCount = 0
-            let sectionCount = try! section.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
-                try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+            let sectionCount = try! section.withOutputRawSpan { sectionSpan throws(QPACKError) -> Int in
+                try instructions.withOutputRawSpan { instructionSpan throws(QPACKError) -> Int in
                     try encoder.encode(store, stream: UInt64(index * 4), into: &sectionSpan, instructions: &instructionSpan)
                     instructionCount = instructionSpan.byteCount
                     return sectionSpan.byteCount
@@ -228,7 +228,7 @@ final class QPACKFlight: @unchecked Sendable {
                 precondition(try! decoder.begin(body.span.bytes, stream: UInt64(decoded * 4)), "decoded in order, nothing blocks")
                 while try! decoder.next(in: body.span.bytes) != nil {}
                 var written = [UInt8](repeating: 0, count: 256)
-                let n = written.withOutputRawSpan { (span) -> Int in
+                let n = written.withOutputRawSpan { span -> Int in
                     decoder.writeDecoderInstructions(into: &span)
                     return span.byteCount
                 }
@@ -287,8 +287,8 @@ func qpackEncodeFlight(_ flight: QPACKFlight, _ encoder: inout QPACKEncoder, _ s
     let feedback = flight.feedback, feedbackEnds = flight.feedbackEnds, stores = flight.fixture.stores
     let feedbackBytes = feedback.span.bytes
     do throws(QPACKError) {
-        return try sections.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
-            try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+        return try sections.withOutputRawSpan { sectionSpan throws(QPACKError) -> Int in
+            try instructions.withOutputRawSpan { instructionSpan throws(QPACKError) -> Int in
                 var start = 0
                 for index in 0..<stores.count {
                     try encoder.encode(stores[index], stream: UInt64(index &* 4), into: &sectionSpan, instructions: &instructionSpan)
@@ -307,8 +307,14 @@ func qpackEncodeFlight(_ flight: QPACKFlight, _ encoder: inout QPACKEncoder, _ s
 /// FNV-1a over every field's name, a 0 byte, its value, and a 1 byte: what `lsqpack_decode_digest` computes.
 func qpackDigest(_ sets: [[(name: [UInt8], value: [UInt8])]]) -> UInt64 {
     var digest: UInt64 = 0xCBF2_9CE4_8422_2325
-    func add(_ bytes: [UInt8]) { for byte in bytes { digest = (digest ^ UInt64(byte)) &* 0x100_0000_01B3 } }
-    for set in sets { for (name, value) in set { add(name); add([0]); add(value); add([1]) } }
+    func add(_ bytes: [UInt8]) { for byte in bytes {
+        digest = (digest ^ UInt64(byte)) &* 0x100_0000_01B3
+    } }
+    for set in sets {
+        for (name, value) in set {
+            add(name); add([0]); add(value); add([1])
+        }
+    }
     return digest
 }
 
@@ -357,6 +363,7 @@ nonisolated(unsafe) var sharedQPACKDynamicEncoder: QPACKEncoder = {
     encoder.setPeerSettings(maximumTableCapacity: 4_096, blockedStreams: 100)
     return encoder
 }()
+
 nonisolated(unsafe) var qpackFeedback = [UInt8](repeating: 0, count: 4_096)
 nonisolated(unsafe) var qpackSectionOutput = [UInt8](repeating: 0, count: 1 << 20)
 nonisolated(unsafe) var qpackInstructionOutput = [UInt8](repeating: 0, count: 1 << 20)
@@ -372,7 +379,7 @@ nonisolated(unsafe) var qpackCSectionEnds = [Int](repeating: 0, count: 4_096)
 @inline(never)
 func qpackDecodeHTTPBytes(_ fixture: QPACKFixture, _ decoder: inout QPACKDecoder, _ feedback: inout [UInt8]) -> Int {
     decoder.reset()
-    let bytes = fixture.bytes          // a local: a span of a class's stored array lasts only for the access
+    let bytes = fixture.bytes // a local: a span of a class's stored array lasts only for the access
     let all = bytes.span.bytes
     var start = 0
     var total = 0
@@ -391,7 +398,7 @@ func qpackDecodeHTTPBytes(_ fixture: QPACKFixture, _ decoder: inout QPACKDecoder
             }
             if count != fixture.fieldCounts[index] { return -1 }
             if decoder.hasDecoderInstructions {
-                feedback.withOutputRawSpan { (span) -> Void in decoder.writeDecoderInstructions(into: &span) }
+                feedback.withOutputRawSpan { span in decoder.writeDecoderInstructions(into: &span) }
             }
             start = fixture.sectionEnds[index]
         }
@@ -408,8 +415,8 @@ func qpackEncodeHTTPBytes(_ fixture: QPACKFixture, _ encoder: inout QPACKEncoder
     let acknowledgments = fixture.acknowledgments
     let acknowledgmentBytes = acknowledgments.span.bytes
     do throws(QPACKError) {
-        return try sections.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
-            try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+        return try sections.withOutputRawSpan { sectionSpan throws(QPACKError) -> Int in
+            try instructions.withOutputRawSpan { instructionSpan throws(QPACKError) -> Int in
                 var ackStart = 0
                 for (index, store) in fixture.stores.enumerated() {
                     try encoder.encode(store, stream: UInt64(index &* 4), into: &sectionSpan, instructions: &instructionSpan)
@@ -486,9 +493,11 @@ func qpackConnectionDecodes(_ bytes: [UInt8], instructionEnds: [Int], sectionEnd
             guard try decoder.processEncoderStream(instructions.span.bytes) == instructions.count else { return false }
             let span = section.span.bytes
             guard try decoder.begin(span, stream: UInt64(index * 4)) else { return false }
-            while let field = try decoder.next(in: span) { fields.append((Array(copying: field.name), Array(copying: field.value))) }
+            while let field = try decoder.next(in: span) {
+                fields.append((Array(copying: field.name), Array(copying: field.value)))
+            }
         } catch { return false }
-        feedback.withOutputRawSpan { (span) -> Void in decoder.writeDecoderInstructions(into: &span) }
+        feedback.withOutputRawSpan { span in decoder.writeDecoderInstructions(into: &span) }
         let expected = fixture.sets[index]
         guard fields.count == expected.count, zip(fields, expected).allSatisfy({ $0.name == $1.name && $0.value == $1.value }) else {
             return false
@@ -508,7 +517,9 @@ func reportQPACKSize(_ encoder: String, _ corpus: String, _ bytes: Int) {
 func registerQPACKBenchmarks() {
     func register(_ name: String, setup: @escaping () -> Int, _ run: @escaping () -> Int) {
         Benchmark(name) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         } setup: {
             precondition(setup() > 0, "\(name): failed")
         }
@@ -662,7 +673,9 @@ func registerQPACKBenchmarks() {
     ]
     for (name, run) in gates {
         Benchmark(name, configuration: zeroAllocations) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         } setup: {
             precondition(run() > 0, "\(name): failed")
         }

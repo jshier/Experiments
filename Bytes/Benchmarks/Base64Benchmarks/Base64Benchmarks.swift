@@ -1,6 +1,6 @@
-import BytesBase64
 import Benchmark
 import Bytes
+import BytesBase64
 import BytesTestSupport
 import Foundation
 
@@ -40,7 +40,9 @@ struct Fixture: @unchecked Sendable {
         var input = [UInt8](repeating: 0, count: count)
         for offset in stride(from: 0, to: count, by: 8) {
             withUnsafeBytes(of: generator.next() as UInt64) { random in
-                for index in 0..<min(8, count - offset) { input[offset + index] = random[index] }
+                for index in 0..<min(8, count - offset) {
+                    input[offset + index] = random[index]
+                }
             }
         }
         let text = Array(Base64.encodedString(input.span.bytes).utf8)

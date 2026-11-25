@@ -169,7 +169,9 @@ func tokenEndNearEnd(_ bytes: RawSpan, from start: Int) -> Int {
         return nibbles == 0 ? count : start &+ nibbles.trailingZeroBitCount &>> 2
     }
     var position = start
-    while position < count, isTokenCharacter(bytes.byte(position)) { position &+= 1 }
+    while position < count, isTokenCharacter(bytes.byte(position)) {
+        position &+= 1
+    }
     return position
 }
 
@@ -247,9 +249,13 @@ func exactFieldLine(_ whole: RawSpan, at start: Int, checked: Int, mark: Int, al
     guard let next = try lineEnd(bytes, at: stop, allowsBareLineFeed: allowsBareLineFeed, otherwise: .invalidFieldValue)
     else { return .needsMore(checked: stop, mark: colon) }
     var valueStart = colon &+ 1
-    while valueStart < stop, case let byte = bytes.byte(valueStart), byte == .space || byte == .tab { valueStart &+= 1 }
+    while valueStart < stop, case let byte = bytes.byte(valueStart), byte == .space || byte == .tab {
+        valueStart &+= 1
+    }
     var valueEnd = stop
-    while valueEnd > valueStart, case let byte = bytes.byte(valueEnd &- 1), byte == .space || byte == .tab { valueEnd &-= 1 }
+    while valueEnd > valueStart, case let byte = bytes.byte(valueEnd &- 1), byte == .space || byte == .tab {
+        valueEnd &-= 1
+    }
     return .field(nameEnd: colon, valueStart: valueStart, valueEnd: valueEnd, next: next)
 }
 
@@ -286,9 +292,13 @@ func walkedField(_ bytes: RawSpan, at start: Int, stop: Int) -> (nameEnd: Int, v
     // line, and the common case is then one compare.
     var valueStart = nameEnd &+ 1
     valueStart &+= bytes.byte(valueStart) == .space ? 1 : 0
-    while bytes.byte(valueStart) <= .space, valueStart < stop { valueStart &+= 1 }
+    while bytes.byte(valueStart) <= .space, valueStart < stop {
+        valueStart &+= 1
+    }
     var valueEnd = stop
-    while bytes.byte(valueEnd &- 1) <= .space, valueEnd > valueStart { valueEnd &-= 1 }
+    while bytes.byte(valueEnd &- 1) <= .space, valueEnd > valueStart {
+        valueEnd &-= 1
+    }
     return (nameEnd, valueStart, valueEnd)
 }
 

@@ -91,7 +91,9 @@ public struct RelaxedCounters: Sendable {
         @inlinable
         init(count: Int, value: Int) {
             counters = UniqueArray(capacity: count) { counters in
-                for _ in 0..<count { counters.append(Atomic(value)) }
+                for _ in 0..<count {
+                    counters.append(Atomic(value))
+                }
             }
         }
     }
@@ -114,6 +116,12 @@ public struct RelaxedCounters: Sendable {
     @inlinable
     public var count: Int {
         @inline(__always) get { storage.counters.count }
+    }
+
+    /// Whether there are no counters.
+    @inlinable
+    public var isEmpty: Bool {
+        @inline(__always) get { storage.counters.isEmpty }
     }
 
     /// Runs `body` with counter `index` itself, for orderings other than relaxed.

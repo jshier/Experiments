@@ -8,6 +8,7 @@ let package = Package(
     platforms: [.macOS("27.0")],
     dependencies: [
         .package(path: "../../../Bytes"),
+        .package(path: "../../../BytesCompression"),
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
     ],
     targets: [
@@ -15,7 +16,7 @@ let package = Package(
             name: "bytes-probe",
             dependencies: [
                 .product(name: "Bytes", package: "Bytes"),
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
             ],
             path: "Sources/BytesProbe",

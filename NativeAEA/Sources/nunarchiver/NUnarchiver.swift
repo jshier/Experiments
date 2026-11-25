@@ -135,7 +135,7 @@ struct NUnarchiver: AsyncParsableCommand {
         } else {
             untrustedChain ? .untrustedCertificateChain : .certificateChain
         }
-        let archive = try AEAArchive(path: FilePath(archive), signingKey: key, decryptionKey: try await decryptionKey())
+        let archive = try await AEAArchive(path: FilePath(archive), signingKey: key, decryptionKey: decryptionKey())
         defer { archive.close() }
         let root = archive.rootHeader
         if info || verbose {
@@ -192,12 +192,11 @@ struct NUnarchiver: AsyncParsableCommand {
             print("Apple Archive, \(file.compression.map { "pbz '\(Character(Unicode.Scalar($0.rawValue)))', blocks of \(file.blockSize) bytes" } ?? "uncompressed")")
         }
         if info { return }
-        let statistics: AEAStatistics
-        if let directory {
-            statistics = try await extracting(readOptions) { try await file.extract(to: FilePath(directory), options: $0) }
+        let statistics: AEAStatistics = if let directory {
+            try await extracting(readOptions) { try await file.extract(to: FilePath(directory), options: $0) }
         } else {
             // Listing makes an entry (and its strings) for each; verifying alone makes none.
-            statistics = list
+            list
                 ? try await file.forEachEntry(options: readOptions) { print($0.path) }
                 : try await file.verify(options: readOptions)
         }
@@ -219,13 +218,12 @@ struct NUnarchiver: AsyncParsableCommand {
             """)
         }
         if info { return }
-        let statistics: AEAStatistics
-        if let directory {
+        let statistics: AEAStatistics = if let directory {
             // `xip --expand` copies no quarantine: the option is ignored.
-            statistics = try await extracting(readOptions) { try await file.extract(to: FilePath(directory), options: $0) }
+            try await extracting(readOptions) { try await file.extract(to: FilePath(directory), options: $0) }
         } else {
             // Listing makes an entry (and its strings) for each; verifying alone makes none.
-            statistics = list
+            list
                 ? try await file.forEachEntry(options: readOptions) { print($0.path) }
                 : try await file.verify(options: readOptions)
         }
@@ -279,12 +277,14 @@ struct NUnarchiver: AsyncParsableCommand {
     /// The key an encrypted archive needs, from the options given.
     private func decryptionKey() async throws -> AEADecryptionKey? {
         if let key { return try AEADecryptionKey.symmetric(text: key) }
-        if let keyFile { return .symmetric(try InputFile.contents(of: FilePath(keyFile), maximumCount: Self.keyFileLimit)) }
+        if let keyFile { return try .symmetric(InputFile.contents(of: FilePath(keyFile), maximumCount: Self.keyFileLimit)) }
         if let recipientPriv { return try AEADecryptionKey.recipientPrivateKey(contentsOf: FilePath(recipientPriv)) }
         if let password { return .password(Array(password.utf8)) }
         if let passwordFile {
             var bytes = try InputFile.contents(of: FilePath(passwordFile), maximumCount: Self.keyFileLimit)
-            while let last = bytes.last, last == 0x0A || last == 0x0D { bytes.removeLast() }
+            while let last = bytes.last, last == 0x0A || last == 0x0D {
+                bytes.removeLast()
+            }
             return .password(bytes)
         }
         if fcsKey != nil || fetchKey {

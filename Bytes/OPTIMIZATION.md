@@ -781,9 +781,12 @@ async function is already running where it must run; Part IV, ["Executor checks 
 
 #### 3.6 How to find the loop
 
-A loop is a branch back to an earlier address. With `--symbolize-operands`, `objdump` turns branch targets into `<L0>`,
-`<L1>` labels, so a backward branch to a label printed above it is a loop; `Tools/loops` automates that, and reports each
-loop's size, depth, instruction mix, and verdict.
+A loop is a set of blocks with a back edge to a header that dominates it: a backward branch alone isn't one (an error
+path joined from several places, a cold block laid out after the return, and a tail call all branch backward). With
+`--symbolize-operands`, `objdump` turns branch targets into `<L0>`, `<L1>` labels, which makes the shape readable by eye;
+`Tools/loops` builds the control-flow graph, finds the natural loops, and reports each loop's size, depth, instruction
+mix, and verdict. (Before 2026-11-24 it took any backward branch as a loop and over-counted: Bytes' Benchmarks/RESULTS.md,
+"The loops re-check".)
 <!-- src: AGENTS.md "Tools/loops FILE|--target PKG TARGET PATTERN" description ("a branch back to an earlier <Ln> label in objdump --symbolize-operands output") -->
 
 The one-liners:
@@ -3172,7 +3175,7 @@ codec"](#8-algorithms-and-data-structures-codec-by-codec)).
 | Brotli | `BrotliEncoder(quality:windowBits:)`, `BrotliDecoder` | both |
 | Zstandard | `ZstdDecoder`, `ZstdFrameHeader`, `XXHash64`; `ZstdEncoder(level:windowLog:checksum:)` (levels 1–4, `ZstdEncoder.Parameters`) | both (encoding at libzstd's levels 1–4) |
 | LZ4 | `LZ4Decoder` (`decompressRaw`, `decompressFramed`) | decode |
-| LZMA, LZMA2, `.xz` | whole output: `LZMA2Decoder` (`decompressLZMA2`, `decompressLZMA`, `decompressLZMAFile`, `decompressXZ`); streaming: `LZMADecoder` (raw LZMA1), `XZDecoder`; `CRC64` | decode |
+| LZMA, LZMA2, `.xz` | whole output: `LZMA2Decoder` (`decompressAll`: `.xz` files, and raw LZMA and LZMA2 within the package); streaming: `LZMADecoder` (raw LZMA1), `XZDecoder`; `CRC64` | decode |
 | bzip2 | `BZip2Decoder` (`decompressAll`, and streaming `decompress(_:into:)`) | decode |
 | Apple's LZFSE, LZVN, LZBITMAP, LZRAVEN | `LZFSEDecoder`/`LZFSEEncoder`, `LZVNDecoder`/`LZVNEncoder`, `LZBitmapDecoder`/`LZBitmapEncoder`, `LZRAVENDecoder` | LZFSE, LZVN, LZBITMAP both; LZRAVEN decode |
 | parallel | `ParallelDeflateEncoder`, `ParallelDeflateDecoder`, `ParallelBrotliEncoder` | the parallel forms of the above |
@@ -3284,7 +3287,7 @@ threshold is zero but one: a `for`-`in` over a `let` reader, held at 1. <!-- src
 A client that chooses its format at run time (an archive reader meeting one method after another, an encrypted archive's
 segments in several codecs) should not write a `switch` over twelve formats and keep a decoder of each alive.
 **`Decompressor`** is that switch, written once. A `DecompressionFormat` names the stream (`.deflate(.raw)`, `.deflate64`,
-`.brotli`, `.zstd`, `.bzip2`, `.lzma(properties, uncompressedSize:, sizeHint:)`, `.xz(sizeHint:)`, `.lzfse`, `.lzvn`,
+`.brotli`, `.zstd`, `.bzip2`, `.lzma(properties, uncompressedSize:, maximumSize:)`, `.xz(sizeHint:)`, `.lzfse`, `.lzvn`,
 `.lz4(framed:)`, `.lzbitmap`, `.lzraven`), carrying what the container records about it; `reset(for:)` starts a stream.
 
 ```swift

@@ -42,10 +42,14 @@ public struct HMAC<H: HashFunction>: Sendable {
             var span = padded.mutableSpan
             span.copyBytes(from: key, toByteOffset: 0)
         }
-        for index in 0..<blockByteCount { padded[index] ^= 0x36 }
+        for index in 0..<blockByteCount {
+            padded[index] ^= 0x36
+        }
         inner = H()
         inner.update(padded.span.bytes.extracting(first: blockByteCount))
-        for index in 0..<blockByteCount { padded[index] ^= 0x36 ^ 0x5C }
+        for index in 0..<blockByteCount {
+            padded[index] ^= 0x36 ^ 0x5C
+        }
         outer = H()
         outer.update(padded.span.bytes.extracting(first: blockByteCount))
     }
@@ -146,7 +150,9 @@ public enum PBKDF2 {
                 var span = u.mutableSpan
                 var bytes = MutableRawSpan(mutating: &span)
                 next.finalize(into: &bytes)
-                for byte in 0..<digestByteCount { t[byte] ^= u[byte] }
+                for byte in 0..<digestByteCount {
+                    t[byte] ^= u[byte]
+                }
             }
             let take = min(digestByteCount, key.byteCount &- offset)
             key.copyBytes(from: t.span.bytes.extracting(first: take), toByteOffset: offset)

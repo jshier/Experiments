@@ -174,7 +174,7 @@ private let largeFixtures = [
         defer { temporary.remove() }
         let directory = temporary.url
         let archives = try ["bzip2.zip", "xz.zip", "deflate64.zip", "symlink.zip"].map(fixture)
-        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { (extractor) async throws(ZipError) in
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor async throws(ZipError) in
             for archive in archives {
                 try await extractor.add(archive)
             }
@@ -194,8 +194,8 @@ private let largeFixtures = [
         let directory = temporary.url
         var options = ZipExtractionOptions()
         options.password = "secret"
-        let archives = try largeFixtures.map { (name: $0, archive: try fixture($0)) }
-        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { (extractor) async throws(ZipError) in
+        let archives = try largeFixtures.map { try (name: $0, archive: fixture($0)) }
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor async throws(ZipError) in
             for (name, archive) in archives {
                 _ = try await extractor.add(archive, into: FilePath(name), options: options)
             }
@@ -222,7 +222,7 @@ private let largeFixtures = [
         defer { temporary.remove() }
         let directory = temporary.url
         let (ppmd, crypto, bzip2) = try (fixture("ppmd.zip"), fixture("zipcrypto.zip"), fixture("bzip2.zip"))
-        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { (extractor) async throws(ZipError) in
+        let failures = try await ZipExtractor.extract(into: FilePath(directory.path)) { extractor async throws(ZipError) in
             try await extractor.add(ppmd, into: "ppmd")
             try await extractor.add(crypto, into: "crypto")
             try await extractor.add(bzip2, into: "bzip2")
@@ -261,7 +261,7 @@ private let largeFixtures = [
         #expect(!FileManager.default.fileExists(atPath: out.appending(path: "small.txt").path))
 
         let collected = directory.appending(path: "collected")
-        let failures = try await ZipExtractor.extract(into: FilePath(collected.path)) { (extractor) async throws(ZipError) in
+        let failures = try await ZipExtractor.extract(into: FilePath(collected.path)) { extractor async throws(ZipError) in
             try await extractor.add(ZipArchive(url: damaged))
         }
         #expect(failures.count == 1)
@@ -308,7 +308,9 @@ private let largeFixtures = [
         var text = [UInt8]()
         var rng = SplitMix64(seed: 3)
         let words = ["zip", "entry", "pipeline", "chunk", "deflate", " ", "\n"]
-        while text.count < 6 << 20 { text += Array(words.randomElement(using: &rng)!.utf8) }
+        while text.count < 6 << 20 {
+            text += Array(words.randomElement(using: &rng)!.utf8)
+        }
         try Data(text).write(to: directory.appending(path: "text.txt"))
         try zip(["deflated.zip", "text.txt"], in: directory)
 
@@ -350,7 +352,9 @@ private let largeFixtures = [
 
         let plain = directory.appending(path: "plain")
         try await archive.extract(to: FilePath(plain.path))
-        for item in items { #expect(attribute(plain.appending(path: item)) == nil, "\(item)") }
+        for item in items {
+            #expect(attribute(plain.appending(path: item)) == nil, "\(item)")
+        }
 
         var destinationOptions = DestinationOptions()
         destinationOptions.quarantine = quarantine
@@ -360,7 +364,7 @@ private let largeFixtures = [
         #expect(try staging.publish(as: FilePath(single.path)) == FilePath(single.path))
         let pooled = directory.appending(path: "pooled")
         let pooledDestination = try Destination(FilePath(pooled.path), options: destinationOptions)
-        let failures = try await ZipExtractor.extract(into: pooledDestination) { (extractor) async throws(ZipError) in
+        let failures = try await ZipExtractor.extract(into: pooledDestination) { extractor async throws(ZipError) in
             try await extractor.add(archive, into: "x/y")
         }
         pooledDestination.close()

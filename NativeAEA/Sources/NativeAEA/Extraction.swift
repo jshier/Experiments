@@ -1,5 +1,6 @@
 import Bytes
 import BytesAsync
+import BytesCompressionAsync
 import Darwin
 public import Disk
 import Foundation
@@ -77,11 +78,16 @@ public struct AEAExtractionOptions: Sendable {
     /// archive -d DIR` writes one), as Archive Utility does for the folder it makes. Off by default: `aa extract` leaves
     /// the destination as it is.
     public var restoresDestinationMetadata = false
-    /// For a `.xip`: give directories the modification times its cpio stream records. Off by default: `xip --expand`
-    /// leaves every directory the time it was extracted. (Archive Utility sets them before it writes the files, so
-    /// only directories holding nothing but directories keep them: 1,877 of Xcode 27.3's 30,068. NativeAEA/RESULTS.md,
-    /// 2026-11-21.)
+    /// For a `.xip`: give directories the modification times its cpio stream records. Off by default: every directory
+    /// keeps the time it was extracted. (Archive Utility and `xip --expand` set them before they write the files, so
+    /// only directories holding nothing but directories keep them: 1,877 of Xcode 27.3's 30,068 for Archive Utility,
+    /// 1,874 for `xip --expand`. NativeAEA/RESULTS.md, 2026-11-21 and 2026-11-24.)
     public var restoresXIPDirectoryTimes = false
+    /// The most an entry's extended attributes and ACL may take together, in bytes: an extraction holds them until the
+    /// entry ends, so an entry declaring more is refused at its header (``AEAError/invalidArchive(_:)``), before any of
+    /// it is read. The default, 256 MiB, is over what Apple's tools carry (`aa archive` and `aa extract` round-trip an
+    /// 80,000,000-byte attribute). Listing and verifying hold none: they take any size.
+    public var maximumMetadataByteCount = 256 << 20
 
     /// ``disk``, with at least one writer and one in file system calls.
     var scheduling: ExtractionSettings {
@@ -111,7 +117,7 @@ public struct AEAExtractionOptions: Sendable {
     }
 }
 
-extension AEAArchive {
+public extension AEAArchive {
     /// Extracts the archive beneath `destination`, created if needed.
     ///
     /// Runs off the caller's actor, every part of it a child task of the calling task: ``AEAReadOptions/decodeThreads``
@@ -127,7 +133,7 @@ extension AEAArchive {
     /// - Returns: Counts and timings.
     /// - Throws: ``AEAError``: a failed check, a malformed stream, an unsafe path, a file system error, or cancellation.
     @concurrent @discardableResult
-    public func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
+    func extract(to destination: FilePath, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
         let source = try payload(options.read, heldBeyondDecoding: options.heldBuffers)
         // `aa extract` quarantines what's in the destination, not the destination itself, for an `.aea` (Xcode's,
         // compared item by item); for a plain `.aar` it quarantines the destination too.
@@ -142,7 +148,7 @@ extension AEAArchive {
     /// Everything extracted gets the destination's quarantine (its options'), whatever
     /// ``AEAExtractionOptions/copiesQuarantine`` says; the destination directory itself is left as its caller opened it.
     @concurrent @discardableResult
-    public func extract(into destination: Destination, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
+    func extract(into destination: Destination, options: AEAExtractionOptions = .init()) async throws(AEAError) -> AEAStatistics {
         let source = try payload(options.read, heldBeyondDecoding: options.heldBuffers)
         let target = try Extractor.reopen(destination, options: options)
         return try await Extractor.extract(source, into: target, options: options, expectedBytes: rootHeader.rawSize)
@@ -211,7 +217,7 @@ enum Extractor {
         options.disk.progress?.setExpected(entries: 0, bytes: max(0, expectedBytes))
         let outcome: Result<AEAStatistics, AEAError> = await source.withDecoding { _ in
             do throws(AEAError) {
-                return .success(try await extract(source, format: format, into: target, options: options))
+                return try await .success(extract(source, format: format, into: target, options: options))
             } catch {
                 return .failure(error)
             }
@@ -225,16 +231,20 @@ enum Extractor {
     }
 
     /// The extraction inside the decoding: once the source knows its pool, Disk's extraction with the walk as its plan.
-    nonisolated(nonsending) private static func extract(
+    private nonisolated(nonsending) static func extract(
         _ source: some ChunkSource, format: StreamFormat, into destination: Destination, options: AEAExtractionOptions
     ) async throws(AEAError) -> AEAStatistics {
         try await source.prepare()
         let pool = source.pool
+        // No more writers than the pool has room for (one buffer each, held through a job): with large blocks the buffer
+        // budget cuts them (`AEAReadOptions.bufferBudget`, BytesCompressionAsync's `BlockBufferPool.sizing`).
+        var settings = options.scheduling
+        settings.writers = min(settings.writers, max(1, pool.heldBuffers))
         var walked = AEAStatistics()
         var compression = DiskCompressionCounts()
         let report: ExtractionReport<Never>
         do throws(ExtractionError<AEAError, Never>) {
-            report = try await Extraction.run(into: destination, source: SegmentContents(pool: pool), settings: options.scheduling) {
+            report = try await Extraction.run(into: destination, source: SegmentContents(pool: pool), settings: settings) {
                 (planner: inout Planner<SegmentContents>) async throws(AEAError) in
                 // The sink holds the planner while the walk runs, and hands it back after.
                 var sink = ExtractionSink(planner, pool: pool, options: options, keepsDirectoryTimes: format != .cpio || options.restoresXIPDirectoryTimes)
@@ -253,10 +263,10 @@ enum Extractor {
             }
         } catch {
             switch error {
-            case .disk(let error): throw AEAError(error)
-            case .plan(let error): throw error
+            case let .disk(error): throw AEAError(error)
+            case let .plan(error): throw error
             // The segments' source can't fail (its contents are decoded and checked before they're planned).
-            case .source(let impossible): switch impossible {}
+            case let .source(impossible): switch impossible {}
             }
         }
         var statistics = walked
@@ -286,7 +296,7 @@ enum Extractor {
 /// (Disk gathers them in the writer's staging buffer); a large file is a piece per segment (Disk's `PieceSource`),
 /// compressed in place over its own consumed bytes, which no one else reads.
 struct SegmentContents: PieceSource {
-    let pool: SegmentBufferPool
+    let pool: BlockBufferPool
 
     /// One or two ranges of buffers: offsets from each buffer's segment base.
     struct Contents: Sendable {
@@ -337,7 +347,7 @@ struct SegmentContents: PieceSource {
 /// to their entry once it ends.
 struct ExtractionSink: ArchiveSink, ~Copyable {
     private var planner: Planner<SegmentContents>
-    let pool: SegmentBufferPool
+    let pool: BlockBufferPool
     private let mode: DiskCompressionMode
     private let restoresOwnership: Bool
     private let restoresDestinationMetadata: Bool
@@ -348,6 +358,8 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
     private let smallSpanLimit: Int
     /// The segments' size: every piece of a large file but the first and last is a whole segment.
     private let segmentSize: Int
+    /// ``AEAExtractionOptions/maximumMetadataByteCount``: the walker refuses more at the header.
+    let maximumMetadataByteCount: Int
     var statistics = AEAStatistics()
     /// Files by on-disk compression, for ``AEAStatistics/filesByDiskCompression`` at the end.
     var diskCompression = DiskCompressionCounts()
@@ -374,9 +386,12 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
     /// The current entry, to add its blobs to.
     private var token = EntryToken.none
     /// The current entry's blobs, gathered until it ends (a file is planned only when its data arrives, and blobs can
-    /// come first).
+    /// come first): reserved once, at the first blob, from their declared sizes (bounded by ``maximumMetadataByteCount``
+    /// at the header), and given back after an entry that took more than 1 MiB.
     private var acceptsBlobs = false
     private var blobs: [UInt8] = []
+    /// The current entry's blobs' declared sizes, together: what the walker passes on.
+    private var blobByteCount = 0
     private var extendedAttributes = 0..<0
     private var accessControlList = 0..<0
     /// Each hard-link cluster's first name.
@@ -385,7 +400,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
     private var plannedEntries = 0
     private var plannedBytes = 0
 
-    init(_ planner: consuming Planner<SegmentContents>, pool: SegmentBufferPool, options: AEAExtractionOptions, keepsDirectoryTimes: Bool) {
+    init(_ planner: consuming Planner<SegmentContents>, pool: BlockBufferPool, options: AEAExtractionOptions, keepsDirectoryTimes: Bool) {
         self.planner = planner
         self.pool = pool
         mode = options.diskCompression
@@ -393,9 +408,22 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         restoresDestinationMetadata = options.restoresDestinationMetadata
         self.keepsDirectoryTimes = keepsDirectoryTimes
         progress = options.disk.progress
-        segmentSize = pool.segmentCapacity
+        segmentSize = pool.blockCapacity
+        maximumMetadataByteCount = options.maximumMetadataByteCount
         // A batch of chunks (1 MiB, Disk's staging buffer), or a segment if that's smaller.
-        smallSpanLimit = min(1 << 20, pool.segmentCapacity)
+        smallSpanLimit = min(1 << 20, pool.blockCapacity)
+    }
+
+    /// The buffers a walk holds while it waits for its next block of up to `blockCapacity` bytes (a source's
+    /// `consumerBuffers`): for a listing (`held` 0), the block it read; for an extraction, also the earlier pieces of a
+    /// compressed large file that the 64 KiB chunk it's in started in, which the planner keeps until the chunk's end
+    /// arrives (Disk's bridges: a chunk spans at most 8 pieces, as pieces under a seventh of a chunk store the file
+    /// plain). One for blocks of 64 KiB or more; four for `aea`'s smallest segments (16 KiB), where a pool of three
+    /// (one decoder, one writer, no extra buffers) waited forever for a decoder's buffer.
+    static func walkBuffers(held: Int, blockCapacity: Int) -> Int {
+        guard held > 0, blockCapacity * 7 >= 65_536 else { return 1 }
+        // Pieces a chunk can span when it doesn't start at a piece's start, less the one that ends it (not yet read).
+        return min(8, (65_535 + blockCapacity - 1) / blockCapacity + 1) - 1
     }
 
     /// After the walk: releases what's held for a file that never got its second range, sets the progress's exact
@@ -440,13 +468,17 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
         cluster = nil
         largeFile = nil
         acceptsBlobs = false
-        blobs.removeAll(keepingCapacity: true)
         extendedAttributes = 0..<0
         accessControlList = 0..<0
-        let hasAttributes = (entry.extendedAttributes?.count ?? 0) > 0, hasACL = (entry.accessControlList?.count ?? 0) > 0
+        let attributesCount = entry.extendedAttributes?.count ?? 0, aclCount = entry.accessControlList?.count ?? 0
+        let hasAttributes = attributesCount > 0, hasACL = aclCount > 0
         if hasAttributes { statistics.withExtendedAttributes += 1 }
         if hasACL { statistics.withAccessControlLists += 1 }
         let hasBlobs = hasAttributes || hasACL
+        // A large reservation (an 80 MB attribute) isn't kept for the entries after it; this entry's room is reserved
+        // once, at its first blob (``metadata(_:_:offset:)``).
+        if blobs.capacity > 1 << 20 { blobs = [] } else { blobs.removeAll(keepingCapacity: true) }
+        blobByteCount = attributesCount + aclCount
         if type == .symbolicLink, entry.linkTarget == nil { throw .invalidArchive("a link without a target") }
         let pathStorage = path
         do throws(DiskError) {
@@ -512,7 +544,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
     }
 
     /// Queues the current file, whose contents are `contents` (their references taken: the planner owns them now).
-    nonisolated(nonsending) private mutating func planFile(size: Int, contents: SegmentContents.Contents) async throws(DiskError) {
+    private nonisolated(nonsending) mutating func planFile(size: Int, contents: SegmentContents.Contents) async throws(DiskError) {
         let pathStorage = path
         let entryPath: EntryPath
         do throws(DiskError) {
@@ -586,6 +618,9 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
     mutating func metadata(_ blob: AAMetadataBlob, _ bytes: RawSpan, offset: Int) throws(AEAError) {
         // Blobs come whole and in order (one finishes before the next starts), so each is one run of `blobs`.
         guard acceptsBlobs else { return }
+        // Room for every blob of the entry at once, from their declared sizes (bounded at the header's parse), not grown
+        // by doubling: one 80 MB attribute peaked at 380 MB that way.
+        if blobs.isEmpty { blobs.reserveCapacity(blobByteCount) }
         let start = blobs.count
         blobs.append(copying: bytes)
         switch blob {

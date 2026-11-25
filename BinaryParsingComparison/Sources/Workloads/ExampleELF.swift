@@ -82,8 +82,8 @@ public struct ExampleELF {
                 case .executable: 0x0002
                 case .sharedObject: 0x0003
                 case .coreFile: 0x0004
-                case .osSpecific(let value): value
-                case .processorSpecific(let value): value
+                case let .osSpecific(value): value
+                case let .processorSpecific(value): value
                 }
             }
         }
@@ -159,7 +159,7 @@ public struct ExampleELF {
                 case .shlib: 0x0000_0005
                 case .programHeader: 0x0000_0006
                 case .threadLocalStorage: 0x0000_0007
-                case .osSpecific(let value), .processorSpecific(let value):
+                case let .osSpecific(value), let .processorSpecific(value):
                     value
                 }
             }
@@ -254,7 +254,7 @@ public struct ExampleELF {
                 case .sectionGroup: 0x11
                 case .extendedSectionIndicies: 0x12
                 case .numberOfDefinedTypes: 0x13
-                case .osSpecific(let value): value
+                case let .osSpecific(value): value
                 }
             }
         }
@@ -294,173 +294,201 @@ extension ExampleELF: ExpressibleByParsing {
         let header = try Header(parsing: &input)
 
         try input.seek(toAbsoluteOffset: header.programHeaderTable)
-        self.programHeaders = try Array(
+        programHeaders = try Array(
             parsing: &input,
             count: header.programHeaderEntryCount
         ) { buffer in
             try ProgramHeader(
                 parsing: &buffer,
                 class: header.class,
-                endian: header.endian.parse)
+                endian: header.endian.parse
+            )
         }
 
         try input.seek(toAbsoluteOffset: Int(header.sectionHeaderTable))
-        self.sectionHeaders = try Array(
+        sectionHeaders = try Array(
             parsing: &input,
             count: header.sectionHeaderEntryCount
         ) { buffer in
             try SectionHeader(
                 parsing: &buffer,
                 class: header.class,
-                endian: header.endian.parse)
+                endian: header.endian.parse
+            )
         }
 
         self.header = header
     }
 }
 
-extension ExampleELF.ProgramHeader {
-    public init(
+public extension ExampleELF.ProgramHeader {
+    init(
         parsing input: inout ParserSpan, class: ExampleELF.Header.Class, endian: Endianness
     ) throws {
         switch `class` {
         case .class32Bit:
-            self.type = try SegmentType(parsing: &input, endianness: endian)
+            type = try SegmentType(parsing: &input, endianness: endian)
 
-            self.offset = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.virtualAddress = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.physicalAddress = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.fileSize = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.memorySize = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
+            offset = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            virtualAddress = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            physicalAddress = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            fileSize = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            memorySize = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
 
-            self.flags = try Flags(parsing: &input, endianness: endian)
+            flags = try Flags(parsing: &input, endianness: endian)
 
-            self.alignment = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
+            alignment = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
 
         case .class64Bit:
-            self.type = try SegmentType(parsing: &input, endianness: endian)
-            self.flags = try Flags(parsing: &input, endianness: endian)
+            type = try SegmentType(parsing: &input, endianness: endian)
+            flags = try Flags(parsing: &input, endianness: endian)
 
-            self.offset = try UInt64(parsing: &input, endianness: endian)
-            self.virtualAddress = try UInt64(parsing: &input, endianness: endian)
-            self.physicalAddress = try UInt64(parsing: &input, endianness: endian)
-            self.fileSize = try UInt64(parsing: &input, endianness: endian)
-            self.memorySize = try UInt64(parsing: &input, endianness: endian)
-            self.alignment = try UInt64(parsing: &input, endianness: endian)
+            offset = try UInt64(parsing: &input, endianness: endian)
+            virtualAddress = try UInt64(parsing: &input, endianness: endian)
+            physicalAddress = try UInt64(parsing: &input, endianness: endian)
+            fileSize = try UInt64(parsing: &input, endianness: endian)
+            memorySize = try UInt64(parsing: &input, endianness: endian)
+            alignment = try UInt64(parsing: &input, endianness: endian)
         }
     }
 }
 
-extension ExampleELF.SectionHeader {
-    public init(
+public extension ExampleELF.SectionHeader {
+    init(
         parsing input: inout ParserSpan, class: ExampleELF.Header.Class, endian: Endianness
     ) throws {
         switch `class` {
         case .class32Bit:
-            self.nameOffset = try UInt32(parsing: &input, endianness: endian)
-            self.type = try HeaderType(parsing: &input, endianness: endian)
-            self.flags = try Flags(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.virtualAddress = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.offset = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.size = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.associatedSectionIndex = try UInt32(
-                parsing: &input, endianness: endian)
-            self.infoSectionIndex = try UInt32(parsing: &input, endianness: endian)
-            self.alignment = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
-            self.entrySize = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian)
+            nameOffset = try UInt32(parsing: &input, endianness: endian)
+            type = try HeaderType(parsing: &input, endianness: endian)
+            flags = try Flags(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            virtualAddress = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            offset = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            size = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            associatedSectionIndex = try UInt32(
+                parsing: &input, endianness: endian
+            )
+            infoSectionIndex = try UInt32(parsing: &input, endianness: endian)
+            alignment = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
+            entrySize = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian
+            )
 
         case .class64Bit:
-            self.nameOffset = try UInt32(parsing: &input, endianness: endian)
-            self.type = try HeaderType(parsing: &input, endianness: endian)
-            self.flags = try Flags(parsing: &input, endianness: endian)
-            self.virtualAddress = try UInt64(parsing: &input, endianness: endian)
-            self.offset = try UInt64(parsing: &input, endianness: endian)
-            self.size = try UInt64(parsing: &input, endianness: endian)
-            self.associatedSectionIndex = try UInt32(
-                parsing: &input, endianness: endian)
-            self.infoSectionIndex = try UInt32(parsing: &input, endianness: endian)
-            self.alignment = try UInt64(parsing: &input, endianness: endian)
-            self.entrySize = try UInt64(parsing: &input, endianness: endian)
+            nameOffset = try UInt32(parsing: &input, endianness: endian)
+            type = try HeaderType(parsing: &input, endianness: endian)
+            flags = try Flags(parsing: &input, endianness: endian)
+            virtualAddress = try UInt64(parsing: &input, endianness: endian)
+            offset = try UInt64(parsing: &input, endianness: endian)
+            size = try UInt64(parsing: &input, endianness: endian)
+            associatedSectionIndex = try UInt32(
+                parsing: &input, endianness: endian
+            )
+            infoSectionIndex = try UInt32(parsing: &input, endianness: endian)
+            alignment = try UInt64(parsing: &input, endianness: endian)
+            entrySize = try UInt64(parsing: &input, endianness: endian)
         }
     }
 }
 
-extension ExampleELF.Header {
-    public init(parsing input: inout ParserSpan) throws {
+public extension ExampleELF.Header {
+    init(parsing input: inout ParserSpan) throws {
         func validate<T: Equatable>(_ check: T, _ value: T) throws -> T {
             guard value == check else { throw ExampleELFError() }
             return value
         }
 
         self.class = try Class(parsing: &input)
-        self.endian = try Endian(parsing: &input)
+        endian = try Endian(parsing: &input)
 
-        self.version = try UInt8(parsing: &input)
+        version = try UInt8(parsing: &input)
         if `class` == .class32Bit {
             _ = try validate(1, self.version)
         }
-        self.osABI = try OSABI(parsing: &input)
-        self.abiVersion = try UInt8(parsing: &input)
+        osABI = try OSABI(parsing: &input)
+        abiVersion = try UInt8(parsing: &input)
 
         // Skip over 7 bytes
         try input.seek(toRelativeOffset: 7)
 
-        self.fileType = try FileType(parsing: &input, endianness: endian.parse)
-        self.instructionSet = try ISA(parsing: &input, endianness: endian.parse)
+        fileType = try FileType(parsing: &input, endianness: endian.parse)
+        instructionSet = try ISA(parsing: &input, endianness: endian.parse)
 
         _ = try validate(1, UInt32(parsing: &input, endianness: endian.parse))
 
         // The size of the next three values differs for 32- and 64-bit executables
         switch `class` {
         case .class32Bit:
-            self.entryPoint = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian.parse)
-            self.programHeaderTable = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian.parse)
-            self.sectionHeaderTable = try UInt64(
-                parsing: &input, storedAs: UInt32.self, endianness: endian.parse)
+            entryPoint = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian.parse
+            )
+            programHeaderTable = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian.parse
+            )
+            sectionHeaderTable = try UInt64(
+                parsing: &input, storedAs: UInt32.self, endianness: endian.parse
+            )
 
         case .class64Bit:
-            self.entryPoint = try UInt64(parsing: &input, endianness: endian.parse)
-            self.programHeaderTable = try UInt64(
-                parsing: &input, endianness: endian.parse)
-            self.sectionHeaderTable = try UInt64(
-                parsing: &input, endianness: endian.parse)
+            entryPoint = try UInt64(parsing: &input, endianness: endian.parse)
+            programHeaderTable = try UInt64(
+                parsing: &input, endianness: endian.parse
+            )
+            sectionHeaderTable = try UInt64(
+                parsing: &input, endianness: endian.parse
+            )
         }
 
-        self.architectureFlags = try UInt32(
-            parsing: &input, endianness: endian.parse)
+        architectureFlags = try UInt32(
+            parsing: &input, endianness: endian.parse
+        )
 
         _ = try validate(
             self.class.headerSize,
-            UInt16(parsing: &input, endianness: endian.parse))
+            UInt16(parsing: &input, endianness: endian.parse)
+        )
         _ = try validate(
             self.class.programHeaderEntrySize,
-            UInt16(parsing: &input, endianness: endian.parse))
+            UInt16(parsing: &input, endianness: endian.parse)
+        )
 
-        self.programHeaderEntryCount = try UInt16(
-            parsing: &input, endianness: endian.parse)
+        programHeaderEntryCount = try UInt16(
+            parsing: &input, endianness: endian.parse
+        )
 
         _ = try validate(
             self.class.sectionHeaderEntrySize,
-            UInt16(parsing: &input, endianness: endian.parse))
+            UInt16(parsing: &input, endianness: endian.parse)
+        )
 
-        self.sectionHeaderEntryCount = try UInt16(
-            parsing: &input, endianness: endian.parse)
-        self.sectionNameIndex = try UInt16(
-            parsing: &input, endianness: endian.parse)
+        sectionHeaderEntryCount = try UInt16(
+            parsing: &input, endianness: endian.parse
+        )
+        sectionNameIndex = try UInt16(
+            parsing: &input, endianness: endian.parse
+        )
     }
 }
 
@@ -498,13 +526,13 @@ extension ExampleELF.Header.Class {
 
 // MARK: Deferred parsing
 
-extension ExampleELF {
-    public func sectionName(at index: Int, data: Data) -> String? {
+public extension ExampleELF {
+    func sectionName(at index: Int, data: Data) -> String? {
         guard let sectionHeader = sectionHeaders[ifInBounds: index],
-            let nameIndex = Int(exactly: sectionHeader.nameOffset),
-            let namesSection = sectionHeaders[ifInBounds: header.sectionNameIndex],
-            namesSection.type == .stringTable,
-            let namesOffset = Int(exactly: namesSection.offset)
+              let nameIndex = Int(exactly: sectionHeader.nameOffset),
+              let namesSection = sectionHeaders[ifInBounds: header.sectionNameIndex],
+              namesSection.type == .stringTable,
+              let namesOffset = Int(exactly: namesSection.offset)
         else { return nil }
 
         return try? data.withParserSpan { span in

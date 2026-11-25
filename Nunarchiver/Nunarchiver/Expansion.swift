@@ -53,7 +53,7 @@ import Foundation
             case .cancelButtonTapped:
                 cancel(&state)
 
-            case .credentialRequested(let request):
+            case let .credentialRequested(request):
                 state.byteSamples = []
                 state.credentialRequest = request
                 state.credentialText = ""
@@ -108,7 +108,7 @@ import Foundation
         // expander also raises its own work and holds an activity against App Nap).
         store.addTask(id: state.expansion, priority: .userInitiated) {
             switch await archiveExpander.expand(archive, id: id, credentials: credentials) {
-            case .needsCredential(let request):
+            case let .needsCredential(request):
                 try store.send(.credentialRequested(request))
             case let outcome:
                 try store.send(.expansionFinished(outcome))

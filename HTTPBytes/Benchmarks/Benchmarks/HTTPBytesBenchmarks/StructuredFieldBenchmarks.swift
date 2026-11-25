@@ -22,12 +22,16 @@ func walkHTTPBytesDictionary(_ bytes: [UInt8]) -> Int {
             while let member = try dictionary.next() {
                 total &+= member.key.byteCount
                 switch member.value {
-                case .item(let item):
+                case let .item(item):
                     total &+= weight(item.bareItem)
                     var parameters = item.parameters
-                    while let parameter = parameters.next() { total &+= parameter.key.byteCount }
-                case .innerList(var list):
-                    while let item = list.next() { total &+= weight(item.bareItem) }
+                    while let parameter = parameters.next() {
+                        total &+= parameter.key.byteCount
+                    }
+                case var .innerList(list):
+                    while let item = list.next() {
+                        total &+= weight(item.bareItem)
+                    }
                 }
             }
         } catch { return -1 }
@@ -43,12 +47,16 @@ func walkHTTPBytesList(_ bytes: [UInt8]) -> Int {
         do {
             while let member = try list.next() {
                 switch member {
-                case .item(let item):
+                case let .item(item):
                     total &+= weight(item.bareItem)
                     var parameters = item.parameters
-                    while let parameter = parameters.next() { total &+= parameter.key.byteCount }
-                case .innerList(var inner):
-                    while let item = inner.next() { total &+= weight(item.bareItem) }
+                    while let parameter = parameters.next() {
+                        total &+= parameter.key.byteCount
+                    }
+                case var .innerList(inner):
+                    while let item = inner.next() {
+                        total &+= weight(item.bareItem)
+                    }
                 }
             }
         } catch { return -1 }
@@ -59,14 +67,14 @@ func walkHTTPBytesList(_ bytes: [UInt8]) -> Int {
 @inline(__always)
 func weight(_ item: HTTPStructuredBareItem) -> Int {
     switch item {
-    case .integer(let value): Int(truncatingIfNeeded: value)
-    case .decimal(let value): Int(truncatingIfNeeded: value.thousandths)
-    case .string(let value): value.byteCount
-    case .token(let value): value.byteCount
-    case .byteSequence(let value): value.byteCount
-    case .boolean(let value): value ? 1 : 0
-    case .date(let value): Int(truncatingIfNeeded: value)
-    case .displayString(let value): value.byteCount
+    case let .integer(value): Int(truncatingIfNeeded: value)
+    case let .decimal(value): Int(truncatingIfNeeded: value.thousandths)
+    case let .string(value): value.byteCount
+    case let .token(value): value.byteCount
+    case let .byteSequence(value): value.byteCount
+    case let .boolean(value): value ? 1 : 0
+    case let .date(value): Int(truncatingIfNeeded: value)
+    case let .displayString(value): value.byteCount
     }
 }
 
@@ -89,8 +97,8 @@ func referenceDictionary(_ bytes: [UInt8]) -> Int {
         for (key, value) in dictionary {
             total &+= key.utf8.count
             switch value {
-            case .item(let item): total &+= item.rfc9651Parameters.count &+ 1
-            case .innerList(let list): total &+= list.bareInnerList.count
+            case let .item(item): total &+= item.rfc9651Parameters.count &+ 1
+            case let .innerList(list): total &+= list.bareInnerList.count
             }
         }
     }
@@ -105,8 +113,8 @@ func referenceList(_ bytes: [UInt8]) -> Int {
         guard let list = try? parser.parseListFieldValue() else { return -1 }
         for member in list {
             switch member {
-            case .item(let item): total &+= item.rfc9651Parameters.count &+ 1
-            case .innerList(let inner): total &+= inner.bareInnerList.count
+            case let .item(item): total &+= item.rfc9651Parameters.count &+ 1
+            case let .innerList(inner): total &+= inner.bareInnerList.count
             }
         }
     }
@@ -116,7 +124,9 @@ func referenceList(_ bytes: [UInt8]) -> Int {
 func registerStructuredFieldBenchmarks() {
     func register(_ name: String, _ run: @escaping () -> Int) {
         Benchmark(name) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         } setup: {
             precondition(run() > 0, "\(name): failed")
         }
@@ -133,6 +143,8 @@ func registerStructuredFieldBenchmarks() {
         thresholds: [.mallocCountTotal: BenchmarkThresholds(absolute: [.p0: 0, .p50: 0, .p90: 0, .p100: 0])]
     )
     Benchmark("Allocations:StructuredFields_dictionary", configuration: zeroAllocations) { benchmark in
-        for _ in benchmark.scaledIterations { blackHole(walkHTTPBytesDictionary(dictionaryValue)) }
+        for _ in benchmark.scaledIterations {
+            blackHole(walkHTTPBytesDictionary(dictionaryValue))
+        }
     }
 }

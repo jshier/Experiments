@@ -51,7 +51,7 @@ import Testing
         reader.rewind(to: start)
         #expect(reader.byteOffset == 0)
         #expect(throws: BytesError.insufficientData) {
-            try reader.atomically { (copy) throws(BytesError) in _ = try copy.read(Byte8.self) }
+            try reader.atomically { copy throws(BytesError) in _ = try copy.read(Byte8.self) }
         }
         #expect(reader.byteOffset == 0)
         try reader.seek(toByteOffset: 3)
@@ -82,14 +82,14 @@ import Testing
 
     @Test func outputSpanBuilders() throws {
         var output = [UInt8](repeating: 0, count: 8)
-        let written = try output.withOutputRawSpan { (span) throws(BytesError) -> Int in
-            try span.withAlignedBytesWriter { (writer) throws(BytesError) in try writer.write(0x0A0B as Byte2) }
+        let written = try output.withOutputRawSpan { span throws(BytesError) -> Int in
+            try span.withAlignedBytesWriter { writer throws(BytesError) in try writer.write(0x0A0B as Byte2) }
             return span.byteCount
         }
         #expect(written == 2 && output[0] == 0x0A && output[1] == 0x0B) // `Byte2` literals are in memory order.
 
         var array: [UInt8] = [9]
-        try array.append(alignedByteCapacity: 4) { (writer) throws(BytesError) in try writer.write(7 as Byte) }
+        try array.append(alignedByteCapacity: 4) { writer throws(BytesError) in try writer.write(7 as Byte) }
         #expect(array == [9, 7])
 
         let text = String(utf8Capacity: 5) { writer in try! writer.write(Array("hello".utf8).span) }

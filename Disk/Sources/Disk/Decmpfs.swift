@@ -51,6 +51,26 @@ public enum DiskCodec: Sendable, Hashable, CaseIterable {
         default: return nil
         }
     }
+
+    /// BytesCompression's encoding of a chunk: Compression's bytes for the Apple codecs, zlib at level 6.
+    var compressionFormat: CompressionFormat {
+        switch self {
+        case .lzvn: .lzvn
+        case .lzfse: .lzfse
+        case .lzbitmap: .lzbitmap
+        case .zlib: .deflate(.zlib, level: 6)
+        }
+    }
+
+    /// BytesCompression's decoding of a chunk.
+    var decompressionFormat: DecompressionFormat {
+        switch self {
+        case .lzvn: .lzvn
+        case .lzfse: .lzfse
+        case .lzbitmap: .lzbitmap
+        case .zlib: .deflate(.zlib)
+        }
+    }
 }
 
 /// How a file is stored when it's to be APFS-compressed: the codec and an extractor's rules for when compressing pays.
@@ -131,8 +151,8 @@ public struct StoragePolicy: Sendable, Hashable {
     @inline(__always)
     func pays(_ forkCount: Int, _ rawCount: Int) -> Bool {
         switch rule {
-        case .bytes(let percent): forkCount * 100 < rawCount * percent
-        case .blocks(let numerator, let denominator): (forkCount + 4095) / 4096 * denominator <= (rawCount + 4095) / 4096 * numerator
+        case let .bytes(percent): forkCount * 100 < rawCount * percent
+        case let .blocks(numerator, denominator): (forkCount + 4095) / 4096 * denominator <= (rawCount + 4095) / 4096 * numerator
         }
     }
 
@@ -170,22 +190,23 @@ enum Decmpfs {
         header[1] = 0x70
         header[2] = 0x6D
         header[3] = 0x63
-        for index in 0..<4 { header[4 + index] = UInt8(truncatingIfNeeded: type >> (8 * UInt32(index))) }
-        for index in 0..<8 { header[8 + index] = UInt8(truncatingIfNeeded: UInt64(size) >> (8 * UInt64(index))) }
+        for index in 0..<4 {
+            header[4 + index] = UInt8(truncatingIfNeeded: type >> (8 * UInt32(index)))
+        }
+        for index in 0..<8 {
+            header[8 + index] = UInt8(truncatingIfNeeded: UInt64(size) >> (8 * UInt64(index)))
+        }
         return header
     }
 }
 
-/// A writer's chunk encoders, each made on first use and kept (BytesCompression's allocate their tables at creation,
-/// and encoding allocates nothing). Used by one writer at a time.
+/// A writer's chunk encoders: BytesCompression's `Compressor`, each codec's encoder made on first use and kept (they
+/// allocate their tables at creation, and encoding allocates nothing). Used by one writer at a time.
 ///
 /// All three Apple codecs write Compression's streams byte for byte (LZBITMAP, LZFSE, LZVN with Compression's parse),
 /// and fail where it fails, so files are stored as `aa extract` and `xip --expand` store them.
 final class ChunkEncoders {
-    private var lzbitmap: LZBitmapEncoder?
-    private var lzfse: LZFSEEncoder?
-    private var lzvn: LZVNEncoder?
-    private var zlib: DeflateEncoder?
+    private var compressor = Compressor()
 
     init() {}
 
@@ -223,22 +244,12 @@ final class ChunkEncoders {
         // Unsafe: an output span over that buffer, none of it initialized. Safe: the buffer outlives the span, which
         // is finalized against the same buffer below; the encoders write only through it, so within `capacity`.
         var target = unsafe OutputRawSpan(buffer: buffer, initializedCount: 0)
-        let fits: Bool
-        switch codec {
-        case .lzbitmap:
-            if lzbitmap == nil { lzbitmap = LZBitmapEncoder() }
-            fits = (try? lzbitmap!.compress(source, into: &target)) != nil
-        case .lzfse:
-            if lzfse == nil { lzfse = LZFSEEncoder() }
-            fits = (try? lzfse!.compressAll(source, into: &target)) != nil
-        case .lzvn:
-            if lzvn == nil { lzvn = LZVNEncoder() }
-            fits = (try? lzvn!.compressAll(source, into: &target)) != nil
-        case .zlib:
-            if zlib == nil { zlib = DeflateEncoder(format: .zlib, level: 6) }
-            zlib!.reset()
-            fits = (try? zlib!.compressAll(source, into: &target)) != nil
-        }
+        // Every `compressAll` starts a new stream (zlib's encoder resets itself once used); the encoder is chosen again
+        // only when the codec changes.
+        let format = codec.compressionFormat
+        // Disk's codecs are fixed formats with valid parameters: `reset(for:)` can't throw for them.
+        if compressor.format != format { try? compressor.reset(for: format) }
+        let fits = (try? compressor.compressAll(source, into: &target)) != nil
         // Unsafe: ends the output span, taking its count. Safe: `buffer` is the buffer the span was made over.
         let written = unsafe target.finalize(for: buffer)
         return fits ? written : 0
@@ -251,8 +262,8 @@ final class ChunkEncoders {
 final class ForkUnpacker {
     private let stored = RawStorage(byteCount: Decmpfs.chunkSize + 64)
     private let raw = RawStorage(byteCount: Decmpfs.chunkSize)
-    private var lzbitmap = LZBitmapDecoder()
-    private var lzfse = LZFSEDecoder()
+    /// BytesCompression's decoder, reset for the fork's codec.
+    private var decompressor = Decompressor()
 
     /// Decompresses one chunk (compressed, or the raw marker and the raw bytes) from `stored` into exactly `rawCount`
     /// bytes of `raw`.
@@ -276,13 +287,11 @@ final class ForkUnpacker {
         // Unsafe: an output span over that buffer, none of it initialized. Safe: the buffer outlives the span, which
         // is finalized against it below; the decoders write only through it, so within `rawCount`.
         var output = unsafe OutputRawSpan(buffer: rawBuffer, initializedCount: 0)
+        guard codec != .zlib else { return false } // Never in a fork.
         do throws(BytesError) {
-            switch codec {
-            case .lzbitmap: _ = try lzbitmap.decompressAll(input, decodedSize: rawCount, into: &output)
-            case .lzfse: _ = try lzfse.decompressAll(input, into: &output)
-            case .lzvn: _ = try LZVNDecoder().decompressAll(input, into: &output)
-            case .zlib: return false // Never in a fork.
-            }
+            let format = codec.decompressionFormat
+            if decompressor.format != format { try decompressor.reset(for: format) }
+            _ = try decompressor.decompressAll(input, into: &output, decodedSize: rawCount)
         } catch {
             return false
         }

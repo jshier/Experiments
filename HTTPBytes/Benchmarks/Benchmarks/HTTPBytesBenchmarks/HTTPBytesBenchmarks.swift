@@ -49,7 +49,7 @@ final class HeadCorpus: Sendable {
     }
 
     /// Each head's end (`offsets[i + 1]`, or `count` for the last), for parsing each from a span of exactly its bytes.
-    var ends: [Int] { offsets.dropFirst().map { $0 } + [count] }
+    var ends: [Int] { offsets.dropFirst().map(\.self) + [count] }
 }
 
 let requests = Lazy { HeadCorpus(file: "requests.http1") }
@@ -99,11 +99,11 @@ func requestEvents(_ bytes: RawSpan, options: HTTP1ParserOptions, knownNames: Bo
     do {
         while true {
             switch try parser.next(in: bytes) {
-            case .requestLine(let line): total &+= line.method.byteCount &+ line.target.byteCount
-            case .field(let field):
+            case let .requestLine(line): total &+= line.method.byteCount &+ line.target.byteCount
+            case let .field(field):
                 total &+= field.name.byteCount &+ field.value.byteCount
                 if knownNames { total &+= Int(field.knownName?.index ?? 0) }
-            case .end(let count): blackHole(total); return count
+            case let .end(count): blackHole(total); return count
             case .needsMore: return -1
             }
         }
@@ -117,11 +117,11 @@ func responseEvents(_ bytes: RawSpan, options: HTTP1ParserOptions, knownNames: B
     do {
         while true {
             switch try parser.next(in: bytes) {
-            case .statusLine(let line): total &+= line.status.code &+ line.reasonPhrase.byteCount
-            case .field(let field):
+            case let .statusLine(line): total &+= line.status.code &+ line.reasonPhrase.byteCount
+            case let .field(field):
                 total &+= field.name.byteCount &+ field.value.byteCount
                 if knownNames { total &+= Int(field.knownName?.index ?? 0) }
-            case .end(let count): blackHole(total); return count
+            case let .end(count): blackHole(total); return count
             case .needsMore: return -1
             }
         }
@@ -146,8 +146,8 @@ func parseRequestIntoStore(_ bytes: RawSpan, _ store: inout HTTPFieldStore) -> I
         while true {
             switch try parser.next(in: bytes) {
             case .requestLine: continue
-            case .field(let field): try store.append(field)
-            case .end(let count): blackHole(store.count); return count
+            case let .field(field): try store.append(field)
+            case let .end(count): blackHole(store.count); return count
             case .needsMore: return -1
             }
         }
@@ -164,10 +164,10 @@ func parseRequestIntoHTTPFields(_ bytes: RawSpan) -> Int {
         while true {
             switch try parser.next(in: bytes) {
             case .requestLine: continue
-            case .field(let field):
+            case let .field(field):
                 guard let name = HTTPField.Name(string(field.name)) else { return -3 }
                 fields.append(HTTPField(name: name, value: string(field.value)))
-            case .end(let count): blackHole(fields.count); return count
+            case let .end(count): blackHole(fields.count); return count
             case .needsMore: return -1
             }
         }
@@ -186,7 +186,9 @@ func everyHead(_ corpus: HeadCorpus, alone: Bool = false, _ parse: (RawSpan) -> 
     let bytes = corpus.bytes
     let span = bytes.span.bytes.extracting(0..<corpus.count)
     for (offset, end) in zip(corpus.offsets, corpus.ends)
-    where parse(span.extracting(offset..<(alone ? end : corpus.count))) != end - offset { return 0 }
+        where parse(span.extracting(offset..<(alone ? end : corpus.count))) != end - offset {
+        return 0
+    }
     return 1
 }
 
@@ -196,7 +198,9 @@ func everyHeadC(_ corpus: HeadCorpus, alone: Bool = false,
         let base = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
         var fields: Int32 = 0
         for (offset, end) in zip(corpus.offsets, corpus.ends)
-        where parse(base + offset, (alone ? end : corpus.count) - offset, &fields) != end - offset { return 0 }
+            where parse(base + offset, (alone ? end : corpus.count) - offset, &fields) != end - offset {
+            return 0
+        }
         return 1
     }
 }
@@ -206,7 +210,9 @@ func eachHead(_ corpus: HeadCorpus, _ parse: (RawSpan) -> Int) -> Int {
     let bytes = corpus.bytes
     let span = bytes.span.bytes.extracting(0..<corpus.count)
     var total = 0
-    for offset in corpus.offsets { total &+= parse(span.extracting(droppingFirst: offset)) }
+    for offset in corpus.offsets {
+        total &+= parse(span.extracting(droppingFirst: offset))
+    }
     return total
 }
 
@@ -216,7 +222,9 @@ func eachHeadAlone(_ corpus: HeadCorpus, _ ends: [Int], _ parse: (RawSpan) -> In
     let bytes = corpus.bytes
     let span = bytes.span.bytes
     var total = 0
-    for (offset, end) in zip(corpus.offsets, ends) { total &+= parse(span.extracting(offset..<end)) }
+    for (offset, end) in zip(corpus.offsets, ends) {
+        total &+= parse(span.extracting(offset..<end))
+    }
     return total
 }
 
@@ -225,7 +233,9 @@ func eachHeadC(_ corpus: HeadCorpus, _ parse: (UnsafePointer<CChar>, Int, Unsafe
     corpus.bytes.withUnsafeBytes { raw in
         let base = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
         var total = 0, fields: Int32 = 0
-        for offset in corpus.offsets { total &+= parse(base + offset, corpus.count - offset, &fields) &+ Int(fields) }
+        for offset in corpus.offsets {
+            total &+= parse(base + offset, corpus.count - offset, &fields) &+ Int(fields)
+        }
         return total
     }
 }
@@ -235,7 +245,9 @@ func eachHeadAloneC(_ corpus: HeadCorpus, _ ends: [Int], _ parse: (UnsafePointer
     corpus.bytes.withUnsafeBytes { raw in
         let base = raw.baseAddress!.assumingMemoryBound(to: CChar.self)
         var total = 0, fields: Int32 = 0
-        for (offset, end) in zip(corpus.offsets, ends) { total &+= parse(base + offset, end - offset, &fields) &+ Int(fields) }
+        for (offset, end) in zip(corpus.offsets, ends) {
+            total &+= parse(base + offset, end - offset, &fields) &+ Int(fields)
+        }
         return total
     }
 }
@@ -250,7 +262,7 @@ func decodeChunked(_ body: RawSpan) -> Int {
         while true {
             var consumed = 0
             switch try decoder.next(in: unread, consumed: &consumed) {
-            case .data(let data): total &+= data.byteCount
+            case let .data(data): total &+= data.byteCount
             case .trailer: break
             case .end: return total
             case .needsMore: return -1
@@ -299,7 +311,9 @@ let benchmarks: @Sendable () -> Void = {
 
     func register(_ name: String, setup: @escaping () -> Int, _ run: @escaping () -> Int) {
         Benchmark(name) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         } setup: {
             precondition(setup() > 0, "\(name): failed")
         }
@@ -415,7 +429,9 @@ let benchmarks: @Sendable () -> Void = {
     ]
     for (name, run) in gates {
         Benchmark(name, configuration: zeroAllocations) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         }
     }
 

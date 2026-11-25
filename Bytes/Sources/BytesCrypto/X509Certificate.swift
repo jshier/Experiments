@@ -37,7 +37,7 @@ public struct X509Certificate: ~Escapable {
     @_lifetime(copy der)
     public init(derEncoded der: RawSpan) throws(BytesError) {
         self.der = der
-        self.layout = try X509Layout(parsing: der)
+        layout = try X509Layout(parsing: der)
     }
 
     /// The certificate's version: 1, 2, or 3.
@@ -162,7 +162,9 @@ extension RawSpan {
     /// Whether two spans hold the same bytes.
     func equals(_ other: RawSpan) -> Bool {
         guard byteCount == other.byteCount else { return false }
-        for index in 0..<byteCount where byteOffsetLoad(index) != other.byteOffsetLoad(index) { return false }
+        for index in 0..<byteCount where byteOffsetLoad(index) != other.byteOffsetLoad(index) {
+            return false
+        }
         return true
     }
 }
@@ -370,7 +372,9 @@ public struct X509NameAttribute: ~Escapable {
             return String(scalars)
         case .teletexString:
             var scalars = String.UnicodeScalarView()
-            for index in 0..<value.byteCount { scalars.append(Unicode.Scalar(value.byteOffsetLoad(index))) }
+            for index in 0..<value.byteCount {
+                scalars.append(Unicode.Scalar(value.byteOffsetLoad(index)))
+            }
             return String(scalars)
         case .bmpString:
             guard value.byteCount % 2 == 0 else { return nil }
@@ -389,7 +393,9 @@ public struct X509NameAttribute: ~Escapable {
             var scalars = String.UnicodeScalarView()
             for index in stride(from: 0, to: value.byteCount, by: 4) {
                 var code: UInt32 = 0
-                for byte in 0..<4 { code = code << 8 | UInt32(value.byteOffsetLoad(index + byte)) }
+                for byte in 0..<4 {
+                    code = code << 8 | UInt32(value.byteOffsetLoad(index + byte))
+                }
                 guard let scalar = Unicode.Scalar(code) else { return nil }
                 scalars.append(scalar)
             }
@@ -408,7 +414,7 @@ extension UTF16 {
         var result: [Unicode.Scalar?] = []
         loop: while true {
             switch decoder.decode(&iterator) {
-            case .scalarValue(let scalar): result.append(scalar)
+            case let .scalarValue(scalar): result.append(scalar)
             case .emptyInput: break loop
             case .error: result.append(nil); break loop
             }
@@ -520,7 +526,7 @@ struct X509Layout: Sendable {
         if reader.nextASN1Tag == .contextSpecific(0, constructed: true) {
             let wrapper = try reader.readASN1Element()
             var inner = try Self.children(der, wrapper)
-            let value = try Self.smallInteger(der, try inner.readASN1Element(.integer))
+            let value = try Self.smallInteger(der, inner.readASN1Element(.integer))
             guard inner.isAtEnd else { throw .trailingData }
             guard value >= 1, value <= 2 else { throw .invalidValue } // v1 is the default: omitted in DER.
             version = value &+ 1
@@ -536,8 +542,8 @@ struct X509Layout: Sendable {
         issuer = issuerName.range
         let validity = try reader.readASN1Element(.sequence)
         var times = try Self.children(der, validity)
-        notBefore = try Self.time(der, try times.readASN1Element())
-        notAfter = try Self.time(der, try times.readASN1Element())
+        notBefore = try Self.time(der, times.readASN1Element())
+        notAfter = try Self.time(der, times.readASN1Element())
         guard times.isAtEnd else { throw .trailingData }
         let subjectName = try reader.readASN1Element(.sequence)
         try Self.checkName(der, subjectName)
@@ -545,8 +551,8 @@ struct X509Layout: Sendable {
         let keyInfo = try reader.readASN1Element(.sequence)
         subjectPublicKeyInfo = keyInfo.range
         var keyFields = try Self.children(der, keyInfo)
-        (publicKeyAlgorithm, publicKeyParameters) = try Self.algorithm(der, try keyFields.readASN1Element(.sequence))
-        publicKey = try Self.bitString(der, try keyFields.readASN1Element(.bitString), allowingUnusedBits: false)
+        (publicKeyAlgorithm, publicKeyParameters) = try Self.algorithm(der, keyFields.readASN1Element(.sequence))
+        publicKey = try Self.bitString(der, keyFields.readASN1Element(.bitString), allowingUnusedBits: false)
         guard keyFields.isAtEnd else { throw .trailingData }
         if let parameters = publicKeyParameters, der.byteOffsetLoad(parameters.lowerBound) == ASN1Tag.objectIdentifier.rawValue {
             let element = try ASN1Element.parseHeader(der, at: parameters.lowerBound)
@@ -556,7 +562,7 @@ struct X509Layout: Sendable {
         // issuerUniqueID [1] and subjectUniqueID [2] (v2 and v3), then extensions [3] (v3).
         for number: UInt8 in 1...2 where reader.nextASN1Tag == .contextSpecific(number, constructed: false) {
             guard version >= 2 else { throw .invalidValue }
-            _ = try Self.bitString(der, try reader.readASN1Element(), allowingUnusedBits: true)
+            _ = try Self.bitString(der, reader.readASN1Element(), allowingUnusedBits: true)
         }
         if reader.nextASN1Tag == .contextSpecific(3, constructed: true) {
             guard version == 3 else { throw .invalidValue }
@@ -571,28 +577,26 @@ struct X509Layout: Sendable {
         guard reader.isAtEnd else { throw .trailingData }
     }
 
+    /// The most extensions a certificate may have: more is refused (``BytesError/invalidValue``).
+    static var maximumExtensionCount: Int { 64 }
+
     /// Checks each extension, rejects duplicates, and decodes the ones this type knows.
     mutating func parseExtensions(_ der: RawSpan, _ list: ASN1Element) throws(BytesError) {
         var reader = try Self.children(der, list)
-        var seen = InlineArray<16, Range<Int>>(repeating: 0..<0)
+        // Every identifier so far, to refuse a second of any (RFC 5280, 4.2). At most `maximumExtensionCount`: real
+        // certificates have fewer than 30, and past 16 the check re-read every earlier extension, so 16,000 of them (a
+        // 192 KB certificate, parsed before its signature is checked) took 2.6 s.
+        var seen = InlineArray<64, Range<Int>>(repeating: 0..<0)
         var count = 0
         while !reader.isAtEnd {
+            guard count < Self.maximumExtensionCount else { throw .invalidValue }
             let element = try reader.readASN1Element(.sequence)
             let parts = try Self.extensionParts(der, element)
             let identifier = der.extracting(parts.identifier)
-            // No extension twice (RFC 5280, 4.2): compared with each earlier one, whose identifiers are kept (the first
-            // 16; past that, found again).
-            for index in 0..<min(count, 16) {
+            for index in 0..<count {
                 guard !der.extracting(seen[index]).equals(identifier) else { throw .invalidValue }
             }
-            if count > 16 {
-                var earlier = try Self.children(der, list)
-                while earlier.byteOffset < element.range.lowerBound {
-                    let previous = try Self.extensionParts(der, try earlier.readASN1Element(.sequence))
-                    guard !der.extracting(previous.identifier).equals(identifier) else { throw .invalidValue }
-                }
-            }
-            if count < 16 { seen[count] = parts.identifier }
+            seen[count] = parts.identifier
             count &+= 1
             let value = parts.value
             if ASN1ObjectIdentifier.basicConstraints.matches(identifier) {
@@ -612,7 +616,7 @@ struct X509Layout: Sendable {
         try ASN1ObjectIdentifier.validate(der.extracting(identifier.contents))
         var isCritical = false
         if fields.nextASN1Tag == .boolean {
-            isCritical = try boolean(der, try fields.readASN1Element())
+            isCritical = try boolean(der, fields.readASN1Element())
             guard isCritical else { throw .invalidValue } // FALSE is the default: omitted in DER.
         }
         let value = try fields.readASN1Element(.octetString)
@@ -628,11 +632,11 @@ struct X509Layout: Sendable {
         var fields = try children(der, sequence)
         var constraints = X509BasicConstraints(isCertificateAuthority: false, pathLengthConstraint: nil)
         if fields.nextASN1Tag == .boolean {
-            constraints.isCertificateAuthority = try boolean(der, try fields.readASN1Element())
+            constraints.isCertificateAuthority = try boolean(der, fields.readASN1Element())
             guard constraints.isCertificateAuthority else { throw .invalidValue } // FALSE is the default: omitted in DER.
         }
         if fields.nextASN1Tag == .integer {
-            let length = try smallInteger(der, try fields.readASN1Element())
+            let length = try smallInteger(der, fields.readASN1Element())
             guard length >= 0 else { throw .invalidValue }
             constraints.pathLengthConstraint = length
         }
@@ -698,7 +702,7 @@ struct X509Layout: Sendable {
             guard !set.contents.isEmpty else { throw .invalidValue }
             var attributes = try children(der, set)
             while !attributes.isAtEnd {
-                var pair = try children(der, try attributes.readASN1Element(.sequence))
+                var pair = try children(der, attributes.readASN1Element(.sequence))
                 let type = try pair.readASN1Element(.objectIdentifier)
                 try ASN1ObjectIdentifier.validate(der.extracting(type.contents))
                 let value = try pair.readASN1Element()
@@ -741,7 +745,9 @@ struct X509Layout: Sendable {
         let contents = element.contents
         guard contents.count <= 7 else { throw .invalidValue }
         var value = Int(Int8(bitPattern: der.byteOffsetLoad(contents.lowerBound)))
-        for offset in contents.dropFirst() { value = value &<< 8 | Int(der.byteOffsetLoad(offset)) }
+        for offset in contents.dropFirst() {
+            value = value &<< 8 | Int(der.byteOffsetLoad(offset))
+        }
         return value
     }
 

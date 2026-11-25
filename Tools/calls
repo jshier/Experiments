@@ -11,48 +11,174 @@
 #   --callee  only callees whose demangled name matches this Perl regex
 #   --sum     one line per callee, summed over all matching functions
 #
-# Output, tab-separated: caller, kind (call = bl/blr; tail = b to a symbol), count, callee (demangled).
-# Static counts: call sites, not executions (for those, Tools/runtime-count).
+# Output, tab-separated: caller, kind, count, callee (demangled). Kinds:
+#   call   `bl` to a symbol, or `blr` (and its pointer-authenticated forms) with callee "(indirect)"
+#   tail   `b` to a symbol: a tail call
+#   jump   `br` (and its pointer-authenticated forms): callee "(jump table)" when the register it jumps through was
+#          last written by an `add` of a table entry (`ldrb`, `ldrh`, `ldrsw` indexed by a register: a `switch`),
+#          "(indirect)" otherwise (an indirect tail call, such as a witness-table slot loaded and jumped to)
+# Static counts: call sites, not executions (for those, Tools/runtime-count). Exit status 1 when nothing matched
+# (no calls at all, or none matching --callee): "no swift_retain" is that answer.
 #
-# Objects: callees come from relocations (`objdump -dr`). Binaries: from `otool -tV`, which also names
-# stubs ("symbol stub for: _swift_retain"); plain objdump mislabels stub calls as the nearest symbol.
+# Objects: callees come from relocations (`objdump -dr`). Linked binaries: a `bl`/`b` whose target is a stub (named
+# from `otool -Iv`'s indirect symbols) or a symbol's address (the lowest name there); objdump's own labels for those
+# are wrong (the nearest symbol). The file is disassembled once for all the matching functions (only the listed
+# functions while their names take at most 512 KB). Functions are found by address, so an alias is counted like the
+# function it names, and a name defined several times (compiler-made helpers in a merged object, a static name in
+# several objects of a binary) is counted over every copy, with a note on stderr. Names are read whole as `nm` prints
+# them (Objective-C methods hold spaces); a name holding a comma makes the tool disassemble the whole file. The file is
+# read by its own header, as for Tools/loops: a universal file for its arm64 slice; archives, other architectures, and
+# other files refused (exit 2); a binary stripped of its local symbols gets a warning (a static function's calls are
+# counted for the function before it). A TERM, HUP, or INT stops the tool and everything it started.
+# Known limit: objdump's argument list shares ARG_MAX (1 MB) with the environment: with an environment of several
+# hundred KB, set CALLS_LIST_MAX lower (E2BIG otherwise).
 #
 # examples:
 #   Tools/calls --target SocketStream SocketStream 'Transfer\.' --callee 'swift_task_switch'
 #   Tools/calls .build/release/MQTTBenchmarks 'parsePublish' --callee 'outlined|swift_(retain|release)'
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
+# A TERM, HUP, or INT from here on stops everything this starts (lib/stoppable.sh): a --target build too, and the
+# scratch directory is removed even if the signal comes before scratch_dir has set its EXIT trap.
+source "$TOOLS_DIR/lib/stoppable.sh" || exit 2
+stop_on_signals
 
 [[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]] && usage
 [[ $# -ge 2 ]] || usage 2
-read_input "$@"; shift "$INPUT_ARGS"
+read_input_stoppable "$@"; shift "$INPUT_ARGS"
 [[ $# -ge 1 ]] || usage 2
 file="$INPUT" pattern="$1"; shift
-target='.' sum=
+target='.' sum=''
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --callee) target="$2"; shift ;;
+        --callee) need_value "$@"; target="$2"; shift ;;
         --sum) sum=1 ;;
         -h|--help) usage ;;
         *) die "unknown option $1" ;;
     esac
     shift
 done
-kind="$(file_kind "$file")"
-symbols="$(find_symbols "$file" "$pattern")"
-[[ -n "$symbols" ]] || fail "no function matching /$pattern/ in $file"
+scratch_dir
+# The file from its own header (lib/macho.sh): a universal file's arm64 slice; archives, other files, and other
+# architectures refused.
+source "$TOOLS_DIR/lib/macho.sh" || exit 2
+macho_input
+kind="$FILE_KIND"
+# The names listed for objdump take at most CALLS_LIST_MAX bytes (0: the whole file); by default 512 KB, or less when the
+# environment leaves less of ARG_MAX (its strings and their pointers, and 32 KB for the rest).
+list_room="$(perl -e 'my $env = 0; $env += length("$_=$ENV{$_}") + 9 for keys %ENV; my $room = $ARGV[0] - $env - 32768; print $room > 0 ? $room : 0' "$(getconf ARG_MAX)")"
+list_max="${CALLS_LIST_MAX:-$(( list_room < 524288 ? list_room : 524288 ))}"
+[[ "$list_max" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "CALLS_LIST_MAX must be a whole number of bytes, not '$list_max'"
+# A linked binary's stubs, named (calls to other images go through them).
+[[ "$kind" == object ]] || "$OTOOL" -Iv "$file" > "$SCRATCH/stubs" 2>/dev/null &
+# The defined symbols, and the matches from them (lib/names.pl: text symbols in code sections), demangled in one run,
+# matched (a Perl regex) against the demangled or the mangled name.
+# In the background, waited for, so a signal stops it at once (a foreground command that doesn't get the INT itself
+# would make bash drop it).
+list_functions() {
+    "$NM" --defined-only "$file" > "$SCRATCH/symbols" 2>/dev/null || die "nm can't read $file"
+    perl "$TOOLS_DIR/lib/names.pl" "$SCRATCH/symbols" "$SCRATCH/code" "$SCRATCH/starts" "$INPUT" \
+        "their calls are counted for the function before them" > "$SCRATCH/names" || die "can't list the functions of $INPUT"
+    paste "$SCRATCH/names" <(demangle < "$SCRATCH/names") |
+        PATTERN="$pattern" perl -ne 'my ($m, $d) = split /\t/; print if $d =~ /$ENV{PATTERN}/ || $m =~ /$ENV{PATTERN}/' > "$SCRATCH/functions"
+}
+run_stoppable list_functions
+wait
+[[ -s "$SCRATCH/functions" ]] || fail "no function matching /$pattern/ in $INPUT"
 
-while IFS=$'\t' read -r mangled demangled; do
-    if [[ "$kind" == object ]]; then
-        "$OBJDUMP" -dr --no-show-raw-insn --disassemble-symbols="$mangled" "$file" |
-            perl -ne 'if (/^\s*[0-9a-f]+:\s+(bl|blr|b)\s/) { $last = $1 } elsif (/ARM64_RELOC_BRANCH26\s+(\S+)/) { print(($last eq "b" ? "tail" : "call"), "\t$1\n") }'
+# Names defined more than once among the matches.
+FUNCTIONS="$SCRATCH/functions" perl -ane '
+    BEGIN { open my $f, "<", $ENV{FUNCTIONS} or die; while (<$f>) { chomp; my ($m, $d) = split /\t/; $demangled{$m} = $d } }
+    $n{$3}++ if /^([0-9a-f]+) ([Tt]) (.+)$/;
+    END { print STDERR "note: $demangled{$_} is defined $n{$_} times (merged objects, or a static name in several); its counts cover every copy\n"
+              for sort grep { $n{$_} > 1 && exists $demangled{$_} } keys %n }' "$SCRATCH/symbols"
+
+# The call sites, as "function index<TAB>kind<TAB>callee (mangled)". A `br` is a jump table's when the register it
+# jumps through was last written by an `add` of a table entry (an `ldrb`/`ldrh`/`ldrsw`… indexed by a register); a
+# pointer loaded and jumped to (`ldr x3, [x2, x9]; br x3`) is an indirect tail call.
+# shellcheck disable=SC2016 # Perl code, not shell.
+common='
+    BEGIN {
+        open my $f, "<", $ENV{FUNCTIONS} or die;
+        my $i = 0;
+        while (<$f>) { chomp; my ($m) = split /\t/; push @{$index_of{$m}}, $i++ }
+        # The matches by address (an alias has the address of what it names), and every text symbol by address (the
+        # lowest name, for a branch target in a linked binary).
+        open my $s, "<", $ENV{SYMBOLS} or die;
+        while (<$s>) {
+            next unless /^([0-9a-f]+) ([A-Za-z]) (.+)$/;
+            my ($address, $type, $name) = (hex $1, $2, $3);
+            # Any section: Objective-C selector stubs (_objc_msgSend$sel) are "s" symbols.
+            $name_at{$address} = $name if !defined $name_at{$address} || $name lt $name_at{$address};
+            push @{$at{$address}}, @{$index_of{$name}} if $type =~ /^[Tt]$/ && $index_of{$name};
+        }
+        # Stubs: "0x000000010000050c     4 _free" under "Indirect symbols for (__TEXT,__stubs)" (or __auth_stubs).
+        if ($ENV{STUBS} && open my $t, "<", $ENV{STUBS}) {
+            my $in;
+            while (<$t>) {
+                if (/^Indirect symbols for \(\w+,(\w+)\)/) { $in = $1 =~ /stubs$/; next }
+                $stub_at{hex $1} = $2 if $in && /^0x([0-9a-f]+)\s+\S+\s+(\S+)/;
+            }
+        }
+    }
+    sub regs { map { /^\s*[xw](\d+)\s*$/ ? $1 : undef } split /,\s*/, $_[0] }
+    sub writes {
+        my ($m, $o) = @_;
+        return (0 .. 18, 30) if $m =~ /^(bl|blr|blraa|blrab|blraaz|blrabz)$/;   # a call clobbers x0-x18 and x30
+        return () if $m =~ /^(st|cmp|cmn|tst|ccmp|ccmn|fcmp|b$|b\.|bc\.|bl|br|cb|tb|ret|prfm|dmb|dsb|isb|nop|brk|udf|hint|msr)/;
+        my @r = regs($o);
+        return grep { defined } ($m =~ /^ldn?p/ ? @r[0, 1] : $r[0]);
+    }
+    sub emit { my $line = shift; print "$_\t$line\n" for @current }
+    sub step {
+        my ($m, $o) = @_;
+        my @r = regs($o);
+        if ($m =~ /^br(aa|ab|aaz|abz)?$/) { emit("jump\t" . (defined $r[0] && $target{$r[0]} ? "(jump table)" : "(indirect)")) }
+        my $entry = $m =~ /^ldr(b|h|sb|sh|sw)$/ && $o =~ /\[x\d+,\s*[xw]\d+/;
+        my $sum = $m eq "add" && grep { defined $_ && $entry{$_} } @r[1, 2];
+        for my $w (writes($m, $o)) { delete $entry{$w}; delete $target{$w} }
+        $entry{$r[0]} = 1 if $entry && defined $r[0];
+        $target{$r[0]} = 1 if $sum && defined $r[0];
+        if ($m =~ /^(b|b\..+|bc\..+|cbn?z|tbn?z|ret\w*|br\w*)$/) { %entry = (); %target = () }
+    }'
+export FUNCTIONS="$SCRATCH/functions" SYMBOLS="$SCRATCH/symbols" STUBS="$SCRATCH/stubs"
+# One disassembly for every match: of the listed symbols while their names take at most 512 KB (far under ARG_MAX, past
+# which objdump fails with E2BIG) and none holds a comma (the list's separator), else of the whole file (listing costs
+# in proportion to the code it covers, so it wins wherever it fits). Each block is the matches defined at its address,
+# whatever name objdump printed (an alias such as ltmp0), so aliases and every copy of a name are counted.
+# The pipelines run in the background, waited for, so a signal stops them at once (lib/stoppable.sh).
+find_sites() {
+    if [[ "$(cut -f1 "$SCRATCH/functions")" != *,* && "$(cut -f1 "$SCRATCH/functions" | wc -c)" -le "$list_max" ]]; then
+        "$OBJDUMP" -dr --no-show-raw-insn --disassemble-symbols="$(cut -f1 "$SCRATCH/functions" | paste -sd, -)" "$file"
     else
-        "$OTOOL" -tV -p "$mangled" "$file" |
-            perl -ne 'next if $. <= 3; last if /^_\S+:$/; if (/\t(bl|b)\t(?:0x[0-9a-f]+\s*;\s*symbol stub for:\s*)?(_\S+)/) { print(($1 eq "b" ? "tail" : "call"), "\t$2\n") } elsif (/\tblr\t/) { print "call\t(indirect)\n" }'
-    fi | demangle | CALLER="$demangled" perl -ne 'chomp; print "$ENV{CALLER}\t$_\n"'
-done <<<"$symbols" |
-    TARGET="$target" SUM="$sum" perl -F'\t' -ane '
-        chomp $F[2]; next unless $F[2] =~ /$ENV{TARGET}/;
-        my $key = $ENV{SUM} ? "(all)\t$F[1]\t$F[2]" : "$F[0]\t$F[1]\t$F[2]";
-        $count{$key}++;
-        END { for (sort { $count{$b} <=> $count{$a} || $a cmp $b } keys %count) { my ($c, $k, $t) = split /\t/; print "$c\t$k\t$count{$_}\t$t\n" }
-              print STDERR "no calls", ($ENV{TARGET} ne "." ? " matching /$ENV{TARGET}/" : ""), " in the matching functions\n" unless %count }'
+        "$OBJDUMP" -dr --no-show-raw-insn "$file"
+    fi | KIND="$kind" perl -ne "$common"'
+        if (/^([0-9a-f]+) <.+>:$/) { @current = @{$at{hex $1} // []}; %entry = (); %target = (); $last = ""; next }
+        next unless @current;
+        # An object: callees from relocations. A linked binary: a `bl`/`b` whose target is a stub or a symbol.
+        # The whole name after the relocation kind: Objective-C methods hold spaces.
+        if (/ARM64_RELOC_BRANCH26\s+(.+?)\s*$/) { emit(($last eq "b" ? "tail" : "call") . "\t$1") }
+        elsif (/^\s*[0-9a-f]+:\s+(\S+)\s*(.*)$/) {
+            my ($m, $o) = ($1, $2);
+            $last = $m;
+            if ($ENV{KIND} ne "object" && $m =~ /^(bl|b)$/ && $o =~ /^0x([0-9a-f]+)/) {
+                my $callee = $stub_at{hex $1} // $name_at{hex $1};
+                emit(($m eq "b" ? "tail" : "call") . "\t$callee") if defined $callee;
+            }
+            emit("call\t(indirect)") if $m =~ /^blr(aa|ab|aaz|abz)?$/;
+            step($m, $o);
+        }' > "$SCRATCH/sites"
+}
+run_stoppable find_sites || die "objdump couldn't disassemble $INPUT (see above)"
+
+# Callees demangled in one run, callers named, then counted.
+count_sites() {
+    paste <(cut -f1,2 "$SCRATCH/sites") <(cut -f3 "$SCRATCH/sites" | demangle) |
+        TARGET="$target" SUM="$sum" perl -F'\t' -ane '
+            BEGIN { open my $f, "<", $ENV{FUNCTIONS} or die; while (<$f>) { chomp; push @caller, (split /\t/)[1] } }
+            chomp $F[2]; next unless $F[2] =~ /$ENV{TARGET}/;
+            my $key = $ENV{SUM} ? "(all)\t$F[1]\t$F[2]" : "$caller[$F[0]]\t$F[1]\t$F[2]";
+            $count{$key}++;
+            END { for (sort { $count{$b} <=> $count{$a} || $a cmp $b } keys %count) { my ($c, $k, $t) = split /\t/; print "$c\t$k\t$count{$_}\t$t\n" }
+                  unless (%count) { print STDERR "no calls", ($ENV{TARGET} ne "." ? " matching /$ENV{TARGET}/" : ""), " in the matching functions\n"; exit 1 } }'
+}
+run_stoppable count_sites

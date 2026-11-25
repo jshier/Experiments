@@ -1,4 +1,5 @@
 internal import Bytes
+internal import BytesCompression
 internal import BytesFoundation
 import Disk
 import Foundation
@@ -120,9 +121,10 @@ public struct ZipArchive: Sendable {
         /// reports that one).
         public static let aes: UInt16 = 99
 
-        /// Whether entries with `method` can be decompressed.
+        /// Whether entries with `method` can be decompressed: stored, LZMA (its format is read from the payload), and
+        /// every method BytesCompression maps to a format (`DecompressionFormat(zipMethod:uncompressedSize:)`).
         public static func isSupported(_ method: UInt16) -> Bool {
-            [stored, deflated, deflate64, bzip2, lzma, zstd, xz].contains(method)
+            method == stored || method == lzma || DecompressionFormat(zipMethod: method, uncompressedSize: nil) != nil
         }
 
         /// A short name for `method`, as listings show it.
@@ -180,7 +182,6 @@ public struct ZipArchive: Sendable {
 }
 
 // MARK: - Central directory
-
 
 extension ZipArchive {
     private struct CentralDirectoryLocation {
@@ -275,6 +276,10 @@ extension ZipArchive {
                     location.size = try zip64.read(UInt64.self)
                     location.offset = try zip64.read(UInt64.self)
                     location.followingRecord = recordOffset
+                    // Bounded as the entries' sizes and offsets are (`maximumSize`).
+                    guard location.entryCount < maximumSize, location.size < maximumSize, location.offset < maximumSize else {
+                        throw BytesError.invalidValue
+                    }
                     return (location, comment)
                 }
             }
@@ -297,6 +302,9 @@ extension ZipArchive {
         guard let offset = window.lastByteOffset(of: Signature.endOfCentralDirectory) else { throw .notAZipArchive }
         return first + offset
     }
+
+    /// The bound on every size and offset the directory gives (exclusive): 2^62.
+    static var maximumSize: UInt64 { 1 << 62 }
 
     @_lifetime(directory: copy directory)
     private static func readCentralDirectoryEntry(
@@ -331,7 +339,7 @@ extension ZipArchive {
                 if localHeaderOffset == UInt32.max { localHeaderOffset = try field.read(UInt64.self) }
             case 0x5455: // Extended timestamp: a flags byte, then a UTC mtime if bit 0 is set.
                 if field.remainingByteCount >= 5, try field.read(ExtendedTimestampFlags.self).modification {
-                    modificationTime = Double(try field.read(Int32.self, asSigned: Byte4.self))
+                    modificationTime = try Double(field.read(Int32.self, asSigned: Byte4.self))
                 }
             case 0x000A: // NTFS: 4 reserved bytes, then tagged attributes; tag 1 holds three 64-bit FILETIMEs.
                 try field.skip(byteCount: 4)
@@ -347,7 +355,7 @@ extension ZipArchive {
             case 0x5855: // Info-ZIP Unix (old): atime, mtime, then optionally 16-bit UID and GID.
                 if field.remainingByteCount >= 8 {
                     try field.skip(byteCount: 4)
-                    fallbackTime = Double(try field.read(UInt32.self))
+                    fallbackTime = try Double(field.read(UInt32.self))
                     if field.remainingByteCount >= 4 {
                         ownerID = try UInt32(field.read(UInt16.self))
                         groupID = try UInt32(field.read(UInt16.self))
@@ -375,6 +383,12 @@ extension ZipArchive {
             default:
                 break
             }
+        }
+        // Sizes and offsets no file can have are refused here, as NativeAEA's root header refuses them, so nothing
+        // after the parser sees one: below 2^62, each converts to `Int`, and two add (an offset and the leading bytes,
+        // a size and a position) without overflow. (Totals over many entries still saturate where they're summed.)
+        guard compressedSize < maximumSize, uncompressedSize < maximumSize, localHeaderOffset < maximumSize else {
+            throw .invalidValue
         }
 
         return makeEntry(
@@ -452,17 +466,17 @@ extension ZipArchive {
         // constants are written out: Darwin's are imported as getters, each an out-of-line call.
         let host = versionMadeBy[ZipAttributes.host]
         let mode = host == 3 || host == 19 ? externalAttributes[ZipAttributes.unixMode] : 0
-        let fileType = mode & 0o170_000 // S_IFMT
+        let fileType = mode & 0o170000 // S_IFMT
         let fromDOS = switch host {
         case 0, 11, 14: true // MS-DOS (FAT), NTFS, VFAT
         default: false
         }
         let path = fromDOS && name.utf8.contains(UInt8(ascii: "\\")) ? name.replacing("\\", with: "/") : name
-        let isDirectory = path.utf8.last == UInt8(ascii: "/") || fileType == 0o040_000 /* S_IFDIR */
+        let isDirectory = path.utf8.last == UInt8(ascii: "/") || fileType == 0o040000 /* S_IFDIR */
             || externalAttributes[ZipAttributes.dosDirectory]
         let kind: ZipEntry.Kind = if isDirectory {
             .directory
-        } else if fileType == 0o120_000 /* S_IFLNK */ {
+        } else if fileType == 0o120000 /* S_IFLNK */ {
             .symlink
         } else {
             .file
@@ -485,7 +499,6 @@ extension ZipArchive {
             modificationTime: modificationTime
         )
     }
-
 
     /// Decodes an entry name as UTF-8 if it validates, otherwise as code page 437.
     ///
@@ -589,13 +602,24 @@ public extension ZipArchive {
         var crc: UInt = 0
         var written: UInt64 = 0
         if entry.method == Method.stored, !entry.isEncrypted {
-            crc = ZipDecoder.crc32(0, payload)
+            // The payload is the compressed size, which nothing ties to the recorded size: a stored entry claiming a
+            // gigabyte compressed and 10 bytes uncompressed would hand the caller the gigabyte.
             written = UInt64(payload.byteCount)
+            guard written == entry.uncompressedSize else {
+                throw .sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written)
+            }
+            crc = ZipDecoder.crc32(0, payload)
             try body(payload)
         } else {
-            try decoder.decode(payload, entry: entry, password: password) { (chunk) throws(ZipError) in
+            try decoder.decode(payload, entry: entry, password: password) { chunk throws(ZipError) in
+                // Checked before `body` sees the chunk (as in `readContents`): an entry decoding past its recorded
+                // size stops at its first chunk beyond it. Chunks are at most 1 MiB and `written` at most the size
+                // (< 2^62): no overflow.
+                written &+= UInt64(chunk.byteCount)
+                guard written <= entry.uncompressedSize else {
+                    throw .sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written)
+                }
                 crc = ZipDecoder.crc32(crc, chunk)
-                written += UInt64(chunk.byteCount)
                 try body(chunk)
             }
         }
@@ -653,8 +677,12 @@ public extension ZipArchive {
         var written: UInt64 = 0
         if entry.method == Method.stored, !entry.isEncrypted {
             let payload = file.bytes.extracting(range)
-            crc = ZipDecoder.crc32(0, payload)
+            // As in the other form: the compressed size isn't tied to the recorded one, so check before `body`.
             written = UInt64(payload.byteCount)
+            guard written == entry.uncompressedSize else {
+                throw .zip(.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written))
+            }
+            crc = ZipDecoder.crc32(0, payload)
             do throws(Failure) { try body(payload) } catch { throw .body(error) }
         } else {
             // Unsafe: the payload in the mapping, which `self` (the caller's archive) keeps valid through this call;
@@ -678,8 +706,14 @@ public extension ZipArchive {
                 // the span ends with this iteration.
                 let chunk = unsafe RawSpan(_unsafeBytes: next.chunk.bytes)
                 if !chunk.isEmpty {
-                    crc = ZipDecoder.crc32(crc, chunk)
+                    // Checked before `body` sees the chunk: an entry decoding past its recorded size (a stream of
+                    // zeros declaring 2 MiB streamed a gigabyte) stops at its first chunk beyond it. A chunk is at
+                    // most 1 MiB and `written` at most the size (< 2^62), so the sum can't overflow.
                     written &+= UInt64(chunk.byteCount)
+                    guard written <= entry.uncompressedSize else {
+                        throw .zip(.sizeMismatch(entry.path, expected: entry.uncompressedSize, actual: written))
+                    }
+                    crc = ZipDecoder.crc32(crc, chunk)
                     do throws(Failure) { try body(chunk) } catch { throw .body(error) }
                 }
                 if unsafe next.finished { break }
@@ -774,8 +808,8 @@ extension BytesError {
         case .insufficientData: .truncated(what)
         case .mismatch: .badSignature(what)
         case .cancelled: .cancelled
-        // The parser doesn't use typed views, writing, or raw-value fields, which throw these.
-        case .misaligned, .insufficientCapacity, .invalidValue, .trailingData: .invalidRecord(self, what)
+        // The parser doesn't use typed views, writing, raw-value fields, or limits, which throw these.
+        case .misaligned, .insufficientCapacity, .limitExceeded, .invalidValue, .trailingData: .invalidRecord(self, what)
         }
     }
 }

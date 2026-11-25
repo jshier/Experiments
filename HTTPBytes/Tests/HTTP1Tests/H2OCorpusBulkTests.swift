@@ -1,5 +1,5 @@
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 import Foundation
 import HTTP1
 import HTTPBytes
@@ -51,8 +51,8 @@ import Testing
     static func category(_ input: [UInt8], _ ours: Conformance.Outcome, _ llhttp: (verdict: String, offset: Int, error: String)) -> String {
         let mine = switch ours {
         case .accept: "accept"
-        case .reject(let error, let stage): "reject \(stage.rawValue) \(error)"
-        case .partial(let stage): "partial \(stage.rawValue)"
+        case let .reject(error, stage): "reject \(stage.rawValue) \(error)"
+        case let .partial(stage): "partial \(stage.rawValue)"
         }
         var category = "\(mine) / \(llhttp.verdict)\(llhttp.error.isEmpty ? "" : " \(llhttp.error)")"
         // Whether llhttp's URL complaint is about a target RFC 9112 allows.
@@ -75,7 +75,7 @@ import Testing
             var options = Conformance.Options()
             options.closesAtEnd = false
             let ours = Conformance.parse(input.bytes, options: options)
-            if case .accept(let message) = ours, input.llhttp.verdict == "accept" {
+            if case let .accept(message) = ours, input.llhttp.verdict == "accept" {
                 if message.end != input.llhttp.offset {
                     mismatchedEnds.append("\(input.name): ends at \(message.end); llhttp \(input.llhttp.offset) [\(Conformance.escaped(input.bytes))]")
                 }
@@ -95,8 +95,8 @@ import Testing
         }
         let unexplained = counts.keys.filter { Self.differences[$0] == nil && Self.knownIssues[$0] == nil }.sorted()
         #expect(unexplained.isEmpty, """
-            \(unexplained.map { "\($0): \(counts[$0]!), e.g. \(examples[$0]!)" }.joined(separator: "\n"))
-            """)
+        \(unexplained.map { "\($0): \(counts[$0]!), e.g. \(examples[$0]!)" }.joined(separator: "\n"))
+        """)
         let stale = Self.differences.keys.filter { counts[$0] == nil }.sorted()
         #expect(stale.isEmpty, "differences that no longer occur: \(stale)")
     }

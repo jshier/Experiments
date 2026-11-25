@@ -35,7 +35,9 @@ enum FieldGrammar {
     @inlinable
     static func whitespaceEnd(_ bytes: RawSpan, from start: Int) -> Int {
         var position = start
-        while position < bytes.byteCount, isWhitespace(byte(bytes, position)) { position &+= 1 }
+        while position < bytes.byteCount, isWhitespace(byte(bytes, position)) {
+            position &+= 1
+        }
         return position
     }
 
@@ -82,8 +84,12 @@ enum FieldGrammar {
     @_lifetime(copy bytes)
     static func trimmed(_ bytes: RawSpan) -> RawSpan {
         var start = 0, end = bytes.byteCount
-        while start < end, isWhitespace(byte(bytes, start)) { start &+= 1 }
-        while end > start, isWhitespace(byte(bytes, end &- 1)) { end &-= 1 }
+        while start < end, isWhitespace(byte(bytes, start)) {
+            start &+= 1
+        }
+        while end > start, isWhitespace(byte(bytes, end &- 1)) {
+            end &-= 1
+        }
         return bytes.extracting(start..<end)
     }
 
@@ -184,9 +190,9 @@ public enum HTTPParameterValue: ~Escapable {
     @inlinable
     public func equals(_ text: RawSpan, ignoringCase: Bool = false) -> Bool {
         switch self {
-        case .token(let token):
+        case let .token(token):
             ignoringCase ? HTTPToken.equalsIgnoringCase(token, text) : token.bytesEqual(text)
-        case .quoted(let string):
+        case let .quoted(string):
             string.equals(text, ignoringCase: ignoringCase)
         }
     }
@@ -195,8 +201,8 @@ public enum HTTPParameterValue: ~Escapable {
     @inlinable
     public func write(to writer: inout AlignedBytesWriter) throws(BytesError) {
         switch self {
-        case .token(let token): try writer.write(token)
-        case .quoted(let string): try string.write(to: &writer)
+        case let .token(token): try writer.write(token)
+        case let .quoted(string): try string.write(to: &writer)
         }
     }
 }
@@ -360,7 +366,9 @@ public struct HTTPListElements: ~Escapable {
             position = try FieldGrammar.quotedStringEnd(bytes, from: position).end
         }
         var end = position
-        while end > start, FieldGrammar.isWhitespace(FieldGrammar.byte(bytes, end &- 1)) { end &-= 1 }
+        while end > start, FieldGrammar.isWhitespace(FieldGrammar.byte(bytes, end &- 1)) {
+            end &-= 1
+        }
         if position < count { position &+= 1 }
         return bytes.extracting(start..<end)
     }
@@ -391,10 +399,10 @@ public enum HTTPWeight {
     }
 }
 
-extension HTTPToken {
+public extension HTTPToken {
     /// Whether `bytes` and `other` are the same bytes, ASCII letters compared without case.
     @inlinable
-    public static func equalsIgnoringCase(_ bytes: RawSpan, _ other: RawSpan) -> Bool {
+    static func equalsIgnoringCase(_ bytes: RawSpan, _ other: RawSpan) -> Bool {
         guard bytes.byteCount == other.byteCount else { return false }
         for offset in 0..<bytes.byteCount {
             var a = FieldGrammar.byte(bytes, offset), b = FieldGrammar.byte(other, offset)

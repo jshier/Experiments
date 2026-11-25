@@ -26,7 +26,8 @@ struct IntList: ExpressibleByArgument {
 
 struct Checksums: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "CRC-32 and Adler-32 throughput (GB/s) by input size, one thread, best of N.")
+        abstract: "CRC-32 and Adler-32 throughput (GB/s) by input size, one thread, best of N."
+    )
 
     @Option(help: "Best of this many timings per size.")
     var reps = 9
@@ -62,7 +63,8 @@ struct Checksums: ParsableCommand {
 
 struct Lanes: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "ParallelDeflateEncoder/Decoder time (ms, medians) by lane count: 256 KB chunks, raw format.")
+        abstract: "ParallelDeflateEncoder/Decoder time (ms, medians) by lane count: 256 KB chunks, raw format."
+    )
 
     @Option(help: "The corpus directory (Tools/corpus path); reads silesia/FILE.")
     var corpus: String
@@ -90,7 +92,7 @@ struct Lanes: ParsableCommand {
                 for lanes in lanes.values {
                     var encoder = ParallelDeflateEncoder(format: .raw, level: level, chunkSize: 256 << 10, lanes: lanes)
                     var output = [UInt8](repeating: 0, count: encoder.maximumCompressedSize(forByteCount: input.count))
-                    _ = encodeAll(&encoder, input, into: &output)  // warm-up
+                    _ = encodeAll(&encoder, input, into: &output) // warm-up
                     var times: [Double] = []
                     for _ in 0..<encodes {
                         let t = now(); _ = encodeAll(&encoder, input, into: &output); times.append(Double(now() - t) / 1e6)
@@ -108,7 +110,9 @@ struct Lanes: ParsableCommand {
                     }
                     decodeRows.append("\(name)\t\(level)\tdecode\t\(lanes)\t\(fmt(median(times)))")
                 }
-                for row in encodeRows + decodeRows { print(row) }
+                for row in encodeRows + decodeRows {
+                    print(row)
+                }
                 fflush(stdout)
             }
         }
@@ -117,7 +121,8 @@ struct Lanes: ParsableCommand {
 
 struct Segments: ParsableCommand {
     static let configuration = CommandConfiguration(
-        abstract: "ParallelDeflateDecoder's segment count and time (ms, median) by lane count: where it falls back to one segment.")
+        abstract: "ParallelDeflateDecoder's segment count and time (ms, median) by lane count: where it falls back to one segment."
+    )
 
     @Option(help: "The corpus directory (Tools/corpus path); reads silesia/FILE.")
     var corpus: String
@@ -171,13 +176,17 @@ func randomBytes(_ count: Int) -> [UInt8] {
 
 @inline(never) func crcLoop(_ bytes: RawSpan, _ rounds: Int) -> UInt32 {
     var acc: UInt32 = 0
-    for _ in 0..<rounds { acc ^= CRC32.checksum(bytes) }
+    for _ in 0..<rounds {
+        acc ^= CRC32.checksum(bytes)
+    }
     return acc
 }
 
 @inline(never) func adlerLoop(_ bytes: RawSpan, _ rounds: Int) -> UInt32 {
     var acc: UInt32 = 0
-    for _ in 0..<rounds { acc ^= Adler32.checksum(bytes) }
+    for _ in 0..<rounds {
+        acc ^= Adler32.checksum(bytes)
+    }
     return acc
 }
 

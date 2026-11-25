@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTesting
 import BytesTestSupport
 import Foundation
@@ -19,6 +19,7 @@ struct RSAVectors: Decodable {
         let keyDer, keyAsn, keyPem: String?
         let tests: [Vector]
     }
+
     struct Vector: Decodable {
         let tcId: Int
         let comment: String
@@ -26,6 +27,7 @@ struct RSAVectors: Decodable {
         let msg, sig: String
         let result: String
     }
+
     let testGroups: [Group]
 }
 
@@ -110,10 +112,10 @@ struct XIPSignature {
             rest = rest[base64.endIndex...].dropFirst("</X509Certificate>".count)
         }
         let heapBytes = [UInt8](heap)
-        self.name = (path as NSString).lastPathComponent
-        self.compressedTOC = [UInt8](toc)
-        self.checksum = Array(heapBytes[checksumOffset..<checksumOffset + checksumSize])
-        self.signature = Array(heapBytes[signatureOffset..<signatureOffset + signatureSize])
+        name = (path as NSString).lastPathComponent
+        compressedTOC = [UInt8](toc)
+        checksum = Array(heapBytes[checksumOffset..<checksumOffset + checksumSize])
+        signature = Array(heapBytes[signatureOffset..<signatureOffset + signatureSize])
         self.certificates = certificates
     }
 }
@@ -191,12 +193,12 @@ enum RSAFile: String, CaseIterable, Sendable {
     /// Each group's key: its modulus size, and the same key from DER, PKCS #1, and PEM, written back.
     func checkKeys() throws {
         for group in try vectors.testGroups where rsaDigestAlgorithm(group.sha) != nil {
-            let der = hex(try #require(group.publicKeyDer ?? group.keyDer))
+            let der = try hex(#require(group.publicKeyDer ?? group.keyDer))
             let key = try RSA.PublicKey(derRepresentation: der.span.bytes)
             #expect(key.modulusBitCount == group.keySize, "\(rawValue)")
-            let pkcs1 = hex(try #require(group.publicKeyAsn ?? group.keyAsn))
+            let pkcs1 = try hex(#require(group.publicKeyAsn ?? group.keyAsn))
             #expect(try RSA.PublicKey(der: pkcs1) == key)
-            #expect(try RSA.PublicKey(pemRepresentation: try #require(group.publicKeyPem ?? group.keyPem)) == key)
+            #expect(try RSA.PublicKey(pemRepresentation: #require(group.publicKeyPem ?? group.keyPem)) == key)
             #expect(key.derRepresentation == der)
             #expect(key.pkcs1DERRepresentation == pkcs1)
         }
@@ -211,15 +213,14 @@ enum RSAFile: String, CaseIterable, Sendable {
         for position in positions {
             let group = vectors.testGroups[position.group], vector = group.tests[position.test]
             let algorithm = try #require(rsaDigestAlgorithm(group.sha))
-            let key = try keys[position.group] ?? RSA.PublicKey(der: hex(try #require(group.publicKeyDer ?? group.keyDer)))
+            let key = try keys[position.group] ?? RSA.PublicKey(der: hex(#require(group.publicKeyDer ?? group.keyDer)))
             keys[position.group] = key
             let message = hex(vector.msg), signature = hex(vector.sig)
             let verified = key.verifies(signature, message: message, algorithm)
-            let expected: Bool
-            switch vector.result {
-            case "valid": expected = true
-            case "invalid": expected = false
-            default: expected = !vector.flags.contains("MissingNull")
+            let expected: Bool = switch vector.result {
+            case "valid": true
+            case "invalid": false
+            default: !vector.flags.contains("MissingNull")
             }
             #expect(verified == expected, "\(rawValue) #\(vector.tcId) \(vector.comment) \(vector.flags) \(vector.result)")
             let digest = rsaDigest(message, algorithm)
@@ -240,7 +241,9 @@ enum RSAFile: String, CaseIterable, Sendable {
                 if rsaDigestAlgorithm(group.sha) == nil {
                     skipped += group.tests.count
                 } else {
-                    for vector in group.tests { counts[vector.result, default: 0] += 1 }
+                    for vector in group.tests {
+                        counts[vector.result, default: 0] += 1
+                    }
                 }
             }
         }
@@ -269,7 +272,7 @@ enum RSAFile: String, CaseIterable, Sendable {
         var error: Unmanaged<CFError>?
         let privateKey = try #require(SecKeyCreateRandomKey(attributes, &error), "\(String(describing: error))")
         let publicKey = try #require(SecKeyCopyPublicKey(privateKey))
-        let pkcs1 = [UInt8](try #require(SecKeyCopyExternalRepresentation(publicKey, nil) as Data?))
+        let pkcs1 = try [UInt8](#require(SecKeyCopyExternalRepresentation(publicKey, nil) as Data?))
         let key = try RSA.PublicKey(derRepresentation: pkcs1.span.bytes)
         #expect(key.modulusBitCount == bits)
         #expect(key.publicExponent == 65537)
@@ -281,10 +284,10 @@ enum RSAFile: String, CaseIterable, Sendable {
             let message = (0..<Int.random(in: 0...300, using: &generator)).map { _ in UInt8.random(in: 0...255, using: &generator) }
             for algorithm in RSA.DigestAlgorithm.allCases {
                 let (messageAlgorithm, digestAlgorithm) = securityAlgorithms(algorithm)
-                let signature = [UInt8](try #require(SecKeyCreateSignature(privateKey, messageAlgorithm, Data(message) as CFData, nil) as Data?))
+                let signature = try [UInt8](#require(SecKeyCreateSignature(privateKey, messageAlgorithm, Data(message) as CFData, nil) as Data?))
                 #expect(key.verifies(signature, message: message, algorithm))
                 let digest = rsaDigest(message, algorithm)
-                let digestSignature = [UInt8](try #require(SecKeyCreateSignature(privateKey, digestAlgorithm, Data(digest) as CFData, nil) as Data?))
+                let digestSignature = try [UInt8](#require(SecKeyCreateSignature(privateKey, digestAlgorithm, Data(digest) as CFData, nil) as Data?))
                 #expect(digestSignature == signature) // Deterministic.
                 #expect(key.verifies(signature, digest: digest, algorithm))
                 // Another hash, a flipped bit in the signature or the message: rejected by both.
@@ -300,7 +303,7 @@ enum RSAFile: String, CaseIterable, Sendable {
                 #expect(!key.verifies(signature, message: changed, algorithm))
                 // Lengths: one byte short or long.
                 #expect(!key.verifies(signature.dropLast(), message: message, algorithm))
-                #expect(!key.verifies(([0] + signature), message: message, algorithm))
+                #expect(!key.verifies([0] + signature, message: message, algorithm))
                 #expect(!key.verifies(signature, digest: digest.dropLast(), algorithm))
             }
             // A random value below n as the signature: nothing verifies it.
@@ -337,8 +340,8 @@ enum RSAFile: String, CaseIterable, Sendable {
         let scratch = directory.url
         let keyPath = scratch.appendingPathComponent("key.pem").path
         _ = try ExternalTool.output(openssl, ["genrsa"] + (exponentThree ? ["-3"] : []) + ["-out", keyPath, "\(bits)"])
-        let spki = String(decoding: try ExternalTool.output(openssl, ["rsa", "-in", keyPath, "-pubout"]), as: UTF8.self)
-        let pkcs1 = String(decoding: try ExternalTool.output(openssl, ["rsa", "-in", keyPath, "-RSAPublicKey_out"]), as: UTF8.self)
+        let spki = try String(decoding: ExternalTool.output(openssl, ["rsa", "-in", keyPath, "-pubout"]), as: UTF8.self)
+        let pkcs1 = try String(decoding: ExternalTool.output(openssl, ["rsa", "-in", keyPath, "-RSAPublicKey_out"]), as: UTF8.self)
         #expect(spki.hasPrefix("-----BEGIN PUBLIC KEY-----"))
         #expect(pkcs1.hasPrefix("-----BEGIN RSA PUBLIC KEY-----"))
         let key = try RSA.PublicKey(pemRepresentation: spki)
@@ -387,7 +390,7 @@ enum RSAFile: String, CaseIterable, Sendable {
             guard native else { continue }
             if RSA.DigestAlgorithm(signatureAlgorithm: certificate.signatureAlgorithm) != nil {
                 rsaVerified += 1
-                sizes.insert(try RSA.PublicKey(certificate: certificate).modulusBitCount)
+                try sizes.insert(RSA.PublicKey(certificate: certificate).modulusBitCount)
             } else {
                 ecdsaVerified += 1
             }
@@ -464,10 +467,9 @@ enum RSAFile: String, CaseIterable, Sendable {
     /// Keys outside the supported ranges, and malformed or mislabeled DER.
     @Test func rejectedKeys() throws {
         func tlv(_ tag: UInt8, _ contents: [UInt8]) -> [UInt8] {
-            var length: [UInt8]
-            if contents.count < 0x80 { length = [UInt8(contents.count)] }
-            else if contents.count < 0x100 { length = [0x81, UInt8(contents.count)] }
-            else { length = [0x82, UInt8(contents.count >> 8), UInt8(contents.count & 0xFF)] }
+            let length: [UInt8] = if contents.count < 0x80 { [UInt8(contents.count)] }
+            else if contents.count < 0x100 { [0x81, UInt8(contents.count)] }
+            else { [0x82, UInt8(contents.count >> 8), UInt8(contents.count & 0xFF)] }
             return [tag] + length + contents
         }
         func integer(_ magnitude: [UInt8]) -> [UInt8] { tlv(0x02, magnitude.first! & 0x80 != 0 ? [0] + magnitude : magnitude) }
@@ -516,7 +518,7 @@ enum RSAFile: String, CaseIterable, Sendable {
 
     /// −n⁻¹ mod 2⁶⁴ by Newton's iteration. (R^e mod n, the other precomputed constant, takes part in every
     /// verification above.)
-    @Test func negativeInverse() throws {
+    @Test func negativeInverse() {
         var generator = SplitMix64(seed: 7)
         for _ in 0..<1000 {
             let n = generator.next() | 1

@@ -31,7 +31,7 @@ struct DecodedField: Equatable, CustomStringConvertible {
 
     var description: String { "\(name): \(value)\(neverIndexed ? " (never indexed)" : "")" }
 
-    static func == (lhs: Self, rhs: Self) -> Bool {
+    static func ==(lhs: Self, rhs: Self) -> Bool {
         lhs.name == rhs.name && lhs.value == rhs.value && lhs.neverIndexed == rhs.neverIndexed
     }
 }

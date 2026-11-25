@@ -38,7 +38,7 @@ public enum LEB128 {
     }
 }
 
-extension GenericBytesReader {
+public extension GenericBytesReader {
     /// Reads an unsigned LEB128 integer of at most `maxByteCount` bytes. Nothing is consumed if it throws.
     /// Single-byte values (below 128) take a fast path.
     ///
@@ -58,7 +58,7 @@ extension GenericBytesReader {
     /// - Precondition: `maxByteCount` is 1 through 10, and the cursor is byte-aligned.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func read(_ format: LEB128.Type, maxByteCount: Int = 10, requiringMinimal: Bool = false) throws(BytesError) -> UInt64 {
+    mutating func read(_ format: LEB128.Type, maxByteCount: Int = 10, requiringMinimal: Bool = false) throws(BytesError) -> UInt64 {
         precondition(maxByteCount >= 1 && maxByteCount <= 10, "LEB128 integers are 1 through 10 bytes")
         precondition(_bitOffset == 0, "Reading LEB128 requires byte alignment: call alignToByte() first")
         _assumeInvariant()

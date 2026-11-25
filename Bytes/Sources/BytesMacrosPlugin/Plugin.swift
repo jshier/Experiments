@@ -27,7 +27,7 @@ struct MacroError: Error, DiagnosticMessage {
     let node: Syntax?
     var diagnosticID: MessageID { MessageID(domain: "BytesMacros", id: "error") }
     var severity: DiagnosticSeverity { .error }
-    init(_ message: String, at node: (some SyntaxProtocol)? = Syntax?.none) {
+    init(_ message: String, at node: some SyntaxProtocol? = Syntax?.none) {
         self.message = message
         self.node = node.map { Syntax($0) }
     }

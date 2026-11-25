@@ -1,7 +1,7 @@
+@testable import NativeAEA
 import BytesTestSupport
 import DiskTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -85,14 +85,14 @@ import Testing
         let publicKey = directory.path("public.pem")
         try ExternalTool.run("/usr/bin/openssl", ["ec", "-in", keys.privateKey.path, "-pubout", "-out", publicKey.path])
         let pem = try String(contentsOf: publicKey, encoding: .utf8)
-        guard case .publicKey(let expected) = try AEASigningKey.publicKey(contentsOf: publicKey) else {
+        guard case let .publicKey(expected) = try AEASigningKey.publicKey(contentsOf: publicKey) else {
             Issue.record("not a public key")
             return
         }
         #expect(expected.count == 65)
         let hex = expected.map { String($0, radix: 16).leftPadded(to: 2) }.joined()
         for text in [pem, pem.replacing("\n", with: " "), "  \(pem)\n", hex, "hex:\(hex)"] {
-            guard case .publicKey(let parsed) = try AEASigningKey.publicKey(text: text) else {
+            guard case let .publicKey(parsed) = try AEASigningKey.publicKey(text: text) else {
                 Issue.record("not a public key: \(text)")
                 continue
             }
@@ -104,8 +104,8 @@ import Testing
     }
 }
 
-extension String {
-    fileprivate func leftPadded(to count: Int) -> String {
+private extension String {
+    func leftPadded(to count: Int) -> String {
         String(repeating: "0", count: max(0, count - self.count)) + self
     }
 }

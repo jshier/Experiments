@@ -46,9 +46,9 @@ public struct HTTPBodyDecoder: ~Copyable, ByteTransform, ResettableByteTransform
     /// - Throws: As ``HTTPContentDecoder/init(contentEncoding:maximumDecodedByteCount:)``.
     public init(framing: HTTP1BodyLength, contentEncoding: RawSpan, maximumDecodedByteCount: Int = 1 << 30,
                 chunked: HTTP1ChunkedDecoder = HTTP1ChunkedDecoder()) throws(HTTPPayloadError) {
-        self.init(framing: framing,
-                  content: try HTTPContentDecoder(contentEncoding: contentEncoding, maximumDecodedByteCount: maximumDecodedByteCount),
-                  chunked: chunked)
+        try self.init(framing: framing,
+                      content: HTTPContentDecoder(contentEncoding: contentEncoding, maximumDecodedByteCount: maximumDecodedByteCount),
+                      chunked: chunked)
     }
 
     @usableFromInline
@@ -57,7 +57,7 @@ public struct HTTPBodyDecoder: ~Copyable, ByteTransform, ResettableByteTransform
         chunks = initialChunks
         framingEnded = false
         sawData = false
-        if case .length(let count) = framing { remaining = count } else { remaining = 0 }
+        if case let .length(count) = framing { remaining = count } else { remaining = 0 }
     }
 
     /// Starts the next body with the same framing and codings.
@@ -136,7 +136,7 @@ public struct HTTPBodyDecoder: ~Copyable, ByteTransform, ResettableByteTransform
                     throw .chunked(error)
                 }
                 switch event {
-                case .data(let data):
+                case let .data(data):
                     // The size line before the data is consumed with it.
                     position &+= used &- data.byteCount
                     piece = data

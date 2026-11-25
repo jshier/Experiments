@@ -63,7 +63,10 @@ under 4.
 Xcode's 624 segments are in three clusters (256, 256, 112). The cluster count follows from the **raw** size,
 ceil(raw size / (segment size × segments per cluster)), not the container size: Xcode's container (2.17 GB) would
 give one cluster of 4 GiB. A last cluster's header still has room for every segment; the unused entries are zero.
-`aea encrypt`'s default segment is 1 MiB.
+`aea encrypt`'s default segment is 1 MiB, and its largest 256 MiB: `aea encrypt -b 512m`, `1g`, and `2g` all write
+268,435,456. The field has room for 2³² − 1, but NativeAEA refuses a segment size over 256 MiB (`invalidHeader`)
+where the root header is parsed, because every buffer pool is sized in segments (a 1.3 MB archive declaring 2³¹ − 1
+took 2.16 GB to list before the check).
 
 **Segments** are compressed independently. A segment whose stored size equals its raw size is stored as is.
 Otherwise:
@@ -165,7 +168,7 @@ A field is a 3-letter key and a 1-character subtype that gives the value's size:
 | `*` | flag: no value |
 | `1` `2` `4` `8` | unsigned integer of that many bytes |
 | `P` | string: u16 size, then the bytes (no terminator) |
-| `T` / `S` | time: u64 seconds and u32 nanoseconds / u64 seconds |
+| `T` / `S` | time: u64 seconds and u32 nanoseconds (below 10⁹: NativeAEA refuses more where the header is parsed, as `setattrlist` would) / u64 seconds |
 | `F` `G` `H` `I` `J` | CRC-32 (4), SHA-1 (20), SHA-256 (32), SHA-384 (48), SHA-512 (64) |
 | `A` `B` `C` | blob with a u16, u32, or u64 size: the bytes follow the header |
 

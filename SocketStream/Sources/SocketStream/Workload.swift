@@ -162,7 +162,6 @@ struct SplitMix64: RandomNumberGenerator {
 }
 
 extension Fixtures {
-
     /// Packet `index`'s identifier: 1 through 65,535, then 1 again.
     ///
     /// - Parameter index: The packet's position in the stream, from 0.

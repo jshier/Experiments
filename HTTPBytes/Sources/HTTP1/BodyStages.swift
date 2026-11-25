@@ -88,7 +88,7 @@ public struct HTTP1Dechunker: Sendable, ByteTransform, ResettableByteTransform {
             }
             var used = 0
             switch try decoder.next(in: input.extracting(droppingFirst: position), consumed: &used) {
-            case .data(let data):
+            case let .data(data):
                 let room = output.freeCapacity
                 guard data.byteCount > room else {
                     output.append(copying: data)

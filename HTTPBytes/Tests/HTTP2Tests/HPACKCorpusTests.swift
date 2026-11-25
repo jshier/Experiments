@@ -1,6 +1,6 @@
 import Bytes
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 import Foundation
 import HTTP2
 import HTTPBytes
@@ -71,7 +71,7 @@ enum HPACKCorpus {
         var decoder = HPACKDecoder(maximumTableSize: tableSize)
         var output = [UInt8](repeating: 0, count: 1 << 16)
         for (index, item) in cases.enumerated() {
-            let written = try output.withOutputRawSpan { (span) throws(HPACKError) -> Int in
+            let written = try output.withOutputRawSpan { span throws(HPACKError) -> Int in
                 for (name, value) in item.headers {
                     try encoder.encode(name: name.span.bytes, value: value.span.bytes, indexing: strategy, into: &span)
                 }
@@ -120,7 +120,9 @@ enum HPACKCorpus {
         let stories = HPACKCorpus.stories(in: implementation)
         try #require(!stories.isEmpty, "Tools/test-data fetch hpack-test-case")
         var total = 0
-        for story in stories.prefix(4) { total += try HPACKCorpus.checkDecoding(story) }
+        for story in stories.prefix(4) {
+            total += try HPACKCorpus.checkDecoding(story)
+        }
         #expect(total > 200, "fields decoded: \(total)")
     }
 
@@ -136,7 +138,9 @@ enum HPACKCorpus {
 
     @Test func truncation() throws {
         for implementation in ["nghttp2", "go-hpack", "python-hpack", "haskell-http2-linear-huffman"] {
-            for story in HPACKCorpus.stories(in: implementation).prefix(4) { try HPACKCorpus.checkTruncation(story) }
+            for story in HPACKCorpus.stories(in: implementation).prefix(4) {
+                try HPACKCorpus.checkTruncation(story)
+            }
         }
     }
 }
@@ -144,7 +148,9 @@ enum HPACKCorpus {
 @Suite(.bulk) struct HPACKCorpusBulkTests {
     @Test(arguments: HPACKCorpus.implementations)
     func decodesEveryStory(_ implementation: String) throws {
-        for story in HPACKCorpus.stories(in: implementation) { try HPACKCorpus.checkDecoding(story) }
+        for story in HPACKCorpus.stories(in: implementation) {
+            try HPACKCorpus.checkDecoding(story)
+        }
     }
 
     @Test(arguments: [HPACKIndexingStrategy.automatic, .prefer, .avoid, .disable])
@@ -160,6 +166,8 @@ enum HPACKCorpus {
 
     @Test(arguments: HPACKCorpus.implementations)
     func truncatesEveryFirstBlock(_ implementation: String) throws {
-        for story in HPACKCorpus.stories(in: implementation) { try HPACKCorpus.checkTruncation(story) }
+        for story in HPACKCorpus.stories(in: implementation) {
+            try HPACKCorpus.checkTruncation(story)
+        }
     }
 }

@@ -174,7 +174,9 @@ public struct Planner<Source: ContentSource>: ~Copyable {
         // The path buffer holds the current path's `count` bytes (the caller's contract), `count` under `PATH_MAX`.
         let bytes = Self.prefix(path, count)
         var slash = count - 1
-        while slash >= 0, bytes.load(fromByteOffset: slash, as: UInt8.self) != 0x2F { slash -= 1 }
+        while slash >= 0, bytes.load(fromByteOffset: slash, as: UInt8.self) != 0x2F {
+            slash -= 1
+        }
         guard slash > 0 else { return (slash, false, nil) }
         // The usual case: the same parent as the last entry's (archives keep a directory's entries together).
         let parent = bytes.extracting(0..<slash)
@@ -239,7 +241,9 @@ public struct Planner<Source: ContentSource>: ~Copyable {
     private func depth(_ count: Int) -> Int {
         let bytes = Self.prefix(path, count)
         var slashes = 0
-        for index in 0..<count where bytes.load(fromByteOffset: index, as: UInt8.self) == 0x2F { slashes += 1 }
+        for index in 0..<count where bytes.load(fromByteOffset: index, as: UInt8.self) == 0x2F {
+            slashes += 1
+        }
         return slashes + (count > 0 ? 1 : 0)
     }
 
@@ -515,7 +519,7 @@ public struct Planner<Source: ContentSource>: ~Copyable {
         state.chunkCount = (size + Decmpfs.chunkSize - 1) / Decmpfs.chunkSize
         state.policy = nil
         // Fork offsets are 32-bit; pieces must be big enough for a chunk's pieces to fit a bridge.
-        if case .compressed(let policy) = storage, size < 1 << 31, minimumPieceSize * (Bridge<Source.Contents>.capacity - 1) >= Decmpfs.chunkSize,
+        if case let .compressed(policy) = storage, size < 1 << 31, minimumPieceSize * (Bridge<Source.Contents>.capacity - 1) >= Decmpfs.chunkSize,
            policy.codec.types.fork != 0, !policy.skips(size: size, first: first.extracting(first: min(8, first.byteCount))) {
             state.policy = policy
         }
@@ -590,7 +594,9 @@ public struct Planner<Source: ContentSource>: ~Copyable {
 
     /// After a failure mid-file: releases what the planner holds and closes the file if no piece is left.
     mutating func abandonOpenFile() async {
-        for index in 0..<largeBridge.count { context.source.release(largeBridge[index].contents) }
+        for index in 0..<largeBridge.count {
+            context.source.release(largeBridge[index].contents)
+        }
         largeBridge = Bridge()
         largeBridgedBytes = 0
         guard largeFile >= 0 else { return }
@@ -666,16 +672,22 @@ struct DirectoryTable: ~Copyable {
     private mutating func place(_ index: Int) {
         let mask = slots.count - 1
         var slot = Int(truncatingIfNeeded: entries[index].hash) & mask
-        while slots[slot] != 0 { slot = (slot + 1) & mask }
+        while slots[slot] != 0 {
+            slot = (slot + 1) & mask
+        }
         slots[slot] = Int32(index + 1)
     }
 
     private mutating func grow() {
         slots = Array(repeating: 0, count: slots.count * 2)
-        for index in entries.indices { place(index) }
+        for index in entries.indices {
+            place(index)
+        }
     }
 
     func closeAll() {
-        for entry in entries where entry.descriptor >= 0 { Sys.close(entry.descriptor) }
+        for entry in entries where entry.descriptor >= 0 {
+            Sys.close(entry.descriptor)
+        }
     }
 }

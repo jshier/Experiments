@@ -1,3 +1,4 @@
+@testable import Nunarchiver
 import BytesTestSupport
 import Disk
 import DiskTestSupport
@@ -5,8 +6,6 @@ import Foundation
 import NativeAEA
 import System
 import Testing
-
-@testable import Nunarchiver
 
 /// The live expander on real archives (made here with `/usr/bin/zip`, `ditto`, and `aea`), in a temporary directory of
 /// each test's own: naming, the folder Archive Utility makes, passwords, and cancellation. (The publishing itself is

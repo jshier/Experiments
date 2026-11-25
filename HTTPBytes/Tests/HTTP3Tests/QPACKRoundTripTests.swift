@@ -1,6 +1,6 @@
 import Bytes
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 import Foundation
 import HTTP3
 import HTTPBytes
@@ -40,7 +40,7 @@ struct QPACKPeers: ~Copyable {
             switch delivery {
             case .inOrder, .noAcknowledgments:
                 try applyEncoderStream(&decoder, encoded.instructions)
-                decoded.append(try #require(try decodeSection(&decoder, encoded.section, stream: stream)))
+                try decoded.append(#require(try decodeSection(&decoder, encoded.section, stream: stream)))
             case .instructionsLate:
                 if let fields = try decodeSection(&decoder, encoded.section, stream: stream) {
                     decoded.append(fields)
@@ -48,7 +48,7 @@ struct QPACKPeers: ~Copyable {
                 } else {
                     try applyEncoderStream(&decoder, encoded.instructions)
                     #expect(decoder.nextUnblockedStream() == stream)
-                    decoded.append(try #require(try decodeSection(&decoder, encoded.section, stream: stream)))
+                    try decoded.append(#require(try decodeSection(&decoder, encoded.section, stream: stream)))
                 }
             }
             let feedback = decoderInstructions(&decoder)

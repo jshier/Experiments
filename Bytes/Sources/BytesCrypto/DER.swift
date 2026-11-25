@@ -49,7 +49,7 @@ extension GenericBytesReader where Mode == ByteAligned {
     /// - Throws: ``BytesError/invalidValue`` for a negative, non-minimal, or larger value, and what
     ///   ``readASN1Element(_:)`` throws.
     mutating func readASN1SmallInteger() throws(BytesError) -> Int {
-        let value = try X509Layout.smallInteger(span, try readASN1Element(.integer))
+        let value = try X509Layout.smallInteger(span, readASN1Element(.integer))
         guard value >= 0 else { throw .invalidValue }
         return value
     }
@@ -62,7 +62,7 @@ extension GenericBytesReader where Mode == ByteAligned {
     @_lifetime(self: copy self)
     mutating func readASN1BitString(_ tag: ASN1Tag = .bitString) throws(BytesError) -> RawSpan {
         let element = try readASN1Element(tag)
-        return span.extracting(try X509Layout.bitString(span, element, allowingUnusedBits: false))
+        return try span.extracting(X509Layout.bitString(span, element, allowingUnusedBits: false))
     }
 
     /// Throws unless every element has been read.
@@ -80,7 +80,9 @@ struct DERWriter {
     /// Appends an element with `contents`.
     mutating func append(_ tag: ASN1Tag, contents: RawSpan) {
         appendHeader(tag, length: contents.byteCount)
-        for index in 0..<contents.byteCount { bytes.append(contents.byteOffsetLoad(index)) }
+        for index in 0..<contents.byteCount {
+            bytes.append(contents.byteOffsetLoad(index))
+        }
     }
 
     /// Appends a constructed element whose children `body` writes.
@@ -100,19 +102,25 @@ struct DERWriter {
     /// bit, as DER's shortest form requires).
     mutating func appendUnsignedInteger(_ magnitude: RawSpan) {
         var start = 0
-        while start < magnitude.byteCount, magnitude.byteOffsetLoad(start) == 0 { start &+= 1 }
+        while start < magnitude.byteCount, magnitude.byteOffsetLoad(start) == 0 {
+            start &+= 1
+        }
         let significant = magnitude.extracting(droppingFirst: start)
         let pad = significant.byteCount == 0 || significant.byteOffsetLoad(0) & 0x80 != 0
         appendHeader(.integer, length: significant.byteCount &+ (pad ? 1 : 0))
         if pad { bytes.append(0) }
-        for index in 0..<significant.byteCount { bytes.append(significant.byteOffsetLoad(index)) }
+        for index in 0..<significant.byteCount {
+            bytes.append(significant.byteOffsetLoad(index))
+        }
     }
 
     /// Appends a `BIT STRING` of whole bytes.
     mutating func appendBitString(_ contents: RawSpan, tag: ASN1Tag = .bitString) {
         appendHeader(tag, length: contents.byteCount &+ 1)
         bytes.append(0) // No unused bits.
-        for index in 0..<contents.byteCount { bytes.append(contents.byteOffsetLoad(index)) }
+        for index in 0..<contents.byteCount {
+            bytes.append(contents.byteOffsetLoad(index))
+        }
     }
 
     /// The identifier and the length in its shortest form.
@@ -123,9 +131,13 @@ struct DERWriter {
             return
         }
         var lengthByteCount = 1
-        while length >> (8 &* lengthByteCount) != 0 { lengthByteCount &+= 1 }
+        while length >> (8 &* lengthByteCount) != 0 {
+            lengthByteCount &+= 1
+        }
         bytes.append(0x80 | UInt8(lengthByteCount))
-        for index in (0..<lengthByteCount).reversed() { bytes.append(UInt8(truncatingIfNeeded: length >> (8 &* index))) }
+        for index in (0..<lengthByteCount).reversed() {
+            bytes.append(UInt8(truncatingIfNeeded: length >> (8 &* index)))
+        }
     }
 }
 
@@ -163,7 +175,7 @@ public enum PEM {
             guard let endLabelEnd = text.firstByteOffset(of: dashes, from: endLabelStart),
                   blockLabel.equals(text.extracting(endLabelStart..<endLabelEnd)) else { throw .invalidValue }
             if blockLabel.equals(wanted.span.bytes) {
-                documents.append(try decodeBase64(text.extracting(bodyStart..<end)))
+                try documents.append(decodeBase64(text.extracting(bodyStart..<end)))
             }
             offset = endLabelEnd &+ Byte5.byteCount
         }

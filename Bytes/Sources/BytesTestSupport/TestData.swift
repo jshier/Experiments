@@ -58,10 +58,10 @@ public enum TestData {
 
 /// The compression corpus `Tools/corpus fetch` downloads (Silesia, web assets, …), cached outside the repository.
 public enum Corpus {
-    /// `EXPERIMENTS_CORPUS` if it's set, otherwise `~/Library/Caches/Experiments/corpus`.
+    /// `EXPERIMENTS_CORPUS` if it's set, otherwise `~/Scratch/corpus.noindex` (where `Tools/corpus` puts it).
     public static var root: URL {
         if let path = ProcessInfo.processInfo.environment["EXPERIMENTS_CORPUS"] { return URL(filePath: path) }
-        return FileManager.default.homeDirectoryForCurrentUser.appending(path: "Library/Caches/Experiments/corpus")
+        return FileManager.default.homeDirectoryForCurrentUser.appending(path: "Scratch/corpus.noindex")
     }
 
     /// The corpus file at `path`, or `nil` if the corpus doesn't have it.

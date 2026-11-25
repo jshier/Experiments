@@ -22,7 +22,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private lazy var progressWindow = ProgressWindowController(store: store)
     private var observations: [Task<Void, Never>] = []
-    private var terminationSource: (any DispatchSourceSignal)?
+    private var terminationSource: any DispatchSourceSignal?
     /// Whether archives were opened at launch: then the app quits when they're done, as Archive Utility does.
     private var launchedWithArchives = false
     private var isLaunching = true

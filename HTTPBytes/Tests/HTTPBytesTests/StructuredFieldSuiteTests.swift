@@ -23,14 +23,14 @@ enum SFValue: Equatable, Sendable, CustomStringConvertible {
 
     var description: String {
         switch self {
-        case .integer(let value): "\(value)"
-        case .decimal(let value): value.map { "\(Double($0) / 1000)" } ?? "decimal?"
-        case .string(let value): "\"\(String(decoding: value, as: UTF8.self))\""
-        case .token(let value): "token(\(String(decoding: value, as: UTF8.self)))"
-        case .binary(let value): "binary(\(value))"
-        case .boolean(let value): "\(value)"
-        case .date(let value): "@\(value)"
-        case .display(let value): "%\"\(String(decoding: value, as: UTF8.self))\""
+        case let .integer(value): "\(value)"
+        case let .decimal(value): value.map { "\(Double($0) / 1000)" } ?? "decimal?"
+        case let .string(value): "\"\(String(decoding: value, as: UTF8.self))\""
+        case let .token(value): "token(\(String(decoding: value, as: UTF8.self)))"
+        case let .binary(value): "binary(\(value))"
+        case let .boolean(value): "\(value)"
+        case let .date(value): "@\(value)"
+        case let .display(value): "%\"\(String(decoding: value, as: UTF8.self))\""
         }
     }
 }
@@ -110,13 +110,13 @@ enum SFSuite {
 enum SFJSON {
     static func field(_ json: Any, type: String) -> SFField {
         switch type {
-        case "list": return .list((json as! [Any]).map(member))
+        case "list": .list((json as! [Any]).map(member))
         case "dictionary":
-            return .dictionary((json as! [Any]).map { pair in
+            .dictionary((json as! [Any]).map { pair in
                 let pair = pair as! [Any]
                 return SFDictionaryMember(key: Array((pair[0] as! String).utf8), value: member(pair[1]))
             })
-        default: return .item(item(json))
+        default: .item(item(json))
         }
     }
 
@@ -185,16 +185,16 @@ enum SFViews {
 
     static func value(_ item: HTTPStructuredBareItem) -> SFValue {
         switch item {
-        case .integer(let value): return .integer(value)
-        case .decimal(let value): return .decimal(value.thousandths)
-        case .string(let value): return .string(written({ (writer) throws(BytesError) in try value.write(to: &writer) }, count: value.byteCount))
-        case .token(let value): return .token(sfArray(value))
-        case .byteSequence(let value):
-            return .binary(written({ (writer) throws(BytesError) in try value.write(to: &writer) }, count: value.byteCount))
-        case .boolean(let value): return .boolean(value)
-        case .date(let value): return .date(value)
-        case .displayString(let value):
-            return .display(written({ (writer) throws(BytesError) in try value.write(to: &writer) }, count: value.byteCount))
+        case let .integer(value): .integer(value)
+        case let .decimal(value): .decimal(value.thousandths)
+        case let .string(value): .string(written({ writer throws(BytesError) in try value.write(to: &writer) }, count: value.byteCount))
+        case let .token(value): .token(sfArray(value))
+        case let .byteSequence(value):
+            .binary(written({ writer throws(BytesError) in try value.write(to: &writer) }, count: value.byteCount))
+        case let .boolean(value): .boolean(value)
+        case let .date(value): .date(value)
+        case let .displayString(value):
+            .display(written({ writer throws(BytesError) in try value.write(to: &writer) }, count: value.byteCount))
         }
     }
 
@@ -215,11 +215,13 @@ enum SFViews {
 
     static func member(_ member: HTTPStructuredMember) -> SFMember {
         switch member {
-        case .item(let item): return .item(Self.item(item))
-        case .innerList(let list):
+        case let .item(item): return .item(Self.item(item))
+        case let .innerList(list):
             var items: [SFItem] = []
             var iterator = list
-            while let item = iterator.next() { items.append(Self.item(item)) }
+            while let item = iterator.next() {
+                items.append(Self.item(item))
+            }
             return .innerList(items, parameters(list.parameters))
         }
     }
@@ -227,7 +229,7 @@ enum SFViews {
     /// The field in `lines` (several field lines joined, as RFC 9651 §4.2 says), as the parser hands it out.
     static func field(_ lines: [[UInt8]], type: String) throws(HTTPStructuredFieldError) -> SFField {
         // One buffer, so every line's span has the same lifetime.
-        let joined = lines.flatMap { $0 }
+        let joined = lines.flatMap(\.self)
         var bounds: [Range<Int>] = []
         var start = 0
         for line in lines {
@@ -241,7 +243,9 @@ enum SFViews {
             var members: [SFMember] = []
             for index in bounds.indices {
                 if index > 0 { try list.appendFieldLine(all.extracting(bounds[index])) }
-                while let member = try list.next() { members.append(Self.member(member)) }
+                while let member = try list.next() {
+                    members.append(Self.member(member))
+                }
             }
             return .list(members)
         case "dictionary":
@@ -260,7 +264,7 @@ enum SFViews {
         default:
             // An Item can't span lines: joined, they'd have a comma between them.
             guard lines.count == 1 else { throw .trailingBytes }
-            return .item(item(try HTTPStructuredItem(parsing: all)))
+            return try .item(item(HTTPStructuredItem(parsing: all)))
         }
     }
 }
@@ -292,24 +296,24 @@ enum SFSerializer {
 
     static func write(_ field: SFField, to writer: inout AlignedBytesWriter) throws(HTTPStructuredFieldError) {
         switch field {
-        case .item(let item):
+        case let .item(item):
             try write(item, to: &writer)
-        case .list(let members):
+        case let .list(members):
             for (index, member) in members.enumerated() {
                 if index > 0 { try HTTPStructuredFieldEncoder.writeMemberSeparator(to: &writer) }
                 switch member {
-                case .item(let item): try write(item, to: &writer)
-                case .innerList(let items, let parameters): try writeInnerList(items, parameters, to: &writer)
+                case let .item(item): try write(item, to: &writer)
+                case let .innerList(items, parameters): try writeInnerList(items, parameters, to: &writer)
                 }
             }
-        case .dictionary(let members):
+        case let .dictionary(members):
             for (index, member) in members.enumerated() {
                 if index > 0 { try HTTPStructuredFieldEncoder.writeMemberSeparator(to: &writer) }
                 switch member.value {
-                case .item(let item):
+                case let .item(item):
                     try write(item.value, at: .dictionaryMember(member.key), to: &writer)
                     try write(item.parameters, to: &writer)
-                case .innerList(let items, let parameters):
+                case let .innerList(items, parameters):
                     try HTTPStructuredFieldEncoder.writeDictionaryKey(member.key.span.bytes, to: &writer)
                     try writeInnerList(items, parameters, to: &writer)
                 }
@@ -323,7 +327,9 @@ enum SFSerializer {
     }
 
     static func write(_ parameters: [SFParameter], to writer: inout AlignedBytesWriter) throws(HTTPStructuredFieldError) {
-        for parameter in parameters { try write(parameter.value, at: .parameter(parameter.key), to: &writer) }
+        for parameter in parameters {
+            try write(parameter.value, at: .parameter(parameter.key), to: &writer)
+        }
     }
 
     static func writeInnerList(_ items: [SFItem], _ parameters: [SFParameter], to writer: inout AlignedBytesWriter) throws(HTTPStructuredFieldError) {
@@ -338,18 +344,18 @@ enum SFSerializer {
 
     static func write(_ value: SFValue, at place: Place, to writer: inout AlignedBytesWriter) throws(HTTPStructuredFieldError) {
         switch value {
-        case .integer(let value): try put(.integer(value), at: place, to: &writer)
-        case .decimal(let value):
+        case let .integer(value): try put(.integer(value), at: place, to: &writer)
+        case let .decimal(value):
             guard let value, let decimal = HTTPStructuredDecimal(thousandths: value) else { throw .valueOutOfRange }
             try put(.decimal(decimal), at: place, to: &writer)
-        case .string(let bytes):
+        case let .string(bytes):
             guard let string = HTTPStructuredString(bytes.span.bytes) else { throw .invalidString }
             try put(.string(string), at: place, to: &writer)
-        case .token(let bytes): try put(.token(bytes.span.bytes), at: place, to: &writer)
-        case .binary(let bytes): try put(.byteSequence(HTTPStructuredByteSequence(bytes.span.bytes)), at: place, to: &writer)
-        case .boolean(let value): try put(.boolean(value), at: place, to: &writer)
-        case .date(let value): try put(.date(value), at: place, to: &writer)
-        case .display(let bytes):
+        case let .token(bytes): try put(.token(bytes.span.bytes), at: place, to: &writer)
+        case let .binary(bytes): try put(.byteSequence(HTTPStructuredByteSequence(bytes.span.bytes)), at: place, to: &writer)
+        case let .boolean(value): try put(.boolean(value), at: place, to: &writer)
+        case let .date(value): try put(.date(value), at: place, to: &writer)
+        case let .display(bytes):
             let text = String(decoding: bytes, as: UTF8.self)
             try put(.displayString(HTTPStructuredDisplayString(text.utf8Span)), at: place, to: &writer)
         }
@@ -358,8 +364,8 @@ enum SFSerializer {
     static func put(_ value: HTTPStructuredBareItem, at place: Place, to writer: inout AlignedBytesWriter) throws(HTTPStructuredFieldError) {
         switch place {
         case .bare: try HTTPStructuredFieldEncoder.writeBareItem(value, to: &writer)
-        case .parameter(let key): try HTTPStructuredFieldEncoder.writeParameter(key: key.span.bytes, value: value, to: &writer)
-        case .dictionaryMember(let key): try HTTPStructuredFieldEncoder.writeDictionaryMember(key: key.span.bytes, value: value, to: &writer)
+        case let .parameter(key): try HTTPStructuredFieldEncoder.writeParameter(key: key.span.bytes, value: value, to: &writer)
+        case let .dictionaryMember(key): try HTTPStructuredFieldEncoder.writeDictionaryMember(key: key.span.bytes, value: value, to: &writer)
         }
     }
 

@@ -58,8 +58,8 @@ let macroTargets: [Target] = [
 
 // Helpers for tests and benchmarks across the repository's packages: not library API. `BytesTestSupport` has no
 // Swift Testing dependency, so benchmark executables and other packages' sources (SocketStream's workloads) can use
-// it; `BytesTesting` adds what needs Swift Testing (the `.bulk` trait); `BytesReferenceCodecs` wraps the SDK's zlib
-// and Compression as reference codecs, apart so the others don't link them.
+// it; `BytesTesting` adds what needs Swift Testing (the `.bulk` trait). (`BytesReferenceCodecs`, the SDK's zlib and
+// Compression as reference codecs, moved with BytesCompression to its package.)
 let supportTargets: [Target] = [
     .target(
         name: "BytesTestSupport",
@@ -70,11 +70,6 @@ let supportTargets: [Target] = [
         dependencies: ["BytesTestSupport"],
         swiftSettings: strictSettings
     ),
-    .target(
-        name: "BytesReferenceCodecs",
-        // Not strict memory safety: it's C calls through and through.
-        swiftSettings: commonSettings
-    ),
 ]
 
 let package = Package(
@@ -82,7 +77,7 @@ let package = Package(
     platforms: [.macOS(.v27), .iOS(.v27), .tvOS(.v27), .watchOS(.v27), .visionOS(.v27)],
     products: [
         .library(name: "Bytes", targets: ["Bytes"]),
-        .library(name: "BytesCompression", targets: ["BytesCompression"]),
+        // (BytesCompression is a package of its own, ../BytesCompression, since 2026-11-23.)
         .library(name: "BytesCrypto", targets: ["BytesCrypto"]),
         .library(name: "BytesAsync", targets: ["BytesAsync"]),
         .library(name: "BytesMacros", targets: ["BytesMacros"]),
@@ -91,7 +86,6 @@ let package = Package(
         // Test and benchmark support (above).
         .library(name: "BytesTestSupport", targets: ["BytesTestSupport"]),
         .library(name: "BytesTesting", targets: ["BytesTesting"]),
-        .library(name: "BytesReferenceCodecs", targets: ["BytesReferenceCodecs"]),
     ],
     // Three builds, for measuring each (see Benchmarks/RESULTS.md):
     // - default: the C modules' NEON and CRC instructions (what Apple silicon gets);
@@ -142,22 +136,16 @@ let package = Package(
             dependencies: ["Bytes", "BytesTestSupport"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
-        // DEFLATE (raw, zlib, gzip) and Brotli, compressing and decompressing.
-        .target(
-            name: "BytesCompression",
-            dependencies: ["Bytes", .target(name: "CBytesCRC", condition: .when(traits: ["HardwareCRC"]))],
-            swiftSettings: strictSettings + portableSwiftSettings + [.enableExperimentalFeature("BuiltinModule")]
-        ),
-        // The asynchronous parts: `ByteBuffer.receive`, lending spans to tasks, the parallel codecs' `async`
-        // entry points, and asynchronous pipeline stages.
+        // The asynchronous parts: `ByteBuffer.receive`, lending spans to tasks, and asynchronous pipeline stages. (The
+        // parallel codecs' `async` entry points moved with BytesCompression, to its BytesCompressionAsync.)
         .target(
             name: "BytesAsync",
-            dependencies: ["Bytes", "BytesCompression"],
+            dependencies: ["Bytes"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         .testTarget(
             name: "BytesAsyncTests",
-            dependencies: ["Bytes", "BytesCompression", "BytesAsync"],
+            dependencies: ["Bytes", "BytesAsync"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         // `Data` with spans (standard library ones only), apart so `Bytes` needn't depend on Foundation.
@@ -196,49 +184,12 @@ let package = Package(
         ),
         .testTarget(
             name: "BytesCryptoTests",
-            dependencies: ["Bytes", "BytesCompression", "BytesCrypto", "BytesTestSupport", "BytesTesting"],
+            dependencies: ["Bytes", "BytesCrypto", "BytesTestSupport", "BytesTesting"],
             // Not strict memory safety: CryptoKit, the reference, takes `Data`.
             swiftSettings: commonSettings + portableSwiftSettings
         ),
-        // Reference implementations, for differential tests and comparison benchmarks only. Found through
-        // pkg-config: `brew install libdeflate brotli zstd xz`. (zlib and Apple's Compression come with the SDK.)
-        .systemLibrary(name: "CLibDeflate", pkgConfig: "libdeflate", providers: [.brew(["libdeflate"])]),
-        .systemLibrary(name: "CBrotli", pkgConfig: "libbrotlienc", providers: [.brew(["brotli"])]),
-        .systemLibrary(name: "CZstd", pkgConfig: "libzstd", providers: [.brew(["zstd"])]),
-        .systemLibrary(name: "CLZMA", pkgConfig: "liblzma", providers: [.brew(["xz"])]),
-        // libbzip2, from the SDK.
-        .systemLibrary(name: "CBZip2"),
-        // (The lzfse and libzbitmap C references that BytesCompression's LZFSE, LZVN, and LZBITMAP coders were
-        // checked against are no longer built: `Tools/test-data fetch c-references` has their source, and
-        // Benchmarks/RESULTS-lz4-lzfse.md and RESULTS-lzbitmap.md say how to add them back as targets.)
-        .testTarget(
-            name: "BytesCompressionTests",
-            dependencies: [
-                "Bytes", "BytesCompression", "BytesAsync", "CLibDeflate", "CBrotli", "CZstd", "CLZMA", "CBZip2",
-                "BytesTestSupport", "BytesTesting", "BytesReferenceCodecs",
-            ],
-            // Not strict memory safety: the tests call the reference libraries' C APIs.
-            swiftSettings: commonSettings + portableSwiftSettings
-        ),
-        .executableTarget(
-            name: "CompressionBenchmarks",
-            dependencies: [
-                "BytesCompression",
-                "BytesAsync",
-                "BytesCrypto",
-                "CLibDeflate",
-                "CBrotli",
-                "CZstd",
-                "CLZMA",
-                "CBZip2",
-                "BytesTestSupport",
-                "BytesReferenceCodecs",
-                .product(name: "Benchmark", package: "benchmark"),
-            ],
-            path: "Benchmarks/CompressionBenchmarks",
-            swiftSettings: commonSettings + portableSwiftSettings,
-            plugins: [.plugin(name: "BenchmarkPlugin", package: "benchmark")]
-        ),
+        // (The codecs' tests and benchmarks, `CompressionBenchmarks` with BytesCrypto's rows among them, and the
+        // reference libraries they compare with moved with BytesCompression to ../BytesCompression.)
         .executableTarget(
             name: "BytesBenchmarks",
             dependencies: [

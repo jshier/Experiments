@@ -144,14 +144,16 @@ public struct HTTPStructuredDecimal: Sendable, Hashable, Comparable, CustomStrin
     }
 
     @inlinable
-    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.thousandths < rhs.thousandths }
+    public static func <(lhs: Self, rhs: Self) -> Bool { lhs.thousandths < rhs.thousandths }
 
     /// The canonical form: `1.5`, `-0.25`, `10.0`.
     public var description: String {
         let magnitude = thousandths.magnitude
         var fraction = String(magnitude % 1000)
         fraction = String(repeating: "0", count: 3 - fraction.count) + fraction
-        while fraction.count > 1, fraction.hasSuffix("0") { fraction.removeLast() }
+        while fraction.count > 1, fraction.hasSuffix("0") {
+            fraction.removeLast()
+        }
         return (thousandths < 0 ? "-" : "") + String(magnitude / 1000) + "." + fraction
     }
 }
@@ -180,7 +182,7 @@ public struct HTTPStructuredString: ~Escapable {
     public init?(_ bytes: RawSpan) {
         guard !bytes.containsByte(where: StructuredFieldScan.nonPrintable) else { return nil }
         self.bytes = bytes
-        self.isEscaped = false
+        isEscaped = false
     }
 
     /// The string's bytes when they need no unescaping, or `nil`.
@@ -387,10 +389,10 @@ public struct HTTPStructuredDisplayString: ~Escapable {
     }
 }
 
-extension String {
+public extension String {
     /// The string's text.
     @inlinable
-    public init(_ value: HTTPStructuredString) {
+    init(_ value: HTTPStructuredString) {
         self.init(utf8Capacity: value.byteCount) { writer in
             // Can't throw: the writer has exactly the room the bytes need.
             try! value.write(to: &writer)
@@ -399,7 +401,7 @@ extension String {
 
     /// The display string's text.
     @inlinable
-    public init(_ value: HTTPStructuredDisplayString) {
+    init(_ value: HTTPStructuredDisplayString) {
         self.init(utf8Capacity: value.byteCount) { writer in
             // Can't throw: the writer has exactly the room the bytes need.
             try! value.write(to: &writer)
@@ -490,7 +492,7 @@ public struct HTTPStructuredParameters: ~Escapable {
     @_lifetime(copy self)
     public mutating func next() -> HTTPStructuredParameter? {
         guard position < bytes.byteCount else { return nil }
-        var position = self.position
+        var position = position
         do throws(HTTPStructuredFieldError) {
             let parameter = try StructuredFieldScan.parameter(bytes, &position)
             self.position = position
@@ -545,7 +547,7 @@ public struct HTTPStructuredInnerList: ~Escapable {
     @inlinable
     @_lifetime(copy self)
     public mutating func next() -> HTTPStructuredItem? {
-        var position = StructuredFieldScan.spacesEnd(items, from: self.position)
+        var position = StructuredFieldScan.spacesEnd(items, from: position)
         guard position < items.byteCount else { return nil }
         do throws(HTTPStructuredFieldError) {
             let item = try StructuredFieldScan.item(items, &position)
@@ -635,7 +637,7 @@ public struct HTTPStructuredList: ~Escapable {
     @inlinable
     @_lifetime(copy self)
     public mutating func next() throws(HTTPStructuredFieldError) -> HTTPStructuredMember? {
-        var position = self.position, state = self.state
+        var position = position, state = state
         guard try StructuredFieldScan.memberFollows(bytes, &position, &state) else {
             self.position = position
             self.state = state
@@ -698,7 +700,7 @@ public struct HTTPStructuredDictionary: ~Escapable {
     @inlinable
     @_lifetime(copy self)
     public mutating func next() throws(HTTPStructuredFieldError) -> HTTPStructuredDictionaryMember? {
-        var position = self.position, state = self.state
+        var position = position, state = state
         guard try StructuredFieldScan.memberFollows(bytes, &position, &state) else {
             self.position = position
             self.state = state

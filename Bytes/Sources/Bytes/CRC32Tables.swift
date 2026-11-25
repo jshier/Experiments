@@ -4,14 +4,14 @@
 //
 // Generated (Perl, from the definition below); `CRC32TableTests` recomputes every entry and compares.
 
-extension CRC32 {
+package extension CRC32 {
     /// Two sets of eight 256-entry tables, in one array. In each set, table `k` gives the register
     /// contribution of byte `b` at position `k` of an 8-byte word, advanced to a later position: the CRC of
     /// `b` followed by `7 - k` zero bytes (slicing-by-8, to the next word), then for the braid set by the
     /// other braids' words too, `8 * (braids - 1)` more (to the same braid's next word). Table 7 is the
     /// classic byte-at-a-time table. (`@usableFromInline`: ``updateRegister(_:byte:)`` reads it on CPUs without CRC
     /// instructions.)
-    @usableFromInline package static let tables: [UInt32] = [
+    @usableFromInline static let tables: [UInt32] = [
         // Slicing table 0
         0x0000_0000, 0xCCAA_009E, 0x4225_077D, 0x8E8F_07E3, 0x844A_0EFA, 0x48E0_0E64, 0xC66F_0987, 0x0AC5_0919,
         0xD3E5_1BB5, 0x1F4F_1B2B, 0x91C0_1CC8, 0x5D6A_1C56, 0x57AF_154F, 0x9B05_15D1, 0x158A_1232, 0xD920_12AC,

@@ -13,7 +13,7 @@ import Testing
         let task = Task { () async -> Result<R, ZipError> in
             withUnsafeCurrentTask { $0?.cancel() }
             do throws(ZipError) {
-                return .success(try await body())
+                return try await .success(body())
             } catch {
                 return .failure(error)
             }
@@ -43,7 +43,7 @@ import Testing
         defer { directory.remove() }
         let out = FilePath(directory.path("out").path)
         let result = await Self.cancelled { () async throws(ZipError) in
-            try await ZipExtractor.extract(into: out, stopOnFirstError: false) { (extractor) async throws(ZipError) in
+            try await ZipExtractor.extract(into: out, stopOnFirstError: false) { extractor async throws(ZipError) in
                 try await extractor.add(archive)
             }
         }
@@ -59,7 +59,9 @@ import Testing
         let source = directory.path("source")
         try FileManager.default.createDirectory(at: source, withIntermediateDirectories: true)
         let contents = Data(repeating: 0x61, count: 2_000)
-        for index in 0..<3_000 { try contents.write(to: source.appending(path: "file-\(index).txt")) }
+        for index in 0..<3_000 {
+            try contents.write(to: source.appending(path: "file-\(index).txt"))
+        }
         let url = directory.path("Many.zip")
         try ExternalTool.run("/usr/bin/zip", ["-q", "-r", "-1", url.path, "."], in: source)
         let archive = try ZipArchive(url: url)

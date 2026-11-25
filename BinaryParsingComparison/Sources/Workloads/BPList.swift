@@ -54,7 +54,7 @@ public enum BPList {
     ///   table is cut short or an offset is past the end.
     public static func parseWithBytes(_ data: RawSpan) throws(BytesError) -> ExampleBPList {
         let trailer = try readTrailer(data)
-        return ExampleBPList(trailer: trailer, topObject: try readObject(index: trailer.topObjectIndex, data, trailer))
+        return try ExampleBPList(trailer: trailer, topObject: readObject(index: trailer.topObjectIndex, data, trailer))
     }
 
     static func readTrailer(_ data: RawSpan) throws(BytesError) -> ExampleBPList.Trailer {
@@ -69,7 +69,7 @@ public enum BPList {
         var entries = try table.readSection(byteCount: tableSize)
         var offsetTable: [Int] = []
         while !entries.isAtEnd {
-            guard let offset = Int(exactly: try readUnsigned(&entries, byteCount: offsetSize)) else { throw .invalidValue }
+            guard let offset = try Int(exactly: readUnsigned(&entries, byteCount: offsetSize)) else { throw .invalidValue }
             offsetTable.append(offset)
         }
         return ExampleBPList.Trailer(
@@ -88,17 +88,17 @@ public enum BPList {
         case (0x0, 0x0): return .null
         case (0x0, 0x8): return .boolean(false)
         case (0x0, 0x9): return .boolean(true)
-        case (0x1, let size): return .int(try readSigned(&reader, byteCount: 1 &<< size))
-        case (0x2, let size): return .real(Double(bitPattern: try readUnsigned(&reader, byteCount: 1 &<< size)))
-        case (0x3, 0x3): return .date(try reader.read(Int64.self))
-        case (0x4, let count):
+        case let (0x1, size): return try .int(readSigned(&reader, byteCount: 1 &<< size))
+        case let (0x2, size): return try .real(Double(bitPattern: readUnsigned(&reader, byteCount: 1 &<< size)))
+        case (0x3, 0x3): return try .date(reader.read(Int64.self))
+        case let (0x4, count):
             let count = try readCount(&reader, count)
-            return .data([UInt8](copying: try reader.read(byteCount: count)))
-        case (0x5, let count): // ASCII
+            return try .data([UInt8](copying: reader.read(byteCount: count)))
+        case let (0x5, count): // ASCII
             let count = try readCount(&reader, count)
             // Validated, where the example repairs invalid UTF-8: the same for ASCII.
-            return .string(String(copying: try reader.readUTF8(byteCount: count)))
-        case (0x6, let count): // UTF-16, big-endian
+            return try .string(String(copying: reader.readUTF8(byteCount: count)))
+        case let (0x6, count): // UTF-16, big-endian
             let count = try readCount(&reader, count)
             let (byteCount, overflow) = count.multipliedReportingOverflow(by: 2)
             guard !overflow else { throw .invalidValue }
@@ -107,18 +107,20 @@ public enum BPList {
             // decoding, which can only decode the machine's order.
             var codeUnits: [UInt16] = []
             codeUnits.reserveCapacity(count)
-            while !units.isAtEnd { codeUnits.append(try units.read(UInt16.self)) }
+            while !units.isAtEnd {
+                try codeUnits.append(units.read(UInt16.self))
+            }
             return .string(String(decoding: codeUnits, as: UTF16.self))
-        case (0x8, let size): // A UID: read as data, as in the example.
-            return .data([UInt8](copying: try reader.read(byteCount: size &+ 1)))
-        case (0xA, let marker):
+        case let (0x8, size): // A UID: read as data, as in the example.
+            return try .data([UInt8](copying: reader.read(byteCount: size &+ 1)))
+        case let (0xA, marker):
             var references = try readReferences(&reader, count: readCount(&reader, marker), trailer)
             var array: [ExampleBPList.Object] = []
             while !references.isAtEnd {
                 try array.append(readObject(index: readReference(&references, trailer), data, trailer))
             }
             return .array(array)
-        case (0xD, let marker):
+        case let (0xD, marker):
             let count = try readCount(&reader, marker) // Once, for both lists.
             var keys = try readReferences(&reader, count: count, trailer)
             var values = try readReferences(&reader, count: count, trailer)
@@ -126,7 +128,7 @@ public enum BPList {
             while !keys.isAtEnd {
                 let key = try readObject(index: readReference(&keys, trailer), data, trailer)
                 let value = try readObject(index: readReference(&values, trailer), data, trailer)
-                guard case .string(let name) = key else { throw .invalidValue }
+                guard case let .string(name) = key else { throw .invalidValue }
                 dictionary[name] = value
             }
             return .dictionary(dictionary)
@@ -141,7 +143,7 @@ public enum BPList {
         guard marker == 0xF else { return marker }
         // An integer marker, 0x1n: 2^n bytes follow. Only n is used, as in the example.
         let size = try reader.read(Byte.self)
-        guard let count = Int(exactly: try readUnsigned(&reader, byteCount: 1 &<< size[BPListMarker.info])) else {
+        guard let count = try Int(exactly: readUnsigned(&reader, byteCount: 1 &<< size[BPListMarker.info])) else {
             throw .invalidValue
         }
         return count
@@ -160,7 +162,7 @@ public enum BPList {
 
     @inline(__always)
     static func readReference(_ references: inout BigEndianBytesReader, _ trailer: ExampleBPList.Trailer) throws(BytesError) -> Int {
-        guard let index = Int(exactly: try readUnsigned(&references, byteCount: trailer.objectReferenceSize)) else {
+        guard let index = try Int(exactly: readUnsigned(&references, byteCount: trailer.objectReferenceSize)) else {
             throw .invalidValue
         }
         return index

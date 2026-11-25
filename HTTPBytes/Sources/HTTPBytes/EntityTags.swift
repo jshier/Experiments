@@ -134,7 +134,7 @@ public struct HTTPEntityTagList: ~Escapable {
         var list = HTTPEntityTagList(value)
         switch tag {
         case .none: return false
-        case .some(let current):
+        case let .some(current):
             if list.isAny { return true }
             while let candidate = try list.next() {
                 if weak ? candidate.weakMatches(current) : candidate.strongMatches(current) { return true }
@@ -161,9 +161,9 @@ public enum HTTPIfRange: ~Escapable {
     public init(parsing value: RawSpan) throws(HTTPFieldValueError) {
         let value = FieldGrammar.trimmed(value)
         if value.byteCount > 0, FieldGrammar.byte(value, 0) == 0x22 || FieldGrammar.byte(value, 0) == 0x57 && value.byteCount > 1 && FieldGrammar.byte(value, 1) == 0x2F {
-            self = .entityTag(try HTTPEntityTag(parsing: value))
+            self = try .entityTag(HTTPEntityTag(parsing: value))
         } else {
-            self = .date(try HTTPDate(parsing: value))
+            self = try .date(HTTPDate(parsing: value))
         }
     }
 
@@ -172,13 +172,13 @@ public enum HTTPIfRange: ~Escapable {
     @inlinable
     public func matches(entityTag: borrowing HTTPEntityTag?, lastModified: HTTPDate?) -> Bool {
         switch self {
-        case .entityTag(let tag):
+        case let .entityTag(tag):
             switch entityTag {
-            case .some(let current): return tag.strongMatches(current)
-            case .none: return false
+            case let .some(current): tag.strongMatches(current)
+            case .none: false
             }
-        case .date(let date):
-            return date == lastModified
+        case let .date(date):
+            date == lastModified
         }
     }
 }
@@ -234,7 +234,7 @@ public struct HTTPPreconditions: ~Escapable {
             if list.isAny { matched = exists } else {
                 // The whole list is read: a malformed one fails wherever its bad element is.
                 switch entityTag {
-                case .some(let current):
+                case let .some(current):
                     do throws(HTTPFieldValueError) {
                         while let candidate = try list.next() {
                             if candidate.strongMatches(current) { matched = true }
@@ -255,7 +255,7 @@ public struct HTTPPreconditions: ~Escapable {
             var list = HTTPEntityTagList(ifNoneMatch)
             if list.isAny { matched = exists } else {
                 switch entityTag {
-                case .some(let current):
+                case let .some(current):
                     do throws(HTTPFieldValueError) {
                         while let candidate = try list.next() {
                             if candidate.weakMatches(current) { matched = true }

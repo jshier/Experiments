@@ -1,6 +1,6 @@
 import Bytes
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 import Foundation
 import HTTP3
 import HTTPBytes
@@ -85,7 +85,7 @@ struct QPACKLink {
                 }
                 carry = pending
             } else {
-                carry.removeFirst(try encoder.processDecoderStream(carry.span.bytes))
+                try carry.removeFirst(encoder.processDecoderStream(carry.span.bytes))
             }
         }
 
@@ -192,7 +192,7 @@ let qpackLinkSettings: [QPACKLink] = [
                                 ("x-e", value), ("x-g", value), ("x-a", value), ("x-a", value)])
         var encoded: [EncodedSection] = []
         for (index, set) in sets.enumerated() {
-            encoded.append(try encodeSection(&encoder, store(set), stream: UInt64(index * 4), indexing: .prefer))
+            try encoded.append(encodeSection(&encoder, store(set), stream: UInt64(index * 4), indexing: .prefer))
             try applyEncoderStream(&decoder, encoded[index].instructions)
             #expect(try decodeSection(&decoder, encoded[index].section, stream: UInt64(index * 4)) == set)
             #expect(try encoder.processDecoderStream(decoderInstructions(&decoder).span.bytes) >= 0)
@@ -233,7 +233,7 @@ let qpackLinkSettings: [QPACKLink] = [
         var encoded: [EncodedSection] = []
         for index in 0..<3 {
             let set = [Field("x-trace", "id-\(index)")]
-            encoded.append(try encodeSection(&encoder, store(set), stream: UInt64(index * 4)))
+            try encoded.append(encodeSection(&encoder, store(set), stream: UInt64(index * 4)))
             try applyEncoderStream(&decoder, encoded[index].instructions)
             #expect(try decodeSection(&decoder, encoded[index].section, stream: UInt64(index * 4)) == set)
             _ = try encoder.processDecoderStream(decoderInstructions(&decoder).span.bytes)

@@ -48,8 +48,16 @@ public final class ExtractionProgress: Sendable {
 
     /// Adds to the totals: a client learning them as it goes (archives added one at a time). Negative counts take
     /// entries back off (ones it then skipped).
+    /// The totals saturate at `Int.max` (and `Int.min`) rather than overflow: they're the archives' claims, which a
+    /// damaged or hostile archive makes as large as it likes.
     public func addExpected(entries: Int, bytes: Int) {
-        expected.withLock { $0 = ($0.entries + entries, $0.bytes + bytes) }
+        expected.withLock { $0 = (Self.saturating($0.entries, entries), Self.saturating($0.bytes, bytes)) }
+    }
+
+    /// `a + b`, saturating.
+    private static func saturating(_ a: Int, _ b: Int) -> Int {
+        let (sum, overflow) = a.addingReportingOverflow(b)
+        return overflow ? (b > 0 ? .max : .min) : sum
     }
 
     /// Entries made so far: directories, files, links, and special files.

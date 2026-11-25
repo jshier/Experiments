@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTesting
 import BytesTestSupport
 import CryptoKit
@@ -25,11 +25,13 @@ struct ECDSAVectors: Decodable {
         let sha: String
         let tests: [Vector]
     }
+
     struct Vector: Decodable {
         let tcId: Int
         let msg, sig, result: String
         let flags: [String]
     }
+
     let testGroups: [Group]
 }
 
@@ -39,11 +41,13 @@ struct ECDHVectors: Decodable {
         let encoding: String
         let tests: [Vector]
     }
+
     struct Vector: Decodable {
         let tcId: Int
         let `public`, `private`, shared, result: String
         let flags: [String]
     }
+
     let testGroups: [Group]
 }
 
@@ -74,10 +78,12 @@ enum TestedP256: TestedCurve {
         guard let signature = try? P256.Signature(derRepresentation: derSignature.span.bytes) else { return false }
         return key.isValidSignature(signature, for: message.span.bytes)
     }
+
     static func verify(_ key: P256.PublicKey, rawSignature: [UInt8], message: [UInt8]) -> Bool {
         guard let signature = try? P256.Signature(rawRepresentation: rawSignature.span.bytes) else { return false }
         return key.isValidSignature(signature, for: message.span.bytes)
     }
+
     static func privateKey(raw: [UInt8]) throws(BytesError) -> P256.PrivateKey { try P256.PrivateKey(rawRepresentation: raw.span.bytes) }
     static func sharedSecret(_ key: P256.PrivateKey, _ other: P256.PublicKey) -> [UInt8] { key.sharedSecret(with: other).array }
 }
@@ -93,10 +99,12 @@ enum TestedP384: TestedCurve {
         guard let signature = try? P384.Signature(derRepresentation: derSignature.span.bytes) else { return false }
         return key.isValidSignature(signature, for: message.span.bytes)
     }
+
     static func verify(_ key: P384.PublicKey, rawSignature: [UInt8], message: [UInt8]) -> Bool {
         guard let signature = try? P384.Signature(rawRepresentation: rawSignature.span.bytes) else { return false }
         return key.isValidSignature(signature, for: message.span.bytes)
     }
+
     static func privateKey(raw: [UInt8]) throws(BytesError) -> P384.PrivateKey { try P384.PrivateKey(rawRepresentation: raw.span.bytes) }
     static func sharedSecret(_ key: P384.PrivateKey, _ other: P384.PublicKey) -> [UInt8] { key.sharedSecret(with: other).array }
 }
@@ -106,6 +114,7 @@ extension P256.PublicKey {
     func verifies(_ signature: P256.Signature, _ message: [UInt8]) -> Bool { isValidSignature(signature, for: message.span.bytes) }
     func verifies(_ signature: P256.Signature, digest: [UInt8]) -> Bool { isValidSignature(signature, digest: digest.span.bytes) }
 }
+
 extension P384.PublicKey {
     func verifies(_ signature: P384.Signature, _ message: [UInt8]) -> Bool { isValidSignature(signature, for: message.span.bytes) }
     func verifies(_ signature: P384.Signature, digest: [UInt8]) -> Bool { isValidSignature(signature, digest: digest.span.bytes) }
@@ -218,11 +227,10 @@ enum ECDHFile: String, CaseIterable, Sendable {
             let encoded = hex(vector.public)
             let privateKey = try C.privateKey(raw: fixedWidth(hex(vector.private), C.byteCount))
             let result = Result { () throws(BytesError) -> [UInt8] in
-                let publicKey: C.PublicKey
-                if group.encoding == "ecpoint" {
-                    publicKey = encoded.count == 1 + C.byteCount ? try C.publicKey(compressed: encoded) : try C.publicKey(x963: encoded)
+                let publicKey: C.PublicKey = if group.encoding == "ecpoint" {
+                    encoded.count == 1 + C.byteCount ? try C.publicKey(compressed: encoded) : try C.publicKey(x963: encoded)
                 } else {
-                    publicKey = try C.publicKey(der: encoded)
+                    try C.publicKey(der: encoded)
                 }
                 return C.sharedSecret(privateKey, publicKey)
             }
@@ -319,7 +327,9 @@ enum ECDHFile: String, CaseIterable, Sendable {
             #expect(M.modulus[0] &* M.negativeInverse == UInt64.max, "−m⁻¹ mod 2⁶⁴")
             var exponent = M.modulus
             exponent[0] -= 2
-            for index in 0..<6 { #expect(exponent[index] == M.inversionExponent[index]) }
+            for index in 0..<6 {
+                #expect(exponent[index] == M.inversionExponent[index])
+            }
         }
         checkModulus(P256FieldModulus.self, limbs: 4)
         checkModulus(P256OrderModulus.self, limbs: 4)
@@ -361,7 +371,7 @@ enum ECDHFile: String, CaseIterable, Sendable {
             #expect(!key.verifies(der, forged))
             forged = Array(signature.rawRepresentation)
             forged[63] ^= 1
-            #expect(!key.verifies(try P256.Signature(rawRepresentation: forged.span.bytes), message))
+            #expect(try !key.verifies(P256.Signature(rawRepresentation: forged.span.bytes), message))
             // Compressed form and DER of the public key.
             #expect(try P256.PublicKey(compressedRepresentation: Array(signer.publicKey.compressedRepresentation).span.bytes)
                 .x963Representation == key.x963Representation)
@@ -398,7 +408,7 @@ enum ECDHFile: String, CaseIterable, Sendable {
             // A P-384 key verifying a SHA-256 digest (ecdsa-with-SHA256 certificates).
             let sha256Signature = try signer.signature(for: CryptoKit.SHA256.hash(data: message))
             let digest = Array(CryptoKit.SHA256.hash(data: message))
-            #expect(key.verifies(try P384.Signature(rawRepresentation: Array(sha256Signature.rawRepresentation).span.bytes), digest: digest))
+            #expect(try key.verifies(P384.Signature(rawRepresentation: Array(sha256Signature.rawRepresentation).span.bytes), digest: digest))
             #expect(try P384.PublicKey(compressedRepresentation: Array(signer.publicKey.compressedRepresentation).span.bytes)
                 .x963Representation == key.x963Representation)
 
@@ -434,40 +444,41 @@ enum ECDHFile: String, CaseIterable, Sendable {
 @Suite struct ECCFormatTests {
     /// `openssl ecparam -genkey -name prime256v1` (a throwaway key made for this test), with its parameters block.
     static let openSSLP256 = """
-        -----BEGIN EC PARAMETERS-----
-        BggqhkjOPQMBBw==
-        -----END EC PARAMETERS-----
-        -----BEGIN EC PRIVATE KEY-----
-        MHcCAQEEIEpq/nlWo8yTTLXQta5XEUwkec8qNmbD3Pcmm8D86CS1oAoGCCqGSM49
-        AwEHoUQDQgAEocJVx7l6y0XlW88SOW0/dCC65yE/Lqqz7qCqJ4HWzLCJQ6xNzDfN
-        sG5OqbqkVzdnjS9zj5RTM9XPzQ1KFsx5WQ==
-        -----END EC PRIVATE KEY-----
-        """
+    -----BEGIN EC PARAMETERS-----
+    BggqhkjOPQMBBw==
+    -----END EC PARAMETERS-----
+    -----BEGIN EC PRIVATE KEY-----
+    MHcCAQEEIEpq/nlWo8yTTLXQta5XEUwkec8qNmbD3Pcmm8D86CS1oAoGCCqGSM49
+    AwEHoUQDQgAEocJVx7l6y0XlW88SOW0/dCC65yE/Lqqz7qCqJ4HWzLCJQ6xNzDfN
+    sG5OqbqkVzdnjS9zj5RTM9XPzQ1KFsx5WQ==
+    -----END EC PRIVATE KEY-----
+    """
 
     /// `openssl ecparam -genkey -name secp384r1 -noout`, and `openssl ec -pubout` of it.
     static let openSSLP384 = """
-        -----BEGIN EC PRIVATE KEY-----
-        MIGkAgEBBDA2001zghltoWBASXpriwUKY3KQxOJ1n3dBBpKtWJAa8U9hx7uCgAXU
-        3axFaFeiJWigBwYFK4EEACKhZANiAARazrNaWU+kVboWybTnGoS1DJsI4jF1UWKz
-        x+UTst7UoIrvLlYgS4qdNqKe7LmRjtgonmIqHBKM61f1V6PO6CNl9XB+flmvCsIx
-        Pp+F+ZeTE2lCZTp9/3KszSpp2UubLoo=
-        -----END EC PRIVATE KEY-----
-        """
+    -----BEGIN EC PRIVATE KEY-----
+    MIGkAgEBBDA2001zghltoWBASXpriwUKY3KQxOJ1n3dBBpKtWJAa8U9hx7uCgAXU
+    3axFaFeiJWigBwYFK4EEACKhZANiAARazrNaWU+kVboWybTnGoS1DJsI4jF1UWKz
+    x+UTst7UoIrvLlYgS4qdNqKe7LmRjtgonmIqHBKM61f1V6PO6CNl9XB+flmvCsIx
+    Pp+F+ZeTE2lCZTp9/3KszSpp2UubLoo=
+    -----END EC PRIVATE KEY-----
+    """
     static let openSSLP384Public = """
-        -----BEGIN PUBLIC KEY-----
-        MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEWs6zWllPpFW6Fsm05xqEtQybCOIxdVFi
-        s8flE7Le1KCK7y5WIEuKnTainuy5kY7YKJ5iKhwSjOtX9VejzugjZfVwfn5ZrwrC
-        MT6fhfmXkxNpQmU6ff9yrM0qadlLmy6K
-        -----END PUBLIC KEY-----
-        """
+    -----BEGIN PUBLIC KEY-----
+    MHYwEAYHKoZIzj0CAQYFK4EEACIDYgAEWs6zWllPpFW6Fsm05xqEtQybCOIxdVFi
+    s8flE7Le1KCK7y5WIEuKnTainuy5kY7YKJ5iKhwSjOtX9VejzugjZfVwfn5ZrwrC
+    MT6fhfmXkxNpQmU6ff9yrM0qadlLmy6K
+    -----END PUBLIC KEY-----
+    """
 
     @Test func openSSLKeys() throws {
         let key = try P256.PrivateKey(pemRepresentation: Self.openSSLP256)
         #expect(key.rawRepresentation == hex("4a6afe7956a3cc934cb5d0b5ae57114c2479cf2a3666c3dcf7269bc0fce824b5"))
         #expect(key.publicKey.x963Representation == hex(
-            "04a1c255c7b97acb45e55bcf12396d3f7420bae7213f2eaab3eea0aa2781d6ccb08943ac4dcc37cdb06e4ea9baa45737678d2f738f945333d5cfcd0d4a16cc7959"))
+            "04a1c255c7b97acb45e55bcf12396d3f7420bae7213f2eaab3eea0aa2781d6ccb08943ac4dcc37cdb06e4ea9baa45737678d2f738f945333d5cfcd0d4a16cc7959"
+        ))
         let key384 = try P384.PrivateKey(pemRepresentation: Self.openSSLP384)
-        #expect(key384.publicKey.x963Representation == (try P384.PublicKey(pemRepresentation: Self.openSSLP384Public)).x963Representation)
+        #expect(try key384.publicKey.x963Representation == (P384.PublicKey(pemRepresentation: Self.openSSLP384Public)).x963Representation)
         // A P-384 key isn't a P-256 one, nor the reverse.
         #expect(throws: BytesError.self) { _ = try P256.PrivateKey(pemRepresentation: Self.openSSLP384) }
         #expect(throws: BytesError.self) { _ = try P384.PublicKey(pemRepresentation: CryptoKit.P256.Signing.PrivateKey().publicKey.pemRepresentation) }
@@ -504,7 +515,7 @@ enum ECDHFile: String, CaseIterable, Sendable {
     @Test func paddedDERSignatures() throws {
         let signer = CryptoKit.P256.Signing.PrivateKey()
         let message: [UInt8] = Array("Apple Encrypted Archive".utf8)
-        let der = Array(try signer.signature(for: Data(message)).derRepresentation)
+        let der = try Array(signer.signature(for: Data(message)).derRepresentation)
         let key = try P256.PublicKey(x963Representation: Array(signer.publicKey.x963Representation).span.bytes)
         let padded = der + [UInt8](repeating: 0, count: 128 - der.count)
         #expect(throws: BytesError.self) { _ = try P256.Signature(derRepresentation: padded.span.bytes) }

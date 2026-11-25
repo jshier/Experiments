@@ -12,14 +12,18 @@
 #   --percentile   p0, p25, p50 (default), p75, p90, p99, p100
 #
 # Output, tab-separated: benchmark, metric, one value per baseline, change (last vs first). Values are in
-# base units, whatever scale the tool printed: counts unscaled (its "(K)"/"(M)" removed), times in
-# microseconds. Missing values are "-".
+# base units, whatever scale the tool printed: counts unscaled (its "(K)" through "(P)" removed), times in
+# microseconds (from ns, μs, ms, s, ks, Ms). Missing values are "-". A benchmark name used by more than one
+# benchmark target of the package is shown as "TARGET: NAME", so the targets' rows stay apart.
+#
+# The values are the ones `baseline read --format markdown` prints: 3 to 4 significant digits. For checks finer
+# than that, read the histograms in the baseline's results.json (before Tools/slim-baselines).
 #
 # Save baselines with: swift package --disable-sandbox benchmark baseline update NAME [--filter …] --no-progress
 #
 # example:
 #   Tools/bench-table Bytes --metric 'Throughput|Instructions' --filter '^Encode.*Bytes \(' v1 tbl zip final
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
 metric='.' filter='.' percentile=p50 baselines=()
 [[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]] && usage
@@ -27,9 +31,9 @@ metric='.' filter='.' percentile=p50 baselines=()
 package="$1"; shift
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --metric) metric="$2"; shift ;;
-        --filter) filter="$2"; shift ;;
-        --percentile) percentile="$2"; shift ;;
+        --metric) need_value "$@"; metric="$2"; shift ;;
+        --filter) need_value "$@"; filter="$2"; shift ;;
+        --percentile) need_value "$@"; percentile="$2"; shift ;;
         -h|--help) usage ;;
         -*) die "unknown option $1" ;;
         *) baselines+=("$1") ;;
@@ -37,6 +41,11 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 [[ ${#baselines[@]} -ge 1 ]] || usage 2
+case "$percentile" in
+    p0|p25|p50|p75|p90|p99|p100) ;;
+    *) die "--percentile is one of p0, p25, p50, p75, p90, p99, p100, not '$percentile'" ;;
+esac
+[[ -d "$package" ]] || die "no package directory $package"
 scratch_dir
 
 index=0
@@ -47,17 +56,19 @@ for baseline in "${baselines[@]}"; do
     index=$((index + 1))
 done
 
-# Markdown: "### <benchmark>", then "| <Metric> (<unit>) * | p0 | p25 | p50 | … |" rows.
+# Markdown: "## <benchmark target>", "### <benchmark>", then "| <Metric> (<unit>) * | p0 | p25 | p50 | … |" rows.
 METRIC="$metric" FILTER="$filter" PERCENTILE="$percentile" COUNT="${#baselines[@]}" NAMES="${baselines[*]}" perl -e '
-    my %scale = (K => 1e3, M => 1e6, G => 1e9, ns => 1e-3, "μs" => 1, us => 1, ms => 1e3, s => 1e6);
+    my %scale = (K => 1e3, M => 1e6, G => 1e9, T => 1e12, P => 1e15,
+                 ns => 1e-3, "μs" => 1, us => 1, ms => 1e3, s => 1e6, ks => 1e9, Ms => 1e12);
     my @percentiles = qw(p0 p25 p50 p75 p90 p99 p100);
     my ($column) = grep { $percentiles[$_] eq $ENV{PERCENTILE} } 0 .. $#percentiles;
     die "unknown percentile $ENV{PERCENTILE}\n" unless defined $column;
-    my (%value, @order, %seen);
+    my (%value, @order, %seen, %targets);
     for my $b (0 .. $ENV{COUNT} - 1) {
         open my $f, "<", "$ARGV[0]/$b.md" or die;
-        my $bench;
+        my ($target, $bench) = ("");
         while (<$f>) {
+            if (/^## (.*?)\s*$/) { $target = $1 unless $1 =~ /^Baseline /; undef $bench; next }
             if (/^### (.*?)(?: metrics)?\s*$/) { $bench = $1; next }
             next unless defined $bench && /^\|\s*([^|]+?)\s*\|((?:\s*[-\d.,]+\s*\|){7})/;
             my ($name, $cells) = ($1, $2);
@@ -65,17 +76,20 @@ METRIC="$metric" FILTER="$filter" PERCENTILE="$percentile" COUNT="${#baselines[@
             my @cells = map { s/[\s,]//gr } grep { length } split /\|/, $cells;
             $name =~ s/\s*\*$//;
             my $factor = 1;
-            while ($name =~ s/\s*\((K|M|G|ns|μs|us|ms|s)\)$//) { $factor *= $scale{$1} }
+            while ($name =~ s/\s*\((K|M|G|T|P|ns|μs|us|ms|s|ks|Ms)\)$//) { $factor *= $scale{$1} }
             next unless $name =~ /$ENV{METRIC}/ && $bench =~ /$ENV{FILTER}/;
-            my $key = "$bench\t$name";
+            $targets{$bench}{$target} = 1;
+            my $key = "$target\t$bench\t$name";
             push @order, $key unless $seen{$key}++;
             my $v = $cells[$column];
             $value{$key}[$b] = $v eq "-" ? undef : $v * $factor;
         }
     }
+    # The benchmark as shown: its name, or "TARGET: NAME" when targets share the name.
+    my %shown = map { my ($t, $bench, $name) = split /\t/; ($_ => (keys %{$targets{$bench}} > 1 ? "$t: $bench" : $bench) . "\t$name") } @order;
     print join("\t", "benchmark", "metric", split(" ", $ENV{NAMES}), "change"), "\n";
-    for my $key (sort @order) {
+    for my $key (sort { $shown{$a} cmp $shown{$b} } @order) {
         my @v = map { $value{$key}[$_] } 0 .. $ENV{COUNT} - 1;
         my $change = (@v > 1 && defined $v[0] && defined $v[-1] && $v[0] != 0) ? sprintf("%+.1f%%", 100 * ($v[-1] / $v[0] - 1)) : "-";
-        print join("\t", $key, (map { defined $_ ? ($_ == int($_) ? int($_) : sprintf("%.4g", $_)) : "-" } @v), $change), "\n";
+        print join("\t", $shown{$key}, (map { defined $_ ? ($_ == int($_) ? int($_) : sprintf("%.4g", $_)) : "-" } @v), $change), "\n";
     }' "$SCRATCH"

@@ -1,5 +1,5 @@
-public import System
 import Darwin
+public import System
 
 /// What failed writing a tree to disk. Every Disk call throws this (typed throws); its strings are made only when
 /// something fails.
@@ -35,15 +35,15 @@ public enum DiskError: Error, Sendable, Equatable, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .unsafePath(let path): "unsafe path: \(path)"
-        case .escapesDestination(let path): "path leads out of the destination: \(path)"
-        case .exists(let path): "already exists: \(path)"
-        case .notADirectory(let path): "not a directory: \(path)"
-        case .refused(let what): "refused: \(what)"
-        case .invalidMetadata(let what): "invalid metadata: \(what)"
-        case .system(let operation, let path, let errno): "\(operation) \(path): \(errno)"
-        case .endOfFile(let path): "the file ends before the bytes read: \(path)"
-        case .tooLarge(let path, let limit): "larger than \(limit) bytes: \(path)"
+        case let .unsafePath(path): "unsafe path: \(path)"
+        case let .escapesDestination(path): "path leads out of the destination: \(path)"
+        case let .exists(path): "already exists: \(path)"
+        case let .notADirectory(path): "not a directory: \(path)"
+        case let .refused(what): "refused: \(what)"
+        case let .invalidMetadata(what): "invalid metadata: \(what)"
+        case let .system(operation, path, errno): "\(operation) \(path): \(errno)"
+        case let .endOfFile(path): "the file ends before the bytes read: \(path)"
+        case let .tooLarge(path, limit): "larger than \(limit) bytes: \(path)"
         case .stopped: "stopped by another entry's failure"
         case .cancelled: "cancelled"
         }

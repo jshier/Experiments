@@ -3,12 +3,12 @@ public import Bytes
 // Lowercase names for HPACK's and QPACK's encoders: HTTP/2 and HTTP/3 require them (RFC 9113 §8.2.1, RFC 9114 §4.2), and
 // a store's fields may be spelled as HTTP/1 sent them (`Host`, `X-Request-Id`).
 
-extension HTTPFieldName {
+package extension HTTPFieldName {
     /// What an encoder writes as the name of a field whose known name has table index `knownName` (0xFF: not known): the
     /// known name's ``lowercaseBytes``, else `name` itself. Matching ignores a known name's bytes (it's by index), so only
     /// the places that write or keep a name's bytes need this.
     @inlinable @inline(__always)
-    package static func lowercaseSpelling(_ knownName: UInt8, _ name: UnsafeRawPointer?, _ nameCount: Int) -> (UnsafeRawPointer?, Int) {
+    static func lowercaseSpelling(_ knownName: UInt8, _ name: UnsafeRawPointer?, _ nameCount: Int) -> (UnsafeRawPointer?, Int) {
         guard knownName != 0xFF else { return unsafe (name, nameCount) }
         return HTTPFieldName(tableIndex: knownName).lowercaseBytes.withUnsafeBytes { bytes in
             // The address escapes the closure, which is safe here: it's the static table of names, a global constant that

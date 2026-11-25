@@ -3,52 +3,130 @@
 #
 # usage: Tools/doctor
 #
-# Output, tab-separated: area, item, status (ok | missing | off | note), detail (version, path, or how to
-# install). Notes on which LLVM is which: Swift compilers embed their own LLVM (Apple's fork in Xcode;
+# Output, tab-separated: area, item, status, detail (version, path, or how to install). Status:
+#   ok       there and usable
+#   error    required and missing or wrong (Command Line Tools selected instead of Xcode, Instruments without
+#            templates, a yq that isn't mikefarah's, a generator's dependency, an invalid toolchain registry)
+#   missing  optional and not there (with how to install it)
+#   off      there but not running (Binary Ninja's MCP server)
+#   note     for information
+# Exit status: 0 when nothing required is missing, 1 when any row is an error.
+#
+# Required: Xcode selected (xcode-select -p), swiftc and Xcode's tools (objdump, otool, nm, swift-demangle,
+# dsymutil, lldb, xctrace) with Instruments' templates; jq and mikefarah's yq; and what `Tools/test-data fetch`'s
+# generators run: lz4, xz, python3 3.14 or later, openssl, aa, aea. It doesn't need Xcode to start, so it reports
+# a missing one rather than failing. The Homebrew section ends with `brew bundle check --verbose --no-upgrade`
+# against the repository's Brewfile, as notes (it installs nothing: `brew bundle --file Brewfile` does).
+#
+# Notes on which LLVM is which: Swift compilers embed their own LLVM (Apple's fork in Xcode;
 # swiftlang/llvm-project in swift.org and PR toolchains); Homebrew's `llvm` is upstream and newer. Use
 # Swift's own for what the compiler did (Tools/remarks), Homebrew's only for what Swift toolchains don't
 # ship (llvm-mca, opt).
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 [[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
+[[ $# -eq 0 ]] || usage 2
 
-row() { printf '%s\t%s\t%s\t%s\n' "$@"; }
+ERRORS=0
+row() {
+    [[ "$3" == error ]] && ERRORS=$((ERRORS + 1))
+    printf '%s\t%s\t%s\t%s\n' "$@"
+}
+# required AREA ITEM COMMAND HOW: an ok row with its path, or an error row saying how to get it.
+required() {
+    local path
+    if path="$(command -v "$3" 2> /dev/null)"; then row "$1" "$2" ok "$path"; else row "$1" "$2" error "$4"; fi
+}
 
 # CPU
 row machine cpu note "$(sysctl -n machdep.cpu.brand_string), $(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || echo ?)P + $(sysctl -n hw.perflevel1.physicalcpu 2>/dev/null || echo 0)E cores, macOS $(sw_vers -productVersion)"
 row machine sip note "$(csrutil status 2>/dev/null | sed 's/.*: //') (enabled: DTrace can't trace system libraries; use Tools/runtime-count)"
-if DevToolsSecurity -status 2>/dev/null | grep -q enabled; then
+if [[ "$(DevToolsSecurity -status 2>/dev/null || true)" == *enabled* ]]; then
     row machine developer-mode ok "attaching (Instruments, lldb) doesn't prompt"
 else
     row machine developer-mode note "off: the first attach (Allocations, lldb) shows an authentication prompt, approved for 10 h; tell the user if a tool hangs. The user can run: sudo DevToolsSecurity -enable"
 fi
 
 # Swift and its LLVM
-row swift xcode ok "$(xcode-select -p)"
-row swift swiftc ok "$(xcrun swiftc --version 2>&1 | head -1)"
-row swift "Swift's LLVM (Xcode)" note "$(xcrun clang --version | head -1) — Apple's fork, what swiftc optimizes with"
+developer="$(xcode-select -p 2>/dev/null || true)"
+if [[ -z "$developer" || ! -d "$developer" ]]; then
+    row swift xcode error "no developer directory (${developer:-none}): install Xcode, then sudo xcode-select -s /Applications/Xcode.app"
+elif [[ "$developer" != *.app/Contents/Developer ]]; then
+    row swift xcode error "$developer is selected, not Xcode (Command Line Tools have no Instruments, xctrace, or macOS platform for tests): sudo xcode-select -s /Applications/Xcode.app"
+else
+    row swift xcode ok "$developer"
+fi
+if swiftc_version="$(xcrun swiftc --version 2>&1 | head -1)" && xcrun --find swiftc > /dev/null 2>&1; then
+    row swift swiftc ok "$swiftc_version"
+    row swift "Swift's LLVM (Xcode)" note "$(xcrun clang --version 2>/dev/null | head -1) — Apple's fork, what swiftc optimizes with"
+else
+    row swift swiftc error "xcrun can't find swiftc: install Xcode and select it (xcode-select -s)"
+fi
 [[ -n "${TOOLCHAINS:-}" ]] && row swift TOOLCHAINS note "$TOOLCHAINS (selects the toolchain for xcrun, swift build, and these tools)"
 for toolchain in ~/Library/Developer/Toolchains/*.xctoolchain /Library/Developer/Toolchains/*.xctoolchain; do
     [[ -d "$toolchain" && -f "$toolchain/Info.plist" ]] || continue
-    id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$toolchain/Info.plist" 2>/dev/null)"
-    version="$("$toolchain/usr/bin/swiftc" --version 2>&1 | head -1)"
+    if [[ -L "$toolchain" ]]; then
+        row swift "toolchain $(basename "$toolchain")" note "link to $(readlink "$toolchain")"
+        continue
+    fi
+    id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$toolchain/Info.plist" 2>/dev/null || true)"
+    version="$("$toolchain/usr/bin/swiftc" --version 2>&1 | head -1 || true)"
     row swift "toolchain $(basename "$toolchain")" ok "TOOLCHAINS=$id — $version"
 done
-# Registry problems (Tools/toolchains.json): needed but missing, broken links, installed but unregistered.
-"$TOOLS_DIR/toolchain" list 2>/dev/null | while IFS=$'\t' read -r name status id users source; do
-    case "$status" in
-        missing) row swift "toolchain $name" missing "needed by ${users:-nothing}: Tools/toolchain install $name ($source)" ;;
-        broken) row swift "toolchain $name" note "broken: $source" ;;
-        unregistered) row swift "toolchain $name" note "not in Tools/toolchains.json; if a package needs it: $source" ;;
-    esac
-done
-have swiftly && row swift swiftly ok "$(swiftly --version 2>/dev/null | head -1); installs release/snapshot toolchains (not PR builds)"
+# Registry problems (Tools/toolchains.json): invalid, needed but missing, broken links, installed but unregistered.
+if have jq; then
+    if registry="$("$TOOLS_DIR/toolchain" list 2>&1)"; then
+        while IFS=$'\t' read -r name status id users source; do
+            case "$status" in
+                missing) row swift "toolchain $name" missing "needed by ${users:-nothing}: Tools/toolchain install $name ($source)" ;;
+                broken) row swift "toolchain $name" note "broken: $source" ;;
+                unregistered) row swift "toolchain $name" note "not in Tools/toolchains.json; if a package needs it: $source" ;;
+            esac
+        done <<< "$registry"
+    else
+        row swift "toolchain registry" error "Tools/toolchain list failed: $(head -1 <<< "$registry")"
+    fi
+fi
+if have swiftly; then
+    row swift swiftly ok "$(swiftly --version 2>/dev/null | head -1); installs release/snapshot toolchains (not PR builds)"
+else
+    row swift swiftly missing "optional: brew install swiftly, for Tools/toolchain install of {\"swiftly\": SPEC} entries (releases and snapshots)"
+fi
 
 # Xcode tools
 for tool in objdump otool nm swift-demangle dsymutil lldb xctrace; do
-    path="$(xcrun --find "$tool" 2>/dev/null || command -v "$tool" || true)"
-    [[ -n "$path" ]] && row xcode "$tool" ok "$path" || row xcode "$tool" missing "install Xcode"
+    # Only through xcrun: /usr/bin's objdump, lldb, and xctrace are shims that fail without a developer directory.
+    path="$(xcrun --find "$tool" 2>/dev/null || true)"
+    if [[ -n "$path" ]]; then row xcode "$tool" ok "$path"; else row xcode "$tool" error "install Xcode and select it"; fi
 done
-row xcode xctrace-templates note "$(xctrace list templates 2>/dev/null | grep -cE '^[A-Z]') templates; CPU Counters, Time Profiler, Processor Trace, Allocations, Swift Tasks…"
+templates="$(xctrace list templates 2>/dev/null | grep -cE '^[A-Z]' || true)"
+if [[ "${templates:-0}" -gt 0 ]]; then
+    row xcode xctrace-templates ok "$templates templates; CPU Counters, Time Profiler, Processor Trace, Allocations, Swift Tasks…"
+else
+    row xcode xctrace-templates error "xctrace lists no Instruments templates (a stub xctrace, or Command Line Tools selected): select Xcode"
+fi
+
+# What Tools/test-data's generators run
+required generators lz4 lz4 "brew install lz4 — swift-help-lz4"
+# nativezip-lzma loads Homebrew's liblzma through ctypes, so the library is what has to be there, not just `xz`.
+liblzma="$( (have brew && brew --prefix xz 2> /dev/null) || true)/lib/liblzma.dylib"
+if [[ "$liblzma" == /* && -f "$liblzma" ]]; then
+    row generators xz ok "$liblzma"
+else
+    row generators xz error "no Homebrew liblzma ($liblzma): brew install xz — nativezip-lzma"
+fi
+python="$(command -v python3 || true)"
+python_version="$( [[ -n "$python" ]] && "$python" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || true)"
+if [[ -n "$python_version" ]] && perl -e 'my @v = split /\./, shift; exit !($v[0] > 3 || ($v[0] == 3 && $v[1] >= 14))' "$python_version"; then
+    row generators python3 ok "$python $python_version"
+elif [[ -n "$python_version" ]]; then
+    row generators python3 error "$python is $python_version; nativezip-formats needs 3.14 or later: brew install python (and put it first on PATH)"
+else
+    row generators python3 error "no python3: brew install python —nativezip-formats, archive-coverage, cursed-http-cases"
+fi
+if path="$(command -v openssl)"; then row generators openssl ok "$path ($(openssl version 2>/dev/null))"
+else row generators openssl error "no openssl — nativeaea-synthetic and archive-coverage make keys with it"; fi
+required generators aa aa "macOS's /usr/bin/aa (Apple Archive) — archive-coverage, nativeaea-synthetic"
+required generators aea aea "macOS's /usr/bin/aea — archive-coverage, nativeaea-synthetic"
 
 # Homebrew
 if have brew; then
@@ -58,19 +136,41 @@ if have brew; then
     else
         row brew llvm missing "brew install llvm — for Tools/mca (llvm-mca) and running opt on emitted IR"
     fi
-    for entry in "yq:XML/YAML/TOML queries (Tools/remarks, counters, profile)" "jq:JSON queries" \
-                 "hyperfine:command-line benchmarking with statistics" "gawk:GNU awk (strtonum, gensub); not needed by Tools" \
+    for entry in "hyperfine:command-line benchmarking with statistics" "gawk:GNU awk (strtonum, gensub); not needed by Tools" \
                  "gsed:GNU sed (sed -i without '', \\b); not needed by Tools" "coreutils:gdate (ns), gtimeout, gnumfmt" \
-                 "rg:ripgrep" "cloc:counting code"; do
+                 "rg:ripgrep" "cloc:counting code" "shellcheck:linting the Tools"; do
         tool="${entry%%:*}" purpose="${entry#*:}"
         command="$tool"; [[ "$tool" == coreutils ]] && command=gdate
         if have "$command"; then row brew "$tool" ok "$(command -v "$command") — $purpose"
         else formula="${tool/gsed/gnu-sed}"; formula="${formula/#rg/ripgrep}"; row brew "$tool" missing "brew install $formula — $purpose"; fi
     done
-    awk_version="$(awk --version 2>&1 | head -1)"
+    awk_version="$(awk --version 2>&1 | head -1 || true)"
     row brew awk note "awk on PATH: $(command -v awk) ($awk_version): one-true-awk, not gawk"
 else
-    row brew brew missing "https://brew.sh — for llvm (llvm-mca), yq, hyperfine"
+    row brew brew missing "https://brew.sh — for llvm (llvm-mca), yq, jq, hyperfine, lz4, xz (Brewfile)"
+fi
+if ! have jq; then
+    row brew jq error "brew install jq — Tools/toolchain, counters, bench-table"
+elif jq -n 1 > /dev/null 2>&1; then
+    row brew jq ok "$(command -v jq) ($(jq --version 2>&1))"
+else
+    row brew jq error "$(command -v jq) doesn't run (jq -n 1 failed): brew reinstall jq"
+fi
+if ! have yq; then
+    row brew yq error "brew install yq — XML/YAML/TOML queries (Tools/remarks, counters, profile)"
+elif [[ "$(yq --version 2>&1 || true)" == *mikefarah* ]]; then
+    row brew yq ok "$(command -v yq) ($(yq --version 2>&1 | head -1))"
+else
+    row brew yq error "$(command -v yq) isn't mikefarah's yq ($(yq --version 2>&1 | head -1)): the Tools use its -p xml -o json; brew install yq and put it first on PATH"
+fi
+if have brew && [[ -f "$EXPERIMENTS_DIR/Brewfile" ]]; then
+    if bundle="$(HOMEBREW_NO_AUTO_UPDATE=1 brew bundle check --verbose --no-upgrade --file "$EXPERIMENTS_DIR/Brewfile" 2>&1)"; then
+        row brew Brewfile ok "everything in Brewfile is installed"
+    else
+        while IFS= read -r line; do
+            [[ "$line" == "→ "* ]] && row brew Brewfile note "${line#→ } (brew bundle --file Brewfile)"
+        done <<< "$bundle"
+    fi
 fi
 
 # Binary Ninja
@@ -81,3 +181,9 @@ if [[ -d "/Applications/Binary Ninja.app" ]]; then
 else
     row binaryninja app missing "optional: https://binary.ninja (IL views, CFGs; MCP server)"
 fi
+
+if (( ERRORS > 0 )); then
+    note "$ERRORS required item(s) missing or wrong: see the error rows"
+    exit 1
+fi
+exit 0

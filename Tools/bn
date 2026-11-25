@@ -5,89 +5,336 @@
 # usage: Tools/bn status                         is the server up; Binary Ninja's version
 #        Tools/bn tools                          the server's tools, one line each
 #        Tools/bn call TOOL ['JSON-ARGUMENTS']   call a tool, print its text result
-#        Tools/bn loop-il FILE PATTERN [--level llil|mlil|lifted]
-#                                                open FILE, find the first function matching PATTERN (a
-#                                                substring of its name), print its loops' blocks (back edges)
-#                                                as IL, where NEON appears as intrinsics (vqtbl4q_s8, vzip1q_s8,
-#                                                vld3q…); then close FILE if this opened it
+#        Tools/bn loop-il FILE PATTERN [--level llil|mlil|lifted|hlil]
+#                                                the loops Tools/loops finds in the first function matching
+#                                                PATTERN (a Perl regex on demangled or mangled names, as for
+#                                                Tools/loops), each loop's blocks printed as Binary Ninja's IL,
+#                                                where NEON appears as intrinsics (vqtbl4q_s8, vzip1q_s8, vld3q…).
+#                                                FILE is opened in the app as an item of its own (Binary Ninja
+#                                                opens a file again even when it's open), closed at the end
 #
 # The server runs inside the Binary Ninja app (GUI MCP server, HTTP; enable and start it in Settings → MCP,
 # or the command palette). The headless `binaryninja_mcp` (stdio) needs a Commercial or Ultimate license.
-# URL: BN_MCP_URL (default http://127.0.0.1:24642/mcp). Opening a file adds a tab in the app; `loop-il`
-# closes what it opened. Constant pools in relocatable objects (.o) read as empty: open linked binaries for
-# memory reads.
+# URL: BN_MCP_URL (default http://127.0.0.1:24642/mcp). Exit status 2 when no server answers, or one stops
+# answering: each request has 60 s, Binary Ninja's analysis of the file BN_ANALYSIS_LIMIT (default 1,800 s; a large
+# linked binary takes minutes, said before it starts). Opening a file adds a tab in the app. Constant pools in
+# relocatable objects (.o) read as empty: open linked binaries for memory reads.
+#
+# loop-il takes the loops from Tools/loops (natural and irreducible loops of the control-flow graph), not from Binary
+# Ninja's back edges, so both tools name the same loops: per loop, its number, header, depth, and pieces, then the IL
+# of every instruction in it. The function is found in Binary Ninja exactly (its symbol, else a search row naming it
+# exactly, else in a linked binary objdump's address), or the tool fails: it never takes a similar name. Addresses
+# are Tools/loops' (objdump's), moved by the difference between the two tools' addresses for the function. The IL
+# is read in pages of 1,000 lines (the server's cap), all of them (up to 200 pages, with a warning past that). The
+# view active before is made active again, and the opened item is closed discarding any analysis changes.
+#
+# Known limits: Tools/loops' (a linked binary's table followed by constants no code refers to directly; ARG_MAX
+# shared with a large environment: LOOPS_LIST_MAX).
 #
 # Binary Ninja vs Tools/loops: loops is faster, needs nothing running, works on any toolchain's output, and
 # can assert; Binary Ninja adds demangled names everywhere, CFGs with back-edge flags, cross-references,
 # IL with NEON as intrinsics, and interactive navigation in the app.
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 have jq || die "needs jq"
 URL="${BN_MCP_URL:-http://127.0.0.1:24642/mcp}"
+IL_PAGES=200   # of 1,000 lines
+
+# Requests and the loops run in the background, waited for, so a TERM, HUP, or INT acts at once (bash runs a trap only
+# once a foreground command, or a `$(…)`, ends): every background command still running (a request, the loops, a
+# slice's copy) is stopped, except a request kept for loop-il's cleanup (BN_SPARE: the open, whose reply names the item
+# to close), they're waited for (at most 3 s, then KILLed), and the tool exits 143, 129, or 130. The replies go in
+# BN_TMP, loop-il's work in SCRATCH, both removed on exit; they're made once the traps are in place, so a signal in the
+# tool's first milliseconds can't leave them behind.
+#
+# The cleanup (bn_cleanup: loop-il's restore, once, then the two directories) runs from the EXIT trap, and the signal
+# handler runs it itself before its `exit`: a signal arriving as the tool exits runs the handler first, and the handler's
+# `exit` would drop the rest of the EXIT trap. Once it starts, signals are ignored.
+BN_TMP='' SCRATCH='' BN_RESTORE=''
+bn_cleanup() {
+    trap '' TERM HUP INT
+    if [[ -n "$BN_RESTORE" ]]; then
+        BN_RESTORE=''
+        restore
+    fi
+    [[ -z "$SCRATCH" ]] || rm -rf "$SCRATCH"
+    [[ -z "$BN_TMP" ]] || rm -rf "$BN_TMP"
+    SCRATCH='' BN_TMP=''
+}
+trap bn_cleanup EXIT
+BN_CHILD='' BN_SPARE='' BN_KEEP=''
+bn_signalled() { # bn_signalled STATUS
+    trap '' TERM HUP INT
+    local pid running stopped='' watchdog
+    running="$(jobs -rp)"   # the background commands still running (unreaped, so their PIDs can't have been reused)
+    # During the open (BN_KEEP), its request is kept even when the signal came before in_background named it: it's the
+    # last command started, if still running. ($! is read only then: a request has run before, so it's set.)
+    if [[ -n "$BN_KEEP" && -z "$BN_SPARE" && -n "$!" && $'\n'"$running"$'\n' == *$'\n'"$!"$'\n'* ]]; then BN_SPARE="$!"; fi
+    # Every other one is stopped: the request or the loops in flight, and loop-il's slice copy (lib/macho.sh). Waited for,
+    # so none outlives the tool (Tools/loops stops its own work, KILLing what ignores its TERM after 2 s); KILLed after 3 s.
+    for pid in $running; do
+        [[ "$pid" == "$BN_SPARE" ]] || { kill "$pid" 2>/dev/null || true; stopped="$stopped $pid"; }
+    done
+    if [[ -n "$stopped" ]]; then
+        # shellcheck disable=SC2086 # a list of PIDs
+        perl -e 'sleep 3; kill "KILL", @ARGV' $stopped &
+        watchdog=$!
+        # shellcheck disable=SC2086
+        wait $stopped 2>/dev/null || true
+        kill -KILL "$watchdog" 2>/dev/null || true   # (it ignores TERM, as this handler does: inherited)
+    fi
+    bn_cleanup
+    exit "$1"
+}
+# The text of FILE on stderr, if it can be written (closed, or a pipe with no reader, it's only lost: the status stays).
+to_stderr() { (cat "$1" >&2) || true; }
+trap 'bn_signalled 143' TERM
+trap 'bn_signalled 129' HUP
+trap 'bn_signalled 130' INT
+BN_TMP="$(mktemp -d "${TMPDIR:-/tmp}/bn.XXXXXX")"
+in_background() { # in_background COMMAND...: its exit status (COMMAND a program)
+    local rc=0
+    if [[ -n "$BN_KEEP" ]]; then
+        # The kept request ignores TERM and HUP (INT already, as a background command), so a signal to bn's whole process
+        # group (gtimeout's, `kill -- -PGID`, a closing terminal's HUP) can't lose its reply either; curl's -m bounds it.
+        (trap '' TERM HUP; exec "$@") &
+    else
+        "$@" &
+    fi
+    BN_CHILD=$!
+    [[ -z "$BN_KEEP" ]] || BN_SPARE="$BN_CHILD"
+    wait "$BN_CHILD" || rc=$?
+    BN_CHILD=''
+    return "$rc"
+}
 
 session() {
-    local headers
-    headers="$(mktemp)"
-    curl -sf -D "$headers" -o /dev/null -X POST "$URL" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
+    in_background curl -sf -m 10 -D "$BN_TMP/headers" -o /dev/null -X POST "$URL" -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' \
         -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"experiments-tools","version":"1"}}}' ||
-        { rm -f "$headers"; fail "no Binary Ninja MCP server at $URL (is Binary Ninja open with the MCP server started?)"; }
-    SESSION="$(perl -ne 'print $1 if /^mcp-session-id:\s*(\S+)/i' "$headers")"
-    rm -f "$headers"
-    post '{"jsonrpc":"2.0","method":"notifications/initialized"}' > /dev/null
+        die "no Binary Ninja MCP server at $URL (is Binary Ninja open with the MCP server started?)"
+    SESSION="$(perl -ne 'print $1 if /^mcp-session-id:\s*(\S+)/i' "$BN_TMP/headers")"
+    post '{"jsonrpc":"2.0","method":"notifications/initialized"}' "$BN_TMP/initialized" || exit 2
 }
-post() {
-    curl -s -X POST "$URL" -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' \
-        ${SESSION:+-H "Mcp-Session-Id: $SESSION"} -d "$1" | sed 's/^data: //'
-}
-call() { # call TOOL JSON: the tool's text result; exit 1 on a tool error
-    local response
-    response="$(post "$(jq -cn --arg name "$1" --argjson args "${2:-{\}}" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$name,arguments:$args}}')")"
-    if [[ "$(jq -r '.result.isError // false' <<<"$response")" == true || -n "$(jq -r '.error.message // empty' <<<"$response")" ]]; then
-        jq -r '.error.message // .result.content[0].text' <<<"$response" >&2; return 1
+# The JSON of a response, plain or as server-sent events (`event: message`, `data: {…}`, blank separators).
+sse_json() { perl -ne 'next if /^(event|id|retry):/ || /^:/ || /^\s*$/; s/^data: ?//; print' "$1"; }
+# Each request has a time limit (SECONDS, default BN_LIMIT, 60): a server that stops answering (a modal dialog in the
+# app) ends the tool with exit 2 and a message, not a hang.
+BN_LIMIT="${BN_LIMIT:-60}"
+need_number BN_LIMIT "$BN_LIMIT"
+post() { # post JSON OUT [SECONDS]: the reply's JSON in OUT (the raw reply in OUT.raw); status 2, said, without one
+    local seconds="${3:-$BN_LIMIT}" rc=0
+    in_background curl -s -m "$seconds" -o "$2.raw" -X POST "$URL" -H 'Content-Type: application/json' \
+        -H 'Accept: application/json, text/event-stream' ${SESSION:+-H "Mcp-Session-Id: $SESSION"} -d "$1" || rc=$?
+    if [[ $rc == 28 ]]; then
+        note "error: Binary Ninja's MCP server at $URL didn't answer within $seconds s (is a dialog open in the app?)"
+        return 2
     fi
-    jq -r '.result.content[0].text' <<<"$response"
+    if [[ $rc != 0 ]]; then
+        note "error: Binary Ninja's MCP server at $URL closed the connection without an answer (curl exit $rc)"
+        return 2
+    fi
+    sse_json "$2.raw" > "$2"
+}
+call() { # call TOOL JSON [SECONDS]: the tool's text result; status 1 on a tool error, 2 when the server doesn't answer
+    local no_arguments='{}'   # bash 3.2 keeps the backslash in "${2:-{\}}"
+    post "$(jq -cn --arg name "$1" --argjson args "${2:-$no_arguments}" '{jsonrpc:"2.0",id:2,method:"tools/call",params:{name:$name,arguments:$args}}')" \
+        "$BN_TMP/response" "${3:-$BN_LIMIT}" || return 2
+    if [[ "$(jq -r '.result.isError // false' "$BN_TMP/response")" == true || -n "$(jq -r '.error.message // empty' "$BN_TMP/response")" ]]; then
+        (jq -r '.error.message // .result.content[0].text' "$BN_TMP/response" >&2) || true
+        return 1
+    fi
+    jq -r '.result.content[0].text' "$BN_TMP/response"
 }
 
 command="${1:-}"; shift || true
 case "$command" in
     status)
         session
-        post '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '"up: \(.result.tools | length) tools"'
-        defaults read "/Applications/Binary Ninja.app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null | sed 's/^/Binary Ninja /' ;;
+        post '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' "$BN_TMP/list" || exit 2
+        jq -r '"up: \(.result.tools | length) tools"' "$BN_TMP/list"
+        version="$(defaults read "/Applications/Binary Ninja.app/Contents/Info.plist" CFBundleShortVersionString 2>/dev/null || true)"
+        [[ -n "$version" ]] && echo "Binary Ninja $version"
+        exit 0 ;;
     tools)
         session
-        post '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' | jq -r '.result.tools[] | "\(.name)\t\(.description | split("\n")[0])"' ;;
+        post '{"jsonrpc":"2.0","id":3,"method":"tools/list"}' "$BN_TMP/list" || exit 2
+        jq -r '.result.tools[] | "\(.name)\t\(.description | split("\n")[0])"' "$BN_TMP/list" ;;
     call)
         [[ $# -ge 1 ]] || usage 2
-        session; call "$1" "${2:-{\}}" ;;
+        session; call "$@" ;;
     loop-il)
         [[ $# -ge 2 ]] || usage 2
+        [[ -f "$1" ]] || die "no file $1"
         file="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")" pattern="$2" level=llil
-        [[ "${3:-}" == --level ]] && level="$4"
+        shift 2
+        while [[ $# -gt 0 ]]; do
+            case "$1" in
+                --level) need_value "$@"; level="$2"; shift ;;
+                *) die "unknown option $1" ;;
+            esac
+            shift
+        done
+        case "$level" in llil|mlil|lifted|hlil) ;; *) die "--level is llil, mlil, lifted, or hlil, not '$level'" ;; esac
+        SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/experiments-tool.XXXXXX")"   # as scratch_dir makes it; removed by bn_cleanup
+
+        # The file from its own header (lib/macho.sh): a universal file's arm64 slice (Binary Ninja opens that slice, so its
+        # addresses are objdump's); archives, other files, and other architectures refused.
+        need_xcode_tools
+        need_number BN_ANALYSIS_LIMIT "${BN_ANALYSIS_LIMIT:-1800}"
+        source "$TOOLS_DIR/lib/macho.sh" || exit 2
+        shown="$file"
+        macho_input
+        # The loops, from Tools/loops: the first matching function (and its first copy, in a merged object), with its
+        # list of matches and its disassembly kept (whose first block starts at the function's first copy). Every
+        # reader here reads its input to the end: a reader that stops early makes the writer die of SIGPIPE.
+        loops_rc=0
+        in_background env LOOPS_SAVE="$SCRATCH" LOOPS_FIRST=1 "$TOOLS_DIR/loops" "$file" "$pattern" --tsv > "$SCRATCH/loops" 2> "$SCRATCH/loops.err" || loops_rc=$?
+        # Tools/loops' own failure (exit 2 and up: objdump failing, a signal) is reported as it, never as "no loops".
+        if [[ $loops_rc -gt 1 ]]; then
+            to_stderr "$SCRATCH/loops.err"
+            exit "$loops_rc"
+        fi
+        [[ -s "$SCRATCH/functions" ]] || fail "no function matching /$pattern/ in $shown"
+        symbol="$(perl -ne 'print unless $done++' "$SCRATCH/functions")"
+        symbol="${symbol%$'\n'}"
+        mangled="${symbol%%$'\t'*}" demangled="${symbol#*$'\t'}"
+        [[ -s "$SCRATCH/loops" ]] || fail "no loops in $demangled (Tools/loops)"
+        first_copy="$(perl -F'\t' -ane 'print $F[0] unless $done++' "$SCRATCH/loops")"
+        FUNCTION="$first_copy" perl -F'\t' -ane 'print if $F[0] eq $ENV{FUNCTION}' "$SCRATCH/loops" > "$SCRATCH/these"
+        start="$(perl -ne 'print "0x$1" if /^([0-9a-f]+) <.+>:$/ && !$done++' "$SCRATCH/disassembly")"
+        [[ -n "$start" ]] || die "no disassembly of $mangled in $shown"
+
         session
-        opened="$(call bn_open_item_open "$(jq -cn --arg p "$file" '{path:$p, setActive:true}')" | perl -ne 'print $1 if /\b(item_\d+)\b/')"
-        trap '[[ -n "$opened" ]] && call bn_open_item_close "{\"openItem\":\"$opened\"}" > /dev/null' EXIT
-        call bn_analysis_update_and_wait '{}' > /dev/null
-        address="$(call bn_function_search "$(jq -cn --arg q "$pattern" '{query:$q, limit:1}')" | perl -ne 'print $1 if /^\|\s*(0x[0-9a-f]+)\s*\|/')"
-        [[ -n "$address" ]] || fail "no function matching '$pattern'"
-        call bn_function_search "$(jq -cn --arg q "$pattern" '{query:$q, limit:1}')" | perl -ne 'print "function $1 ", substr($2, 0, 150), "\n" if /^\|\s*(0x[0-9a-f]+)\s*\|[^|]*\|\s*([^|]+)/'
-        # Loop blocks: those with a back-edge among their incoming edges.
-        call bn_function_basic_blocks "{\"function\":\"$address\",\"limit\":500}" |
-            perl -ne 'print "$1 $2\n" if /^\|\s*\d+\s*\|\s*(0x[0-9a-f]+)-(0x[0-9a-f]+).*back-edge/' > "${TMPDIR:-/tmp}/bn-loops.$$"
-        [[ -s "${TMPDIR:-/tmp}/bn-loops.$$" ]] || { rm -f "${TMPDIR:-/tmp}/bn-loops.$$"; fail "no loops in $address"; }
-        while read -r start end; do echo "loop block ${start}–${end}:"; done < "${TMPDIR:-/tmp}/bn-loops.$$"
-        call bn_function_il "{\"function\":\"$address\",\"level\":\"$level\",\"limit\":2000}" |
-            RANGES="$(tr '\n' ' ' < "${TMPDIR:-/tmp}/bn-loops.$$")" perl -ne '
-                BEGIN { my @r = split " ", $ENV{RANGES}; while (@r) { push @ranges, [hex shift @r, hex shift @r] } }
-                next unless /^(0x[0-9a-f]+)\s+(.*)$/; my ($address, $text) = ($1, $2); my $a = hex $address;
-                next unless grep { $a >= $_->[0] && $a < $_->[1] } @ranges;
-                # Lanewise operations lift as one statement per lane (v17.b[0] = …, v17.b[1] = …): collapse
-                # a run of them at one address into the first, with the lane count.
-                (my $shape = $text) =~ s/\[\d+\]/[i]/g;
-                if (defined $last && $address eq $last_address && $shape eq $last_shape) { $lanes++; next }
-                flush(); ($last, $last_address, $last_shape, $lanes) = ("  $address  $text", $address, $shape, 1);
-                sub flush { print $last, ($lanes > 1 ? "   (×$lanes lanes)" : ""), "\n" if defined $last }
-                END { flush() }'
-        rm -f "${TMPDIR:-/tmp}/bn-loops.$$" ;;
+        # Binary Ninja opens a file as a new item (its own handle, the active view) even when it's open already
+        # (checked against Binary Ninja 6.0's server, 2026-11-24), so closing that handle at the end closes only what
+        # this opened, never a tab the user had.
+        # The view the user had active is made active again afterwards, and the item is closed discarding analysis changes
+        # (no save prompt in the app). The cleanup is in place before the open: a signal during the open leaves that
+        # request running (BN_SPARE), and the cleanup takes the handle from its reply.
+        previous='' opened=''
+        restore() { # run once, by bn_cleanup (signals ignored); what it has used is cleared
+            if [[ -n "$BN_SPARE" ]]; then
+                wait "$BN_SPARE" 2>/dev/null || true
+                BN_SPARE=''
+                sse_json "$BN_TMP/response.raw" > "$BN_TMP/open.json" 2>/dev/null || true
+                opened="$(jq -r '.result.content[0].text // empty' "$BN_TMP/open.json" 2>/dev/null |
+                    jq -r '.openItem.handle // empty' 2>/dev/null || true)"
+            fi
+            [[ -z "$opened" ]] ||
+                call bn_open_item_close "$(jq -cn --arg h "$opened" '{openItem:$h, save:"discard"}')" 10 > /dev/null || true
+            opened=''
+            [[ -z "$previous" ]] ||
+                call bn_binary_view_set_active "$(jq -cn --arg h "$previous" '{binaryView:$h}')" 10 > /dev/null || true
+            previous=''
+        }
+        BN_RESTORE=1
+        # A server that stops answering ends the tool here too (exit 2, saying so); a tool error is only no view to
+        # restore, or "didn't open". An open answered after its time limit leaves that item open: its reply, the only
+        # place its handle is, never arrives (bounded by BN_LIMIT; the app shows it as a tab).
+        rc=0
+        call bn_binary_view_get_active '{}' > "$SCRATCH/active" 2> "$SCRATCH/active.err" || rc=$?
+        if [[ $rc == 2 ]]; then to_stderr "$SCRATCH/active.err"; exit 2; fi
+        previous="$(jq -r '.binaryView.handle // empty' "$SCRATCH/active" 2>/dev/null || true)"
+        BN_KEEP=1 rc=0
+        call bn_open_item_open "$(jq -cn --arg p "$file" '{path:$p, setActive:true}')" > "$SCRATCH/opened" 2> "$SCRATCH/opened.err" ||
+            rc=$?
+        # A server that stopped answering, or a tool error (its reason said, then "didn't open").
+        [[ $rc == 0 ]] || to_stderr "$SCRATCH/opened.err"
+        [[ $rc != 2 ]] || exit 2
+        # The handle read before the open's request is forgotten: a signal between the two would leave the cleanup neither.
+        opened="$(jq -r '.openItem.handle // empty' "$SCRATCH/opened" 2>/dev/null || true)"
+        BN_KEEP='' BN_SPARE=''
+        [[ -n "$opened" ]] || die "Binary Ninja didn't open $shown"
+        # Binary Ninja analyzes the whole file first: minutes for a large linked binary (nunzip, 3.4 MB of code: about 10).
+        [[ "$FILE_KIND" == object ]] ||
+            note "note: Binary Ninja analyzes all of $shown first: a large linked binary takes minutes (at most ${BN_ANALYSIS_LIMIT:-1800} s, BN_ANALYSIS_LIMIT)"
+        call bn_analysis_update_and_wait '{}' "${BN_ANALYSIS_LIMIT:-1800}" > /dev/null
+
+        # Binary Ninja's address for the function, exactly, or a failure (never a guess). In a linked binary,
+        # objdump's address, when Binary Ninja has a function starting there (it loads a binary at the file's
+        # addresses), unless the name resolves only elsewhere. Otherwise every function the name names: its symbol as
+        # an address expression (the mangled name; a name with spaces or brackets isn't one) and the search rows whose
+        # name is the mangled or demangled name exactly; one, or the tool fails. A server that stops answering ends the
+        # tool (exit 2), never reading as "no function".
+        ask() { # ask TOOL JSON: the tool's text in $SCRATCH/answer; status 1 on a tool error
+            local rc=0
+            call "$1" "$2" > "$SCRATCH/answer" 2> "$SCRATCH/answer.err" || rc=$?
+            if [[ $rc == 2 ]]; then to_stderr "$SCRATCH/answer.err"; exit 2; fi
+            return "$rc"
+        }
+        info_at() { # info_at EXPRESSION: the start of the function Binary Ninja resolves EXPRESSION to, or nothing
+            ask bn_function_info "$(jq -cn --arg f "$1" '{function:$f}')" || return 0
+            perl -ne 'printf "0x%x", hex $1 if /^function:\s*"0x([0-9a-f]+)"/ && !$done++' "$SCRATCH/answer"
+        }
+        : > "$SCRATCH/rows"
+        queries=("$mangled")
+        [[ "$demangled" == "$mangled" ]] || queries+=("$demangled")
+        for query in "${queries[@]}"; do
+            if ask bn_function_search "$(jq -cn --arg q "$query" '{query:$q, limit:1000}')"; then
+                cat "$SCRATCH/answer" >> "$SCRATCH/rows"
+            fi
+        done
+        named="$(info_at "$mangled")"
+        rows="$(NAMES="$mangled"$'\n'"$demangled" perl -ne '
+            BEGIN { %want = map { $_ => 1 } split /\n/, $ENV{NAMES} }
+            $hit{sprintf "0x%x", hex $1} = 1 if /^\|\s*0x([0-9a-f]+)\s*\|[^|]*\|\s*(.*?)\s*\|/ && $want{$2};
+            END { print join(" ", sort keys %hit) }' "$SCRATCH/rows")"
+        start="$(printf '0x%x' "$start")"
+        address='' at=''
+        # Assigned on its own: inside `[[ ]]` a stalled server's exit 2 would be lost.
+        [[ "$FILE_KIND" != binary ]] || at="$(info_at "$start")"
+        names="$mangled"
+        [[ "$demangled" == "$mangled" ]] || names="$mangled or $demangled"
+        if [[ -n "$at" && "$at" == "$start" ]]; then
+            [[ -z "$named" || "$named" == "$start" || " $rows " == *" $start "* ]] ||
+                fail "Binary Ninja's $mangled is at $named, and no function of that name starts at objdump's $start"
+            address="$start"
+        else
+            candidates="$(printf '%s %s\n' "$named" "$rows" | perl -ane 'my %s = map { $_ => 1 } @F; print join(" ", sort keys %s)')"
+            [[ -n "$candidates" ]] || fail "Binary Ninja has no function named exactly $names"
+            [[ "$candidates" != *" "* ]] || fail "Binary Ninja has several functions named $names (at ${candidates// /, })"
+            address="$candidates"
+        fi
+        offset=$(( address - start ))
+        printf 'function %s at %s (objdump 0x%x)\n' "$demangled" "$address" "$(( start ))"
+
+        # The IL in pages of 1,000 lines (the server's cap), following each page's nextOffset to the end.
+        : > "$SCRATCH/il"
+        il_offset=0 pages=0
+        while [[ -n "$il_offset" ]]; do
+            (( pages++ < IL_PAGES )) || { note "warning: stopped after $IL_PAGES pages of Binary Ninja's IL: loops past them are incomplete"; break; }
+            call bn_function_il "$(jq -cn --arg f "$address" --arg l "$level" --argjson o "$il_offset" '{function:$f, level:$l, limit:1000, offset:$o}')" > "$SCRATCH/page" ||
+                die "Binary Ninja's IL listing failed at line $il_offset"
+            cat "$SCRATCH/page" >> "$SCRATCH/il"
+            il_offset="$(perl -ne 'if (/^nextOffset:\s*(\d+)\s*$/) { print $1; exit }' "$SCRATCH/page")"
+        done
+        # Columns: function, loop, start, end, instructions, depth, innermost|outer, verdict, mix, headers, pieces, kind.
+        OFFSET="$offset" perl -F'\t' -ane '
+            no warnings "portable";
+            chomp $F[11];
+            my @pieces = map { [map { hex($_) + $ENV{OFFSET} } split /-/] } split /,/, $F[10];
+            my @headers = map { sprintf "0x%x", hex($_) + $ENV{OFFSET} } split /,/, $F[9];
+            printf "%s  %s %s  depth %d%s  %s  %d instructions\n", $F[1] =~ s/^loop/loop /r,
+                $F[11] eq "irreducible" ? "irreducible, entries" : "header", join(", ", @headers), $F[5],
+                $F[6] eq "innermost" ? " (innermost)" : "", join(", ", map { sprintf "0x%x–0x%x", @$_ } @pieces), $F[4];
+            print "LOOP\t", join(" ", map { "$_->[0] $_->[1]" } @pieces), "\n";' "$SCRATCH/these" > "$SCRATCH/plan"
+        while IFS= read -r line; do
+            if [[ "$line" == LOOP$'\t'* ]]; then
+                RANGES="${line#LOOP$'\t'}" perl -ne '
+                    BEGIN { my @r = split " ", $ENV{RANGES}; while (@r) { push @ranges, [shift @r, shift @r] } }
+                    next unless /^(0x[0-9a-f]+)\s+(.*)$/; my ($address, $text) = ($1, $2); my $a = hex $address;
+                    next unless grep { $a >= $_->[0] && $a <= $_->[1] } @ranges;
+                    # Lanewise operations lift as one statement per lane (v17.b[0] = …, v17.b[1] = …): collapse
+                    # a run of them at one address into the first, with the lane count.
+                    (my $shape = $text) =~ s/\[\d+\]/[i]/g;
+                    if (defined $last && $address eq $last_address && $shape eq $last_shape) { $lanes++; next }
+                    flush(); ($last, $last_address, $last_shape, $lanes) = ("  $address  $text", $address, $shape, 1);
+                    sub flush { print $last, ($lanes > 1 ? "   (×$lanes lanes)" : ""), "\n" if defined $last }
+                    END { flush() }' "$SCRATCH/il"
+            else
+                echo "$line"
+            fi
+        done < "$SCRATCH/plan" ;;
     -h|--help|"") usage ;;
     *) die "unknown command $command" ;;
 esac

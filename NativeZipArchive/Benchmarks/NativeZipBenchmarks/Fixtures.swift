@@ -54,6 +54,10 @@ enum Fixtures {
         }
     }
 
+    /// `small.zip`'s 2,000 files, each compressed on its own with `method` (LZMA or xz): every entry starts a stream
+    /// (made by ``prepareSmallMethod(_:)``, on first use).
+    static func smallMethodArchive(_ method: Method) -> URL { root.appending(path: "small-\(method.rawValue).zip") }
+
     /// The encrypted archives' password.
     static let password = "benchmark-secret"
 
@@ -76,7 +80,7 @@ enum Fixtures {
             try ExternalTool.run("/usr/bin/zip", ["-q", "-0", "-P", password, partial.path, "big.txt"], in: directory)
         case .aes256:
             try ExternalTool.run("/usr/bin/bsdtar", ["--format", "zip", "--options", "zip:encryption=aes256", "--passphrase", password,
-                                                    "-cf", partial.path, "big.txt"], in: directory)
+                                                     "-cf", partial.path, "big.txt"], in: directory)
         }
         try FileManager.default.moveItem(at: partial, to: archive)
     }
@@ -217,6 +221,55 @@ enum Fixtures {
         try patchHeaders(of: partial, method: method == .bzip2 ? 12 : method == .lzma ? 14 : 95, flags: flags,
                          crc: crc, size: UInt32(original.count))
         try fileManager.moveItem(at: partial, to: archive)
+    }
+
+    /// Makes ``smallMethodArchive(_:)`` for `method` (LZMA or xz) if it isn't there yet (a few seconds; then cached):
+    /// the small files ``prepare()`` left in `source/small`, compressed by one `xz -6` run (Homebrew's xz;
+    /// `--format=lzma` for LZMA, its 13-byte header replaced by the zip method's as in ``prepareMethod(_:)``), written
+    /// into a zip archive here (no macOS tool writes these methods).
+    static func prepareSmallMethod(_ method: Method) throws {
+        precondition(method == .lzma || method == .xz)
+        try prepare()
+        let fileManager = FileManager.default
+        let archive = smallMethodArchive(method)
+        if fileManager.fileExists(atPath: archive.path) { return }
+        let source = root.appending(path: "source")
+        let names = try fileManager.subpathsOfDirectory(atPath: source.appending(path: "small").path)
+            .filter { $0.hasSuffix(".txt") }.sorted().map { "small/\($0)" }
+        let work = root.appending(path: "small-\(method.rawValue)-work")
+        try? fileManager.removeItem(at: work)
+        try fileManager.createDirectory(at: work, withIntermediateDirectories: true)
+        defer { try? fileManager.removeItem(at: work) }
+        for (index, name) in names.enumerated() {
+            try fileManager.copyItem(at: source.appending(path: name), to: work.appending(path: "f\(index)"))
+        }
+        let format = method == .lzma ? ["--format=lzma"] : []
+        try ExternalTool.run("/usr/bin/env", ["xz"] + format + ["-6", "-k", "-f"] + names.indices.map { "f\($0)" }, in: work)
+        var output: [UInt8] = []
+        var central: [UInt8] = []
+        func le16(_ value: Int) -> [UInt8] { [UInt8(truncatingIfNeeded: value), UInt8(truncatingIfNeeded: value >> 8)] }
+        func le32(_ value: Int) -> [UInt8] { (0..<4).map { UInt8(truncatingIfNeeded: value >> (8 * $0)) } }
+        for (index, name) in names.enumerated() {
+            let original = try [UInt8](Data(contentsOf: work.appending(path: "f\(index)")))
+            let compressed = try [UInt8](Data(contentsOf: work.appending(path: "f\(index).\(method == .lzma ? "lzma" : "xz")")))
+            var payload = compressed
+            var flags = 0
+            if method == .lzma {
+                payload = [9, 20, 5, 0] + compressed.prefix(5) + compressed.dropFirst(13)
+                if compressed[5..<13].allSatisfy({ $0 == 0xFF }) { flags = 0x2 }
+            }
+            let crc = Int(CRC32.checksum(original.span.bytes))
+            let nameBytes = Array(name.utf8)
+            let fields = le16(63) + le16(flags) + le16(method == .lzma ? 14 : 95) + le16(0) + le16(0x21) + le32(crc)
+                + le32(payload.count) + le32(original.count) + le16(nameBytes.count) + le16(0)
+            central += le32(0x0201_4B50) + le16(0x031E) + fields + le16(0) + le16(0) + le16(0) + le32(0o100644 << 16)
+                + le32(output.count) + nameBytes
+            output += le32(0x0403_4B50) + fields + nameBytes + payload
+        }
+        let directoryOffset = output.count
+        output += central + le32(0x0605_4B50) + le16(0) + le16(0) + le16(names.count) + le16(names.count)
+            + le32(central.count) + le32(directoryOffset) + le16(0)
+        try Data(output).write(to: archive)
     }
 
     /// Rewrites the last entry's method (and, if given, its CRC-32 and uncompressed size), and ORs `flags` into its

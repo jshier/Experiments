@@ -1,7 +1,8 @@
 import BytesTestSupport
+import enum Disk.DiskError
+
 // Only what's needed: Disk has an `ZipExtractionOptions` of its own.
 import class Disk.ExtractionProgress
-import enum Disk.DiskError
 import DiskTestSupport
 import Foundation
 import NativeZip
@@ -94,7 +95,7 @@ import Testing
         defer { temporary.remove() }
         let progress = ExtractionProgress()
         let archives = try ["symlink.zip", "zstd-large.zip", "bzip2-large.zip"].map(Self.fixture)
-        let failures = try await ZipExtractor.extract(into: FilePath(temporary.url.path), progress: progress) { (extractor) async throws(ZipError) in
+        let failures = try await ZipExtractor.extract(into: FilePath(temporary.url.path), progress: progress) { extractor async throws(ZipError) in
             for (index, archive) in archives.enumerated() {
                 try await extractor.add(archive, into: FilePath("\(index)"))
             }
@@ -131,7 +132,7 @@ import Testing
         for subdirectory in ["../out", "/tmp/out", "a/../../out"] {
             // Disk's refusal, as Disk threw it.
             let error = await #expect(throws: ZipError.self) {
-                _ = try await ZipExtractor.extract(into: FilePath(temporary.url.path)) { (extractor) async throws(ZipError) in
+                _ = try await ZipExtractor.extract(into: FilePath(temporary.url.path)) { extractor async throws(ZipError) in
                     try await extractor.add(archive, into: FilePath(subdirectory))
                 }
             }

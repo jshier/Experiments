@@ -1,5 +1,6 @@
 import Bytes
 import Darwin
+
 // User and group lookups for ACL qualifiers: an explicit submodule.
 import Darwin.membership
 public import System
@@ -141,7 +142,7 @@ struct AttributeList {
             // the only value is the flags: its first 4 bytes, a `UInt32` stored by `append`.
             return Sys.fchflags(descriptor, unsafe values.span.bytes.unsafeLoadUnaligned(as: UInt32.self))
         }
-        let count = self.count
+        let count = count
         var span = values.mutableSpan
         // Unsafe: pointers to the list and to the values, to `fsetattrlist`. Safe: both are this value's own (`self`
         // is `mutating`: exclusive), valid inside `withUnsafeMutableBytes`; the 64-byte buffer is never `nil`, and
@@ -155,7 +156,7 @@ struct AttributeList {
     /// link itself.
     mutating func apply(_ directory: Int32, _ name: UnsafePointer<CChar>) -> Int32 {
         if isEmpty { return 0 }
-        let count = self.count
+        let count = count
         var span = values.mutableSpan
         // Unsafe: `name` and pointers to the list and to the values, to `setattrlistat`. Safe: `name` is the caller's
         // NUL-terminated string, valid for this call; the list and the 64-byte buffer (never `nil`) are this value's
@@ -459,7 +460,7 @@ enum CString {
     @inline(__always)
     static func with<R, E: Error>(_ bytes: UnsafeRawPointer, count: Int, _ body: (UnsafePointer<CChar>) throws(E) -> R) throws(E) -> R {
         // `count + 1` bytes of stack: the caller's `count` bytes, then the NUL.
-        try withUnsafeTemporaryAllocation(byteCount: count + 1, alignment: 1) { (buffer) throws(E) -> R in
+        try withUnsafeTemporaryAllocation(byteCount: count + 1, alignment: 1) { buffer throws(E) -> R in
             // Unsafe (the next two): copies the caller's bytes into the temporary buffer and stores a NUL after them.
             // Safe: the caller keeps `count` readable bytes at `bytes` for the call (the contract; with a count of 0
             // nothing is read); the buffer is `count + 1` bytes (at least 1, so not `nil`), valid inside this closure.
@@ -477,7 +478,7 @@ enum CString {
         // Unsafe (the line after next): the span's buffer, as a pointer and a count, to `with(_:count:_:)`. Safe: the
         // span's own bytes, valid inside `withUnsafeBytes`, copied there; for an empty span with no address, a
         // made-up non-null one (1) that's never read, its count being 0.
-        try span.withUnsafeBytes { (bytes) throws(E) -> R in
+        try span.withUnsafeBytes { bytes throws(E) -> R in
             try unsafe with(bytes.baseAddress ?? UnsafeRawPointer(bitPattern: 1)!, count: bytes.count, body)
         }
     }

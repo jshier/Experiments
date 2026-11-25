@@ -23,14 +23,14 @@ func string(_ bytes: RawSpan) -> String {
 func parse(_ parser: inout HTTP1RequestParser, _ bytes: RawSpan, into head: inout ParsedHead) throws(HTTP1Error) -> Bool {
     while true {
         switch try parser.next(in: bytes) {
-        case .requestLine(let line):
+        case let .requestLine(line):
             head.method = string(line.method)
             head.target = string(line.target)
             head.version = "\(line.version)"
-        case .field(let field):
+        case let .field(field):
             head.fields.append([string(field.name), string(field.value)])
             head.known.append(field.knownName.map { "\($0)" } ?? "-")
-        case .end(let headByteCount):
+        case let .end(headByteCount):
             head.byteCount = headByteCount
             return true
         case .needsMore:

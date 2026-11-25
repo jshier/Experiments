@@ -12,7 +12,9 @@ import Testing
             for (start, maxLength) in [(0, 150), (4, 150), (0, 9), (3, 3), (0, 0)] {
                 let length = bytes.span.bytes.commonPrefixLength(at: 150, and: 0, from: start, maxLength: maxLength)
                 var expected = start
-                while expected < maxLength && bytes[150 + expected] == bytes[expected] { expected += 1 }
+                while expected < maxLength && bytes[150 + expected] == bytes[expected] {
+                    expected += 1
+                }
                 #expect(length == expected, "difference \(difference), start \(start), max \(maxLength)")
             }
             bytes[150 + difference] = 0x61
@@ -37,7 +39,9 @@ import Testing
 
     @Test func searchFromAnOffset() {
         var bytes = [UInt8](repeating: 0x11, count: 100)
-        for offset in [3, 40, 96] { bytes.replaceSubrange(offset..<(offset + 4), with: [0x00, 0x00, 0xFF, 0xFF]) }
+        for offset in [3, 40, 96] {
+            bytes.replaceSubrange(offset..<(offset + 4), with: [0x00, 0x00, 0xFF, 0xFF])
+        }
         let marker = [0x00, 0x00, 0xFF, 0xFF] as Byte4
         #expect(bytes.span.bytes.firstByteOffset(of: marker) == 3)
         #expect(bytes.span.bytes.firstByteOffset(of: marker, from: 4) == 40)
@@ -50,7 +54,9 @@ import Testing
         var lanes = SIMD16<UInt8>(repeating: 1)
         #expect(ByteLanes(lanes).matching(0).bitmask == 0)
         #expect(ByteLanes(lanes).matching(0).firstIndex == nil)
-        for lane in [0, 5, 7, 8, 15] { lanes[lane] = 0 }
+        for lane in [0, 5, 7, 8, 15] {
+            lanes[lane] = 0
+        }
         let matches = ByteLanes(lanes).matching(0)
         #expect(matches.bitmask == 1 << 0 | 1 << 5 | 1 << 7 | 1 << 8 | 1 << 15)
         #expect(matches.firstIndex == 0)

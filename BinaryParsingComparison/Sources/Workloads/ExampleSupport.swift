@@ -25,13 +25,13 @@ struct ExampleTestError: Error, CustomStringConvertible {
 
     @usableFromInline
     init() {
-        self.description = ""
+        description = ""
     }
 }
 
 extension UInt32 {
     var utf8: String {
-        withUnsafeBytes(of: self.byteSwapped) { buffer in
+        withUnsafeBytes(of: byteSwapped) { buffer in
             String(decoding: buffer, as: UTF8.self)
         }
     }
@@ -42,8 +42,8 @@ extension String {
         let paddingLength = toCount - count
         let prefix =
             paddingLength > 0
-            ? String(repeating: padding, count: paddingLength)
-            : ""
+                ? String(repeating: padding, count: paddingLength)
+                : ""
         return prefix + self
     }
 }

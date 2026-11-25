@@ -133,7 +133,9 @@ public struct HTTPHost: ~Escapable {
         if count > 0, FieldGrammar.byte(value, 0) == 0x5B {
             // An IP literal: up to `]`.
             var close = 1
-            while close < count, FieldGrammar.byte(value, close) != 0x5D { close &+= 1 }
+            while close < count, FieldGrammar.byte(value, close) != 0x5D {
+                close &+= 1
+            }
             guard close < count else { throw .invalidHost }
             let literal = value.extracting(1..<close)
             if literal.byteCount > 0, FieldGrammar.byte(literal, 0) | 0x20 == 0x76 {
@@ -147,7 +149,9 @@ public struct HTTPHost: ~Escapable {
             hostEnd = close &+ 1
         } else {
             hostEnd = 0
-            while hostEnd < count, FieldGrammar.byte(value, hostEnd) != 0x3A { hostEnd &+= 1 }
+            while hostEnd < count, FieldGrammar.byte(value, hostEnd) != 0x3A {
+                hostEnd &+= 1
+            }
             let name = value.extracting(0..<hostEnd)
             guard Self.isRegisteredName(name) else { throw .invalidHost }
             // An IPv4 address starts with a digit; most names don't, and skip the test.
@@ -239,7 +243,9 @@ public struct HTTPHost: ~Escapable {
         while position < count {
             // A group, or the trailing IPv4 address.
             let start = position
-            while position < count, position &- start < 5, isHexDigit(FieldGrammar.byte(text, position)) { position &+= 1 }
+            while position < count, position &- start < 5, isHexDigit(FieldGrammar.byte(text, position)) {
+                position &+= 1
+            }
             if position < count, FieldGrammar.byte(text, position) == 0x2E {
                 guard groups <= (compressed ? 5 : 6), isIPv4(text.extracting(droppingFirst: start)) else { return false }
                 return compressed || groups == 6
@@ -265,7 +271,9 @@ public struct HTTPHost: ~Escapable {
     @inlinable
     static func isIPFuture(_ text: RawSpan) -> Bool {
         var position = 1
-        while position < text.byteCount, isHexDigit(FieldGrammar.byte(text, position)) { position &+= 1 }
+        while position < text.byteCount, isHexDigit(FieldGrammar.byte(text, position)) {
+            position &+= 1
+        }
         guard position > 1, position < text.byteCount, FieldGrammar.byte(text, position) == 0x2E else { return false }
         position &+= 1
         guard position < text.byteCount else { return false }

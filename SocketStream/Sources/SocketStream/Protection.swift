@@ -42,6 +42,7 @@ public struct Protection: Sendable, Hashable, CustomStringConvertible {
         case .aes256gcm: .aes256GCMSHA384
         }
     }
+
     /// How many cores compress each sender's stream: above 1, DEFLATE runs as a `ParallelDeflateEncoder`
     /// with this many lanes, each batch cut into that many chunks (at least 32 KB each). Brotli stays
     /// sequential.
@@ -117,24 +118,24 @@ extension Transfer {
     ) async throws -> Int {
         switch (protection.compression, protection.encrypted) {
         case (.none, _):
-            return try await sendProtected(workload, to: address, through: protection.sealer(keys))
+            try await sendProtected(workload, to: address, through: protection.sealer(keys))
         case (.deflate, false) where protection.compressionLanes > 1:
-            return try await sendProtected(workload, to: address, through: parallelDeflate(protection.compressionLanes))
+            try await sendProtected(workload, to: address, through: parallelDeflate(protection.compressionLanes))
         case (.deflate, true) where protection.compressionLanes > 1:
-            return try await sendProtected(
+            try await sendProtected(
                 workload, to: address,
                 through: parallelDeflate(protection.compressionLanes).then(protection.sealer(keys), bufferCapacity: workload.batchSize &+ (64 << 10))
             )
         case (.deflate, false):
-            return try await sendProtected(workload, to: address, through: DeflateEncoder(format: .raw, level: 1))
+            try await sendProtected(workload, to: address, through: DeflateEncoder(format: .raw, level: 1))
         case (.deflate, true):
-            return try await sendProtected(
+            try await sendProtected(
                 workload, to: address, through: DeflateEncoder(format: .raw, level: 1).then(protection.sealer(keys))
             )
         case (.brotli, false):
-            return try await sendProtected(workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18))
+            try await sendProtected(workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18))
         case (.brotli, true):
-            return try await sendProtected(
+            try await sendProtected(
                 workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18).then(protection.sealer(keys))
             )
         }
@@ -146,17 +147,17 @@ extension Transfer {
     ) async throws -> (wire: Int, plain: Int, packets: Int) {
         switch (protection.compression, protection.encrypted) {
         case (.none, _):
-            return try await receiveProtected(workload, on: connection, through: TLSRecordOpener(keys: keys))
+            try await receiveProtected(workload, on: connection, through: TLSRecordOpener(keys: keys))
         case (.deflate, false):
-            return try await receiveProtected(workload, on: connection, through: DeflateDecoder(format: .raw))
+            try await receiveProtected(workload, on: connection, through: DeflateDecoder(format: .raw))
         case (.deflate, true):
-            return try await receiveProtected(
+            try await receiveProtected(
                 workload, on: connection, through: TLSRecordOpener(keys: keys).then(DeflateDecoder(format: .raw))
             )
         case (.brotli, false):
-            return try await receiveProtected(workload, on: connection, through: BrotliDecoder())
+            try await receiveProtected(workload, on: connection, through: BrotliDecoder())
         case (.brotli, true):
-            return try await receiveProtected(workload, on: connection, through: TLSRecordOpener(keys: keys).then(BrotliDecoder()))
+            try await receiveProtected(workload, on: connection, through: TLSRecordOpener(keys: keys).then(BrotliDecoder()))
         }
     }
 
@@ -215,7 +216,7 @@ extension Transfer {
         var wireBytes = 0
         var plainBytes = 0
         var ended = false
-        do throws(any Error) {
+        do throws {
             while !ended {
                 let count = try await received.read(from: &connection)
                 wireBytes += count
@@ -234,8 +235,8 @@ extension Transfer {
                     }
                     received.consume(progress.consumed)
                     plainBytes += progress.produced
-                    do throws(any Error) {
-                        plain.consume(try checker.check(plain.unread))
+                    do throws {
+                        try plain.consume(checker.check(plain.unread))
                     } catch {
                         throw TransferError(description: "Packet \(checker.packets) failed (\(error)) after \(plainBytes) bytes decoded")
                     }

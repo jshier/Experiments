@@ -22,12 +22,18 @@ struct FieldValueSet {
             var lineStart = all.startIndex
             while lineStart < all.endIndex {
                 var lineEnd = lineStart
-                while lineEnd < all.endIndex, all[lineEnd] != 0x0D { lineEnd += 1 }
+                while lineEnd < all.endIndex, all[lineEnd] != 0x0D {
+                    lineEnd += 1
+                }
                 let line = all[lineStart..<lineEnd].map { $0 >= 0x41 && $0 <= 0x5A ? $0 | 0x20 : $0 }
                 for name in wanted where line.starts(with: name) {
                     var start = lineStart + name.count, end = lineEnd
-                    while start < end, all[start] == 0x20 || all[start] == 0x09 { start += 1 }
-                    while end > start, all[end - 1] == 0x20 || all[end - 1] == 0x09 { end -= 1 }
+                    while start < end, all[start] == 0x20 || all[start] == 0x09 {
+                        start += 1
+                    }
+                    while end > start, all[end - 1] == 0x20 || all[end - 1] == 0x09 {
+                        end -= 1
+                    }
                     let offset = bytes.count
                     bytes += all[start..<end]
                     ranges.append(offset..<bytes.count)
@@ -59,10 +65,14 @@ let targets = Lazy { () -> FieldValueSet in
     for corpus in [requests.value, top1kRequests.value] {
         for offset in corpus.offsets {
             var start = offset
-            while corpus.bytes[start] != 0x20 { start += 1 }
+            while corpus.bytes[start] != 0x20 {
+                start += 1
+            }
             start += 1
             var end = start
-            while corpus.bytes[end] != 0x20 { end += 1 }
+            while corpus.bytes[end] != 0x20 {
+                end += 1
+            }
             let at = bytes.count
             bytes += corpus.bytes[start..<end]
             ranges.append(at..<bytes.count)
@@ -83,7 +93,9 @@ extension FieldValueSet {
 func eachValue(_ set: FieldValueSet, _ body: (RawSpan) -> Int) -> Int {
     let all = set.bytes.span.bytes
     var total = 0
-    for range in set.ranges { total &+= body(all.extracting(range)) }
+    for range in set.ranges {
+        total &+= body(all.extracting(range))
+    }
     return total
 }
 
@@ -94,7 +106,9 @@ func eachValue(_ set: FieldValueSet, _ body: (RawSpan) -> Int) -> Int {
 @inline(never) func parseDatesFoundation(_ strings: [String]) -> Int {
     let style = Date.HTTPFormatStyle()
     var total = 0
-    for string in strings { total &+= Int((try? style.parseStrategy.parse(string))?.timeIntervalSince1970 ?? -1) }
+    for string in strings {
+        total &+= Int((try? style.parseStrategy.parse(string))?.timeIntervalSince1970 ?? -1)
+    }
     return total
 }
 
@@ -102,8 +116,8 @@ func eachValue(_ set: FieldValueSet, _ body: (RawSpan) -> Int) -> Int {
     var total = 0
     for index in 0..<count {
         let date = HTTPDate(secondsSince1970: 1_700_000_000 &+ Int64(index) &* 86_413)
-        let written = try? output.withOutputRawSpan(overwritingFrom: 0) { (span) throws(BytesError) -> Int in
-            try span.withAlignedBytesWriter { (writer) throws(BytesError) in try date.write(to: &writer) }
+        let written = try? output.withOutputRawSpan(overwritingFrom: 0) { span throws(BytesError) -> Int in
+            try span.withAlignedBytesWriter { writer throws(BytesError) in try date.write(to: &writer) }
             return span.byteCount
         }
         total &+= written ?? -1
@@ -124,7 +138,9 @@ func eachValue(_ set: FieldValueSet, _ body: (RawSpan) -> Int) -> Int {
     var cache = HTTPDateCache()
     var total = 0
     // A server's `Date` for 1,000 responses over 10 seconds.
-    for index in 0..<count { total &+= cache.imfFixdate(HTTPDate(secondsSince1970: 1_700_000_000 &+ Int64(index / 100))).byteCount }
+    for index in 0..<count {
+        total &+= cache.imfFixdate(HTTPDate(secondsSince1970: 1_700_000_000 &+ Int64(index / 100))).byteCount
+    }
     return total
 }
 
@@ -174,7 +190,9 @@ let enUS = Array("en-US".utf8)
     eachValue(set) { value in
         var cookies = HTTPCookies(value)
         var total = 0
-        while let cookie = cookies.next() { total &+= cookie.name.byteCount &+ cookie.value.byteCount }
+        while let cookie = cookies.next() {
+            total &+= cookie.name.byteCount &+ cookie.value.byteCount
+        }
         return total
     }
 }
@@ -191,7 +209,9 @@ let enUS = Array("en-US".utf8)
         let parts = HTTPTargetComponents(value)
         var total = parts.path.byteCount
         var items = parts.queryItems
-        while let item = items.next() { total &+= item.name.byteCount &+ 1 }
+        while let item = items.next() {
+            total &+= item.name.byteCount &+ 1
+        }
         return total
     }
 }
@@ -199,7 +219,9 @@ let enUS = Array("en-US".utf8)
 func registerFieldValueBenchmarks() {
     func register(_ name: String, _ run: @escaping () -> Int) {
         Benchmark(name) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         } setup: {
             precondition(run() > 0, "\(name): failed")
         }
@@ -228,7 +250,9 @@ func registerFieldValueBenchmarks() {
         Benchmark(name, configuration: zeroAllocations) { benchmark in
             precondition(run() > 0)
             benchmark.startMeasurement()
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         }
     }
     gate("Allocations:FieldValues_dates") { parseDates(responseDates.value) &+ formatDates(100, into: &output) &+ cachedDates(100) }

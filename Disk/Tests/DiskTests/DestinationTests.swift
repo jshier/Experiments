@@ -1,8 +1,8 @@
-import BytesAsync
-import BytesTestSupport
-import BytesTesting
-import Darwin
 @testable import Disk
+import BytesAsync
+import BytesTesting
+import BytesTestSupport
+import Darwin
 import DiskTestSupport
 import Foundation
 import System
@@ -160,8 +160,8 @@ import Testing
         let attributes = blob.bytes
         let arraySource = ArraySource([Array("read only".utf8)])
         try await Extraction.run(into: destination, source: arraySource) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-                let token = try await planFile(&planner, "ro", index: 0, size: 9, metadata: EntryMetadata(mode: 0o444), attachments: true)
-                try planner.addExtendedAttributes(attributes.span.bytes, to: token)
+            let token = try await planFile(&planner, "ro", index: 0, size: 9, metadata: EntryMetadata(mode: 0o444), attachments: true)
+            try planner.addExtendedAttributes(attributes.span.bytes, to: token)
         }
         let url = directory.path("out/ro")
         #expect(try readItem(at: url).mode == 0o444)
@@ -249,7 +249,7 @@ import Testing
             #expect(staging.path.lastComponent!.string.hasPrefix(".Archive.partial-"))
             var writer = FileWriter(staging)
             try withPath("file\(round)") { try writer.writeFile($0, contents: ([UInt8(round)] as [UInt8]).span.bytes) }
-            published.append(try staging.publish(as: final).lastComponent!.string)
+            try published.append(staging.publish(as: final).lastComponent!.string)
         }
         #expect(published == ["Archive", "Archive 2", "Archive 3"])
         #expect(try readItem(at: directory.path("Archive 3/file2")).contents == [2])
@@ -261,7 +261,6 @@ import Testing
         #expect(try FileManager.default.contentsOfDirectory(atPath: directory.url.path).sorted() == ["Archive", "Archive 2", "Archive 3"])
     }
 }
-
 
 @Suite(.diskLifetimes) struct ClientHooksTests {
     /// `existingItem(at:)` sees what's there, never through a link (NativeZip's freshen and "replace?" questions).
@@ -294,6 +293,7 @@ import Testing
                     try await output.write(([UInt8(truncatingIfNeeded: contents)] as [UInt8]).span.bytes)
                 }
             }
+
             func release(_ contents: Int) {}
         }
         let directory = try TemporaryDirectory()
@@ -303,7 +303,9 @@ import Testing
         let source = IndexSource(writers: 3)
         let destination = try Destination(directory.filePath("out"))
         try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<IndexSource>) throws(DiskError) in
-            for index in 0..<100 { _ = try await planFile(&planner, "f\(index)", index: index, size: 1) }
+            for index in 0..<100 {
+                _ = try await planFile(&planner, "f\(index)", index: index, size: 1)
+            }
         }
         destination.close()
         #expect(source.seen.value == 100)
@@ -369,11 +371,11 @@ import Testing
         let report = try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
             _ = try await planFile(&planner, "a/b/c/one", index: 0, size: 1)
             // A directory listed after its contents made it: quarantined once more, harmlessly, with its metadata.
-            try withPath("a/b") { (path) throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o750)) }
+            try withPath("a/b") { path throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o750)) }
             _ = try await planFile(&planner, "a/two", index: 1, size: 1)
-            try withPath("listed") { (path) throws(DiskError) in _ = try planner.directory(path) }
+            try withPath("listed") { path throws(DiskError) in _ = try planner.directory(path) }
             _ = try await planFile(&planner, "top", index: 2, size: 1)
-            try withPath("x/y/link") { (path) throws(DiskError) in _ = try planner.symbolicLink(path, target: Array("../../top".utf8).span.bytes) }
+            try withPath("x/y/link") { path throws(DiskError) in _ = try planner.symbolicLink(path, target: Array("../../top".utf8).span.bytes) }
         }
         #expect(report.files == 3 && report.directories == 2)
         for path in ["out/a", "out/a/b", "out/a/b/c", "out/a/b/c/one", "out/a/two", "out/listed", "out/top", "out/x", "out/x/y", "out/x/y/link"] {
@@ -404,10 +406,10 @@ import Testing
             settings.stopsOnFirstFailure = false
             let report = try await Extraction.run(into: destination, source: source, settings: settings) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 _ = try await planFile(&planner, "a/b/one", index: 0, size: 1, tag: 0)
-                try withPath("a") { (path) throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o750)) }
+                try withPath("a") { path throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o750)) }
                 _ = try await planFile(&planner, "two", index: 1, size: 1, tag: 1)
                 _ = try await planFile(&planner, "three", index: 2, size: 1, tag: 2)
-                try withPath("link") { (path) throws(DiskError) in _ = try planner.symbolicLink(path, target: Array("two".utf8).span.bytes) }
+                try withPath("link") { path throws(DiskError) in _ = try planner.symbolicLink(path, target: Array("two".utf8).span.bytes) }
             }
             return (destination, report)
         }
@@ -481,7 +483,7 @@ import Testing
             #expect(mapped.buffer(bytes.count..<bytes.count).isEmpty)
         }
         let empty = try MappedFile(path: directory.filePath("empty"))
-        #expect(empty.count == 0 && empty.bytes.isEmpty && empty.buffer(0..<0).baseAddress == nil)
+        #expect(empty.isEmpty && empty.bytes.isEmpty && empty.buffer(0..<0).baseAddress == nil)
         let missing = directory.filePath("missing")
         #expect(throws: DiskError.system("open", path: missing.string, .noSuchFileOrDirectory)) { _ = try MappedFile(path: missing) }
         // A prefix of an open file, whose descriptor can go once it's mapped.

@@ -22,9 +22,9 @@ import Testing
                 return events
             }
             switch event {
-            case .requestLine(let line): events.append("\(string(line.method)) \(string(line.target)) \(line.version)")
-            case .field(let field): events.append("\(string(field.name)): \(string(field.value))")
-            case .end(let count):
+            case let .requestLine(line): events.append("\(string(line.method)) \(string(line.target)) \(line.version)")
+            case let .field(field): events.append("\(string(field.name)): \(string(field.value))")
+            case let .end(count):
                 events.append("end \(count)")
                 return events
             case .needsMore:
@@ -49,9 +49,9 @@ import Testing
                 return events
             }
             switch event {
-            case .statusLine(let line): events.append("\(line.version) \(line.status.code) \(string(line.reasonPhrase))")
-            case .field(let field): events.append("\(string(field.name)): \(string(field.value))")
-            case .end(let count):
+            case let .statusLine(line): events.append("\(line.version) \(line.status.code) \(string(line.reasonPhrase))")
+            case let .field(field): events.append("\(string(field.name)): \(string(field.value))")
+            case let .end(count):
                 events.append("end \(count)")
                 return events
             case .needsMore:
@@ -70,7 +70,7 @@ import Testing
 
     @Test func leadingEmptyLinesCountAgainstTheLimit() {
         // 200 KB of CR LF: the caller must keep them all while the parser says `needsMore`, so they're part of the head.
-        let empty = Array(repeating: Self.bytes("\r\n"), count: 100_000).flatMap { $0 }
+        let empty = Array(repeating: Self.bytes("\r\n"), count: 100_000).flatMap(\.self)
         #expect(Self.requestEvents(empty, cuts: nil) == ["error headTooLarge"])
         #expect(Self.responseEvents(empty, cuts: nil) == ["error headTooLarge"])
         // In pieces too: two bytes (and an odd byte, a CR waiting for its LF) at a time.
@@ -96,12 +96,12 @@ import Testing
     /// from its start on every call: a 60 KB value took 60,000 calls and 0.13 s in a release build, and the 200 KB
     /// lines here would take minutes in a debug one.)
     @Test(arguments: [
-        "GET / HTTP/1.1\r\nx: VALUE\r\n\r\n",                // the walk's scan
-        "GET / HTTP/1.1\r\nx: \tVALUE\r\n\r\n",              // a tab: the exact path's
-        "GET / HTTP/1.1\r\nVALUE: x\r\n\r\n",                // a name
-        "GET /VALUE HTTP/1.1\r\nx: y\r\n\r\n",               // a target
-        "HTTP/1.1 200 VALUE\r\nx: y\r\n\r\n",                // a reason phrase
-        "HTTP/1.1 200 \tVALUE\r\nx: y\r\n\r\n",              // a reason phrase with a tab
+        "GET / HTTP/1.1\r\nx: VALUE\r\n\r\n", // the walk's scan
+        "GET / HTTP/1.1\r\nx: \tVALUE\r\n\r\n", // a tab: the exact path's
+        "GET / HTTP/1.1\r\nVALUE: x\r\n\r\n", // a name
+        "GET /VALUE HTTP/1.1\r\nx: y\r\n\r\n", // a target
+        "HTTP/1.1 200 VALUE\r\nx: y\r\n\r\n", // a reason phrase
+        "HTTP/1.1 200 \tVALUE\r\nx: y\r\n\r\n", // a reason phrase with a tab
     ])
     func longLinesInPiecesAreScannedOnce(template: String) {
         let long = String(repeating: "a", count: 200_000)

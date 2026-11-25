@@ -127,7 +127,9 @@ enum ChaCha20 {
         var state = InlineArray<16, UInt32>(repeating: 0)
         let c = constants
         state[0] = c.0; state[1] = c.1; state[2] = c.2; state[3] = c.3
-        for index in 0..<8 { state[4 &+ index] = key[index] }
+        for index in 0..<8 {
+            state[4 &+ index] = key[index]
+        }
         state[12] = counter; state[13] = nonce.0; state[14] = nonce.1; state[15] = nonce.2
         var x = state
         @inline(__always)
@@ -436,7 +438,9 @@ struct Poly1305 {
     init(key: InlineArray<64, UInt8>) {
         func word(_ offset: Int) -> UInt64 {
             var value: UInt64 = 0
-            for index in 0..<8 { value |= UInt64(key[offset &+ index]) &<< UInt64(8 &* index) }
+            for index in 0..<8 {
+                value |= UInt64(key[offset &+ index]) &<< UInt64(8 &* index)
+            }
             return value
         }
         r0 = word(0) & 0x0FFF_FFFC_0FFF_FFFF
@@ -495,7 +499,9 @@ struct Poly1305 {
         offset = count & ~15
         if offset < count {
             var block = InlineArray<16, UInt8>(repeating: 0)
-            for index in 0..<(count &- offset) { block[index] = data.load(fromByteOffset: offset &+ index, as: UInt8.self) }
+            for index in 0..<(count &- offset) {
+                block[index] = data.load(fromByteOffset: offset &+ index, as: UInt8.self)
+            }
             var t0: UInt64 = 0, t1: UInt64 = 0
             for index in 0..<8 {
                 t0 |= UInt64(block[index]) &<< UInt64(8 &* index)

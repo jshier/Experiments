@@ -31,13 +31,13 @@ extension ExamplePNG: ExpressibleByParsing {
         }
 
         let firstChunk = try ExampleChunk(parsing: &input)
-        guard case .header(let header) = firstChunk else {
+        guard case let .header(header) = firstChunk else {
             throw ExamplePNGParsingError()
         }
         self.header = header
 
         var state = ExamplePNGParserState.headerParsed()
-        self.chunks = try Array(parsingAll: &input) { input in
+        chunks = try Array(parsingAll: &input) { input in
             let chunk = try ExampleChunk(parsing: &input)
             try state.nextState(for: chunk.kind)
             return chunk
@@ -61,26 +61,22 @@ enum ExamplePNGParserState {
             throw ExampleTestError(description: "Header must be first chunk")
         case (_, .header):
             throw ExampleTestError(description: "Only one header chunk allowed")
-
         case (.headerParsed, .data):
             self = .data
         case (.headerParsed, .end):
             throw ExampleTestError(description: "At least one data chunk required")
-
         case (.headerParsed(var chunks), let newChunk):
             let inserted = chunks.insert(newChunk).inserted
             if !newChunk.multipleAllowed && !inserted {
                 throw ExampleTestError(description: "No more than one \(event) chunk allowed")
             }
             self = .headerParsed(chunks)
-
         case (.data, .data):
             break
         case (.data, .end):
             self = .end
         case (.data, _):
             throw ExampleTestError(description: "Only data and end once data starts")
-
         case (.end, _):
             throw ExampleTestError(description: "No chunks allowed after end")
         }
@@ -104,15 +100,15 @@ public enum ExampleChunk {
         var slice = try input.sliceSpan(byteCount: length)
         self =
             switch id {
-            case 0x49_48_44_52:  // IHDR
+            case 0x49_48_44_52: // IHDR
                 try .header(Header(parsing: &slice))
-            case 0x69_54_58_74:  // iTXt
+            case 0x69_54_58_74: // iTXt
                 try .text(InternationalText(parsing: &slice))
-            case 0x70_48_59_73:  // pHYs
+            case 0x70_48_59_73: // pHYs
                 try .pixelDimensions(PixelDimensions(parsing: &slice))
-            case 0x49_44_41_54:  // IDAT
+            case 0x49_44_41_54: // IDAT
                 .data(Array(parsingRemainingBytes: &slice))
-            case 0x49_45_4E_44:  // IEND
+            case 0x49_45_4E_44: // IEND
                 .end
             default:
                 try .other(id.utf8, Array(parsingRemainingBytes: &slice))
@@ -156,15 +152,15 @@ extension ExampleChunk {
 extension ExampleChunk: CustomStringConvertible {
     public var description: String {
         switch self {
-        case .header(let header):
+        case let .header(header):
             String(describing: header)
-        case .text(let text):
+        case let .text(text):
             "Text: \(text.keyword)\n\(text.text)"
-        case .pixelDimensions(let dims):
+        case let .pixelDimensions(dims):
             "Dimensions: \(dims.width) x \(dims.height)"
-        case .data(let data):
+        case let .data(data):
             "Data: \(data.count) bytes"
-        case .other(let tag, let data):
+        case let .other(tag, data):
             "Other (\(tag)): \(data.count) bytes"
         case .end:
             "End"
@@ -174,7 +170,7 @@ extension ExampleChunk: CustomStringConvertible {
 
 // MARK: PNGParser/Chunks/Header.swift
 
-extension ExampleChunk {
+public extension ExampleChunk {
     // An IHDR chunk contains:
     //
     // Width  4 bytes
@@ -185,7 +181,7 @@ extension ExampleChunk {
     // Filter method  1 byte
     // Interlace method  1 byte
 
-    public struct Header {
+    struct Header {
         public enum ColorType: UInt8 {
             case grayscale = 0
             case trueColor = 2
@@ -204,17 +200,17 @@ extension ExampleChunk {
 
 struct ExamplePNGParsingError: Error {}
 
-extension ExampleChunk.Header {
-    public init(parsing input: inout ParserSpan) throws {
-        self.width = try Int(parsing: &input, storedAsBigEndian: UInt32.self)
-        self.height = try Int(parsing: &input, storedAsBigEndian: UInt32.self)
-        self.bitDepth = try UInt8(parsing: &input)
-        self.colorType = try ColorType(parsing: &input)
+public extension ExampleChunk.Header {
+    init(parsing input: inout ParserSpan) throws {
+        width = try Int(parsing: &input, storedAsBigEndian: UInt32.self)
+        height = try Int(parsing: &input, storedAsBigEndian: UInt32.self)
+        bitDepth = try UInt8(parsing: &input)
+        colorType = try ColorType(parsing: &input)
 
         // Discard reserved value
         _ = try UInt16(parsingBigEndian: &input)
 
-        self.interlaced = try pngBool(parsing: &input)
+        interlaced = try pngBool(parsing: &input)
     }
 }
 
@@ -231,13 +227,13 @@ extension ExampleChunk.Header: CustomStringConvertible {
     }
 }
 
-extension ExampleChunk.Header {
-    public init(properties: (Int, Int, UInt8, ColorType, Bool)) {
-        self.width = properties.0
-        self.height = properties.1
-        self.bitDepth = properties.2
-        self.colorType = properties.3
-        self.interlaced = properties.4
+public extension ExampleChunk.Header {
+    init(properties: (Int, Int, UInt8, ColorType, Bool)) {
+        width = properties.0
+        height = properties.1
+        bitDepth = properties.2
+        colorType = properties.3
+        interlaced = properties.4
     }
 }
 
@@ -281,7 +277,7 @@ extension Bool {
 
 // MARK: PNGParser/Chunks/InternationalText.swift
 
-extension ExampleChunk {
+public extension ExampleChunk {
     // An iTXt chunk contains:
     //
     // Keyword  1-79 bytes (character string)
@@ -294,7 +290,7 @@ extension ExampleChunk {
     // Null separator  1 byte (null character)
     // Text  0 or more bytes
 
-    public struct InternationalText {
+    struct InternationalText {
         public var keyword: String
         public var compressionFlag: UInt8
         public var compressionMethod: UInt8
@@ -328,22 +324,22 @@ extension ExampleChunk.InternationalText {
 
 // MARK: PNGParser/Chunks/PixelDimensions.swift
 
-extension ExampleChunk {
+public extension ExampleChunk {
     // An pHYs chunk contains:
     //
     // Pixels per unit, X axis  4 bytes (PNG unsigned integer)
     // Pixels per unit, Y axis  4 bytes (PNG unsigned integer)
     // Unit specifier  1 byte
 
-    public struct PixelDimensions {
+    struct PixelDimensions {
         public var width: UInt32
         public var height: UInt32
         public var unitSpecifier: UInt8
     }
 }
 
-extension ExampleChunk.PixelDimensions {
-    public init(parsing input: inout ParserSpan) throws {
+public extension ExampleChunk.PixelDimensions {
+    init(parsing input: inout ParserSpan) throws {
         width = try UInt32(parsingBigEndian: &input)
         height = try UInt32(parsingBigEndian: &input)
         unitSpecifier = try UInt8(parsing: &input)

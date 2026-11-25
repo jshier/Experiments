@@ -58,7 +58,7 @@ public extension AsyncByteTransform where Self: ~Copyable {
             var progress = TransformProgress(consumed: 0, produced: 0, status: .needsInput)
             var failure: Failure?
             do throws(Failure) {
-                progress = try await bytes.withOutputRawSpan(overwritingFrom: start) { (raw) async throws(Failure) in
+                progress = try await bytes.withOutputRawSpan(overwritingFrom: start) { raw async throws(Failure) in
                     try await transform(input.extracting(consumed...), into: &raw, flush: flush)
                 }
             } catch {
@@ -209,7 +209,7 @@ extension UnsafeStage where Base: ByteTransform & ~Copyable {
         var output = unsafe OutputRawSpan(buffer: target.buffer, initializedCount: 0)
         let result: Result<TransformProgress, Base.Failure>
         do throws(Base.Failure) {
-            result = .success(try unsafe pointer.pointee.transform(source.span, into: &output, flush: flush))
+            result = try .success(unsafe pointer.pointee.transform(source.span, into: &output, flush: flush))
         } catch {
             result = .failure(error)
         }

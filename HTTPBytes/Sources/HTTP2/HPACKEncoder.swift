@@ -252,7 +252,8 @@ public struct HPACKEncoder: ~Copyable {
                 // Unsafe: the spans' own bytes, read within their counts during the call.
                 unsafe encodeField(
                     name: name.baseAddress, nameCount: name.count, value: value.baseAddress, valueCount: value.count,
-                    knownName: knownName?.index ?? 0xFF, strategy: strategy, &output)
+                    knownName: knownName?.index ?? 0xFF, strategy: strategy, &output
+                )
             }
         }
     }

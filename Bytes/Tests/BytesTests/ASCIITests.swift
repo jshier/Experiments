@@ -27,7 +27,9 @@ import Testing
     @Test func laneClassesAgreeWithBytes() {
         for base in stride(from: 0, to: 256, by: 16) {
             var vector = SIMD16<UInt8>()
-            for lane in 0..<16 { vector[lane] = UInt8(base + lane) }
+            for lane in 0..<16 {
+                vector[lane] = UInt8(base + lane)
+            }
             let lanes = ByteLanes(vector)
             func mask(_ test: (UInt8) -> Bool) -> UInt16 {
                 (0..<16).reduce(0) { $0 | (test(vector[$1]) ? 1 << $1 : 0) }
@@ -69,7 +71,9 @@ import Testing
         func next() -> UInt64 { generator.next() }
         for digitCount in 1...19 {
             var power: UInt64 = 1
-            for _ in 0..<digitCount { power = power &* 10 }
+            for _ in 0..<digitCount {
+                power = power &* 10
+            }
             for trial in 0..<200 {
                 // Leading zeros sometimes; the largest value of the width sometimes.
                 let value = trial == 0 ? power &- 1 : trial == 1 ? 0 : next() % (digitCount == 19 ? UInt64(Int64.max) : power)

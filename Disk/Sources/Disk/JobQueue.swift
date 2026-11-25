@@ -89,6 +89,11 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
         var closed = false
         var consumers: WaiterQueue<Continuation<Void>>
         var producers: WaiterQueue<Continuation<Void>>
+
+        /// Whether no job is queued.
+        var isEmpty: Bool {
+            count == 0
+        }
     }
 
     private let state: Mutex<State>
@@ -120,7 +125,9 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
         let (head, count) = state.withLock { ($0.head, $0.count) }
         // Unsafe: deinitializes slots. Safe: the jobs still queued (none after an extraction: the writers take every
         // one) are exactly the initialized slots `head..<head + count`, wrapping.
-        for index in 0..<count { unsafe (ring + (head + index) % capacity).deinitialize(count: 1) }
+        for index in 0..<count {
+            unsafe (ring + (head + index) % capacity).deinitialize(count: 1)
+        }
         // Unsafe: frees the ring. Safe: `init`'s allocation, every slot uninitialized now.
         unsafe ring.deallocate()
     }
@@ -180,7 +187,7 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
         let address = UInt(bitPattern: path.baseAddress), pathCount = path.count
         while true {
             switch state.withLock({ offer(job, address, pathCount, &$0) }) {
-            case .added(let consumer):
+            case let .added(consumer):
                 consumer?.resume()
                 return true
             case .closed:
@@ -207,7 +214,7 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
     nonisolated(nonsending) func pop(pathInto pathBuffer: UnsafeMutableRawPointer) async -> (job: Job, pathCount: Int)? {
         while true {
             let take: Take = state.withLock { state in
-                guard state.count > 0 else { return state.closed ? .done : .wait }
+                guard !state.isEmpty else { return state.closed ? .done : .wait }
                 // Unsafe: moves a slot out. Safe: the oldest queued slot, initialized by `offer`; uninitialized again
                 // after, as the state's new head records.
                 let slot = unsafe (ring + state.head).move()
@@ -229,7 +236,7 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
                 return .job(job, count, state.producers.popFirst())
             }
             switch take {
-            case .job(let job, let count, let producer):
+            case let .job(job, count, producer):
                 producer?.resume()
                 return (job, count)
             case .done:
@@ -237,7 +244,7 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
             case .wait:
                 await withContinuation { (continuation: Continuation<Void>) in
                     let wait = state.withLock { state in
-                        if state.count > 0 || state.closed { return false }
+                        if !state.isEmpty || state.closed { return false }
                         state.consumers.append(continuation)
                         return true
                     }
@@ -254,7 +261,11 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
             state.closed = true
             return (state.consumers.removeAll(), state.producers.removeAll())
         }
-        for consumer in consumers { consumer.resume() }
-        for producer in producers { producer.resume() }
+        for consumer in consumers {
+            consumer.resume()
+        }
+        for producer in producers {
+            producer.resume()
+        }
     }
 }

@@ -320,7 +320,9 @@ current Bytes, which alone added 0.4–1.5%):
   stream 4–5% faster. So the fewer instructions buy little time here: these loops are bound by load
   latency and branches, not instruction count. Absolute times on this day ran 8–10% above `dispatch1`'s
   for the old code too (machine state), so compare times only within one interleaved run.
-- **Checked unchanged**: the vectorized loops (`Tools/loops`: the same 11 `vector128` loops, same
+- **Checked unchanged** (correction, 2026-11-24: 11 was the old `Tools/loops`' count; the natural loops are 6, 5
+  innermost, and `MQTTPacket.init(parsing:)` has none: its backward branches go to a shared error block): the vectorized
+  loops (`Tools/loops`: the same 11 `vector128` loops, same
   sizes, in `MQTTPublish.init(reading:flags:)`, `MQTTSubscriptions.init(validating:)`, and
   `MQTTPacket.init(parsing:)`); runtime calls (`Tools/calls --callee
   'swift_retain|swift_release|swift_allocObject|outlined|swift_task_switch'`: identical); allocation

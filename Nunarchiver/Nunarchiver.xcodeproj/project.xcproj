@@ -16,6 +16,9 @@
       "path": "../Bytes",
     }, {
       "kind": "local",
+      "path": "../BytesCompression",
+    }, {
+      "kind": "local",
       "path": "../Disk",
     }, {
       "kind": "local",

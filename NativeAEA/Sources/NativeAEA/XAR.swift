@@ -63,7 +63,7 @@ enum XAR {
         var scanner = XMLScanner(xml)
         while let event = try scanner.next() {
             switch event {
-            case .start(let path, let style):
+            case let .start(path, style):
                 switch path {
                 case "xar/toc/checksum":
                     inChecksum = true
@@ -75,7 +75,7 @@ enum XAR {
                 case "xar/toc/file/data/encoding": file?.encoding = style ?? ""
                 default: break
                 }
-            case .text(let path, let text, let style):
+            case let .text(path, text, style):
                 switch path {
                 case "xar/toc/checksum/offset": checksum.offset = try integer(text)
                 case "xar/toc/checksum/size": checksum.size = try integer(text)
@@ -95,7 +95,7 @@ enum XAR {
                 case "xar/toc/file/data/extracted-checksum": file?.extractedChecksum = (style ?? "", text)
                 default: break
                 }
-            case .end(let path):
+            case let .end(path):
                 switch path {
                 case "xar/toc/checksum":
                     inChecksum = false
@@ -151,11 +151,15 @@ enum XAR {
     }
 }
 
-
 /// A minimal XML reader for XAR TOCs: elements (with their path from the root, slash-separated, and a `style`
 /// attribute, the only one XAR's readers need), text, and the five predefined entities and character references.
 /// Skips the declaration, comments, processing instructions, and DOCTYPE. Not a general XML parser: no namespaces
 /// (a prefix stays in the name), CDATA is rejected.
+///
+/// The path is kept as bytes, a name appended when its element opens and cut back to its parent's length when it
+/// closes, and made into a `String` only while it's at most ``maximumPathByteCount`` bytes (longer ones are reported as
+/// `""`, which no reader matches): each event costs its own bytes and at most that much more. Built from the stack on
+/// every event, a 511-byte TOC 40,000 elements deep took 42.8 s (review 2026-11-23 §1.8).
 struct XMLScanner {
     enum Event {
         /// An element opened: its path, and its `style` attribute.
@@ -165,33 +169,52 @@ struct XMLScanner {
         case end(String)
     }
 
+    /// The longest path reported: the readers' deepest is 51 bytes (`xar/toc/signature/KeyInfo/X509Data/X509Certificate`).
+    static var maximumPathByteCount: Int { 128 }
+
     private let bytes: [UInt8]
     private var offset = 0
-    private var stack: [(name: String, style: String?)] = []
-    private var pendingEnd: String?
+    /// The open elements' path, slash-separated.
+    private var pathBytes: [UInt8] = []
+    /// Per open element: where its name starts in ``pathBytes`` (its parent's path ends before it, and a slash), and its
+    /// `style`.
+    private var stack: [(nameStart: Int, style: String?)] = []
+    private var pendingEnd = false
 
     init(_ bytes: [UInt8]) {
         self.bytes = bytes
     }
 
-    private var path: String { stack.map(\.name).joined(separator: "/") }
+    /// The current path, or `""` past ``maximumPathByteCount``.
+    private var path: String {
+        pathBytes.count <= Self.maximumPathByteCount ? String(decoding: pathBytes, as: UTF8.self) : ""
+    }
 
     private func byte(_ index: Int) -> UInt8 { bytes[index] }
 
+    /// Closes the innermost element: its path, then the path cut back to its parent's.
+    private mutating func close() -> Event {
+        let ended = path
+        let top = stack.removeLast()
+        pathBytes.removeSubrange(max(0, top.nameStart - 1)...)
+        return .end(ended)
+    }
+
     mutating func next() throws(AEAError) -> Event? {
-        if let pending = pendingEnd {
-            pendingEnd = nil
-            stack.removeLast()
-            return .end(pending)
+        if pendingEnd {
+            pendingEnd = false
+            return close()
         }
         while offset < bytes.count {
             if byte(offset) != 0x3C { // Text up to the next tag.
                 let start = offset
-                while offset < bytes.count, byte(offset) != 0x3C { offset += 1 }
+                while offset < bytes.count, byte(offset) != 0x3C {
+                    offset += 1
+                }
                 let raw = bytes[start..<offset]
                 guard raw.contains(where: { !Self.isSpace($0) }) else { continue }
                 guard let top = stack.last else { throw .invalidArchive("XML text outside the root") }
-                return .text(path, try Self.unescape(raw), style: top.style)
+                return try .text(path, Self.unescape(raw), style: top.style)
             }
             // A tag.
             guard offset + 1 < bytes.count else { throw .invalidArchive("XML ends inside a tag") }
@@ -222,22 +245,23 @@ struct XMLScanner {
     private mutating func element(_ tag: [UInt8]) throws(AEAError) -> Event {
         var bytes = tag
         if bytes.first == 0x2F { // </name>
-            let name = String(decoding: bytes.dropFirst().prefix { !Self.isSpace($0) }, as: UTF8.self)
-            guard let top = stack.last, top.name == name else { throw .invalidArchive("XML end tag \(name) doesn't match") }
-            let ended = path
-            stack.removeLast()
-            return .end(ended)
+            let name = bytes.dropFirst().prefix { !Self.isSpace($0) }
+            guard let top = stack.last, pathBytes[top.nameStart...].elementsEqual(name) else {
+                // A name too long to be one the readers know is cut short in the message.
+                throw .invalidArchive("XML end tag \(String(decoding: name.prefix(Self.maximumPathByteCount), as: UTF8.self)) doesn't match")
+            }
+            return close()
         }
         let selfClosing = bytes.last == 0x2F
         if selfClosing { bytes.removeLast() }
         let nameEnd = bytes.firstIndex(where: Self.isSpace) ?? bytes.count
-        let name = String(decoding: bytes[..<nameEnd], as: UTF8.self)
-        guard !name.isEmpty else { throw .invalidArchive("an XML element without a name") }
+        guard nameEnd > 0 else { throw .invalidArchive("an XML element without a name") }
         let style = try Self.attribute("style", in: bytes[nameEnd...])
-        stack.append((name, style))
-        let opened = path
-        if selfClosing { pendingEnd = opened }
-        return .start(opened, style: style)
+        if !stack.isEmpty { pathBytes.append(0x2F) }
+        stack.append((pathBytes.count, style))
+        pathBytes.append(contentsOf: bytes[..<nameEnd])
+        pendingEnd = selfClosing
+        return .start(path, style: style)
     }
 
     private static func isSpace(_ byte: UInt8) -> Bool { byte == 0x20 || byte == 0x0A || byte == 0x0D || byte == 0x09 }
@@ -247,17 +271,25 @@ struct XMLScanner {
         var index = bytes.startIndex
         let wanted = Array(name.utf8)
         while index < bytes.endIndex {
-            while index < bytes.endIndex, isSpace(bytes[index]) { index += 1 }
+            while index < bytes.endIndex, isSpace(bytes[index]) {
+                index += 1
+            }
             let nameStart = index
-            while index < bytes.endIndex, bytes[index] != 0x3D, !isSpace(bytes[index]) { index += 1 }
+            while index < bytes.endIndex, bytes[index] != 0x3D, !isSpace(bytes[index]) {
+                index += 1
+            }
             let attributeName = bytes[nameStart..<index]
-            while index < bytes.endIndex, isSpace(bytes[index]) || bytes[index] == 0x3D { index += 1 }
+            while index < bytes.endIndex, isSpace(bytes[index]) || bytes[index] == 0x3D {
+                index += 1
+            }
             guard index < bytes.endIndex else { break }
             let quote = bytes[index]
             guard quote == 0x22 || quote == 0x27 else { throw .invalidArchive("an XML attribute without quotes") }
             index += 1
             let valueStart = index
-            while index < bytes.endIndex, bytes[index] != quote { index += 1 }
+            while index < bytes.endIndex, bytes[index] != quote {
+                index += 1
+            }
             guard index < bytes.endIndex else { throw .invalidArchive("an XML attribute without its closing quote") }
             let value = bytes[valueStart..<index]
             index += 1
@@ -305,7 +337,7 @@ struct XMLScanner {
             case "apos": output.append(0x27)
             default:
                 let scalarValue: UInt32? = if entity.hasPrefix("#x") { UInt32(entity.dropFirst(2), radix: 16) }
-                    else if entity.hasPrefix("#") { UInt32(entity.dropFirst(), radix: 10) } else { nil }
+                else if entity.hasPrefix("#") { UInt32(entity.dropFirst(), radix: 10) } else { nil }
                 guard let scalarValue, let scalar = Unicode.Scalar(scalarValue) else { throw .invalidArchive("an XML reference &\(entity);") }
                 output.append(contentsOf: Array(String(Character(scalar)).utf8))
             }

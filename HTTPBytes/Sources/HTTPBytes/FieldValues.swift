@@ -27,8 +27,12 @@ public enum HTTPList {
             }
             end = Swift.min(end, count)
             var first = start, last = end
-            while first < last, case let byte = value.load(fromByteOffset: first, as: UInt8.self), byte == 0x20 || byte == 0x09 { first &+= 1 }
-            while last > first, case let byte = value.load(fromByteOffset: last &- 1, as: UInt8.self), byte == 0x20 || byte == 0x09 { last &-= 1 }
+            while first < last, case let byte = value.load(fromByteOffset: first, as: UInt8.self), byte == 0x20 || byte == 0x09 {
+                first &+= 1
+            }
+            while last > first, case let byte = value.load(fromByteOffset: last &- 1, as: UInt8.self), byte == 0x20 || byte == 0x09 {
+                last &-= 1
+            }
             if last > first { body(value.extracting(first..<last)) }
             start = end &+ 1
         }
@@ -58,8 +62,12 @@ public enum HTTPToken {
     @_lifetime(copy bytes)
     public static func prefix(_ bytes: RawSpan, upTo delimiter: UInt8) -> RawSpan {
         var end = 0
-        while end < bytes.byteCount, bytes.load(fromByteOffset: end, as: UInt8.self) != delimiter { end &+= 1 }
-        while end > 0, case let byte = bytes.load(fromByteOffset: end &- 1, as: UInt8.self), byte == 0x20 || byte == 0x09 { end &-= 1 }
+        while end < bytes.byteCount, bytes.load(fromByteOffset: end, as: UInt8.self) != delimiter {
+            end &+= 1
+        }
+        while end > 0, case let byte = bytes.load(fromByteOffset: end &- 1, as: UInt8.self), byte == 0x20 || byte == 0x09 {
+            end &-= 1
+        }
         return bytes.extracting(0..<end)
     }
 

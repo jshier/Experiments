@@ -15,7 +15,7 @@ func register<F, R>(
     Benchmark(name, configuration: configuration ?? Benchmark.defaultConfiguration) { benchmark in
         let fixture = fixture.value
         for _ in benchmark.scaledIterations {
-            blackHole(try run(fixture))
+            try blackHole(run(fixture))
         }
     } setup: {
         let fixture = fixture.value
@@ -33,6 +33,7 @@ let searchHaystack = Lazy {
     tail.replaceSubrange(0..<4, with: [0x50, 0x4B, 0x05, 0x06])
     return tail
 }
+
 let searchSignature: Byte4 = 0x50_4B_05_06
 
 let benchmarks: @Sendable () -> Void = {

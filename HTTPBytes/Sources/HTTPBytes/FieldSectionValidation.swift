@@ -24,7 +24,7 @@ public enum HTTPFieldSectionError: Error, Sendable, Hashable {
     /// §4.3.1, §4.4; RFC 8441 §4, RFC 9220 §3).
     case missingPseudoHeader
     /// A pseudo-header field's value is wrong: an empty `:path` for `http` or `https`, a `:status` that isn't three
-    /// digits, a `:protocol` request whose method isn't CONNECT.
+    /// digits from 100 to 999, a `:protocol` request whose method isn't CONNECT.
     case invalidPseudoHeaderValue
 }
 
@@ -184,7 +184,9 @@ public struct HTTPFieldSectionValidator: Sendable {
             let d0 = Int(value.load(fromByteOffset: 0, as: UInt8.self)) &- 0x30
             let d1 = Int(value.load(fromByteOffset: 1, as: UInt8.self)) &- 0x30
             let d2 = Int(value.load(fromByteOffset: 2, as: UInt8.self)) &- 0x30
-            guard UInt(bitPattern: d0) < 10, UInt(bitPattern: d1) < 10, UInt(bitPattern: d2) < 10 else { throw .invalidPseudoHeaderValue }
+            // A status code is 100–999 (RFC 9110 §15, as `HTTPStatus(code:)` reads one): `000`–`099` could pass for an
+            // interim response, or be forwarded as an HTTP/1.1 status line no client expects.
+            guard UInt(bitPattern: d0 &- 1) < 9, UInt(bitPattern: d1) < 10, UInt(bitPattern: d2) < 10 else { throw .invalidPseudoHeaderValue }
             pseudoHeaders.status = d0 &* 100 &+ d1 &* 10 &+ d2
         case .request:
             switch name {
@@ -245,6 +247,6 @@ public struct HTTPFieldSectionValidator: Sendable {
         let v = lanes.vector
         let upper = v &- SIMD16(repeating: 0x41) .< SIMD16(repeating: 26)
         return HTTPCharacters.matches((v .<= SIMD16(repeating: 0x20)) .| (v .>= SIMD16(repeating: 0x7F)) .| upper
-                                          .| (v .== SIMD16(repeating: 0x3A)))
+            .| (v .== SIMD16(repeating: 0x3A)))
     }
 }

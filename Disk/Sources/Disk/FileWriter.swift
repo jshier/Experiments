@@ -136,7 +136,7 @@ struct WriterCore: ~Copyable {
         // `data` is `count` bytes the caller keeps valid for the call. The output (`outputCapacity` bytes) holds a table
         // of up to 18 entries and 18 chunks of a chunk and one byte each, the most `compress` writes, and 64 bytes.
         // Unsafe: reads the optional pointer. Safe: only its value, tested for `nil`.
-        guard case .compressed(let policy) = storage, let data = unsafe data, count > 0 else { return .plain }
+        guard case let .compressed(policy) = storage, let data = unsafe data, count > 0 else { return .plain }
         // Unsafe: a span over the file's first bytes, with no lifetime the compiler can check. Safe: at most `count`
         // of the caller's bytes; `skips` only reads it, during the call.
         if unsafe policy.skips(size: count, first: RawSpan(_unsafeStart: data, byteCount: min(count, 8))) { return .plain }
@@ -231,7 +231,7 @@ struct WriterCore: ~Copyable {
     func createMakingParents(count: Int, mode final: mode_t) throws(DiskError) -> Int32 {
         do throws(DiskError) {
             return try create(directory: destination.root, leaf: 0, mode: final)
-        } catch .system(_, _, let errno) where errno == .noSuchFileOrDirectory {
+        } catch let .system(_, _, errno) where errno == .noSuchFileOrDirectory {
             // Unsafe: the path buffer as a C string to `makeParents`. Safe: it holds the path's `count` bytes and a
             // NUL (`setPath`, the caller's contract), in the core's buffer, unchanged during the call.
             try unsafe destination.makeParents(of: path.assumingMemoryBound(to: CChar.self), count: count)
@@ -249,12 +249,12 @@ struct WriterCore: ~Copyable {
             // `count` bytes the caller keeps valid for the call; `writeFully` only reads them, during it.
             if let data = unsafe data, count > 0 { try unsafe FileIO.writeFully(descriptor, data, count: count, at: 0, path: pathRef) }
             return false
-        case .inline(let attributeCount):
+        case let .inline(attributeCount):
             // Unsafe: the output's base to `setAttribute`. Safe: `prepare` (which made this form) wrote the header
             // and chunk into the output's first `attributeCount` bytes; the storage is the core's, read during the call.
             try unsafe setAttribute(descriptor, Decmpfs.attribute, output.base, count: attributeCount, position: 0)
             return true
-        case .fork(let forkCount, let type):
+        case let .fork(forkCount, type):
             // Unsafe: the output's base to `setAttribute`. Safe: `prepare` wrote the table and chunks into the
             // output's first `forkCount` bytes; the storage is the core's, read during the call.
             try unsafe setAttribute(descriptor, Decmpfs.resourceFork, output.base, count: forkCount, position: 0)
@@ -291,7 +291,7 @@ struct WriterCore: ~Copyable {
 
     func setHeader(_ descriptor: Int32, type: UInt32, size: Int) throws(DiskError) {
         let header = Decmpfs.header(type: type, size: size)
-        try header.span.withUnsafeBytes { (bytes) throws(DiskError) in
+        try header.span.withUnsafeBytes { bytes throws(DiskError) in
             // Unsafe: the buffer's base pointer to `setAttribute`. Safe: the header's 16 bytes (`headerSize`), so not
             // `nil`, valid inside `withUnsafeBytes`; `setAttribute` reads them before it returns.
             try unsafe setAttribute(descriptor, Decmpfs.attribute, bytes.baseAddress!, count: Decmpfs.headerSize, position: 0)
@@ -382,7 +382,7 @@ package struct FileWriter: ~Copyable {
         path.bytes.withUnsafeBytes { unsafe core.setPath($0.baseAddress!, count: $0.count) }
         // `data` below is the contents' `count` bytes (or `nil` for none), valid inside this closure, which every use
         // of it returns within.
-        return try contents.withUnsafeBytes { (bytes) throws(DiskError) -> StoredForm in
+        return try contents.withUnsafeBytes { bytes throws(DiskError) -> StoredForm in
             let data = bytes.baseAddress
             // Unsafe: `data` to `prepare`. Safe: the span's `count` bytes, as above; `prepare` only reads them.
             let form = unsafe core.prepare(data, count: count, storage: storage)
@@ -393,7 +393,7 @@ package struct FileWriter: ~Copyable {
                 var compressed: Bool
                 var stored: StoredForm
                 // Unsafe: reads the optional pointer. Safe: only its value, tested for `nil`.
-                if case .batches(let policy) = form, let data = unsafe data {
+                if case let .batches(policy) = form, let data = unsafe data {
                     let chunkCount = (count + Decmpfs.chunkSize - 1) / Decmpfs.chunkSize
                     core.reserveTable(chunkCount + 1)
                     var forkOffset = (chunkCount + 1) * 4

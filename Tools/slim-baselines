@@ -22,7 +22,7 @@
 # examples:
 #   Tools/slim-baselines Bytes
 #   Tools/slim-baselines --check .
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
 check=0 min_size='' paths=()
 [[ $# -ge 1 ]] || usage 2

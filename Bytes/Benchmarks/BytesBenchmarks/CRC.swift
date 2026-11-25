@@ -1,6 +1,6 @@
 import Benchmark
-import BytesTestSupport
 import Bytes
+import BytesTestSupport
 
 /// CRC-32 implementations, and `forEach` with and without a byte order.
 func registerCRCBenchmarks() {

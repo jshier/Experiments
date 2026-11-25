@@ -1,0 +1,55 @@
+#!/bin/bash
+# disk-space — a volume's free space as macOS counts it three ways, so a check doesn't mistake purgeable space for
+# none (`df` alone said 98% full while Finder said 274 GB available, 2026-11-24).
+#
+# usage: Tools/disk-space [--check GB] [PATH]      (PATH defaults to the Data volume, /System/Volumes/Data)
+#
+# Output, one tab-separated line of six fields (GB, one decimal): path, total, free now, available (important), available
+# (opportunistic), and "read-only yes" or "read-only no". `/` itself, in any spelling (`/.`, `//`, `/System/..`,
+# `/Volumes/Macintosh HD`), is measured as the Data volume: the sealed system volume's figures are the shared
+# container's. Any other path on the system volume (`/usr/bin/x`, or a new `/Scratch/x`, a typo for ~/Scratch) reads as
+# what it is, read-only. A PATH that doesn't exist yet is measured at its nearest existing ancestor (a dangling symbolic
+# link at its target's), except one whose first missing component is right under /Volumes (in any spelling,
+# /System/Volumes/Data/Volumes too: compared by device and inode): a volume that isn't mounted, refused (exit 2). A note
+# on stderr says which, and the first field is the path measured.
+#   free now       blocks free at this moment (statfs, as `df`): what writes and the kernel see right away. Kernel-heavy
+#                  benchmark rows inflated when this was ~2% of the disk (AGENTS.md).
+#   available      free plus purgeable space (caches, optimized storage) the system frees when an app needs it: the
+#                  figure Finder shows, and the one to compare a planned large write against.
+#   opportunistic  what background work may use without the system purging anything.
+#   Only APFS has purgeable space: on other volumes (exFAT, MS-DOS, HFS+) both "available" figures are "free now".
+# --check GB (decimals allowed) exits 1, with a note on stderr, when "available" is below GB or the volume is read-only;
+# use it before extracting or generating anything large. When only "free now" is below GB, it exits 0 with a note that the write will wait on
+# the system purging space as it goes.
+#
+# Compiled with xcrun clang on first use (and when the source, arguments, or compiler change) into
+# ~/Scratch/tools-cache.noindex/ (EXPERIMENTS_TOOLS_CACHE).
+source "$(dirname "$0")/lib/common.sh" || exit 2
+
+check=
+path=
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --check) need_value "$@"; need_decimal "$1" "$2"; check="$2"; shift ;;
+        -h|--help) usage ;;
+        -*) die "unknown option $1" ;;
+        *) [[ -z "$path" ]] || die "one PATH only (got $path and $1)"; path="$1" ;;
+    esac
+    shift
+done
+binary="$(compiled_tool disk-space "$TOOLS_DIR/lib/disk-space.m" -O2 -fobjc-arc -framework Foundation)"
+# The helper picks the path to measure (the default, an existing ancestor, the Data volume) and notes why on stderr.
+line="$("$binary" ${path:+"$path"})" || die "couldn't read ${path:-the Data volume}"
+perl -e '
+    my ($path, $total, $free, $important, $opportunistic, $read_only) = split /\t/, shift;
+    my $check = shift;
+    my $gb = sub { sprintf "%.1f", $_[0] / 1e9 };
+    printf "%s\ttotal %s GB\tfree now %s GB\tavailable %s GB\topportunistic %s GB\tread-only %s\n",
+        $path, $gb->($total), $gb->($free), $gb->($important), $gb->($opportunistic), $read_only;
+    exit 0 if $check eq "";
+    my $need = $check * 1e9;
+    if ($read_only eq "yes") { print STDERR "$path is on a read-only volume: nothing can be written there\n"; exit 1 }
+    if ($important < $need) { print STDERR "only ", $gb->($important), " GB available: below $check GB\n"; exit 1 }
+    if ($free < $need) { print STDERR "available, but only ", $gb->($free), " GB free now: the system purges as it goes\n" }
+    exit 0;
+' "$line" "$check"

@@ -16,19 +16,17 @@ enum SegmentDecoderKind: String, CaseIterable, CustomStringConvertible {
 }
 
 /// Decodes single segments outside the extraction pipeline, for the benchmarks comparing decoders: BytesCompression's
-/// decoders made once for the archive's compression, as NativeAEA's `SegmentCodec` makes them, or Compression's
-/// scratch memory. Written against NativeAEA's public API only (`AEAArchive`, `AEACompression`, and the
-/// `storedBytes(of:)` SPI), so it builds against the library before and after the backend's removal.
+/// `Decompressor`, made once for the archive's compression (`DecompressionFormat(aeaSegment:)`, as NativeAEA's
+/// segment stage decodes), or Compression's scratch memory. Written against NativeAEA's public API only (`AEAArchive`,
+/// `AppleArchiveCompression`, and the `storedBytes(of:)` SPI).
 ///
-/// A class: the decoders' state is made once (in a benchmark's setup) and mutated by every decode.
+/// A class: the decoder's state is made once (in a benchmark's setup) and mutated by every decode.
 final class SegmentDecoder {
     let kind: SegmentDecoderKind
-    let compression: AEACompression
-    private var inflater: DeflateDecoder?
-    private var lzma: LZMA2Decoder?
-    private var lzfse: LZFSEDecoder?
-    private var lzraven: LZRAVENDecoder?
-    private var lzbitmap: LZBitmapDecoder?
+    let compression: AppleArchiveCompression
+    /// BytesCompression's decoder for the archive's segments (and for zlib's with either kind: Compression has no
+    /// zlib to compare).
+    private var decompressor: Decompressor?
     /// Compression's scratch memory, made once, for ``SegmentDecoderKind/system``.
     private let scratch: RawStorage?
 
@@ -36,12 +34,11 @@ final class SegmentDecoder {
         self.kind = kind
         compression = archive.rootHeader.compression
         let bytes = kind == .bytes
-        // zlib went through BytesCompression with either backend.
-        inflater = compression == .zlib ? DeflateDecoder(format: .zlib) : nil
-        lzma = bytes && compression == .lzma ? LZMA2Decoder() : nil
-        lzfse = bytes && compression == .lzfse ? LZFSEDecoder() : nil
-        lzraven = bytes && compression == .lzraven ? LZRAVENDecoder() : nil
-        lzbitmap = bytes && compression == .lzbitmap ? LZBitmapDecoder() : nil
+        if bytes || compression == .zlib, let format = DecompressionFormat(aeaSegment: compression) {
+            decompressor = try? Decompressor(for: format)
+        } else {
+            decompressor = nil
+        }
         if !bytes, let algorithm = Self.algorithm(compression) {
             scratch = RawStorage(byteCount: compression_decode_scratch_buffer_size(algorithm))
         } else {
@@ -51,7 +48,7 @@ final class SegmentDecoder {
 
     /// Compression's algorithm for an AEA segment's compression (raw LZ4 blocks, not `bv41` frames), or `nil` where it
     /// has none (LZVN's is undocumented, zlib's is raw DEFLATE).
-    static func algorithm(_ compression: AEACompression) -> compression_algorithm? {
+    static func algorithm(_ compression: AppleArchiveCompression) -> compression_algorithm? {
         switch compression {
         case .lzma: COMPRESSION_LZMA
         case .lzfse: COMPRESSION_LZFSE
@@ -64,7 +61,7 @@ final class SegmentDecoder {
 
     /// Compression's decoding of a segment (BytesReferenceCodecs), or its stored bytes when it's stored as is: the
     /// reference the benchmarks' outputs are checked against.
-    static func reference(_ stored: [UInt8], rawSize: Int, compression: AEACompression) -> [UInt8] {
+    static func reference(_ stored: [UInt8], rawSize: Int, compression: AppleArchiveCompression) -> [UInt8] {
         if stored.count == rawSize { return stored }
         guard let algorithm = algorithm(compression) else {
             precondition(compression == .zlib, "no reference decoder for \(compression)")
@@ -89,26 +86,11 @@ final class SegmentDecoder {
             try decodeWithCompression(stored, into: &output, scratch: scratch)
             return
         }
+        guard decompressor != nil else { throw .invalidValue }
         let source = stored.span.bytes
         let rawSize = output.count
-        let consumed = try output.withOutputRawSpan { (span) throws(BytesError) -> Int in
-            let consumed: Int
-            switch compression {
-            case .zlib:
-                inflater!.reset()
-                consumed = try inflater!.decompressAll(source, into: &span)
-            case .lzma: consumed = try lzma!.decompressXZ(source, into: &span)
-            case .lzfse: consumed = try lzfse!.decompressAll(source, into: &span)
-            case .lzraven: consumed = try lzraven!.decompressAll(source, decodedSize: rawSize, into: &span)
-            case .lzbitmap: consumed = try lzbitmap!.decompressAll(source, decodedSize: rawSize, into: &span)
-            case .lzvn: consumed = try LZVNDecoder().decompressAll(source, into: &span)
-            case .lz4:
-                try LZ4Decoder().decompressRaw(source, decodedSize: rawSize, into: &span)
-                consumed = source.byteCount
-            case .none: throw .invalidValue
-            }
-            guard span.byteCount == rawSize else { throw .invalidValue }
-            return consumed
+        let consumed = try output.withOutputRawSpan { span throws(BytesError) -> Int in
+            try decompressor!.decompressAll(source, into: &span, decodedSize: rawSize)
         }
         guard consumed == stored.count else { throw .trailingData }
     }

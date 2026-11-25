@@ -15,7 +15,7 @@ public enum HTTP1HeadWriter {
                                         to writer: inout AlignedBytesWriter) throws(HTTP1HeadWriterError) {
         guard target.byteCount > 0, !target.containsByte(where: HTTPCharacters.targetStop) else { throw .invalidTarget }
         do {
-            try method.withBytes { (bytes) throws(BytesError) in try writer.write(bytes) }
+            try method.withBytes { bytes throws(BytesError) in try writer.write(bytes) }
             try writer.write(0x20 as UInt8)
             try writer.write(target)
             try writer.write(0x20 as UInt8)

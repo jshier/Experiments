@@ -124,7 +124,7 @@ enum Probe {
             while offset < bytes.count {
                 let count = min(piece, bytes.count - offset)
                 // No copy: the data borrows the buffer (it outlives the writes).
-                let data = DispatchData(bytesNoCopy: UnsafeRawBufferPointer(rebasing: bytes[offset..<(offset + count)]), deallocator: .custom(nil, {}))
+                let data = DispatchData(bytesNoCopy: UnsafeRawBufferPointer(rebasing: bytes[offset..<(offset + count)]), deallocator: .custom(nil) {})
                 group.enter()
                 channel.write(offset: off_t(offset), data: data, queue: queue) { done, _, _ in if done { group.leave() } }
                 offset += count

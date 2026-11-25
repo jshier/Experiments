@@ -1,4 +1,5 @@
 import Bytes
+import BytesCompression
 
 // The Apple Encrypted Archive container (`AEA1`), as Apple's libAppleArchive writes it. Apple doesn't publish
 // the layout; it's documented here from the archive itself, and checked against `aea decrypt` (FORMAT.md in this
@@ -65,18 +66,6 @@ public enum AEAProfile: Int, Sendable, CaseIterable {
     }
 }
 
-/// How each segment is compressed: a byte holding an ASCII letter.
-public enum AEACompression: UInt8, Sendable {
-    case none = 0x2D // "-"
-    case lz4 = 0x34 // "4"
-    case lzbitmap = 0x62 // "b"
-    case lzfse = 0x65 // "e"
-    case lzvn = 0x66 // "f"
-    case lzraven = 0x6D // "m": macOS 27's `aea encrypt -a lzraven`
-    case lzma = 0x78 // "x": an xz stream per segment
-    case zlib = 0x7A // "z"
-}
-
 /// The checksum kept for each segment's decompressed bytes.
 public enum AEAChecksum: UInt8, Sendable {
     case none = 0
@@ -103,10 +92,13 @@ public struct AEARootHeader: Sendable, Equatable {
     public var segmentSize: Int
     /// Segments per cluster.
     public var segmentsPerCluster: Int
-    public var compression: AEACompression
+    /// How each segment is compressed: BytesCompression's letters, the ones `pbz` streams use.
+    public var compression: AppleArchiveCompression
     public var checksum: AEAChecksum
 
     static var byteCount: Int { 48 }
+    /// The largest segment `aea` writes, and this reader reads.
+    static var maximumSegmentSize: Int { 256 << 20 }
 
     init(parsing bytes: RawSpan) throws(AEAError) {
         let record: RootHeaderRecord
@@ -116,7 +108,7 @@ public struct AEARootHeader: Sendable, Equatable {
         } catch {
             throw .invalidHeader("root header")
         }
-        guard let compression = AEACompression(rawValue: record.compression) else {
+        guard let compression = AppleArchiveCompression(rawValue: record.compression) else {
             throw .unsupportedCompression(record.compression)
         }
         guard let checksum = AEAChecksum(rawValue: record.checksum) else {
@@ -127,6 +119,11 @@ public struct AEARootHeader: Sendable, Equatable {
         guard record.rawSize < 1 << 62, record.containerSize < 1 << 62, record.segmentSize > 0, record.segmentSize < 1 << 31,
               record.segmentsPerCluster > 0, record.segmentsPerCluster < 1 << 20
         else { throw .invalidHeader("root header sizes") }
+        // Segments of at most 256 MiB, `aea`'s largest (`aea encrypt -b 512m`, `1g`, `2g` all write 268,435,456): every
+        // decoded segment takes a buffer that size (review 2026-11-23 §1.6).
+        guard Int(record.segmentSize) <= Self.maximumSegmentSize else {
+            throw .invalidHeader("segment size \(record.segmentSize), over 256 MiB")
+        }
         rawSize = Int(record.rawSize)
         containerSize = Int(record.containerSize)
         segmentSize = Int(record.segmentSize)
@@ -272,7 +269,9 @@ public struct AEAPrologue: Sendable {
     /// - Parameter original: The prologue's bytes as stored.
     func signedBytes(_ original: [UInt8]) -> [UInt8] {
         var bytes = original
-        for index in signatureOffset..<(signatureOffset + signature.count) { bytes[index] = 0 }
+        for index in signatureOffset..<(signatureOffset + signature.count) {
+            bytes[index] = 0
+        }
         return bytes
     }
 }

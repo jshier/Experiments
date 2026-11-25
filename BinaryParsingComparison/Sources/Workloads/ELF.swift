@@ -202,18 +202,26 @@ public enum ELF {
         var programHeaders: [ExampleELF.ProgramHeader] = []
         programHeaders.reserveCapacity(Int(end.programHeaderCount))
         if is64 {
-            for _ in 0..<end.programHeaderCount { programHeaders.append(try reader.read(ELFProgramHeader64.self).programHeader) }
+            for _ in 0..<end.programHeaderCount {
+                try programHeaders.append(reader.read(ELFProgramHeader64.self).programHeader)
+            }
         } else {
-            for _ in 0..<end.programHeaderCount { programHeaders.append(try reader.read(ELFProgramHeader32.self).programHeader) }
+            for _ in 0..<end.programHeaderCount {
+                try programHeaders.append(reader.read(ELFProgramHeader32.self).programHeader)
+            }
         }
 
         try reader.seek(toByteOffset: addresses.sectionHeaderTable)
         var sectionHeaders: [ExampleELF.SectionHeader] = []
         sectionHeaders.reserveCapacity(Int(end.sectionHeaderCount))
         if is64 {
-            for _ in 0..<end.sectionHeaderCount { sectionHeaders.append(try reader.read(ELFSectionHeader64.self).sectionHeader) }
+            for _ in 0..<end.sectionHeaderCount {
+                try sectionHeaders.append(reader.read(ELFSectionHeader64.self).sectionHeader)
+            }
         } else {
-            for _ in 0..<end.sectionHeaderCount { sectionHeaders.append(try reader.read(ELFSectionHeader32.self).sectionHeader) }
+            for _ in 0..<end.sectionHeaderCount {
+                try sectionHeaders.append(reader.read(ELFSectionHeader32.self).sectionHeader)
+            }
         }
 
         return ExampleELF(header: header, programHeaders: programHeaders, sectionHeaders: sectionHeaders)
@@ -236,7 +244,7 @@ public enum ELF {
             // The name runs to the first NUL from its offset, not bounded by the table: as in the example.
             var reader = try AlignedBytesReader(data, atByteOffset: namesOffset)
             try reader.skip(byteCount: Int(elf.sectionHeaders[index].nameOffset))
-            return String(copying: try reader.read(utf8TerminatedBy: 0))
+            return try String(copying: reader.read(utf8TerminatedBy: 0))
         } catch {
             return nil
         }

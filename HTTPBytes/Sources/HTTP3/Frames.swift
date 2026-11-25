@@ -133,11 +133,13 @@ public struct HTTP3SettingsPayload: ~Escapable {
         var seen: InlineArray<8, UInt64> = .init(repeating: .max)
         var seenCount = 0
         var updated = settings
-        try forEach { (id, value) throws(HTTP3Error) in
+        try forEach { id, value throws(HTTP3Error) in
             guard id.rawValue < 2 || id.rawValue > 5 else { throw .connection(.settingsError) }
             switch id {
             case .qpackMaxTableCapacity, .maxFieldSectionSize, .qpackBlockedStreams, .enableConnectProtocol, .h3Datagram:
-                for index in 0..<seenCount where seen[index] == id.rawValue { throw .connection(.settingsError) }
+                for index in 0..<seenCount where seen[index] == id.rawValue {
+                    throw .connection(.settingsError)
+                }
                 seen[seenCount] = id.rawValue
                 seenCount &+= 1
             default:

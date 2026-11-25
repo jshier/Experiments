@@ -1,6 +1,6 @@
 import Bytes
-public import System
 import Disk
+public import System
 
 /// The archive formats Apple's tools and Archive Utility expand, recognized by their first bytes (then by extension):
 /// what the reader for a file is. NativeAEA reads all but `.zip` (NativeZip's).

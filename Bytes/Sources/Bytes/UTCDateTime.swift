@@ -159,7 +159,7 @@ public struct UTCDateTime: Hashable, Comparable, Sendable, CustomStringConvertib
 
     /// Compares the fields in order, year first (a leap second sorts before the next minute).
     @inlinable
-    public static func < (a: Self, b: Self) -> Bool {
+    public static func <(a: Self, b: Self) -> Bool {
         (a.year, a.month, a.day, a.hour, a.minute, a.second) < (b.year, b.month, b.day, b.hour, b.minute, b.second)
     }
 

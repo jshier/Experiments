@@ -1,7 +1,7 @@
+@testable import NativeAEA
 import BytesTestSupport
 import DiskTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -79,8 +79,8 @@ import Testing
         #expect(count > 10)
     }
 
-    /// A block that doesn't decode, mid-stream: the extraction throws (and doesn't hang with threads waiting on
-    /// buffers or staging), on its own and inside an AEA container.
+    /// A block that doesn't decode, mid-stream: the extraction throws that block's error, named as a `pbz` block (and
+    /// doesn't hang with threads waiting on buffers or staging), on its own and inside an AEA container.
     @Test func corruptBlocksFailCleanly() async throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
@@ -88,34 +88,47 @@ import Testing
         let source = try Self.source.get()
         let archive = directory.path("tree.aar")
         try ExternalTool.run("/usr/bin/aa", ["archive", "-a", "lzfse", "-b", "64k", "-d", source.path, "-o", archive.path])
-        var bytes = Array(try Data(contentsOf: archive))
+        var bytes = try Array(Data(contentsOf: archive))
         // Corrupt a compressed block past the first (stored blocks have no checks in `pbz`: their damage can't be
         // detected, by `aa` either).
         func bigEndian(_ at: Int) -> Int { (0..<8).reduce(0) { $0 << 8 | Int(bytes[at + $1]) } }
-        var offset = 12, block = 0, target: Range<Int>?
+        var offset = 12, block = 0, target: Range<Int>?, targetBlock = -1
         while offset + 16 <= bytes.count {
             let raw = bigEndian(offset), stored = bigEndian(offset + 8)
-            if block > 2, stored < raw, target == nil { target = (offset + 16 + stored / 4)..<(offset + 16 + stored / 2) }
+            if block > 2, stored < raw, target == nil {
+                target = (offset + 16 + stored / 4)..<(offset + 16 + stored / 2)
+                targetBlock = block
+            }
             offset += 16 + stored
             block += 1
         }
         let corrupted = try #require(target)
-        for index in corrupted { bytes[index] ^= 0x5A }
+        let failingBlock = targetBlock
+        for index in corrupted {
+            bytes[index] ^= 0x5A
+        }
         let corrupt = directory.path("corrupt.aar")
         try Data(bytes).write(to: corrupt)
         let file = try AppleArchiveFile(path: FilePath(corrupt.path))
         defer { file.close() }
+        /// The corrupted block's own error, whichever decoder failed first.
+        func isTheBlocksFailure(_ error: any Error) -> Bool {
+            guard case .blockDecompressionFailed(failingBlock, _)? = error as? AEAError else { return false }
+            return "\(error)".hasPrefix("block \(failingBlock) failed to decompress")
+        }
         for threads in [1, 8] {
             var options = AEAExtractionOptions()
             options.read.decodeThreads = threads
             options.disk.writers = threads
-            await #expect(throws: AEAError.self) { try await file.extract(to: FilePath(directory.path("out-\(threads)").path), options: options) }
+            await #expect {
+                try await file.extract(to: FilePath(directory.path("out-\(threads)").path), options: options)
+            } throws: { isTheBlocksFailure($0) }
             let url = try makeAEA(corrupt, keys: keys, in: directory, compression: "copy", blockSize: "100k")
-            await #expect(throws: AEAError.self) {
+            await #expect {
                 let opened = try AEAArchive(url: url, signingKey: keys.signingKey)
                 defer { opened.close() }
                 try await opened.extract(to: FilePath(directory.path("aea-out-\(threads)").path), options: options)
-            }
+            } throws: { isTheBlocksFailure($0) }
         }
     }
 
@@ -135,5 +148,42 @@ import Testing
         let file = try AppleArchiveFile(path: FilePath(cut.path))
         defer { file.close() }
         await #expect(throws: AEAError.self) { try await file.extract(to: FilePath(directory.path("out").path)) }
+    }
+
+    /// A file's first bytes through BytesCompression's `PBZ.header` (fix plan D1): a `pbz` header cut anywhere in its 12
+    /// bytes is a header cut short, a block size of 0 a bad header (`PBZError`'s descriptions), and bytes that don't
+    /// start one (3 bytes of magic, an unknown letter) aren't an Apple Archive. A `pbz` file and a plain one both read
+    /// their blocks with the walker's carry region before each (D8: NativeAEA's to size, 64 KiB).
+    @Test func readsThePBZHeader() throws {
+        let directory = try TemporaryDirectory()
+        defer { directory.remove() }
+        let source = try Self.source.get()
+        let archive = directory.path("tree.aar"), plainArchive = directory.path("plain.aar")
+        try ExternalTool.run("/usr/bin/aa", ["archive", "-a", "lzfse", "-b", "256k", "-d", source.path, "-o", archive.path])
+        try ExternalTool.run("/usr/bin/aa", ["archive", "-a", "raw", "-d", source.path, "-o", plainArchive.path])
+        let bytes = try Data(contentsOf: archive)
+        func opening(_ prefix: [UInt8], _ name: String) throws -> AppleArchiveFile {
+            let url = directory.path(name)
+            try Data(prefix).write(to: url)
+            return try AppleArchiveFile(path: FilePath(url.path))
+        }
+        for count in 4..<12 {
+            #expect(throws: AEAError.invalidArchive("a pbz header is cut short"), "\(count) bytes") {
+                _ = try opening(Array(bytes.prefix(count)), "cut-\(count).aar")
+            }
+        }
+        #expect(throws: AEAError.invalidArchive("a pbz header")) {
+            _ = try opening(Array("pbze".utf8) + [UInt8](repeating: 0, count: 8), "zero.aar")
+        }
+        for prefix in [Array("pbz".utf8), Array("pbzq".utf8) + [UInt8](repeating: 0, count: 8)] {
+            #expect(throws: AEAError.invalidArchive("not an Apple Archive (no AA01 or pbz magic)")) { _ = try opening(prefix, "not.aar") }
+        }
+        for (url, compressed) in [(archive, true), (plainArchive, false)] {
+            let file = try AppleArchiveFile(path: FilePath(url.path))
+            defer { file.close() }
+            #expect((file.compression != nil) == compressed)
+            let blocks = file.source(AEAReadOptions(), heldBeyondDecoding: 0)
+            #expect(blocks.pool.carryCapacity == AppleArchive.headerCarryCapacity)
+        }
     }
 }

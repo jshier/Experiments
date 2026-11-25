@@ -1,8 +1,8 @@
-import BytesAsync
-import BytesTestSupport
-import BytesTesting
-import Darwin
 @testable import Disk
+import BytesAsync
+import BytesTesting
+import BytesTestSupport
+import Darwin
 import DiskTestSupport
 import Foundation
 import Synchronization
@@ -35,8 +35,8 @@ import Testing
         attributes.append(name: "com.example.a", value: ([1, 2] as [UInt8]).span.bytes)
         let blob = attributes.bytes
         let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-            try withPath("top") { (path) throws(DiskError) in try planner.directory(path, metadata: EntryMetadata(mode: 0o755, times: time)) }
-            try withPath("top/locked") { (path) throws(DiskError) in try planner.directory(path, metadata: EntryMetadata(mode: 0o555, times: time)) }
+            try withPath("top") { path throws(DiskError) in try planner.directory(path, metadata: EntryMetadata(mode: 0o755, times: time)) }
+            try withPath("top/locked") { path throws(DiskError) in try planner.directory(path, metadata: EntryMetadata(mode: 0o555, times: time)) }
             let first = try await planFile(&planner, "top/a.txt", index: 0, size: 100, metadata: EntryMetadata(mode: 0o600, times: time), hardLinked: true)
             _ = try await planFile(&planner, "top/locked/b.bin", index: 1, size: 70_000, metadata: EntryMetadata(times: time), storage: .compressed(.appleArchive))
             _ = try await planFile(&planner, "implicit/parents/empty", index: 2, size: 0)
@@ -44,9 +44,9 @@ import Testing
             _ = try await planFile(&planner, "top/large", index: 4, size: 2_000_000, metadata: EntryMetadata(times: time), storage: .compressed(.appleArchive))
             let readOnly = try await planFile(&planner, "top/ro", index: 5, size: 2, metadata: EntryMetadata(mode: 0o444), attachments: true)
             try planner.addExtendedAttributes(blob.span.bytes, to: readOnly)
-            try withPath("top/link") { (path) throws(DiskError) in try planner.symbolicLink(path, target: Array("a.txt".utf8).span.bytes, metadata: EntryMetadata(times: time)) }
-            try withPath("other-name") { (path) throws(DiskError) in try planner.hardLink(path, to: first) }
-            try withPath("top/pipe") { (path) throws(DiskError) in try planner.specialFile(path, .fifo, metadata: EntryMetadata(mode: 0o600)) }
+            try withPath("top/link") { path throws(DiskError) in try planner.symbolicLink(path, target: Array("a.txt".utf8).span.bytes, metadata: EntryMetadata(times: time)) }
+            try withPath("other-name") { path throws(DiskError) in try planner.hardLink(path, to: first) }
+            try withPath("top/pipe") { path throws(DiskError) in try planner.specialFile(path, .fifo, metadata: EntryMetadata(mode: 0o600)) }
         }
         #expect(source.releaseCount == files.count)
         #expect(report.files == 6 && report.directories == 2 && report.symbolicLinks == 1 && report.hardLinks == 1 && report.specialFiles == 1)
@@ -85,7 +85,9 @@ import Testing
         defer { destination.close() }
         let (report, source) = try await extract(entries, into: destination, options: options, storage: .compressed(.appleArchive), writesPerFile: writes)
         #expect(report.files == entries.count && source.releaseCount == entries.count)
-        for (path, bytes) in entries { #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes, "\(path)") }
+        for (path, bytes) in entries {
+            #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes, "\(path)")
+        }
     }
 
     /// A file in pieces, compressed in parallel and in place, across bridges (pieces smaller than a chunk), and one
@@ -106,7 +108,7 @@ import Testing
         let progress = ExtractionProgress(expectedEntries: 1, expectedBytes: size)
         options.progress = progress
         let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-            let file = try await withPathAsync("big") { (path) async throws(DiskError) in
+            let file = try await withPathAsync("big") { path async throws(DiskError) in
                 try await planner.beginLargeFile(path, size: size, metadata: EntryMetadata(mode: 0o644), storage: .compressed(.appleArchive),
                                                  first: bytes.span.bytes, minimumPieceSize: pieceSize)
             }
@@ -215,7 +217,7 @@ import Testing
             Issue.record("no error")
         } catch {
             // The source's own error, as it threw it.
-            guard case .source(let failure) = error else { Issue.record("\(error)"); return }
+            guard case let .source(failure) = error else { Issue.record("\(error)"); return }
             #expect(failure == DecodingFailure(file: 3))
         }
         // Every file handed to the planner (it stops taking them once stopped) is released once.
@@ -261,7 +263,7 @@ import Testing
 /// `withPath` for async bodies.
 func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError) -> R) async throws(DiskError) -> R {
     let bytes = Array(path.utf8)
-    return try await body(try EntryPath(validating: bytes.span.bytes))
+    return try await body(EntryPath(validating: bytes.span.bytes))
 }
 
 @Suite(.bulk, .diskLifetimes) struct ExtractionBulkTests {
@@ -285,7 +287,9 @@ func withPathAsync<R>(_ path: String, _ body: (EntryPath) async throws(DiskError
         defer { destination.close() }
         let (report, source) = try await extract(entries, into: destination, options: options, storage: .compressed(.appleArchive), writesPerFile: Int(generator.next() % 3) + 1)
         #expect(report.files == entries.count && source.releaseCount == entries.count)
-        for (path, bytes) in entries { #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes) }
+        for (path, bytes) in entries {
+            #expect(try readItem(at: directory.path("out/\(path)")).contents == bytes)
+        }
     }
 }
 

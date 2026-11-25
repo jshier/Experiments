@@ -17,6 +17,7 @@ public struct HTTPPriority: Sendable, Hashable, CustomStringConvertible {
     public var urgency: Int {
         didSet { precondition(urgency >= 0 && urgency <= 7, "an urgency is 0 through 7") }
     }
+
     /// Whether the response can be processed incrementally, as it arrives (so interleaving it with others helps).
     public var isIncremental: Bool
 
@@ -52,18 +53,18 @@ public struct HTTPPriority: Sendable, Hashable, CustomStringConvertible {
     /// - Throws: ``HTTPStructuredFieldError`` if the line isn't valid; nothing is changed then.
     @inlinable
     public mutating func update(from dictionary: inout HTTPStructuredDictionary) throws(HTTPStructuredFieldError) {
-        var urgency = self.urgency, isIncremental = self.isIncremental
+        var urgency = urgency, isIncremental = isIncremental
         while let member = try dictionary.next() {
             guard member.key.byteCount == 1 else { continue }
             switch member.key.load(fromByteOffset: 0, as: UInt8.self) {
             case 0x75: // u
                 urgency = Self.defaultUrgency
-                if case .item(let item) = member.value, case .integer(let value) = item.bareItem, value >= 0, value <= 7 {
+                if case let .item(item) = member.value, case let .integer(value) = item.bareItem, value >= 0, value <= 7 {
                     urgency = Int(value)
                 }
             case 0x69: // i
                 isIncremental = false
-                if case .item(let item) = member.value, case .boolean(let value) = item.bareItem {
+                if case let .item(item) = member.value, case let .boolean(value) = item.bareItem {
                     isIncremental = value
                 }
             default:

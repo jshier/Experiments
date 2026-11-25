@@ -1,4 +1,5 @@
 import Bytes
+import BytesCompressionAsync
 import Darwin
 
 // The cpio "odc" format (POSIX.1 portable, `070707`), what an Xcode `.xip`'s `Content` holds once its pbzx blocks are
@@ -84,7 +85,7 @@ enum Cpio {
 /// Each entry's header and name (and a link's target) are made contiguous, as ``ArchiveWalker`` makes Apple Archive
 /// headers, by copying a partial one into the next buffer's carry region; file contents are never copied.
 enum CpioWalker {
-    /// The longest header, name, and link target handled (the carry region's size).
+    /// The longest header, name, and link target handled (within the carry region, ``AppleArchive/headerCarryCapacity``).
     static let maximumHeaderAndName = 65_535
 
     /// `xip --expand` compresses only files larger than this (16 KiB: every one of Xcode 27.2's files of 16,384
@@ -104,7 +105,7 @@ enum CpioWalker {
         defer {
             if previousBuffer >= 0 { pool.release(previousBuffer) }
         }
-        while let chunk = try await source.nextChunk() {
+        while let chunk = try await source.nextBlock() {
             let buffer = chunk.buffer
             let start = chunk.rawOffset
             let end = start + chunk.rawSize
@@ -156,7 +157,7 @@ enum CpioWalker {
                     let entry = try entryHeader(header, type: type, bytes: headerBytes)
                     try await sink.entry(entry, header: headerBytes, buffer: buffer)
                     position += count
-                    if let data = entry.data, data.count > 0 {
+                    if let data = entry.data, !data.isEmpty {
                         inHeader = false
                         dataStart = position
                         dataEnd = position + data.count
@@ -208,7 +209,7 @@ enum CpioWalker {
         case .symbolicLink:
             entry.linkTarget = AAHeaderRange(offset: Cpio.headerSize + cpio.nameSize, count: cpio.fileSize)
         case .regularFile:
-            entry.data = (0, cpio.fileSize)
+            entry.data = AAHeaderRange(offset: 0, count: cpio.fileSize)
             // `xip --expand`'s compression: LZVN forks for files over 16 KiB, stored by Disk's `StoragePolicy.lzvnForks`
             // (whether one pays, and PNGs, are decided with the data: the rest of `.xipExpand`'s rules).
             if cpio.fileSize > xipCompressionThreshold { entry.diskCompression = 8 }

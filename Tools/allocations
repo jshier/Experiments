@@ -6,36 +6,48 @@
 # usage: Tools/allocations [--top N] [--timeout SECONDS] [--keep FILE.trace] -- PROGRAM [ARGS...]
 #        Tools/allocations --history [--top N] [--timeout SECONDS] [--keep FILE.txt] -- PROGRAM [ARGS...]
 #
-# Output: the busiest size classes/types (count, bytes), then the top responsible callers (count, caller,
-# library), tab-separated, under "== categories" and "== callers" headers. Compare two workload sizes to
-# separate per-iteration allocations from fixed ones.
+#   --top N        rows per table (default 15)
+#   --timeout S    PROGRAM's time limit (default 120): xctrace stops it there (or LLDB is stopped, with --history),
+#                  and the tool fails
+#   --keep PATH    keep the recording (a new path ending in .trace, or an earlier recording, which is replaced) or,
+#                  with --history, malloc_history's dump (a new file)
+#
+# Output, tab-separated, under "==" headers:
+#   == totals       Instruments' aggregate rows ("All Heap Allocations", "All Heap & Anonymous VM", …)
+#   == categories   the --top N size classes and types by allocations
+#                   both: allocations (made during the run), live (still allocated at the end), bytes (allocated
+#                   during the run), category
+#   == callers      allocations still live at the end, by responsible caller: count, bytes, caller, library
+# Compare two workload sizes to separate per-iteration allocations from fixed ones.
 #
 # Instruments' export lists only allocations still live at the end ("Allocations List"), and its callers for
 # allocations made before it attached read "<Call stack limit reached>": anything allocated and freed again (a
 # per-item box, a temporary array) shows up only in the category counts, never with a caller. --history finds those:
 # it runs PROGRAM under LLDB with malloc stack logging in full mode (MallocStackLoggingNoCompact), stops at `exit`,
-# dumps every event with `malloc_history -allEvents`, and groups the allocations by the innermost frame in PROGRAM's
-# own image ("== callers (count, bytes, frame)"; frames in system libraries only: "[outside] FRAME (LIBRARY)").
-# Full mode changes what libobjc does: every autorelease pool push gets a fresh 4 KiB page, and Swift Concurrency
-# pushes one per job on Darwin, so those pages (absent from a normal run) are left out and counted on stderr. Use
-# --history for where allocations come from; count them with the default mode or a benchmark's malloc counter.
+# dumps every event of that process (by PID) with `malloc_history -allEvents`, and groups the allocations by the
+# innermost frame in PROGRAM's own image ("== callers (count, bytes, frame)"; frames in system libraries only:
+# "[outside] FRAME (LIBRARY)"). Full mode changes what libobjc does: every autorelease pool push gets a fresh 4 KiB
+# page, and Swift Concurrency pushes one per job on Darwin, so those pages (absent from a normal run) are left out and
+# counted on stderr. Use --history for where allocations come from; count them with the default mode or a benchmark's
+# malloc counter. PROGRAM's standard input is /dev/null.
 #
 # Two hurdles, handled:
 # - Allocations attaches to the process, which needs the `get-task-allow` entitlement; SwiftPM release builds
 #   don't have it ("Failed to attach to target process"). Like every launching tool, this runs PROGRAM-
 #   debuggable, a copy signed with it (lib/common.sh `debuggable`; PROGRAM itself is untouched).
-# - macOS may ask the user to authorize attaching (a system prompt). Until they do, the recording waits:
-#   this gives up after --timeout seconds (default 120) and says so. Tell the user to look for the prompt.
-source "$(dirname "$0")/lib/common.sh"
+# - macOS may ask the user to authorize attaching (a system prompt). Until they do, the recording waits: 60 s past
+#   --timeout, xctrace is interrupted (stopping only the processes it started) and the tool says so. Tell the user
+#   to look for the prompt.
+source "$(dirname "$0")/lib/common.sh" || exit 2
 have yq || die "needs yq: brew install yq"
 have jq || die "needs jq: brew install jq"
 
-top=15 timeout=120 keep= history=0
+top=15 timeout=120 keep='' history=0
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --top) top="$2"; shift ;;
-        --timeout) timeout="$2"; shift ;;
-        --keep) keep="$2"; shift ;;
+        --top) need_value "$@"; need_number "$1" "$2"; top="$2"; shift ;;
+        --timeout) need_value "$@"; need_number "$1" "$2"; timeout="$2"; shift ;;
+        --keep) need_value "$@"; keep="$2"; shift ;;
         --history) history=1 ;;
         -h|--help) usage ;;
         --) shift; break ;;
@@ -43,28 +55,53 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+need_xcode_tools # once here, not in every `| demangle` subshell, and before anything is recorded
 [[ $# -ge 1 ]] || usage 2
+(( top > 0 )) || die "--top needs at least 1"
+
+# --keep: a path ending in .trace that doesn't exist, or an earlier recording (a .trace directory with Instruments'
+# form.template), which is replaced. Anything else is refused, never removed.
+check_keep() {
+    [[ "$1" == *.trace ]] || die "--keep takes a path ending in .trace: $1"
+    if [[ -e "$1" || -L "$1" ]]; then
+        [[ -d "$1" && ! -L "$1" && -f "$1/form.template" ]] ||
+            die "--keep $1 exists and isn't an Instruments recording: refusing to replace it"
+    fi
+}
+
 scratch_dir
 program="$(debuggable "$1")"; shift
 
 if [[ $history == 1 ]]; then
+    if [[ -n "$keep" ]]; then
+        [[ ! -e "$keep" && ! -L "$keep" ]] || die "--keep $keep exists: refusing to replace it"
+        [[ -d "$(dirname "$keep")" ]] || die "no directory $(dirname "$keep") for --keep"
+    fi
     events="${keep:-$SCRATCH/history.txt}"
-    rm -f "$events"
     # The program's arguments go on LLDB's command line after it (`lldb -- PROGRAM ARGS`): no quoting for LLDB.
-    # `platform shell` runs its command without a shell (a redirect would be arguments): `/bin/sh -c` does it.
-    cat > "$SCRATCH/history.lldb" <<EOF
+    # malloc_history gets the stopped process's PID from LLDB (by name it would pick any process of that name, or
+    # refuse when there are several); EVENTS and ERRORS come through the environment, so paths need no quoting.
+    cat > "$SCRATCH/history.lldb" <<'EOF'
 settings set target.env-vars MallocStackLoggingNoCompact=1
 breakpoint set -n exit
 run
-platform shell -- /bin/sh -c "malloc_history '$(basename "$program")' -allEvents > '$events' 2>&1"
+script import subprocess; subprocess.call('malloc_history %d -allEvents > "$EVENTS" 2> "$ERRORS"' % lldb.debugger.GetSelectedTarget().GetProcess().GetProcessID(), shell=True)
 kill
 quit
 EOF
     note "running $(basename "$program") with full malloc stack logging…"
     status=0
-    with_timeout "$timeout" lldb --batch -s "$SCRATCH/history.lldb" -- "$program" "$@" > "$SCRATCH/lldb.log" 2>&1 || status=$?
-    [[ $status == 124 ]] && fail "the program didn't reach exit in ${timeout}s (--timeout), or LLDB is waiting on a prompt: $AUTH_HINT"
-    grep -q '^ALLOC' "$events" 2>/dev/null || { tail -5 "$SCRATCH/lldb.log" >&2; die "no allocation history: did the program reach exit?"; }
+    with_timeout "$timeout" env EVENTS="$events" ERRORS="$SCRATCH/malloc_history.err" \
+        lldb --batch -s "$SCRATCH/history.lldb" -- "$program" "$@" > "$SCRATCH/lldb.log" 2>&1 < /dev/null || status=$?
+    [[ $status == 124 ]] && fail "the program didn't reach exit in ${timeout}s (--timeout) and was stopped, or LLDB was waiting on a prompt: $AUTH_HINT"
+    if ! grep -q '^ALLOC' "$events" 2>/dev/null; then
+        if [[ -s "$SCRATCH/malloc_history.err" ]]; then
+            perl -pe 's/^/malloc_history: /' "$SCRATCH/malloc_history.err" >&2
+        else
+            tail -5 "$SCRATCH/lldb.log" >&2
+        fi
+        die "no allocation history (did the program reach exit?)"
+    fi
     image="$(basename "$program")"
     IMAGE="$image" TOP="$top" perl -ne '
         BEGIN { $image = $ENV{IMAGE} }
@@ -102,25 +139,50 @@ EOF
     exit 0
 fi
 
+[[ -z "$keep" ]] || check_keep "$keep"
 trace="${keep:-$SCRATCH/run.trace}"
-rm -rf "$trace"
+[[ ! -d "$trace" ]] || rm -rf "$trace"
 note "recording $(basename "$program") with Allocations…"
 status=0
-with_timeout "$timeout" xctrace record --template Allocations --output "$trace" --launch -- "$program" "$@" > "$SCRATCH/record.log" 2>&1 || status=$?
+with_timeout $((timeout + 60)) xctrace record --template Allocations --output "$trace" --time-limit "${timeout}s" \
+    --launch -- "$program" "$@" > "$SCRATCH/record.log" 2>&1 < /dev/null || status=$?
 if [[ $status == 124 ]]; then
-    pkill -f "$program" 2>/dev/null || true
-    fail "recording didn't finish in ${timeout}s: the program runs longer (--timeout), or xctrace is waiting on a prompt: $AUTH_HINT"
+    fail "xctrace didn't finish within $((timeout + 60)) s and was stopped: it may be waiting on a prompt: $AUTH_HINT"
 fi
 grep -q "Failed to attach" "$SCRATCH/record.log" && fail "xctrace couldn't attach: $(grep -m1 Error "$SCRATCH/record.log"); $AUTH_HINT"
+grep -q 'Reached specified time limit' "$SCRATCH/record.log" &&
+    fail "$(basename "$program") didn't finish in ${timeout} s (--timeout) and was stopped${keep:+; the recording is in $keep}"
 [[ -d "$trace" ]] || { tail -5 "$SCRATCH/record.log" >&2; die "no trace recorded"; }
 
-detail() { xctrace export --input "$trace" --xpath "/trace-toc/run[@number=\"1\"]/tracks/track[@name=\"Allocations\"]/details/detail[@name=\"$1\"]" 2>/dev/null | yq -p xml -o json '.'; }
-echo "== categories (count events, total bytes)"
-detail Statistics | jq -r --argjson top "$top" '[.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
-    | {category: .["+@category"], count: (.["+@count-events"] | tonumber), bytes: (.["+@total-bytes"] | tonumber)}]
-    | sort_by(-.count) | .[0:$top][] | [.count, .bytes, .category] | @tsv'
-echo "== callers (count, responsible caller, library)"
-detail "Allocations List" | jq -r --argjson top "$top" '[.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
-    | {caller: .["+@responsible-caller"], library: .["+@responsible-library"]}]
-    | group_by(.caller) | map({caller: .[0].caller, library: .[0].library, count: length}) | sort_by(-.count) | .[0:$top][]
-    | [.count, .caller, .library] | @tsv' | demangle
+# One of the Allocations track's details as JSON in FILE. An export that fails (or a pipeline under `set -e`, which
+# would end the tool with status 1 and no word) is tried once more, then reported with xctrace's own message.
+detail() {
+    local attempt
+    for attempt in 1 2; do
+        if xctrace export --input "$trace" \
+            --xpath "/trace-toc/run[@number=\"1\"]/tracks/track[@name=\"Allocations\"]/details/detail[@name=\"$1\"]" \
+            > "$SCRATCH/export.xml" 2> "$SCRATCH/export.err" && yq -p xml -o json '.' "$SCRATCH/export.xml" > "$2" 2>> "$SCRATCH/export.err"
+        then
+            return 0
+        fi
+        [[ $attempt == 2 ]] || sleep 2
+    done
+    tail -3 "$SCRATCH/export.err" >&2
+    die "xctrace couldn't export the Allocations $1 from $trace"
+}
+detail Statistics "$SCRATCH/statistics.json"
+detail "Allocations List" "$SCRATCH/list.json"
+jq -r --argjson top "$top" '[.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
+    | {category: .["+@category"], total: (.["+@count-total"] | tonumber), live: (.["+@count-persistent"] | tonumber),
+       bytes: (.["+@total-bytes"] | tonumber)}] as $rows
+    | "== totals (allocations, live, bytes, category)",
+      ($rows | map(select(.category | startswith("All "))) | .[] | [.total, .live, .bytes, .category] | @tsv),
+      "== categories (allocations, live, bytes, category)",
+      ($rows | map(select(.category | startswith("All ") | not)) | sort_by(-.total) | .[0:$top][]
+       | [.total, .live, .bytes, .category] | @tsv)' "$SCRATCH/statistics.json"
+echo "== callers (live allocations at the end: count, bytes, responsible caller, library)"
+jq -r --argjson top "$top" '[.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
+    | {caller: .["+@responsible-caller"], library: .["+@responsible-library"], size: (.["+@size"] // "0" | tonumber)}]
+    | group_by(.caller) | map({caller: .[0].caller, library: .[0].library, count: length, bytes: (map(.size) | add)})
+    | sort_by(-.count) | .[0:$top][]
+    | [.count, .bytes, .caller, .library] | @tsv' "$SCRATCH/list.json" | demangle

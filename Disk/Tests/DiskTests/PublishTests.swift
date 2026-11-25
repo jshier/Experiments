@@ -1,6 +1,6 @@
+@testable import Disk
 import BytesTestSupport
 import Darwin
-@testable import Disk
 import DiskTestSupport
 import Foundation
 import System
@@ -28,7 +28,7 @@ import Testing
             let staging = try staging(for: directory.filePath("Archive"))
             var writer = FileWriter(staging)
             try withPath("hello.txt") { try writer.writeFile($0, contents: ([UInt8(round)] as [UInt8]).span.bytes, metadata: EntryMetadata(mode: 0o640)) }
-            published.append(try staging.publishUnwrapped(as: directory.filePath("Archive")).lastComponent!.string)
+            try published.append(staging.publishUnwrapped(as: directory.filePath("Archive")).lastComponent!.string)
         }
         #expect(published == ["hello.txt", "hello 2.txt", "hello 3.txt"])
         // Nothing else is left: no folder, no staging directory.
@@ -128,7 +128,7 @@ import Testing
         let source = ArraySource([[1], [2]])
         let time = EntryTimes(modification: Timestamp(seconds: 1_600_000_000))
         _ = try await Extraction.run(into: staging, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-            try withPath("") { (path) throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o755, times: time)) }
+            try withPath("") { path throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o755, times: time)) }
             _ = try await planFile(&planner, "one", index: 0, size: 1)
             _ = try await planFile(&planner, "two", index: 1, size: 1)
         }
@@ -151,7 +151,7 @@ import Testing
         defer { destination.close() }
         let source = ArraySource([[1]])
         _ = try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-            try withPath("d") { (path) throws(DiskError) in
+            try withPath("d") { path throws(DiskError) in
                 let token = try planner.directory(path, attachments: true)
                 try planner.addAccessControlList(blob.bytes.span.bytes, to: token)
             }

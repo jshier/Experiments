@@ -44,8 +44,8 @@ public enum EntryError<SourceFailure: Error>: Error, CustomStringConvertible {
 
     public var description: String {
         switch self {
-        case .disk(let error): error.description
-        case .source(let error): "\(error)"
+        case let .disk(error): error.description
+        case let .source(error): "\(error)"
         }
     }
 
@@ -139,8 +139,8 @@ public enum ExtractionError<PlanFailure: Error, SourceFailure: Error>: Error {
     /// An entry's failure (the one that stopped the extraction).
     init(_ error: EntryError<SourceFailure>) {
         switch error {
-        case .disk(let error): self = .disk(error)
-        case .source(let error): self = .source(error)
+        case let .disk(error): self = .disk(error)
+        case let .source(error): self = .source(error)
         }
     }
 }
@@ -410,7 +410,7 @@ final class ExtractionContext<Source: ContentSource>: @unchecked Sendable {
     /// (the extraction's error carries the source's own).
     var stoppingDiskFailure: DiskError? {
         switch stoppingFailure {
-        case .disk(let error): error
+        case let .disk(error): error
         case .source: .stopped
         case nil: nil
         }
@@ -573,6 +573,8 @@ final class LargeFile: @unchecked Sendable {
             turn.failed = true
             return turn.waiters.removeAll()
         }
-        for waiter in waiting { waiter.continuation.resume(returning: false) }
+        for waiter in waiting {
+            waiter.continuation.resume(returning: false)
+        }
     }
 }

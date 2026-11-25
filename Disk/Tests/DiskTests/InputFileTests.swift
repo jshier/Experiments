@@ -1,6 +1,6 @@
+@testable import Disk
 import Bytes
 import BytesTestSupport
-@testable import Disk
 import Foundation
 import System
 import Testing
@@ -28,7 +28,7 @@ import Testing
 
         // Into an output span: appended after what's there.
         var appended = [UInt8](repeating: 0, count: 40)
-        let written = try appended.withOutputRawSpan { (output) throws(DiskError) -> Int in
+        let written = try appended.withOutputRawSpan { output throws(DiskError) -> Int in
             output.append(copying: ([9, 9] as [UInt8]).span)
             try file.read(at: 50, count: 30, into: &output)
             return output.byteCount
@@ -53,11 +53,11 @@ import Testing
         try Data().write(to: directory.path("empty"))
         let empty = try InputFile(directory.filePath("empty"))
         defer { empty.close() }
-        #expect(empty.count == 0)
+        #expect(empty.isEmpty)
         #expect(try empty.read(at: 0, count: 0) == [])
         #expect(throws: DiskError.endOfFile(empty.path.string)) { _ = try empty.read(at: 0, count: 1) }
         #expect(try InputFile.contents(of: empty.path, maximumCount: 10) == [])
-        #expect(try empty.map().count == 0)
+        #expect(try empty.map().isEmpty)
 
         let missing = directory.filePath("missing")
         #expect(throws: DiskError.system("open", path: missing.string, .noSuchFileOrDirectory)) { _ = try InputFile(missing) }

@@ -1,5 +1,5 @@
-import Bytes
 @testable import Disk
+import Bytes
 import Testing
 
 @Suite(.diskLifetimes) struct PathTests {
@@ -15,7 +15,7 @@ import Testing
     ]
 
     @Test(arguments: valid)
-    func acceptsCanonicalRelativePaths(_ path: String) throws {
+    func acceptsCanonicalRelativePaths(_ path: String) {
         let bytes = Array(path.utf8)
         let valid = EntryPath.isValid(bytes.span.bytes)
         #expect(valid, "\(path)")
@@ -37,7 +37,9 @@ import Testing
             for pattern in patterns where pattern.count <= count {
                 for position in 0...(count - pattern.count) {
                     var bytes = [UInt8](repeating: 0x61, count: count)
-                    for (index, byte) in pattern.enumerated() { bytes[position + index] = byte }
+                    for (index, byte) in pattern.enumerated() {
+                        bytes[position + index] = byte
+                    }
                     let screened = EntryPath.screen(bytes.span.bytes)
                     let exact = EntryPath.exactCheck(bytes.span.bytes)
                     // The screen may send valid paths to the exact check, never pass an invalid one.
@@ -56,7 +58,7 @@ import Testing
     func sanitizesAsInfoZIPDoes(_ input: String, _ expected: String, _ adjusted: Bool) throws {
         var output = [UInt8](repeating: 0, count: 64)
         let bytes = Array(input.utf8)
-        let result = try output.withOutputRawSpan { (span) throws(DiskError) in try EntryPath.sanitize(bytes.span.bytes, into: &span) }
+        let result = try output.withOutputRawSpan { span throws(DiskError) in try EntryPath.sanitize(bytes.span.bytes, into: &span) }
         #expect(String(decoding: output.prefix(result.count), as: UTF8.self) == expected)
         #expect(result.adjusted == adjusted)
     }

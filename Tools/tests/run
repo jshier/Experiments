@@ -1,0 +1,47 @@
+#!/bin/bash
+# Tools/tests/run — the Tools' own regression checks: runs every Tools/tests/*.sh (or the ones named), each in its own
+# process, and prints one line per script.
+#
+# usage: Tools/tests/run [NAME...]      (NAME without .sh: `Tools/tests/run job loops`)
+#
+# A check script is plain bash 3.2 (run with /bin/bash): it builds what it needs in a `mktemp -d` directory (fake repositories, small
+# objects compiled from assembly, throwaway programs), runs the tool, prints what it checked, and exits non-zero on
+# the first failure. No network, no Instruments attach prompts unless the script says so, a few seconds each.
+# Exit status: 0 when every script passed, 1 when any failed, 2 for a name with no script.
+here="$(cd "$(dirname "$0")" && pwd)"
+# Each script gets at most this long (with_timeout stops it and what it started): a hung check fails, it doesn't
+# block the run. The Instruments checks take about 40 s.
+limit="${TOOLS_CHECK_LIMIT:-600}"
+# shellcheck source=SCRIPTDIR/../lib/common.sh
+source "$here/../lib/common.sh" || exit 2
+set +e
+log=""
+trap 'rm -f "$log"' EXIT
+scripts=()
+if [[ $# -eq 0 ]]; then
+    for script in "$here"/*.sh; do
+        [[ -e "$script" ]] && scripts+=("$script")
+    done
+else
+    for name in "$@"; do
+        [[ -f "$here/$name.sh" ]] || { echo "error: no check $here/$name.sh" >&2; exit 2; }
+        scripts+=("$here/$name.sh")
+    done
+fi
+failed=0
+for script in "${scripts[@]}"; do
+    log="$(mktemp "${TMPDIR:-/tmp}/tools-check.XXXXXX")"
+    # /bin/bash, the 3.2 the Tools run under: a newer bash earlier on PATH would hide 3.2-only failures.
+    with_timeout "$limit" /bin/bash "$script" > "$log" 2>&1
+    rc=$?
+    if [[ $rc -eq 0 ]]; then
+        printf 'ok\t%s\n' "$(basename "$script" .sh)"
+    else
+        [[ $rc -ne 124 ]] || echo "(stopped after ${limit} s)" >> "$log"
+        printf 'FAIL\t%s\n' "$(basename "$script" .sh)"
+        sed 's/^/    /' "$log"
+        failed=1
+    fi
+    rm -f "$log"
+done
+exit "$failed"

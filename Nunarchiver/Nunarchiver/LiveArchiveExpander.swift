@@ -28,7 +28,7 @@ final class LiveArchiveExpander: ArchiveExpander {
     private static let log = Logger(subsystem: "com.jonshier.Nunarchiver", category: "expansion")
 
     /// The App Nap opt-out held while anything expands, and how many expansions hold it.
-    private let activity = Mutex<(count: Int, token: (any NSObjectProtocol)?)>((0, nil))
+    private let activity = Mutex<(holders: Int, token: any NSObjectProtocol?)>((0, nil))
 
     func expand(_ archive: URL, id: UUID, credentials: ArchiveCredentials) async -> ExpansionOutcome {
         let progress = ExtractionProgress()
@@ -44,9 +44,9 @@ final class LiveArchiveExpander: ArchiveExpander {
         // efficiency cores (Xcode's xip: minutes instead of 10 s). A child task keeps the caller's cancellation.
         let outcome = await withPriority(.userInitiated) { () async -> ExpansionOutcome in
             do throws(ExpansionError) {
-                return .expanded(try await Expander.expand(FilePath(archive.path), credentials: credentials, progress: progress))
+                return try await .expanded(Expander.expand(FilePath(archive.path), credentials: credentials, progress: progress))
             } catch {
-                if case .credential(let request) = error { return .needsCredential(request) }
+                if case let .credential(request) = error { return .needsCredential(request) }
                 if Task.isCancelled || error.isCancellation { return .cancelled }
                 // The failure as the package reported it (the call and the path, for file system errors), for
                 // diagnosing from the system log: `log show --predicate 'subsystem == "com.jonshier.Nunarchiver"'`.
@@ -67,18 +67,18 @@ final class LiveArchiveExpander: ArchiveExpander {
     /// An outcome for the log.
     private static func summary(_ outcome: ExpansionOutcome) -> String {
         switch outcome {
-        case .expanded(let url): "expanded to \(url.path)"
-        case .failed(let message): "failed (\(message))"
+        case let .expanded(url): "expanded to \(url.path)"
+        case let .failed(message): "failed (\(message))"
         case .cancelled: "cancelled"
-        case .needsCredential(let request): "needs \(request.kind)\(request.isRetry ? " (again)" : "")"
+        case let .needsCredential(request): "needs \(request.kind)\(request.isRetry ? " (again)" : "")"
         }
     }
 
     /// Opts out of App Nap and idle sleep while the first expansion runs, until the last one ends.
     private func beginActivity() {
         activity.withLock { state in
-            state.count += 1
-            if state.count == 1 {
+            state.holders += 1
+            if state.holders == 1 {
                 state.token = ProcessInfo.processInfo.beginActivity(
                     options: [.userInitiated, .idleSystemSleepDisabled], reason: "Expanding archives"
                 )
@@ -88,8 +88,8 @@ final class LiveArchiveExpander: ArchiveExpander {
 
     private func endActivity() {
         activity.withLock { state in
-            state.count -= 1
-            if state.count == 0, let token = state.token {
+            state.holders -= 1
+            if state.holders == 0, let token = state.token {
                 ProcessInfo.processInfo.endActivity(token)
                 state.token = nil
             }
@@ -158,7 +158,7 @@ enum Expander {
             if Task.isCancelled { throw .cancelled }
             // Publishing closes the staging directory's descriptors (and discarding does, below).
             do throws(DiskError) {
-                return URL(filePath: try staging.publishUnwrapped(as: folder).string)
+                return try URL(filePath: staging.publishUnwrapped(as: folder).string)
             } catch {
                 throw .disk(error)
             }
@@ -226,19 +226,19 @@ enum ExpansionError: Error, CustomStringConvertible {
     var isCancellation: Bool {
         switch self {
         case .cancelled, .disk(.cancelled): true
-        case .zip(let error): error.isCancellation
-        case .appleArchive(let error): error.isCancellation
+        case let .zip(error): error.isCancellation
+        case let .appleArchive(error): error.isCancellation
         case .credential, .failure, .disk: false
         }
     }
 
     var description: String {
         switch self {
-        case .credential(let request): "the archive needs a \(request.kind)"
-        case .failure(let failure): failure.description
-        case .zip(let error): error.description
-        case .appleArchive(let error): error.description
-        case .disk(let error): error.description
+        case let .credential(request): "the archive needs a \(request.kind)"
+        case let .failure(failure): failure.description
+        case let .zip(error): error.description
+        case let .appleArchive(error): error.description
+        case let .disk(error): error.description
         case .cancelled: "cancelled"
         }
     }

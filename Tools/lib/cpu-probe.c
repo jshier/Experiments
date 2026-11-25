@@ -19,6 +19,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/qos.h>
+#include <sys/sysctl.h>
 #include <time.h>
 
 static double now(void) { return clock_gettime_nsec_np(CLOCK_UPTIME_RAW) * 1e-9; }
@@ -198,15 +199,40 @@ static double ghz(void) {
     return 32.0 * n / best(lat_s_add, n, 7) * 1e-9;
 }
 
+#define PROBE_COUNT (sizeof probes / sizeof probes[0])
+
+// Whether NAME is probe P's name or id, ignoring case (`pmull`, `tbx 4 regs`, `v_tbx4`).
+static int names(const char *name, const probe *p) {
+    return strcasecmp(p->name, name) == 0 || strcasecmp(p->id, name) == 0;
+}
+// Whether NAME selects probe P: P alone when NAME is exactly some probe's name or id (`pmull` is pmull, not pmull2);
+// otherwise every probe whose name or id contains it, ignoring case (`ld4` selects "ld4 (64 B, no chain)"; `tbl`
+// every tbl).
+static int selects(const char *name, const probe *p) {
+    for (size_t i = 0; i < PROBE_COUNT; i++)
+        if (names(name, &probes[i])) return names(name, p);
+    return strcasestr(p->name, name) != NULL || strcasestr(p->id, name) != NULL;
+}
+
 static int cmd_insn(int argc, char **argv) {
+    // Every NAME must select something, checked before anything is measured.
+    int missing = 0;
+    for (int a = 0; a < argc; a++)
+        if (argv[a][0] == '\0') { fprintf(stderr, "an empty NAME selects every row: leave NAME out for that\n"); return 2; }
+    for (int a = 0; a < argc; a++) {
+        int found = 0;
+        for (size_t i = 0; i < PROBE_COUNT; i++) found |= selects(argv[a], &probes[i]);
+        if (!found) { fprintf(stderr, "no instruction matches '%s' (cpu-probe insn lists them all)\n", argv[a]); missing = 1; }
+    }
+    if (missing) return 1;
     double f = ghz();
     printf("# clock %.3f GHz (dependent scalar add = 1 cycle)\n", f);
     printf("instruction\tlatency_cycles\tper_cycle\n");
-    for (size_t i = 0; i < sizeof probes / sizeof probes[0]; i++) {
+    for (size_t i = 0; i < PROBE_COUNT; i++) {
         const probe *p = &probes[i];
         if (argc > 0) {
             int wanted = 0;
-            for (int a = 0; a < argc; a++) wanted |= strcmp(argv[a], p->id) == 0 || strcmp(argv[a], p->name) == 0;
+            for (int a = 0; a < argc; a++) wanted |= selects(argv[a], p);
             if (!wanted) continue;
         }
         long n = 1000000;
@@ -223,15 +249,58 @@ static int cmd_insn(int argc, char **argv) {
 
 // MARK: - Load-to-use latency
 
-static long parse_size(const char *s) {
-    char *end;
-    double v = strtod(s, &end);
-    switch (*end) {
-        case 'k': case 'K': v *= 1024; break;
-        case 'm': case 'M': v *= 1024 * 1024; break;
-        case 'g': case 'G': v *= 1024.0 * 1024 * 1024; break;
+// The most a probe allocates: half of this Mac's memory (a 64 GB pointer chase on a 64 GB Mac swaps for minutes).
+// CPU_PROBE_MEMORY_BYTES stands in for hw.memsize, for the Tools' checks: they test the cap against a small total, so
+// a regression can't make them allocate what the real cap would allow.
+static double memory_cap(void) {
+    const char *override = getenv("CPU_PROBE_MEMORY_BYTES");
+    if (override && *override) return strtod(override, NULL) / 2.0;
+    uint64_t memory = 0;
+    size_t size = sizeof memory;
+    if (sysctlbyname("hw.memsize", &memory, &size, NULL, 0) != 0 || memory == 0) memory = 8ull << 30;
+    return memory / 2.0;
+}
+
+// A size: digits, optionally a fraction (`1.5`), then optionally K, M, or G (powers of 1024), and nothing else (no
+// sign, space, hex, or exponent); at least 128 bytes (one line). Anything else exits 2. `overhead` is what the probe
+// allocates per byte of it (the latency chase's order array adds 1/16), held to the cap.
+static long parse_size_for(const char *s, double overhead) {
+    const char *p = s;
+    if (*p < '0' || *p > '9') goto bad;
+    while (*p >= '0' && *p <= '9') p++;
+    if (*p == '.') {
+        p++;
+        if (*p < '0' || *p > '9') goto bad;
+        while (*p >= '0' && *p <= '9') p++;
+    }
+    double v = strtod(s, NULL);
+    switch (*p) {
+        case 'k': case 'K': v *= 1024; p++; break;
+        case 'm': case 'M': v *= 1024 * 1024; p++; break;
+        case 'g': case 'G': v *= 1024.0 * 1024 * 1024; p++; break;
+    }
+    if (*p != '\0' || !(v >= 128)) goto bad;
+    if (v * overhead > memory_cap()) {
+        fprintf(stderr, "size '%s' needs more than half this Mac's memory (%.1f GB of %.1f GB)\n", s, memory_cap() / 1e9,
+                2 * memory_cap() / 1e9);
+        exit(2);
     }
     return (long)v;
+bad:
+    fprintf(stderr, "bad size '%s': a number of bytes from 128, with K, M, or G (32K, 1.5M)\n", s);
+    exit(2);
+}
+static long parse_size(const char *s) { return parse_size_for(s, 1.0); }
+
+// A thread count from 1 to 256; anything else exits 2.
+static int parse_threads(const char *s) {
+    char *end;
+    long v = strtol(s, &end, 10);
+    if (end == s || *end != '\0' || v < 1 || v > 256) {
+        fprintf(stderr, "THREADS must be a whole number from 1 to 256, not '%s'\n", s);
+        exit(2);
+    }
+    return (int)v;
 }
 
 // Page-aligned memory (`aligned_alloc` returns NULL unless the size is a multiple of the alignment).
@@ -278,11 +347,13 @@ static int cmd_latency(int argc, char **argv) {
     static const char *defaults[] = { "16K", "32K", "64K", "128K", "256K", "512K", "1M", "2M", "4M", "8M", "12M",
                                       "16M", "24M", "32M", "48M", "64M", "128M", "256M", "512M" };
     if (argc == 0) { argc = sizeof defaults / sizeof defaults[0]; argv = (char **)defaults; }
+    // All checked before anything is measured, with the chase's order array (8 bytes a 128-byte line) counted.
+    for (int i = 0; i < argc; i++) parse_size_for(argv[i], 17.0 / 16);
     double f = ghz();
     printf("# clock %.3f GHz; one pointer per 128-byte line, random order\n", f);
     printf("working_set\tns\tcycles\n");
     for (int i = 0; i < argc; i++) {
-        double ns = chase_ns(parse_size(argv[i]));
+        double ns = chase_ns(parse_size_for(argv[i], 17.0 / 16));
         printf("%s\t%.2f\t%.1f\n", argv[i], ns, ns * f);
     }
     return 0;
@@ -336,15 +407,27 @@ static void *bandwidth_worker(void *arg) {
 
 static int cmd_bandwidth(int argc, char **argv) {
     if (argc < 3) { fprintf(stderr, "usage: cpu-probe bandwidth read|store BYTES-PER-THREAD THREADS...\n"); return 2; }
+    if (strcmp(argv[0], "read") != 0 && strcmp(argv[0], "store") != 0) {
+        fprintf(stderr, "bandwidth needs read or store, not '%s'\n", argv[0]);
+        return 2;
+    }
     int store = strcmp(argv[0], "store") == 0;
     long bytes = parse_size(argv[1]) & ~127L;
     // About 4 GB moved per thread (at least 3 passes), so a run takes 50–100 ms per thread at memory speed.
     long passes = (4L << 30) / bytes;
     if (passes < 3) passes = 3;
+    // All checked before anything is measured; each thread has its own buffer, so the threads' total is capped too.
+    for (int a = 2; a < argc; a++) {
+        int threads = parse_threads(argv[a]);
+        if ((double)threads * bytes > memory_cap()) {
+            fprintf(stderr, "%d threads of %s each is more than half this Mac's memory (%.1f GB of %.1f GB)\n", threads,
+                    argv[1], memory_cap() / 1e9, 2 * memory_cap() / 1e9);
+            return 2;
+        }
+    }
     printf("threads\tbytes_per_thread\tGB_per_s_total\tGB_per_s_per_thread\n");
     for (int a = 2; a < argc; a++) {
-        int threads = atoi(argv[a]);
-        if (threads < 1 || threads > 256) { fprintf(stderr, "THREADS must be 1-256\n"); return 2; }
+        int threads = parse_threads(argv[a]);
         double bestRate = 0;
         for (int run = 0; run < 3; run++) {
             _Atomic int ready = 0, go = 0;

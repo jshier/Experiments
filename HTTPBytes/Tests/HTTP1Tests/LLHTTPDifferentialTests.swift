@@ -24,7 +24,9 @@ import Testing
             let columns = line.split(separator: "\t", omittingEmptySubsequences: false).map(String.init)
             var input: [UInt8] = []
             var hex = columns[3][...]
-            while hex.count >= 2 { input.append(UInt8(hex.prefix(2), radix: 16)!); hex = hex.dropFirst(2) }
+            while hex.count >= 2 {
+                input.append(UInt8(hex.prefix(2), radix: 16)!); hex = hex.dropFirst(2)
+            }
             return Case(file: columns[0], title: columns[1], type: columns[2], input: input,
                         headersOffset: Int(columns[4])!, errorOffset: Int(columns[5])!, reason: columns[6])
         }
@@ -35,9 +37,9 @@ import Testing
         case head(Int), framingError(HTTP1Error), headError(HTTP1Error), incomplete
         var description: String {
             switch self {
-            case .head(let length): "head of \(length) bytes"
-            case .framingError(let error): "framing error \(error)"
-            case .headError(let error): "head error \(error)"
+            case let .head(length): "head of \(length) bytes"
+            case let .framingError(error): "framing error \(error)"
+            case let .headError(error): "head error \(error)"
             case .incomplete: "incomplete"
             }
         }
@@ -52,9 +54,9 @@ import Testing
                 var version = HTTPVersion.http1_1
                 while true {
                     switch try parser.next(in: bytes) {
-                    case .requestLine(let line): version = line.version
-                    case .field(let field): try framing.observe(field)
-                    case .end(let length):
+                    case let .requestLine(line): version = line.version
+                    case let .field(field): try framing.observe(field)
+                    case let .end(length):
                         do { _ = try framing.requestBody(version: version) } catch { return .framingError(error) }
                         return .head(length)
                     case .needsMore: return .incomplete
@@ -65,9 +67,9 @@ import Testing
                 var status = HTTPStatus.ok, version = HTTPVersion.http1_1
                 while true {
                     switch try parser.next(in: bytes) {
-                    case .statusLine(let line): (status, version) = (line.status, line.version)
-                    case .field(let field): try framing.observe(field)
-                    case .end(let length):
+                    case let .statusLine(line): (status, version) = (line.status, line.version)
+                    case let .field(field): try framing.observe(field)
+                    case let .end(length):
                         do { _ = try framing.responseBody(status: status, version: version, requestMethod: .get) } catch {
                             return .framingError(error)
                         }

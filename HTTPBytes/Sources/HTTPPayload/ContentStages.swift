@@ -33,7 +33,7 @@ extension HTTPContentDecoder: ResettableByteTransform {
     /// message); ``reset(applied:then:)`` changes the codings.
     public mutating func reset() {
         let then: HTTPContentCoding? = switch first {
-        case .some(let stage): stage.coding
+        case let .some(stage): stage.coding
         case .none: nil
         }
         do throws(HTTPPayloadError) {

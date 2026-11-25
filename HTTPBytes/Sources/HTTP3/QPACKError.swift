@@ -140,8 +140,8 @@ public typealias HTTP3FieldValidator = HTTPFieldSectionValidator
 /// How the QPACK encoder may use the dynamic table for a field: the core's ``HTTPFieldIndexingStrategy``, shared with HPACK.
 public typealias QPACKIndexingStrategy = HTTPFieldIndexingStrategy
 
-extension HTTPFieldSectionError {
+public extension HTTPFieldSectionError {
     /// The stream error to answer with: H3_MESSAGE_ERROR (RFC 9114 §4.1.2).
     @inlinable
-    public var http3Error: HTTP3Error { .stream(.messageError) }
+    var http3Error: HTTP3Error { .stream(.messageError) }
 }

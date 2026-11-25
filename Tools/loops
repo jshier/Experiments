@@ -9,9 +9,32 @@
 #             target_object). The way to check a package; set TOOLCHAINS for another toolchain.
 #   PATTERN   Perl regex matched against demangled names ("static Base64.encodeBlocks") and mangled ones.
 #
-# For each matching function, each loop (a branch back to an earlier label): its address range, instruction
-# count, nesting, a verdict, and its instruction mix. Verdicts:
-#   vector128   128-bit NEON (`.16b`, `.8h`, `.4s`, `.2d`, q-register loads/stores)
+# For each matching function, the loops of its control-flow graph (lib/loops.pl has the details):
+#   natural      a back edge to a block that dominates it, the loop being every block that reaches that edge without
+#                passing its header; loops sharing a header are one loop
+#   irreducible  a cycle entered at more than one block, which no natural loop explains (a vectorizer's remainder, a
+#                retry loop); its entries are its headers
+#   natural+side-entry  a cycle that is a natural loop plus side blocks with no cycle of their own, also entered from
+#                before the loop (a refill path laid out before the header, an outer loop whose preheader can be
+#                bypassed): headed by the natural loop's header, around the natural loop, which keeps its own row
+# A loop's blocks need not be contiguous: LLVM lays rare paths (a call, a slow refill) out after the function's return,
+# and they're still part of the loop. Calls and tail calls (a branch with a relocation, or out of the function) leave
+# the function; a branch to its own address is a one-instruction loop. A `switch`'s jump table (`br`) leads to its
+# cases, read from the table in `__const` (compressed `adr`-anchored tables and 32-bit relative ones, relocations
+# included). Its length: a bounds check's; else the index's width (Swift's exhaustive switches), capped by the
+# table's extent: to the next symbol in an object (lJTI0_1), else to the next address the code refers to (another
+# table, a literal: an object's PAGEOFF12 relocations; a linked binary's `adrp`s, decoded from __text); entries stop
+# before the first one outside the function. A table nothing bounds but its section's end ends at its last entry
+# naming a block only a table reaches. A table that can't be read has its cases placed by position, with a warning on
+# stderr. The file is read by its own header (lib/macho.pl): a universal file for its arm64 (else arm64e) slice;
+# archives (`ar`), other architectures, and other files refused (exit 2). A binary stripped of its local symbols (more
+# than a quarter of its function starts without one) gets a warning: a function without a symbol reads as part of
+# the one before it. Only text symbols in sections holding code are functions (not `__mh_execute_header`).
+#
+# Per loop: its address span (first to last instruction), instruction count, nesting depth (the loops holding it), a
+# verdict, and its instruction mix; when it isn't one contiguous run, or its header isn't its first instruction, a line
+# with the header (or entries) and the pieces. Verdicts, over the loop's own instructions:
+#   vector128   128-bit NEON (`.16b`, `.8h`, `.4s`, `.2d`, `.1q`, q-register loads/stores)
 #   vector64    only 64-bit NEON (often a vectorizer epilogue)
 #   scalar      no NEON
 #   +lane-moves single lanes moved to/from general registers (`mov.b v3[2], w12`, `ins`, `umov`): a shuffle
@@ -19,43 +42,133 @@
 #   +calls      calls in the loop (`bl`/`blr`)
 #
 #   --tsv         one line per loop: function, loop, start, end, instructions, depth, innermost|outer,
-#                 verdict, mix
-#   --body        print each loop's instructions
+#                 verdict, mix, headers (comma-separated: several for an irreducible loop), pieces
+#                 (comma-separated FIRST-LAST address ranges, in address order), kind (natural, natural+side-entry,
+#                 irreducible)
+#   --body        print each loop's instructions, block by block in address order, with the gaps between pieces
+#                 marked and the header flagged
 #   --require OPS comma-separated mnemonics that must all appear in an innermost loop (`ld3.16b,st4.16b`);
 #                 a mnemonic without its suffix matches every form (`zip` matches `zip1.16b`, `tbl` `tbl.16b`)
 #   --forbid OPS  mnemonics that must not (`mov.b,ins,umov,bl`: `bl` doesn't match `tbl` or `blr`)
 #   With --require/--forbid, exits 1 unless every matching function has an innermost loop that passes.
+#
+# A name defined several times in a merged object (compiler-made helpers) is analyzed per copy, each labeled with
+# its address. The file is disassembled once for every match (the listed symbols while their names take at most
+# LOOPS_LIST_MAX bytes, default 512 KB; else the whole file), and the functions are analyzed in parallel (one process
+# per performance core; LOOPS_JOBS=1 for one), the output in the same order: about 0.5 s for a 2 MB object. A TERM,
+# HUP, or INT stops the tool and everything it started (exit 143, 129, 130).
+#
+# Known limits: in a linked binary, a table followed by constants that no `adrp` refers to directly (reached only
+# through a register offset) reads them as entries, up to the first that leaves the function. And objdump's argument
+# list shares ARG_MAX (1 MB) with the environment: with an environment of several hundred KB, set LOOPS_LIST_MAX lower
+# (E2BIG otherwise).
 #
 # examples (Base64's two kernels: the NEON table kernel, without lane-at-a-time inserts, and the
 # auto-vectorized 3-byte-group kernel):
 #   Tools/loops --target Bytes BytesBase64 encodeBlocks --require tbl,zip --forbid mov.b,ins
 #   Tools/loops --target Bytes BytesBase64 'encode\(_:into:alphabet:\)' --require ld3.16b,st4.16b
 #   Tools/loops .build/release/mqtt-benchmarks 'MQTTPublish.init' --body
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
+# A TERM, HUP, or INT from here on stops everything this starts (lib/stoppable.sh): a --target build too, and the
+# scratch directory is removed even if the signal comes before scratch_dir has set its EXIT trap.
+source "$TOOLS_DIR/lib/stoppable.sh" || exit 2
+stop_on_signals
 
 [[ $# -ge 1 && ( "$1" == "-h" || "$1" == "--help" ) ]] && usage
 [[ $# -ge 2 ]] || usage 2
-read_input "$@"; shift "$INPUT_ARGS"
+read_input_stoppable "$@"; shift "$INPUT_ARGS"
 [[ $# -ge 1 ]] || usage 2
 file="$INPUT" pattern="$1"; shift
 [[ -f "$file" ]] || die "no file $file"
-export FORMAT=text BODY= REQUIRE= FORBID=
+export FORMAT=text BODY='' REQUIRE='' FORBID=''
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --tsv) FORMAT=tsv ;;
         --body) BODY=1 ;;
-        --require) REQUIRE="$2"; shift ;;
-        --forbid) FORBID="$2"; shift ;;
+        --require) need_value "$@"; REQUIRE="$2"; shift ;;
+        --forbid) need_value "$@"; FORBID="$2"; shift ;;
         -h|--help) usage ;;
         *) die "unknown option $1" ;;
     esac
     shift
 done
 
-symbols="$(find_symbols "$file" "$pattern")"
-[[ -n "$symbols" ]] || fail "no function matching /$pattern/ in $file"
-status=0
-while IFS=$'\t' read -r mangled demangled; do
-    FUNCTION="$demangled" disassemble_symbol "$file" "$mangled" | FUNCTION="$demangled" perl "$TOOLS_DIR/lib/loops.pl" || status=1
-done <<<"$symbols"
-exit $status
+# Analysis in parallel across functions when there are many: one process per performance core by default, at most
+# four per core (output in the same order either way).
+cores="$(sysctl -n hw.perflevel0.physicalcpu 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 1)"
+jobs="${LOOPS_JOBS:-$cores}"
+[[ "$jobs" =~ ^[1-9][0-9]{0,5}$ ]] || die "LOOPS_JOBS must be a whole number from 1 to 999999, not '$jobs'"
+(( jobs > 4 * cores )) && jobs=$((4 * cores))
+# The names listed for objdump take at most LOOPS_LIST_MAX bytes; by default 512 KB, or less when the environment leaves
+# less of ARG_MAX (the arguments and the environment share it: its strings and their pointers, and 32 KB for the rest).
+list_room="$(perl -e 'my $env = 0; $env += length("$_=$ENV{$_}") + 9 for keys %ENV; my $room = $ARGV[0] - $env - 32768; print $room > 0 ? $room : 0' "$(getconf ARG_MAX)")"
+list_max="${LOOPS_LIST_MAX:-$(( list_room < 524288 ? list_room : 524288 ))}"
+[[ "$list_max" =~ ^(0|[1-9][0-9]{0,8})$ ]] || die "LOOPS_LIST_MAX must be a whole number of bytes, not '$list_max'"
+
+scratch_dir
+# The file from its own header (lib/macho.sh): a universal file's arm64 slice; archives, other files, and other
+# architectures refused.
+source "$TOOLS_DIR/lib/macho.sh" || exit 2
+macho_input
+# The file's constant sections (for jump tables), read while the matches are found.
+"$OBJDUMP" -r -s --section=__const "$file" > "$SCRATCH/const" 2>/dev/null &
+# An object's relocations (`otool -r`: 0.01 s where `objdump -r` took 0.36), for the addresses its code refers to and
+# for telling a merged object's copies of a name apart (lib/loops.pl reads them once, before its workers start).
+[[ "$FILE_KIND" != object ]] || "$OTOOL" -r "$file" > "$SCRATCH/relocs" 2>/dev/null &
+# The symbol table, in its order (an object's relocations name symbols by their index; a linked binary's debugger
+# entries, the slow part of `nm -a`, aren't needed), and the matches from it (lib/names.pl: text symbols in code
+# sections), demangled in one run, matched against the demangled or mangled name.
+# In the background, waited for, so a signal stops it at once (a foreground command that doesn't get the INT itself
+# would make bash drop it).
+list_functions() {
+    if [[ "$FILE_KIND" == object ]]; then
+        "$NM" -p -a "$file" > "$SCRATCH/symbols" 2>/dev/null || die "nm can't read $file"
+    else
+        "$NM" -p --defined-only "$file" > "$SCRATCH/symbols" 2>/dev/null || die "nm can't read $file"
+    fi
+    perl "$TOOLS_DIR/lib/names.pl" "$SCRATCH/symbols" "$SCRATCH/code" "$SCRATCH/starts" "$INPUT" \
+        "their code is read as part of the function before them" > "$SCRATCH/names" || die "can't list the functions of $INPUT"
+    paste "$SCRATCH/names" <(demangle < "$SCRATCH/names") |
+        PATTERN="$pattern" perl -ne 'my ($m, $d) = split /\t/; print if $d =~ /$ENV{PATTERN}/ || $m =~ /$ENV{PATTERN}/' > "$SCRATCH/functions"
+}
+run_stoppable list_functions
+wait
+[[ -s "$SCRATCH/functions" ]] || fail "no function matching /$pattern/ in $INPUT"
+# A merged object has a copy of each object's local names (lJTI0_0): relocations' symbol numbers tell them apart.
+if perl -ane '$n{$F[-1]}++ if @F >= 3 && $F[1] =~ /^[st]$/ && $F[-1] =~ /^l/; END { exit((grep { $_ > 1 } values %n) ? 0 : 1) }' "$SCRATCH/symbols"; then
+    "$OBJDUMP" -h "$file" > "$SCRATCH/sections" 2>/dev/null || true
+    export LOOPS_SECTIONS="$SCRATCH/sections"
+fi
+[[ "$FILE_KIND" != object ]] || export LOOPS_RELOCS="$SCRATCH/relocs"
+# One disassembly for every match (numeric branch targets, no --symbolize-operands; relocations, -r), read by
+# lib/loops.pl as it's made: of the listed symbols while their names take at most LOOPS_LIST_MAX bytes (default 512 KB,
+# far under ARG_MAX, past which objdump fails with E2BIG) and none holds a comma (the list's separator), else of the
+# whole file (lib/loops.pl keeps only the matches' blocks). Listing costs in proportion to the code it covers (nunzip:
+# 64 names 0.03 s, 1,024 0.09 s, 8,192 0.65 s; the whole file 1.34 s), so it wins wherever it fits.
+# For Tools/mca, which shares this work: LOOPS_SAVE=DIR keeps the matches (`functions`) and the disassembly there, and
+# LOOPS_FIRST=1 analyzes only the first match.
+save="${LOOPS_SAVE:-}"
+[[ -z "$save" ]] || cp "$SCRATCH/functions" "$save/functions" || die "can't write $save"
+if [[ -n "${LOOPS_FIRST:-}" ]]; then
+    head -1 "$SCRATCH/functions" > "$SCRATCH/first"
+    mv "$SCRATCH/first" "$SCRATCH/functions"
+fi
+export LOOPS_FUNCTIONS="$SCRATCH/functions" LOOPS_CONST="$SCRATCH/const" LOOPS_SYMBOLS="$SCRATCH/symbols"
+export LOOPS_END=1 LOOPS_JOBS="$jobs" LOOPS_TMP="$SCRATCH" LOOPS_KIND="$FILE_KIND" LOOPS_TEXT="$MACHO_TEXT" LOOPS_FILE="$file"
+disassemble() {
+    if [[ "$(cut -f1 "$SCRATCH/functions")" != *,* && "$(cut -f1 "$SCRATCH/functions" | wc -c)" -le "$list_max" ]]; then
+        "$OBJDUMP" -dr --no-show-raw-insn --disassemble-symbols="$(cut -f1 "$SCRATCH/functions" | paste -sd, -)" "$file"
+    else
+        "$OBJDUMP" -dr --no-show-raw-insn "$file"
+    fi || return
+    echo "<<end of the disassembly>>"   # objdump succeeded: lib/loops.pl reports nothing without this line
+}
+analyze() {
+    if [[ -n "$save" ]]; then
+        disassemble | tee "$save/disassembly" | perl "$TOOLS_DIR/lib/loops.pl"
+    else
+        disassemble | perl "$TOOLS_DIR/lib/loops.pl"
+    fi
+}
+# In the background, waited for, so a signal stops it at once (lib/stoppable.sh).
+run_stoppable analyze

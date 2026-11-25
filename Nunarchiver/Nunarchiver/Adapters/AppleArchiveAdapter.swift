@@ -38,7 +38,7 @@ enum AppleArchiveAdapter {
         case .symmetric, .symmetricSigned:
             guard let text = credentials[.key] else { throw .credential(CredentialRequest(kind: .key)) }
             // Text that isn't a 32-byte key in hex or base64: ask again.
-            guard case .symmetric(let key)? = try? AEADecryptionKey.symmetric(text: text), key.count == 32 else {
+            guard case let .symmetric(key)? = try? AEADecryptionKey.symmetric(text: text), key.count == 32 else {
                 throw .credential(CredentialRequest(kind: .key, isRetry: true))
             }
             decryptionKey = .symmetric(key)

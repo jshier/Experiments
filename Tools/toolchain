@@ -5,7 +5,8 @@
 #
 # usage: Tools/toolchain list
 #        Tools/toolchain install NAME
-#        Tools/toolchain register NAME [--url TARBALL | --swiftly SPEC] [--path XCTOOLCHAIN] [--description TEXT]
+#        Tools/toolchain register NAME [--url TARBALL [--sha256 SUM] | --swiftly SPEC] [--path XCTOOLCHAIN]
+#                                      [--description TEXT]
 #        Tools/toolchain NAME env
 #        Tools/toolchain NAME [--runtime] -- COMMAND [ARGS...]
 #        Tools/toolchain NAME test [--debug] [PACKAGE_DIR] [-- TESTING_ARGS...]
@@ -13,27 +14,41 @@
 # Never hardcode a toolchain's path or bundle id in a package or script: they change with every build, and
 # builds get deleted. Instead:
 #   - Tools/toolchains.json, the registry: each toolchain the experiments need, with how to install it
-#     ({"swiftly": SPEC} for releases and snapshots; {"url": TARBALL} for builds swiftly can't install, like
-#     unmerged PRs) and, once installed, its directory and bundle id.
+#     ({"swiftly": SPEC} for releases and snapshots; {"url": TARBALL, "sha256": SUM} for builds swiftly can't
+#     install, like unmerged PRs; the sum is optional) and, once installed, its directory and bundle id. A
+#     registry that isn't valid JSON stops every command (exit 2).
 #   - PACKAGE/.swift-toolchain: the registry name a package needs (one line).
 #
 #   NAME       a registry name ("pr-91981"); a package directory with a .swift-toolchain ("SocketStream");
-#              a path to an .xctoolchain; or a substring of an installed toolchain's directory name, bundle
-#              id, or alias ("PR91981")
+#              a path to an .xctoolchain; or an installed toolchain's directory name, bundle id, or alias,
+#              exactly, else as a substring ("PR91981"); several names for one toolchain (an alias link such
+#              as swift-latest) count once
 #   list       registry entries (installed or missing, who uses them), then unregistered installed
-#              toolchains and broken links in ~/Library/Developer/Toolchains
+#              toolchains and broken links in ~/Library/Developer/Toolchains (a link to a toolchain listed
+#              already isn't listed again)
 #   install    install a registry entry (swiftly, or download and extract into ~/Library/Developer/Toolchains;
-#              PR builds are ~3 GB: ask the user first) and record its directory and bundle id
+#              PR builds are ~3 GB: ask the user first) and record its directory and bundle id. A tarball is
+#              checked against the entry's sha256 if it has one, and refused if any path in it is outside
+#              Library/Developer/Toolchains or has a `..` component, before anything is extracted
 #   register   remember a toolchain: where to get it, and with --path an installed one (e.g. one installed by
-#              hand), so `install` can restore it and NAME resolves to it
+#              hand), so `install` can restore it and NAME resolves to it. --path is checked before the
+#              registry is written
 #   env        `export` lines for eval: TOOLCHAINS (selects it for xcrun, swift build/run/package, and every
 #              Tool), TOOLCHAIN (its path), TOOLCHAIN_RUNTIME (its usr/lib/swift/macosx)
 #   --         run COMMAND in that environment. With --runtime, COMMAND also gets
 #              DYLD_LIBRARY_PATH=TOOLCHAIN_RUNTIME: only for running built programs that don't embed it.
-#   test       build PACKAGE_DIR's tests (release unless --debug; default: NAME if it's a package, else the
-#              current directory) and run them against the toolchain's runtime through its
-#              swiftpm-testing-helper. `swift test` can't: it replaces DYLD_LIBRARY_PATH for the test process,
-#              which then loads the OS runtime. TESTING_ARGS default to --testing-library swift-testing.
+#   test       build PACKAGE_DIR's tests (release with -enable-testing, for @testable imports, unless --debug;
+#              default: NAME if it's a package, else the current directory) and run them against the
+#              toolchain's runtime through its swiftpm-testing-helper. `swift test` can't: it replaces
+#              DYLD_LIBRARY_PATH for the test process, which then loads the OS runtime. TESTING_ARGS default to
+#              --testing-library swift-testing. Exits with the tests' status.
+#
+# Toolchains are looked for in ~/Library/Developer/Toolchains and /Library/Developer/Toolchains
+# (EXPERIMENTS_SYSTEM_TOOLCHAINS replaces the second, for tests).
+#
+# Exit status: 0 success; 1 a check failed (a download or test build that failed); 2 bad usage, an invalid
+# registry (not JSON, or entries, installs, or their fields of the wrong type), a tarball refused, or a toolchain
+# that isn't installed.
 #
 # Programs started by tools that don't pass the environment through (the benchmark plugin) need the runtime
 # path embedded at link time: see SocketStream/Package.swift, which derives it from TOOLCHAIN_RUNTIME or
@@ -46,12 +61,24 @@
 #   Tools/toolchain SocketStream -- swift package --package-path SocketStream --disable-sandbox benchmark
 #   Tools/toolchain SocketStream test
 #   Tools/toolchain pr-91981 -- Tools/loops --target Bytes BytesBase64 encodeBlocks
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
+[[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
 have jq || die "needs jq: brew install jq"
+jq -n 1 > /dev/null 2>&1 || die "$(command -v jq) doesn't run (jq -n 1 failed)"
 REGISTRY="$TOOLS_DIR/toolchains.json"
 USER_TOOLCHAINS="$HOME/Library/Developer/Toolchains"
+# The system-wide toolchains directory; EXPERIMENTS_SYSTEM_TOOLCHAINS replaces it (Tools/tests/toolchain.sh).
+SYSTEM_TOOLCHAINS="${EXPERIMENTS_SYSTEM_TOOLCHAINS:-/Library/Developer/Toolchains}"
+# A registry jq can't read would otherwise look empty: every toolchain "unregistered", nothing missing.
+# Every entry an object; its install an object; its strings strings.
+jq -e '(.toolchains | type == "object") and all(.toolchains[]; type == "object"
+        and ((.install // {}) | type == "object")
+        and all((.install // {})[]; type == "string")
+        and all(.description, .directory, .bundle_id; . == null or type == "string"))' "$REGISTRY" > /dev/null 2>&1 ||
+    die "$REGISTRY isn't valid JSON of the registry's shape: {\"toolchains\": {NAME: {\"install\": {...}, ...}}} (check it with: jq . $REGISTRY)"
 
-toolchains() { ls -d "$USER_TOOLCHAINS"/*.xctoolchain /Library/Developer/Toolchains/*.xctoolchain 2>/dev/null || true; }
+toolchains() { ls -d "$USER_TOOLCHAINS"/*.xctoolchain "$SYSTEM_TOOLCHAINS"/*.xctoolchain 2>/dev/null || true; }
+real_path() { (cd "$1" 2>/dev/null && pwd -P) || echo "$1"; }
 bundle_id() { /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$1/Info.plist" 2>/dev/null || true; }
 registry() { jq -r "$@" "$REGISTRY"; }
 registered() { [[ -n "$(registry --arg n "$1" '.toolchains[$n] // empty')" ]]; }
@@ -70,8 +97,14 @@ registry_path() {
 record() { # record NAME PATH: the installed directory and bundle id
     local updated
     updated="$(jq --arg n "$1" --arg d "$(basename "$2")" --arg b "$(bundle_id "$2")" \
-        '.toolchains[$n].directory = $d | .toolchains[$n].bundle_id = $b' "$REGISTRY")"
-    printf '%s\n' "$updated" > "$REGISTRY"
+        '.toolchains[$n].directory = $d | .toolchains[$n].bundle_id = $b' "$REGISTRY")" || die "couldn't update $REGISTRY"
+    write_registry "$updated"
+}
+write_registry() { # the whole registry, replaced at once (never left half-written)
+    if ! printf '%s\n' "$1" > "$REGISTRY.$$" || ! mv -f "$REGISTRY.$$" "$REGISTRY"; then
+        rm -f "$REGISTRY.$$"
+        die "couldn't write $REGISTRY"
+    fi
 }
 users() { # packages whose .swift-toolchain names $1
     local file
@@ -102,18 +135,42 @@ resolve() {
     fi
     if registered "$name"; then
         TOOLCHAIN="$(registry_path "$name")"
-        [[ -n "$TOOLCHAIN" ]] || fail "$(missing_hint "$name")"
+        [[ -n "$TOOLCHAIN" ]] || die "$(missing_hint "$name")"
         return
     fi
+    # Exact matches of a directory name (with or without .xctoolchain), bundle id, or alias win over substrings; a
+    # toolchain reached by several names (swift-latest, a link to a snapshot) is counted once, by its real path.
+    local exact=() seen=$'\n' real
     while IFS= read -r toolchain; do
         [[ -f "$toolchain/Info.plist" ]] || continue
         # Collected first: `… | grep -q` fails under pipefail when grep exits early.
-        names="$(basename "$toolchain"; bundle_id "$toolchain"; /usr/libexec/PlistBuddy -c 'Print :Aliases' "$toolchain/Info.plist" 2>/dev/null || true)"
-        grep -qiF -- "$name" <<<"$names" && matches+=("$toolchain")
+        names="$(basename "$toolchain"; basename "$toolchain" .xctoolchain; bundle_id "$toolchain"
+            /usr/libexec/PlistBuddy -c 'Print :Aliases' "$toolchain/Info.plist" 2>/dev/null | perl -ne 'print "$1\n" if /^\s+(\S.*?)\s*$/' || true)"
+        if grep -qxF -- "$name" <<<"$names"; then
+            exact+=("$toolchain")
+        elif grep -qiF -- "$name" <<<"$names"; then
+            matches+=("$toolchain")
+        fi
     done < <(toolchains)
-    [[ ${#matches[@]} -ge 1 ]] || die "no toolchain '$name' installed or registered (Tools/toolchain list)"
-    [[ ${#matches[@]} -eq 1 ]] || die "'$name' matches ${#matches[@]} toolchains: ${matches[*]}"
-    TOOLCHAIN="${matches[0]}"
+    [[ ${#exact[@]} -gt 0 ]] && matches=("${exact[@]}")
+    local unique=() ordered=()
+    # The real directories first, so a link and its target resolve to the directory.
+    for toolchain in ${matches[@]+"${matches[@]}"}; do
+        if [[ ! -L "$toolchain" ]]; then ordered+=("$toolchain"); fi
+    done
+    for toolchain in ${matches[@]+"${matches[@]}"}; do
+        if [[ -L "$toolchain" ]]; then ordered+=("$toolchain"); fi
+    done
+    for toolchain in ${ordered[@]+"${ordered[@]}"}; do
+        real="$(real_path "$toolchain")"
+        if [[ "$seen" != *$'\n'"$real"$'\n'* ]]; then
+            seen="$seen$real"$'\n'
+            unique+=("$toolchain")
+        fi
+    done
+    [[ ${#unique[@]} -ge 1 ]] || die "no toolchain '$name' installed or registered (Tools/toolchain list)"
+    [[ ${#unique[@]} -eq 1 ]] || die "'$name' matches ${#unique[@]} toolchains: ${unique[*]}"
+    TOOLCHAIN="${unique[0]}"
 }
 
 [[ $# -ge 1 ]] || usage 2
@@ -127,15 +184,23 @@ case "$1" in
             printf '%s\t%s\t%s\t%s\t%s\n' "$name" "$status" "$id" "$(users "$name")" \
                 "$(registry --arg n "$name" '.toolchains[$n].install | .swiftly // .url // "-"')"
         done < <(registry '.toolchains | keys[]')
+        # Real directories first, so a link to one already listed (swift-latest) is skipped.
+        all="$(toolchains)"
+        seen=$'\n'
         while IFS= read -r toolchain; do
+            [[ -n "$toolchain" ]] || continue
             if [[ ! -f "$toolchain/Info.plist" ]]; then
                 printf '%s\tbroken\t-\t-\t%s\n' "$(basename "$toolchain")" "link to $(readlink "$toolchain" || echo '?') (remove it)"
                 continue
             fi
+            real="$(real_path "$toolchain")"
+            [[ "$seen" == *$'\n'"$real"$'\n'* ]] && continue
+            seen="$seen$real"$'\n'
             id="$(bundle_id "$toolchain")"
             [[ -n "$(registry --arg b "$id" '.toolchains[] | select(.bundle_id == $b) | 1')" ]] && continue
             printf '%s\tunregistered\t%s\t-\t%s\n' "$(basename "$toolchain")" "$id" "Tools/toolchain register NAME --path $toolchain"
-        done < <(toolchains)
+        done < <(while IFS= read -r t; do if [[ ! -L "$t" ]]; then echo "$t"; fi; done <<< "$all"
+                 while IFS= read -r t; do if [[ -L "$t" ]]; then echo "$t"; fi; done <<< "$all")
         exit 0 ;;
     install)
         [[ $# -eq 2 ]] || usage 2
@@ -146,6 +211,7 @@ case "$1" in
         before="$(toolchains)"
         spec="$(registry --arg n "$name" '.toolchains[$n].install.swiftly // empty')"
         url="$(registry --arg n "$name" '.toolchains[$n].install.url // empty')"
+        sum="$(registry --arg n "$name" '.toolchains[$n].install.sha256 // empty')"
         if [[ -n "$spec" ]]; then
             have swiftly || die "needs swiftly (https://www.swift.org/install)"
             swiftly install "$spec" --assume-yes >&2 || die "swiftly install $spec failed"
@@ -154,11 +220,17 @@ case "$1" in
             note "downloading ${url}…"
             curl -fL --progress-bar -o "$SCRATCH/toolchain.tar.gz" "$url" ||
                 fail "download failed: PR builds on download.swift.org/tmp expire; look for a newer build number of the PR and register it"
-            # Extracted into ~ only if every path is inside Library/Developer/Toolchains.
+            if [[ -n "$sum" ]]; then
+                actual="$(shasum -a 256 "$SCRATCH/toolchain.tar.gz" | cut -d' ' -f1)"
+                [[ "$actual" == "$sum" ]] || die "$url's SHA-256 is $actual, not the registry's $sum; not extracting"
+            fi
+            # Extracted into ~ only if every path is inside Library/Developer/Toolchains, with no `..` component
+            # (bsdtar refuses those only when it reaches them, after extracting what came before).
             tar -tzf "$SCRATCH/toolchain.tar.gz" > "$SCRATCH/contents" || die "$url isn't a readable tarball"
             grep -vqE '^(\./)?Library/Developer/Toolchains(/|$)' "$SCRATCH/contents" &&
                 die "$url has paths outside Library/Developer/Toolchains; not extracting"
-            tar -xzf "$SCRATCH/toolchain.tar.gz" -C "$HOME"
+            grep -qE '(^|/)\.\.(/|$)' "$SCRATCH/contents" && die "$url has paths with '..' in them; not extracting"
+            tar -xzf "$SCRATCH/toolchain.tar.gz" -C "$HOME" || die "couldn't extract $url into $HOME"
         else
             die "'$name' has no install source"
         fi
@@ -171,27 +243,36 @@ case "$1" in
     register)
         [[ $# -ge 2 ]] || usage 2
         name="$2"; shift 2
-        url= spec= path= description=
+        [[ "$name" != -* ]] || usage 2
+        url='' spec='' path='' description='' sum=''
         while [[ $# -gt 0 ]]; do
             case "$1" in
-                --url) url="$2"; shift ;;
-                --swiftly) spec="$2"; shift ;;
-                --path) path="$2"; shift ;;
-                --description) description="$2"; shift ;;
+                --url) need_value "$@"; url="$2"; shift ;;
+                --sha256) need_value "$@"; sum="$2"; shift ;;
+                --swiftly) need_value "$@"; spec="$2"; shift ;;
+                --path) need_value "$@"; path="$2"; shift ;;
+                --description) need_value "$@"; description="$2"; shift ;;
                 *) die "unknown option $1" ;;
             esac
             shift
         done
         [[ -n "$url$spec$path" ]] || die "register needs --url, --swiftly, or --path"
-        updated="$(jq --arg n "$name" --arg u "$url" --arg s "$spec" --arg d "$description" '
+        [[ -z "$url" || -z "$spec" ]] || die "register takes --url or --swiftly, not both"
+        [[ -z "$sum" || -n "$url" ]] || die "--sha256 goes with --url"
+        [[ -z "$sum" || "$sum" =~ ^[0-9a-f]{64}$ ]] || die "--sha256 needs 64 lowercase hex digits"
+        # Everything checked before the registry is written.
+        if [[ -n "$path" ]]; then
+            [[ -f "$path/Info.plist" ]] || die "$path isn't a toolchain (no Info.plist)"
+            [[ -n "$(bundle_id "$path")" ]] || die "$path has no CFBundleIdentifier"
+            path="$(cd "$path" && pwd)"
+        fi
+        updated="$(jq --arg n "$name" --arg u "$url" --arg h "$sum" --arg s "$spec" --arg d "$description" '
             .toolchains[$n] = ((.toolchains[$n] // {}) as $e | $e
                 + (if $d != "" then {description: $d} else {} end)
-                + (if $u != "" then {install: {url: $u}} elif $s != "" then {install: {swiftly: $s}} else {} end))' "$REGISTRY")"
-        printf '%s\n' "$updated" > "$REGISTRY"
-        if [[ -n "$path" ]]; then
-            [[ -f "$path/Info.plist" ]] || die "$path isn't a toolchain"
-            record "$name" "$(cd "$path" && pwd)"
-        fi
+                + (if $u != "" then {install: ({url: $u} + (if $h != "" then {sha256: $h} else {} end))}
+                   elif $s != "" then {install: {swiftly: $s}} else {} end))' "$REGISTRY")" || die "couldn't update $REGISTRY"
+        write_registry "$updated"
+        [[ -z "$path" ]] || record "$name" "$path"
         registry --arg n "$name" '.toolchains[$n]'
         exit 0 ;;
 esac
@@ -222,11 +303,15 @@ case "$command" in
         [[ -f "$package/Package.swift" ]] || die "$package isn't a package (no Package.swift)"
         helper="$TOOLCHAIN/usr/libexec/swift/pm/swiftpm-testing-helper"
         [[ -x "$helper" ]] || die "$TOOLCHAIN has no swiftpm-testing-helper"
-        cd "$package"
+        cd "$package" || die "can't enter $package"
+        # Release builds need -enable-testing for @testable imports (Bytes', BytesCompression's tests); the bin path
+        # query gets the same flags, or it names another build's directory.
+        flags=(-c "$configuration")
+        [[ "$configuration" == release ]] && flags+=(-Xswiftc -enable-testing)
         note "building tests ($configuration) with ${TOOLCHAINS}…"
-        swift build -c "$configuration" --build-tests > /dev/null 2> >(grep -E 'error:' >&2) || die "build failed"
-        bin="$(swift build -c "$configuration" --show-bin-path)"
-        bundle="$(ls -d "$bin"/*.xctest 2>/dev/null | head -1)"
+        swift build "${flags[@]}" --build-tests > /dev/null 2> >(grep -E 'error:' >&2) || fail "build failed"
+        bin="$(swift build "${flags[@]}" --show-bin-path)" || fail "swift build --show-bin-path failed"
+        bundle="$(find "$bin" -maxdepth 1 -name '*.xctest' 2>/dev/null | sort | head -1)"
         [[ -n "$bundle" ]] || die "no .xctest bundle in $bin"
         executable="$bundle/Contents/MacOS/$(basename "$bundle" .xctest)"
         platform="$(xcode-select -p)/Platforms/MacOSX.platform/Developer"

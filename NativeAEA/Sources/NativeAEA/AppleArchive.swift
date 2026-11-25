@@ -37,6 +37,11 @@ public enum AAEntryType: UInt8, Sendable {
 public struct AAHeaderRange: Sendable, Equatable {
     public var offset: Int
     public var count: Int
+
+    /// Whether the range holds no bytes.
+    public var isEmpty: Bool {
+        count == 0
+    }
 }
 
 /// One entry's header, parsed. Strings are ranges of the header's bytes, so parsing allocates nothing.
@@ -60,11 +65,11 @@ public struct AAEntryHeader: Sendable, Equatable {
     public var hardLinkCluster: UInt64?
     public var cloneCluster: UInt64?
     /// The file's contents: offset from the end of the header (after earlier blobs) and size.
-    public var data: (offset: Int, count: Int)?
+    public var data: AAHeaderRange?
     /// Extended attributes (`XAT`): offset from the end of the header and size.
-    public var extendedAttributes: (offset: Int, count: Int)?
+    public var extendedAttributes: AAHeaderRange?
     /// The access control list (`ACL`): offset from the end of the header and size.
-    public var accessControlList: (offset: Int, count: Int)?
+    public var accessControlList: AAHeaderRange?
     /// A device's `st_rdev` (`DEV`), for character and block devices.
     public var device: UInt64?
     /// Every blob's bytes, together: what follows the header before the next entry.
@@ -72,7 +77,7 @@ public struct AAEntryHeader: Sendable, Equatable {
 
     public init() {}
 
-    public static func == (a: Self, b: Self) -> Bool {
+    public static func ==(a: Self, b: Self) -> Bool {
         a.byteCount == b.byteCount && a.type == b.type && a.path == b.path && a.linkTarget == b.linkTarget
             && a.uid == b.uid && a.gid == b.gid && a.mode == b.mode && a.flags == b.flags
             && a.diskCompression == b.diskCompression && a.modificationTime?.seconds == b.modificationTime?.seconds
@@ -90,6 +95,19 @@ public struct AAEntryHeader: Sendable, Equatable {
 public enum AppleArchive {
     /// The smallest header: magic and size.
     public static var minimumHeaderByteCount: Int { 6 }
+
+    /// The room before each decoded block for a header that starts in the block before, which the walkers copy there to
+    /// make it contiguous (BytesCompressionAsync's carry region, `BlockBufferPool.carry`): a header is at most 65,535
+    /// bytes (its size is 16 bits), and so are a cpio entry's header, name, and link target here
+    /// (``CpioWalker/maximumHeaderAndName``). Sources nothing walks (decryption to a file) need none.
+    static var headerCarryCapacity: Int { 65_536 }
+
+    /// Whether `bytes` start a plain Apple Archive stream (`AA01` or `YAA1`).
+    static func startsAnArchive(_ bytes: RawSpan) -> Bool {
+        guard bytes.byteCount >= 4 else { return false }
+        let magic = UInt32(bigEndian: bytes.load(fromByteOffset: 0, as: UInt32.self))
+        return magic == 0x4141_3031 || magic == 0x5941_4131 // "AA01", "YAA1"
+    }
 
     /// The size of the header starting at `bytes`, from its first 6 bytes.
     ///
@@ -119,10 +137,12 @@ public enum AppleArchive {
 
     /// Parses one entry's header.
     ///
-    /// - Parameter header: Exactly the header's bytes (``headerByteCount(_:)`` of them).
-    /// - Throws: ``AEAError/invalidArchive(_:)`` for an unknown subtype, a field running past the header, or a
-    ///   repeated `DAT`.
-    public static func parseHeader(_ header: RawSpan) throws(AEAError) -> AAEntryHeader {
+    /// - Parameters:
+    ///   - header: Exactly the header's bytes (``headerByteCount(_:)`` of them).
+    ///   - maximumMetadataByteCount: The most its extended attributes (`XAT`) and ACL (`ACL`) blobs may take together.
+    /// - Throws: ``AEAError/invalidArchive(_:)`` for an unknown subtype, a field running past the header, a repeated
+    ///   `DAT`, blobs over `maximumMetadataByteCount`, or a time with a billion nanoseconds or more.
+    public static func parseHeader(_ header: RawSpan, maximumMetadataByteCount: Int = .max) throws(AEAError) -> AAEntryHeader {
         var entry = AAEntryHeader()
         entry.byteCount = header.byteCount
         var reader = AlignedBytesReader(header)
@@ -130,7 +150,7 @@ public enum AppleArchive {
         // as a value. Both typed: an untyped `do` boxes every error it rethrows.
         let problem: AEAError?
         do throws(BytesError) {
-            problem = try parseFields(&reader, &entry)
+            problem = try parseFields(&reader, &entry, maximumMetadataByteCount)
         } catch {
             throw .invalidArchive("a field runs past its header")
         }
@@ -143,7 +163,9 @@ public enum AppleArchive {
     /// - Returns: What's wrong with a field's value, or `nil`.
     /// - Throws: `BytesError` when a field runs past the header.
     @inline(__always)
-    private static func parseFields(_ reader: inout AlignedBytesReader, _ entry: inout AAEntryHeader) throws(BytesError) -> AEAError? {
+    private static func parseFields(
+        _ reader: inout AlignedBytesReader, _ entry: inout AAEntryHeader, _ maximumMetadataByteCount: Int
+    ) throws(BytesError) -> AEAError? {
         try reader.skip(byteCount: minimumHeaderByteCount)
         while reader.remainingByteCount > 0 {
             let field = try reader.read(Byte4.self, .bigEndian)
@@ -168,11 +190,11 @@ public enum AppleArchive {
             case Byte4(ascii: "LNKP").bigEndian:
                 entry.linkTarget = try string(&reader)
             case Byte4(ascii: "DATA").bigEndian:
-                if let problem = addData(&entry, count: try Int(reader.read(Byte2.self, .littleEndian))) { return problem }
+                if let problem = try addData(&entry, count: Int(reader.read(Byte2.self, .littleEndian))) { return problem }
             case Byte4(ascii: "DATB").bigEndian:
-                if let problem = addData(&entry, count: try Int(reader.read(Byte4.self, .littleEndian))) { return problem }
+                if let problem = try addData(&entry, count: Int(reader.read(Byte4.self, .littleEndian))) { return problem }
             default:
-                if let problem = try parseField(field, &reader, &entry) { return problem }
+                if let problem = try parseField(field, &reader, &entry, maximumMetadataByteCount) { return problem }
             }
         }
         return nil
@@ -190,9 +212,23 @@ public enum AppleArchive {
     @inline(__always)
     private static func addData(_ entry: inout AAEntryHeader, count: Int) -> AEAError? {
         guard entry.data == nil else { return .invalidArchive("two DAT fields") }
-        entry.data = (entry.blobByteCount, count)
-        entry.blobByteCount += count
+        entry.data = AAHeaderRange(offset: entry.blobByteCount, count: count)
+        return addBlob(&entry, count: count)
+    }
+
+    /// Adds a blob's size to the header's total, which stays below 2^62 as each blob's size does (so a position in the
+    /// stream plus the total can't overflow either), or what's wrong: blobs larger than that together.
+    @inline(__always)
+    private static func addBlob(_ entry: inout AAEntryHeader, count: Int) -> AEAError? {
+        // `blobByteCount` is below 2^62 and `count` is non-negative: the subtraction can't overflow.
+        guard count < (1 << 62) - entry.blobByteCount else { return .invalidArchive("blob sizes") }
+        entry.blobByteCount &+= count
         return nil
+    }
+
+    /// A field's 3-letter key, for errors.
+    private static func keyName(_ key: UInt32) -> String {
+        String(decoding: [UInt8(truncatingIfNeeded: key >> 16), UInt8(truncatingIfNeeded: key >> 8), UInt8(truncatingIfNeeded: key)], as: UTF8.self)
     }
 
     /// Any other field, by its subtype: the values Xcode's archives don't use, or other widths.
@@ -200,7 +236,9 @@ public enum AppleArchive {
     /// - Returns: What's wrong with the field's value, or `nil`.
     /// - Throws: `BytesError` when it runs past the header.
     @inline(never)
-    private static func parseField(_ field: UInt32, _ reader: inout AlignedBytesReader, _ entry: inout AAEntryHeader) throws(BytesError) -> AEAError? {
+    private static func parseField(
+        _ field: UInt32, _ reader: inout AlignedBytesReader, _ entry: inout AAEntryHeader, _ maximumMetadataByteCount: Int
+    ) throws(BytesError) -> AEAError? {
         let key = field >> 8
         let subtype = UInt8(truncatingIfNeeded: field)
         func keyIs(_ name: Byte4) -> Bool { key == name.bigEndian >> 8 }
@@ -210,7 +248,9 @@ public enum AppleArchive {
         case 0x31, 0x32, 0x34, 0x38: // "1" "2" "4" "8"
             let width = Int(subtype - 0x30)
             var value: UInt64 = 0
-            for index in 0..<width { value |= try UInt64(UInt8(reader.read(Byte.self))) << (8 * index) }
+            for index in 0..<width {
+                value |= try UInt64(UInt8(reader.read(Byte.self))) << (8 * index)
+            }
             if keyIs(Byte4(ascii: "TYP*")) {
                 guard let type = AAEntryType(rawValue: UInt8(truncatingIfNeeded: value)) else {
                     return .invalidArchive("entry type \(value)")
@@ -237,8 +277,11 @@ public enum AppleArchive {
             let range = try string(&reader)
             if keyIs(Byte4(ascii: "PAT*")) { entry.path = range } else if keyIs(Byte4(ascii: "LNK*")) { entry.linkTarget = range }
         case 0x54, 0x53: // "T": seconds and nanoseconds; "S": seconds
-            let seconds = Int64(bitPattern: try reader.read(Byte8.self, .littleEndian))
+            let seconds = try Int64(bitPattern: reader.read(Byte8.self, .littleEndian))
             let nanoseconds = subtype == 0x54 ? try reader.read(Byte4.self, .littleEndian) : 0
+            // A `timespec`'s nanoseconds are below a second (`setattrlist` refuses the rest with `EINVAL`, after the
+            // entry is made: review 2026-11-23, minor).
+            guard nanoseconds < 1_000_000_000 else { return .invalidArchive("\(keyName(key)) nanoseconds \(nanoseconds)") }
             if keyIs(Byte4(ascii: "MTM*")) {
                 entry.modificationTime = (seconds, nanoseconds)
             } else if keyIs(Byte4(ascii: "CTM*")) {
@@ -262,12 +305,21 @@ public enum AppleArchive {
             if keyIs(Byte4(ascii: "DAT*")) {
                 return addData(&entry, count: count)
             }
-            if keyIs(Byte4(ascii: "XAT*")) {
-                entry.extendedAttributes = (entry.blobByteCount, count)
-            } else if keyIs(Byte4(ascii: "ACL*")) {
-                entry.accessControlList = (entry.blobByteCount, count)
+            let isAttributes = keyIs(Byte4(ascii: "XAT*"))
+            if isAttributes || keyIs(Byte4(ascii: "ACL*")) {
+                if isAttributes {
+                    entry.extendedAttributes = AAHeaderRange(offset: entry.blobByteCount, count: count)
+                } else {
+                    entry.accessControlList = AAHeaderRange(offset: entry.blobByteCount, count: count)
+                }
+                // What an extraction holds until the entry ends (the last of each kind: the walker passes on only those),
+                // refused before any of it is read (review 2026-11-23 §1.7). Each is below 2^62: the sum can't overflow.
+                let metadata = (entry.extendedAttributes?.count ?? 0) + (entry.accessControlList?.count ?? 0)
+                guard metadata <= maximumMetadataByteCount else {
+                    return .invalidArchive("extended attributes and ACL of \(metadata) bytes, over the limit of \(maximumMetadataByteCount)")
+                }
             }
-            entry.blobByteCount += count
+            return addBlob(&entry, count: count)
         default:
             return .invalidArchive("field subtype \(subtype)")
         }

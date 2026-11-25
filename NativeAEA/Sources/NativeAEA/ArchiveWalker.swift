@@ -1,10 +1,14 @@
 import Bytes
+import BytesCompressionAsync
 
 /// Receives an Apple Archive stream's entries as the walker finds them, in order.
 ///
 /// Spans are of segment buffers, for the call: a sink that keeps bytes past it retains their buffer through the pool
 /// and finds them again by buffer and offset.
 protocol ArchiveSink: ~Copyable {
+    /// The most an entry's extended attributes and ACL may take together: the walker refuses a header declaring more
+    /// (``AppleArchive/parseHeader(_:maximumMetadataByteCount:)``), before any of it is passed on.
+    var maximumMetadataByteCount: Int { get }
     /// An entry's header: `header` is its bytes, in buffer `buffer`.
     nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: RawSpan, buffer: Int) async throws(AEAError)
     /// A piece of the current entry's file contents, at `fileOffset` in the file: `bytes`, `offset` bytes from buffer
@@ -40,10 +44,11 @@ enum ArchiveWalker {
         var previousStart = 0 // The previous chunk's offset in the stream.
         var carry = 0 // Bytes of a partial header at the end of the previous chunk.
         var streamEnd = 0
+        let maximumMetadataByteCount = sink.maximumMetadataByteCount
         defer {
             if previousBuffer >= 0 { pool.release(previousBuffer) }
         }
-        while let chunk = try await source.nextChunk() {
+        while let chunk = try await source.nextBlock() {
             let buffer = chunk.buffer
             let start = chunk.rawOffset
             let end = start + chunk.rawSize
@@ -73,7 +78,7 @@ enum ArchiveWalker {
                         break
                     }
                     let header = pool.bytes(buffer, at: position - start, count: count)
-                    entry = try AppleArchive.parseHeader(header)
+                    entry = try AppleArchive.parseHeader(header, maximumMetadataByteCount: maximumMetadataByteCount)
                     try await sink.entry(entry, header: header, buffer: buffer)
                     position += count
                     if entry.blobByteCount == 0 {
@@ -85,7 +90,7 @@ enum ArchiveWalker {
                     blobsEnd = position + entry.blobByteCount
                 }
                 let stop = min(blobsEnd, end)
-                if let data = entry.data, data.count > 0 {
+                if let data = entry.data, !data.isEmpty {
                     let dataStart = blobsStart + data.offset
                     let low = max(position, dataStart), high = min(stop, dataStart + data.count)
                     if low < high {
@@ -95,14 +100,14 @@ enum ArchiveWalker {
                         )
                     }
                 }
-                if let blob = entry.extendedAttributes, blob.count > 0 {
+                if let blob = entry.extendedAttributes, !blob.isEmpty {
                     let blobStart = blobsStart + blob.offset
                     let low = max(position, blobStart), high = min(stop, blobStart + blob.count)
                     if low < high {
                         try sink.metadata(.extendedAttributes, pool.bytes(buffer, at: low - start, count: high - low), offset: low - blobStart)
                     }
                 }
-                if let blob = entry.accessControlList, blob.count > 0 {
+                if let blob = entry.accessControlList, !blob.isEmpty {
                     let blobStart = blobsStart + blob.offset
                     let low = max(position, blobStart), high = min(stop, blobStart + blob.count)
                     if low < high {

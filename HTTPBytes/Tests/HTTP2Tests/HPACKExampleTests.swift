@@ -142,7 +142,7 @@ import Testing
         encoder.usesHuffmanCoding = huffman
         var output = [UInt8](repeating: 0, count: 4_096)
         return try blocks.map { block in
-            let written = try output.withOutputRawSpan { (span) throws(HPACKError) -> Int in
+            let written = try output.withOutputRawSpan { span throws(HPACKError) -> Int in
                 for (name, value) in block {
                     let nameBytes = latin1(name), valueBytes = latin1(value)
                     try encoder.encode(name: nameBytes.span.bytes, value: valueBytes.span.bytes, indexing: .prefer, into: &span)

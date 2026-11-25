@@ -1,5 +1,5 @@
-import BytesCrypto
 @testable import NativeAEA
+import BytesCrypto
 import Synchronization
 import Testing
 
@@ -66,7 +66,9 @@ import Testing
     @Test(arguments: [1, 32, 33, 64, 80, 255])
     func keyExpanderMatchesHKDF(length: Int) {
         var key = Key32(repeating: 0)
-        for index in 0..<32 { key[index] = UInt8(truncatingIfNeeded: index &* 37 &+ 11) }
+        for index in 0..<32 {
+            key[index] = UInt8(truncatingIfNeeded: index &* 37 &+ 11)
+        }
         let info = KeyInfo("AEA_SK", index: 0x0102_0304)
 
         var pseudorandom = Key32(repeating: 0)
@@ -89,7 +91,9 @@ import Testing
     /// One expander serves many keys: each the same as a derivation of its own.
     @Test func dataKeysFromOneExpander() {
         var key = Key32(repeating: 0)
-        for index in 0..<32 { key[index] = UInt8(index) }
+        for index in 0..<32 {
+            key[index] = UInt8(index)
+        }
         let expander = KeyExpander(key)
         for index in [0, 1, 255, 70_000] as [UInt32] {
             let shared = AEAKeys.expandDataKey(expander, KeyInfo("AEA_SK", index: index))
@@ -102,35 +106,14 @@ import Testing
 
     // MARK: Memory
 
-    /// A pool that starts with some buffers inactive (an AEA payload, until it knows whether writers will hold segment
-    /// buffers) hands out only the active ones, recirculating them; activating the rest gives them to a waiting task
-    /// first, then to the free list behind the buffers already used.
-    @Test func poolActivatesTheRestLater() async {
-        let pool = SegmentBufferPool(count: 6, segmentCapacity: 1_024, active: 3)
-        #expect((0..<3).compactMap { _ in pool.tryAcquire() } == [0, 1, 2])
-        #expect(pool.tryAcquire() == nil)
-        pool.release(1)
-        #expect(pool.tryAcquire() == 1) // Recirculated: 3–5 untouched.
-        pool.release(1)
-        #expect(pool.tryAcquire() == 1)
-        // A task waiting for a buffer gets the first activated one.
-        async let waited = pool.acquire()
-        while pool.waiting == 0 { await Task.yield() }
-        pool.activateAll()
-        #expect(await waited == 3)
-        pool.release(2)
-        // The buffer just freed first, then the activated ones.
-        #expect((0..<3).compactMap { _ in pool.tryAcquire() } == [2, 4, 5])
-        #expect(pool.tryAcquire() == nil)
-        for index in 0..<6 { pool.release(index) }
-        #expect(pool.buffersInUse == 0)
-        #expect(pool.peakInUse.load(ordering: .relaxed) == 6)
-    }
+    // (The pool's activation test moved with the pool: BytesCompression's `BlockDecoderTests`.)
 
     /// Files by disk compression, counted in a table and made into the statistics' dictionary at the end.
     @Test func countsFilesByDiskCompression() {
         var counts = DiskCompressionCounts()
-        for type: UInt32? in [nil, 0, 8, 8, 14, 15, 16, 300, 300] { counts.count(type) }
+        for type: UInt32? in [nil, 0, 8, 8, 14, 15, 16, 300, 300] {
+            counts.count(type)
+        }
         var dictionary: [UInt32: Int] = [8: 1]
         counts.add(to: &dictionary)
         #expect(dictionary == [0: 2, 8: 3, 14: 1, 15: 1, 16: 1, 300: 2])

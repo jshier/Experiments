@@ -13,6 +13,18 @@ swift package --traits SyscallCounting --scratch-path .build-syscalls --disable-
 Tools/bench-table Disk --metric 'wall|Disk syscalls|Malloc' syscalls disk-1
 ```
 
+## 2026-11-23, stage 3: progress totals saturate
+
+`ExtractionProgress.addExpected(entries:bytes:)` added with checked `+`: the totals are the archives' claims, and two ZIP
+archives whose directories each summed to `Int.max` (NativeZip now saturates its own sum, NativeZipArchive's
+Benchmarks/RESULTS.md, stage 3) trapped here. It saturates at `Int.max` (and `Int.min` for negative adjustments); the
+fraction is computed in `Double`s and was never at risk. Tested through NativeZip's
+`HostileSizeTests.largestAcceptedSizesExtractWithoutOverflow` (one extractor, two such archives, `expectedBytes == Int.max`).
+No benchmark row touches it (one locked addition per archive added). The sweep of what NativeAEA and NativeZip hand Disk
+(times, modes, owners, device numbers, extended-attribute and ACL blobs, `decmpfs` offsets) found widening conversions and
+bounds already in place: `ExtendedAttributeBlob.append`'s `UInt32(size)` sees only AppleDouble values below 64 MB (NativeZip
+merges none larger), `acl_init(Int32(count))` would need 2^31 entries in memory.
+
 ## 2026-11-23, later: safe APIs where they're free (baselines `safe-arch-before` → `safe-arch-after`, `safe-arch-syscalls-before`; M1 Max, under load)
 
 The survey's "safe now at no cost" list (Writeups/Library-Survey-2026-11-23.md, "Unsafe code"), Disk's part, judged by

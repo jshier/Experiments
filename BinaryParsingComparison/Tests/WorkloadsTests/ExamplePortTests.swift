@@ -61,13 +61,21 @@ func elfFile(_ name: String) throws -> [UInt8] {
         let elf = try ExampleELF(parsing: data)
         func swap(_ offset: Int, _ width: Int) { data[offset..<(offset + width)].reverse() }
         data[5] = 2 // ELFDATA2MSB
-        for (offset, width) in [(16, 2), (18, 2), (20, 4), (24, 4), (28, 4), (32, 4), (36, 4)] { swap(offset, width) }
-        for offset in stride(from: 40, to: 52, by: 2) { swap(offset, 2) }
+        for (offset, width) in [(16, 2), (18, 2), (20, 4), (24, 4), (28, 4), (32, 4), (36, 4)] {
+            swap(offset, width)
+        }
+        for offset in stride(from: 40, to: 52, by: 2) {
+            swap(offset, 2)
+        }
         for index in 0..<elf.programHeaders.count {
-            for field in 0..<8 { swap(Int(elf.header.programHeaderTable) + 0x20 * index + 4 * field, 4) }
+            for field in 0..<8 {
+                swap(Int(elf.header.programHeaderTable) + 0x20 * index + 4 * field, 4)
+            }
         }
         for index in 0..<elf.sectionHeaders.count {
-            for field in 0..<10 { swap(Int(elf.header.sectionHeaderTable) + 0x28 * index + 4 * field, 4) }
+            for field in 0..<10 {
+                swap(Int(elf.header.sectionHeaderTable) + 0x28 * index + 4 * field, 4)
+            }
         }
         let expected = try ExampleELF(parsing: data)
         #expect(expected.header.endian == .big)

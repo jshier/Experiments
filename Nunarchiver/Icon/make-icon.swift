@@ -215,6 +215,7 @@ else {
     FileHandle.standardError.write(Data("can't write \(output.path)\n".utf8))
     exit(1)
 }
+
 CGImageDestinationAddImage(destination, image, nil)
 guard CGImageDestinationFinalize(destination) else {
     FileHandle.standardError.write(Data("can't write \(output.path)\n".utf8))

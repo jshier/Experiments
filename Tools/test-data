@@ -4,11 +4,15 @@
 # Test and benchmark files that aren't checked in: downloaded from other projects, or made by generator scripts
 # that are, into TestData/SET/ at the repository root (ignored by git).
 #
-#   fetch [SET...]  Download or generate the sets named (default: all). Idempotent: downloaded files already
-#                   there with the right SHA-256 are kept, and a generated set is made again only when its
-#                   generator's files have changed (or its directory is gone).
+#   fetch [SET...]  Download or generate the sets named (default: all), and the sets they take as input.
+#                   Idempotent: downloaded files already there with the right SHA-256 are kept, a snapshot is
+#                   unpacked again only when its files differ from the manifest recorded when it was unpacked,
+#                   and a generated set is made again only when its generator's files, its input sets, the
+#                   versions of the tools it runs, or Tools/lib/testdata.sh have changed (or its directory is
+#                   gone). First reclaims staging that killed fetches left. Exits 1 if any set failed.
 #   path [SET]      Print TestData/ (or TestData/SET), the directory tests and benchmarks read.
-#   list            Print each set and its files with their sizes (or "missing"), tab-separated.
+#   list            Print each set and its files with their sizes (or "missing"), tab-separated, then a
+#                   "(staging)" row for each staging directory: in use, or left over by a fetch that's gone.
 #
 # Downloaded sets (pinned to a revision, checked by SHA-256):
 #   swift-binary-parsing  apple/swift-binary-parsing's Sources/TestData/Data (PNG, QOI, ELF, PCAPNG, binary plist
@@ -26,7 +30,7 @@
 #                         of each mode and suite's key schedule, and its encryptions. Used by BytesCrypto's HPKE tests.
 #   c-references          The C codecs BytesCompression's LZFSE, LZVN, and LZBITMAP coders were checked and benchmarked
 #                         against while they were written (lzfse at e634ca5, BSD; libzbitmap at 2fcb080, MIT), as
-#                         source tarballs. Not built by any package now; Bytes' RESULTS-lz4-lzfse.md and
+#                         source tarballs. Not built by any package now; BytesCompression's RESULTS-lz4-lzfse.md and
 #                         RESULTS-lzbitmap.md have the comparisons and how to build them again.
 #   hpack-test-case       http2jp/hpack-test-case (MIT): real header sets ("stories") encoded by nghttp2, go-hpack,
 #                         python-hpack, swift-nio-hpack, and others, with and without Huffman coding, plus the raw
@@ -50,12 +54,17 @@
 #                         fuzz/http1-corpus from it.
 #   cursed-http           public/cursed-http (MIT): fbparse.h and fbresp.h, SIMD HTTP/1 head parsers (a C reference for
 #                         HTTPBytes' benchmarks), and tests/top1k, real requests and responses from the Tranco top 1,000.
-# Repository snapshots are `*.unpack.tar.gz` files: unpacked into the set's directory (top directory stripped).
-# Generated sets (the generator is run with the output directory as its argument):
+# Repository snapshots are `*.unpack.tar.gz` files: unpacked (top directory stripped) into a staging directory beside
+# the set's, with the set's downloaded files, then swapped in for the set's directory. Its `.unpacked` marker holds the
+# tarballs' SHA-256s and a manifest of every file (SHA-256) and link: a set whose files no longer match (one deleted or
+# edited, or left over from an older pin) is unpacked again.
+# Generated sets (the generator is run with an empty staging directory as its argument, which then replaces the set's
+# directory):
 #   swift-help-lz4        swift-binary-parsing's ELF/swift-help compressed with `lz4 -9`, for BinaryParsingComparison's
 #                         LZ4 and ELF workloads (BinaryParsingComparison/TestDataGenerators; needs Homebrew's lz4).
 #   nativezip-formats     Archives from Python's zipfile, Info-ZIP zip, and bsdtar for NativeZip's FormatTests
-#                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/formats; needs python3 3.14 or later).
+#                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/formats; needs python3 3.14 or later, whose
+#                         lzma and zstd modules load Homebrew's liblzma and libzstd).
 #   nativezip-lzma        LZMA payloads from liblzma for NativeZip's LZMADecoderTests
 #                         (NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma; needs Homebrew's xz).
 #   nativeaea-synthetic   An Apple Archive laid out like Xcode's (sizes, fields, APFS compression), in a signed `aea`
@@ -79,14 +88,34 @@
 #                         (HTTPBytes/Fixtures/h2o; needs the h2o and llhttp sets).
 #   http-top1k            cursed-http's tests/top1k as HTTP/1.1 heads (3,533 requests, bodies left out; 2,054 responses)
 #                         for HTTPBytes' HTTP/1 rows (HTTPBytes/Fixtures/top1k; needs the cursed-http set fetched first).
+#   archive-coverage      One deterministic source tree with every case extraction meets (2,000 small files, large text
+#                         and random ones, 24 levels, 255-byte and Unicode NFC/NFD names, relative, absolute, dangling,
+#                         and directory symbolic links, hard links across directories, extended attributes and resource
+#                         forks, ACLs, read-only and special modes, flags, APFS-compressed files), archived by `aa` (plain
+#                         and six codecs), `aea` (profiles 0–5, with the test keys), `ditto -c -k --sequesterRsrc`, and
+#                         `zip -y`, plus names that collide only by case; and manifests of what `aa extract` and
+#                         `ditto -x -k` make of each, for NativeAEA's and NativeZip's coverage tests and benchmarks
+#                         (Disk/Fixtures/archive-coverage; about 100 MB, 20 s; makes and detaches a small disk image).
 #
 # To add a set: add lines to DOWNLOADS (set, URL, SHA-256, file name) or a line to GENERATED (set, generator
-# script relative to the repository), and describe it above.
+# script relative to the repository, the sets it reads, and the tools whose paths and versions matter (lz4, xz with
+# Homebrew's liblzma, zstd with Homebrew's libzstd, python3, openssl, clang, macos by product and build version), each
+# list separated by commas or `-`), and describe it above. A generated set that reads another generated set comes
+# after it in GENERATED. Generators run with a fixed PATH, Homebrew's bin then /usr/bin:/bin:/usr/sbin:/sbin
+# (TESTDATA_GENERATOR_PATH replaces it), and their tools are looked up there, so the same tools run, and hash alike,
+# whatever PATH the fetch had. TESTDATA_HOMEBREW_DIR replaces Homebrew's prefix (tests point it at fake libraries).
 #
 # Everything this script and the generators write or delete is checked to be inside TestData/ first
-# (`in_testdata` in Tools/lib/testdata.sh).
-source "$(dirname "$0")/lib/common.sh"
-source "$(dirname "$0")/lib/testdata.sh"
+# (`in_testdata` in Tools/lib/testdata.sh: no symbolic links, and TestData itself not a link unless
+# TESTDATA_ALLOW_LINK=1). Downloads, unpacking, and generation happen in staging directories of their own
+# (`.SET.download.XXXXXX`, `.SET.unpack.XXXXXX`, `.SET.generate.XXXXXX`; `.SET.old.XXXXXX` holds a set being replaced),
+# each with an `.owner` file beside it naming the fetch that made it, so fetches running at once never share one and a
+# swap never nests one set in another (the last fetch's set wins). An interrupted fetch (INT, TERM, HUP, QUIT) puts back
+# an old set whose place is empty and removes its staging; one killed outright leaves them for the next fetch to
+# reclaim.
+# Exit if a library can't be read: without common.sh this would run on without `set -e`.
+source "$(dirname "$0")/lib/common.sh" || exit 2
+source "$(dirname "$0")/lib/testdata.sh" || exit 2
 
 ROOT="$TESTDATA_ROOT"
 
@@ -149,128 +178,794 @@ http-parser https://raw.githubusercontent.com/nodejs/http-parser/ec8b5ee63f0e511
 h2o https://github.com/h2o/h2o/archive/d3e43fcf00c3e6b17826b95d2d362d646185918a.tar.gz 23706494c2ad840ff4786c4d18fd8438e369399afc98e5f6038c42cca71cf838 h2o-d3e43fc.tar.gz
 "
 GENERATED="
-swift-help-lz4 BinaryParsingComparison/TestDataGenerators/make-swift-help-lz4.sh
-nativezip-formats NativeZipArchive/Tests/NativeZipTests/Fixtures/formats/make-fixtures.sh
-nativezip-lzma NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma/make-lzma-vectors.sh
-nativeaea-synthetic NativeAEA/Benchmarks/Fixtures/make-archive.sh
-http-corpus HTTPBytes/Fixtures/corpus/make-corpus.sh
-llhttp-cases HTTPBytes/Fixtures/llhttp/make-cases.sh
-cursed-http-cases HTTPBytes/Fixtures/cursed-http/make-cases.sh
-httparse-cases HTTPBytes/Fixtures/httparse/make-cases.sh
-http-parser-cases HTTPBytes/Fixtures/http-parser/make-cases.sh
-picohttpparser-cases HTTPBytes/Fixtures/picohttpparser/make-cases.sh
-h2o-http1-corpus HTTPBytes/Fixtures/h2o/make-corpus.sh
-http-top1k HTTPBytes/Fixtures/top1k/make-top1k.sh
+swift-help-lz4 BinaryParsingComparison/TestDataGenerators/make-swift-help-lz4.sh - lz4
+nativezip-formats NativeZipArchive/Tests/NativeZipTests/Fixtures/formats/make-fixtures.sh - python3,xz,zstd,macos
+nativezip-lzma NativeZipArchive/Tests/NativeZipTests/Fixtures/lzma/make-lzma-vectors.sh - python3,xz
+nativeaea-synthetic NativeAEA/Benchmarks/Fixtures/make-archive.sh - python3,openssl,macos
+http-corpus HTTPBytes/Fixtures/corpus/make-corpus.sh qifs -
+llhttp-cases HTTPBytes/Fixtures/llhttp/make-cases.sh llhttp-tests -
+cursed-http-cases HTTPBytes/Fixtures/cursed-http/make-cases.sh cursed-http,llhttp-tests,http-garden,picohttpparser,httparse python3
+httparse-cases HTTPBytes/Fixtures/httparse/make-cases.sh httparse -
+http-parser-cases HTTPBytes/Fixtures/http-parser/make-cases.sh http-parser -
+picohttpparser-cases HTTPBytes/Fixtures/picohttpparser/make-cases.sh picohttpparser -
+h2o-http1-corpus HTTPBytes/Fixtures/h2o/make-corpus.sh h2o,llhttp clang
+http-top1k HTTPBytes/Fixtures/top1k/make-top1k.sh cursed-http -
+archive-coverage Disk/Fixtures/archive-coverage/make-archives.sh - python3,openssl,macos
 "
 STAMP=".generator"
+MARKER=".unpacked"
 
 sets() { printf '%s\n%s\n' "$DOWNLOADS" "$GENERATED" | perl -ane 'print "$F[0]\n" if @F' | sort -u; }
+download_sets() { echo "$DOWNLOADS" | perl -ane 'print "$F[0]\n" if @F && !$seen{$F[0]}++'; }
+generated_sets() { echo "$GENERATED" | perl -ane 'print "$F[0]\n" if @F'; }
+is_generated() { grep -qxF -- "$1" <<< "$(generated_sets)"; }
+# DOWNLOADS lines of SET: "set url sum file".
+downloads_of() { echo "$DOWNLOADS" | perl -sane 'print if @F && $F[0] eq $set' -- -set="$1"; }
+generator_of() { echo "$GENERATED" | perl -sane 'print "$F[1]\n" if @F && $F[0] eq $set' -- -set="$1"; }
+# The sets SET's generator reads, one a line.
+inputs_of() {
+    echo "$GENERATED" | perl -sane 'print map { "$_\n" } split /,/, $F[2] if @F > 2 && $F[0] eq $set && $F[2] ne "-"' -- -set="$1"
+}
+# The tools whose versions SET's output depends on, one a line.
+tools_of() {
+    echo "$GENERATED" | perl -sane 'print map { "$_\n" } split /,/, $F[3] if @F > 3 && $F[0] eq $set && $F[3] ne "-"' -- -set="$1"
+}
+# Generators run with a fixed PATH, Homebrew's bin then the system's, and their tools are looked up in it: a fetch from
+# a launchd job, `env -i`, or a shell with another PATH runs the same tools and computes the same hashes.
+# TESTDATA_GENERATOR_PATH replaces it (tests put fake tools first), and TESTDATA_HOMEBREW_DIR Homebrew's prefix, where
+# the libraries hashed below are (tests put fake ones there).
+HOMEBREW_DIR="${TESTDATA_HOMEBREW_DIR:-}"
+if [[ -z "$HOMEBREW_DIR" ]]; then
+    for brew in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        if [[ -x "$brew" ]]; then HOMEBREW_DIR="$(dirname "$(dirname "$brew")")"; break; fi
+    done
+fi
+GENERATOR_PATH="${TESTDATA_GENERATOR_PATH:-${HOMEBREW_DIR:+$HOMEBREW_DIR/bin:}/usr/bin:/bin:/usr/sbin:/sbin}"
+
+# A library's SHA-256, or "missing".
+library_sum() { if [[ -f "$1" ]]; then sha256 "$1"; else echo missing; fi; }
+
+# One line naming TOOL, as the generators find it, and its version (or that it's missing): folded into the generator
+# hash, so a new lz4, xz or zstd (and Homebrew's liblzma and libzstd, which xz, zstd, and Python's lzma and zstd modules
+# load), python3, openssl, clang, or macOS (aa, aea, ditto, zip, bsdtar: by product and build version) makes the set
+# again.
+tool_version() {
+    local path="" version="" extra=""
+    case "$1" in
+        macos)
+            echo "tool macos: $(sw_vers -productVersion 2> /dev/null || true) $(sw_vers -buildVersion 2> /dev/null || true)"
+            return 0 ;;
+        clang)
+            path="$(xcrun --find clang 2> /dev/null || true)"
+            version="$(xcrun clang --version 2> /dev/null | head -1 || true)" ;;
+        *)
+            path="$(PATH="$GENERATOR_PATH"; command -v "$1" 2> /dev/null || true)"
+            if [[ -n "$path" && "$1" == openssl ]]; then
+                version="$("$path" version 2>&1 || true)"
+            elif [[ -n "$path" ]]; then
+                version="$("$path" --version 2>&1 | tr '\n' ' ' || true)"
+            fi ;;
+    esac
+    if [[ "$1" == xz ]]; then
+        extra="liblzma $(library_sum "$HOMEBREW_DIR/opt/xz/lib/liblzma.dylib")"
+    elif [[ "$1" == zstd ]]; then
+        extra="libzstd $(library_sum "$HOMEBREW_DIR/opt/zstd/lib/libzstd.dylib")"
+    fi
+    echo "tool $1: ${path:-missing} ${version} ${extra}"
+}
+# SET and every set it reads, recursively.
+with_inputs() {
+    local name input
+    for name in "$@"; do
+        echo "$name"
+        for input in $(inputs_of "$name"); do with_inputs "$input"; done
+    done
+}
 
 sha256() { shasum -a 256 "$1" | cut -d' ' -f1; }
 
-check_set() { sets | grep -qx "$1" || die "unknown set '$1' (sets: $(sets | tr '\n' ' '))"; }
+check_set() { grep -qxF -- "$1" <<< "$(sets)" || die "unknown set '$1' (sets: $(sets | tr '\n' ' '))"; }
 
-generator_of() { echo "$GENERATED" | perl -sane 'print "$F[1]\n" if @F && $F[0] eq $set' -- -set="$1"; }
+# Sets that failed in this run (one a line): a generated set whose input failed isn't made from what's left.
+FAILED_SETS=""
+failed_set() { grep -qxF -- "$1" <<< "$FAILED_SETS"; }
+mark_failed() { FAILED_SETS="$FAILED_SETS$1"$'\n'; }
 
-# A hash of every file in the generator's directory: its scripts, and whatever they read.
-generator_hash() {
+# Staging: directories beside the sets named `.SET.KIND.XXXXXX`, KIND one of download (files being fetched), unpack and
+# generate (a set being made), old (a set's previous directory, at `.SET.old.XXXXXX/SET`, between the two renames of a
+# swap). Each has a `.SET.KIND.XXXXXX.owner` file beside it: the PID and start time of the fetch that made it. This
+# run's are removed on exit (INT, TERM, HUP, and QUIT exit through it; further signals are ignored while it runs) after
+# any old set whose place is empty is renamed back; a fetch killed outright leaves them, and the next fetch reclaims
+# those whose owner is gone (`sweep_staging`).
+STAGING=()
+OLD_SETS=()
+GIVEN_UP=""
+STAGED=""
+STAGING_PATTERN='^\.(.+)\.(download|unpack|generate|old)\.[A-Za-z0-9]{6}$'
+# process_start (common.sh) reads start times in the C locale and UTC: fetches run in different TZ or LC_* settings
+# read one process's start alike.
+OWNER_START="$(process_start $$)"
+OWNER="$$ $OWNER_START"
+# A trash directory's suffix (discard_staging): this fetch's PID and start time, letters and digits only, so a sweep
+# tells a live fetch's trash from one whose PID has been reused. trash_tag PID: the same for another process.
+TRASH_TAG="$$.${OWNER_START//[!A-Za-z0-9]/}"
+trash_tag() { local start; start="$(process_start "$1")"; echo "$1.${start//[!A-Za-z0-9]/}"; }
+
+# Succeeds while the fetch named in OWNER_FILE is running (the same PID, started at the same time).
+owner_alive() {
+    local pid start
+    [[ -f "$1" ]] || return 1
+    { read -r pid start < "$1"; } 2> /dev/null || return 1 # gone meanwhile: another fetch removed it
+    [[ "$pid" =~ ^[0-9]+$ && -n "$start" && "$(process_start "$pid")" == "$start" ]]
+}
+
+cleanup_staging() {
+    # A second signal (Ctrl-C, then Ctrl-\) would exit again and cut the cleanup short.
+    trap '' INT TERM HUP QUIT
     local dir
-    dir="$(dirname "$EXPERIMENTS_DIR/$1")"
-    (cd "$dir" && find . -type f ! -name '.*' | sort | while read -r file; do shasum -a 256 "$file"; done) | shasum -a 256 | cut -d' ' -f1
+    # First what discard_staging was removing when the signal came (already renamed aside): the discards below reset
+    # TRASHING.
+    if [[ -n "${TRASHING:-}" ]]; then remove_tree "$TRASHING" > /dev/null 2>&1 || true; fi
+    for dir in ${OLD_SETS[@]+"${OLD_SETS[@]}"}; do
+        if [[ -d "$dir" ]]; then restore_old "$dir" || true; fi
+    done
+    for dir in ${STAGING[@]+"${STAGING[@]}"}; do
+        discard_staging "$dir" > /dev/null 2>&1 || true
+    done
+    for dir in ${OLD_SETS[@]+"${OLD_SETS[@]}"}; do
+        # Not again what a swap already failed to remove (it said so); the next fetch tries.
+        if [[ -d "$dir" && "$GIVEN_UP" != *"$dir"$'\n'* ]]; then remove_old "$dir" || true; fi
+    done
+    return 0
+}
+trap cleanup_staging EXIT
+trap 'exit 130' INT TERM HUP
+trap 'exit 131' QUIT
+
+# A new staging directory beside the sets, named for SET and KIND, with its own suffix: concurrent fetches never share
+# one. Sets STAGED to its path (not printed: run in `$(…)`, it couldn't be recorded for the cleanup).
+make_staging() {
+    in_testdata "$ROOT/.$1.$2"
+    STAGED="$(mktemp -d "$ROOT/.$1.$2.XXXXXX")" || { note "error: can't make a staging directory in $ROOT"; return 1; }
+    if [[ "$2" == old ]]; then OLD_SETS+=("$STAGED"); else STAGING+=("$STAGED"); fi
+    in_testdata "$STAGED"
+    # Written whole, then renamed: a sweep never reads half an owner file.
+    if ! echo "$OWNER" > "$STAGED.owner.$$" || ! mv -f "$STAGED.owner.$$" "$STAGED.owner"; then
+        rm -f "$STAGED.owner.$$"
+        note "error: can't write $STAGED.owner"
+        return 1
+    fi
+    chmod 755 "$STAGED"
+}
+
+# Removes a staging directory (and its owner file). It's renamed aside first (to `DIR.trash.TRASH_TAG`), so of fetches
+# sweeping one leftover at once only one removes it: DISCARDED says whether this one did. One that can't be removed is
+# renamed back. TRASHING names the directory being removed, for the cleanup when a signal comes meanwhile; a fetch
+# killed outright leaves it to the next sweep.
+DISCARDED=""
+TRASHING=""
+discard_staging() {
+    local trash="$1.trash.$TRASH_TAG"
+    DISCARDED=""
+    in_testdata "$1"
+    TRASHING="$trash" # before the rename: a signal right after it still finds the trash
+    if rename_path "$1" "$trash" 2> /dev/null; then
+        DISCARDED=yes
+        if ! remove_tree "$trash"; then
+            rename_path "$trash" "$1" || true
+            TRASHING=""
+            return 1
+        fi
+    elif present "$1"; then
+        TRASHING=""
+        remove_tree "$1" || return 1 # there but not renamable: removed in place
+        DISCARDED=yes
+    fi
+    TRASHING=""
+    rm -f "$1.owner"
+}
+
+# The set an old directory holds: `.SET.old.XXXXXX` → SET.
+old_set_name() { local name; name="$(basename "$1")"; name="${name#.}"; echo "${name%.old.*}"; }
+
+# Succeeds when SET's place holds a set: a directory, not a symbolic link, with a set's marker or stamp or a file that
+# isn't hidden. A link or a file there isn't one, nor the empty directory fetch_set makes before its first download
+# lands, nor a directory holding only hidden files (Finder's .DS_Store).
+set_in_place() {
+    [[ -d "$ROOT/$1" && ! -L "$ROOT/$1" ]] || return 1
+    [[ -e "$ROOT/$1/$STAMP" || -e "$ROOT/$1/$MARKER" || -n "$(ls "$ROOT/$1" 2> /dev/null)" ]]
+}
+
+# Renames an old directory's set back into place if its place is empty (a swap interrupted between its renames). When the
+# rename fails because another fetch filled the place meanwhile (renamed this set back first, or swapped a newer one
+# in), this copy isn't needed: that's success too, and remove_old discards it. An empty directory at the place is
+# replaced (rename(2) does that atomically). Anything else there (a link, a file, a directory of hidden files only) is
+# left alone, and so is the old copy, with an error.
+restore_old() {
+    local set error
+    set="$(old_set_name "$1")"
+    [[ -e "$1/$set" || -L "$1/$set" ]] || return 0
+    set_in_place "$set" && return 0
+    if [[ -L "$ROOT/$set" ]] || [[ -e "$ROOT/$set" && ! -d "$ROOT/$set" ]] ||
+        [[ -n "$(ls -A "$ROOT/$set" 2> /dev/null)" ]]; then
+        set_in_place "$set" && return 0 # another fetch's first file landed meanwhile
+        note "error: $ROOT/$set isn't a set's directory: its old copy is kept in $1 (remove $ROOT/$set to restore it)"
+        return 1
+    fi
+    if ! error="$(rename_path "$1/$set" "$ROOT/$set" 2>&1)"; then
+        set_in_place "$set" && return 0
+        note "$error"
+        note "error: $set is still in $1: rename it back to $ROOT/$set"
+        return 1
+    fi
+    note "restored $set from $1"
+}
+
+# Removes an old directory once its set is back in place or replaced; never the only copy of a set.
+remove_old() {
+    local set
+    set="$(old_set_name "$1")"
+    restore_old "$1" || return 1
+    # An old directory holding no set (a fetch killed before its first rename) is no copy of anything.
+    if [[ -e "$1/$set" || -L "$1/$set" ]] && ! set_in_place "$set"; then
+        note "error: $set's only copy is in $1"
+        return 1
+    fi
+    discard_staging "$1" || { note "error: the old $set is left in $1"; return 1; }
+}
+
+# Reclaims staging left by fetches that are gone (killed outright: no EXIT trap): an old set whose place is empty is
+# restored first. A directory with no owner file counts as left over only after a minute (its maker may be between
+# `mktemp` and writing the file). With `--report`, only prints a row for each staging directory instead.
+sweep_staging() {
+    local report="${1:-}" dir base now mtime kind tag concealed
+    now="$(date +%s)"
+    # Another fetch may remove an entry while this one looks at it: one whose time can't be read is skipped (an empty
+    # operand in `$(( ))` would abandon the whole fetch).
+    for dir in "$ROOT"/.*; do
+        base="$(basename "$dir")"
+        [[ "$base" =~ $STAGING_PATTERN ]] || continue
+        kind="${BASH_REMATCH[2]}"
+        # A directory whose ACL denies reading its attributes reads as missing (its age can't be read either): once its
+        # fetch is gone it's left over, and remove_tree removes the ACL with the rest. Anything else of a staging name (a
+        # file or a link, hidden or not: no fetch makes one) is left alone, never followed.
+        concealed=""
+        if ! real_directory "$dir"; then
+            hidden_directory "$dir" || continue
+            concealed=", hidden by its ACL"
+        fi
+        if owner_alive "$dir.owner"; then
+            [[ -z "$report" ]] ||
+                printf '(staging)\t%s\tin use by fetch %s\n' "$base" "$(cut -d' ' -f1 "$dir.owner" 2> /dev/null)"
+            continue
+        fi
+        if [[ -z "$concealed" ]]; then
+            mtime="$(stat -f %m "$dir" 2> /dev/null)" || continue
+            if [[ ! -f "$dir.owner" ]] && (( now - mtime < 60 )); then
+                [[ -z "$report" ]] || printf '(staging)\t%s\tbeing made\n' "$base"
+                continue
+            fi
+        fi
+        if [[ -n "$report" ]]; then
+            printf '(staging)\t%s\tleft over by a fetch that is gone%s (the next fetch removes it)\n' "$base" "$concealed"
+        elif [[ "$kind" == old ]]; then
+            # "removed" only from the fetch that removed it (another sweeping at once may have).
+            remove_old "$dir" && [[ -n "$DISCARDED" ]] && note "removed $base, left by a fetch that is gone"
+        else
+            discard_staging "$dir" && [[ -n "$DISCARDED" ]] && note "removed $base, left by a fetch that is gone"
+        fi
+    done
+    # Directories a fetch was removing when it was killed (`.….trash.PID.START`): removed unless that fetch is still
+    # running (the same PID, started at the same time; a reused PID doesn't count).
+    for dir in "$ROOT"/.*.trash.*; do
+        tag="${dir##*.trash.}"
+        [[ "$tag" =~ ^[0-9]+(\..*)?$ ]] || continue
+        real_directory "$dir" || hidden_directory "$dir" || continue # a directory hidden by its ACL too
+        if [[ "$(trash_tag "${tag%%.*}")" == "$tag" ]]; then
+            [[ -z "$report" ]] || printf '(staging)\t%s\tbeing removed by fetch %s\n' "$(basename "$dir")" "${tag%%.*}"
+        elif [[ -n "$report" ]]; then
+            printf '(staging)\t%s\tleft over by a fetch that is gone (the next fetch removes it)\n' "$(basename "$dir")"
+        else
+            remove_tree "$dir" || true
+        fi
+    done
+    # Owner files whose directory is gone (a fetch killed between removing the two).
+    for dir in "$ROOT"/.*.owner; do
+        [[ -f "$dir" ]] || continue
+        present "${dir%.owner}" && continue
+        owner_alive "$dir" || [[ -n "$report" ]] || rm -f "$dir"
+    done
+    # Owner files half made (a fetch killed between writing and renaming one), after a minute.
+    for dir in "$ROOT"/.*.owner.*; do
+        [[ -f "$dir" && -z "$report" ]] || continue
+        mtime="$(stat -f %m "$dir" 2> /dev/null)" || continue
+        if (( now - mtime >= 60 )); then rm -f "$dir"; fi
+    done
+    return 0
+}
+
+# Succeeds when PATH is there, including when an ACL denying its owner `readsecurity` makes lstat fail with EACCES (then
+# `-e` and `-L` read false).
+present() { [[ -e "$1" || -L "$1" ]] || hidden "$1"; }
+# Succeeds when an ACL denying `readsecurity` keeps PATH from being seen (lstat fails with EACCES). By lstat alone: `-e`
+# and `-d` follow a link, so a hidden link to a directory reads as one.
+hidden() { perl -e 'exit 1 if lstat $ARGV[0]; exit($!{EACCES} ? 0 : 1)' "$1"; }
+# Succeeds when PATH itself is a directory, by lstat: never a link to one, hidden or not.
+real_directory() { perl -e 'exit((lstat $ARGV[0]) && -d _ ? 0 : 1)' "$1"; }
+
+# Succeeds when PATH is a directory hidden by its ACL: not a link (readlink fails with EINVAL), and it opens or opendir
+# fails with EACCES (which only a directory gives: one whose ACL also denies listing). A directory is hard-linked only on
+# HFS+, where remove_tree checks first, so its ACL is DIR's own to remove; a hidden file or link may be someone else's.
+hidden_directory() {
+    hidden "$1" && perl -e '
+        exit 1 if defined(readlink $ARGV[0]) || !$!{EINVAL};
+        exit 0 if opendir(my $d, $ARGV[0]);
+        exit($!{EACCES} ? 0 : 1)' "$1"
+}
+
+# Perl, by system calls that work where lstat can't (an ACL denying readsecurity), unlike df and stat; each undefined
+# when its call fails:
+# - fsid(PATH) and fstype(PATH): PATH's file system's id and type ("apfs", "hfs") by statfs(2) (SYS_statfs64, 345;
+#   f_fsid at offset 48 of struct statfs, f_fstypename at 72). They follow a link.
+# - identity(PATH): "DEVICE:FILEID" by getattrlist(2) (SYS_getattrlist, 220; ATTR_CMN_DEVID and ATTR_CMN_FILEID), not
+#   following a link: the same for every spelling of one directory (/System/Volumes/Data/…, another letter case).
+# - directory_links(PATH): a directory's hard links (ATTR_DIR_LINKCOUNT; st_nlink counts its entries on HFS+).
+STATFS_PERL='
+    sub statfs_buffer { my $buffer = "\0" x 2168; syscall(345, $_[0], $buffer) == 0 ? $buffer : undef }
+    sub fsid { my $buffer = statfs_buffer($_[0]); defined $buffer ? join(":", unpack("x48 l l", $buffer)) : undef }
+    sub fstype { my $buffer = statfs_buffer($_[0]); defined $buffer ? unpack("x72 Z16", $buffer) : undef }
+    sub attributes {
+        my ($path, $common, $directory, $size) = @_;
+        my $list = pack("S S L L L L L", 5, 0, $common, 0, $directory, 0, 0);
+        my $buffer = "\0" x $size;
+        syscall(220, $path, $list, $buffer, $size, 1) == 0 ? $buffer : undef
+    }
+    sub identity {
+        my $buffer = attributes($_[0], 0x2000002, 0, 16);
+        defined $buffer ? join(":", unpack("x4 l Q", $buffer)) : undef
+    }
+    sub directory_links { my $buffer = attributes($_[0], 0, 1, 8); defined $buffer ? unpack("x4 L", $buffer) : undef }'
+
+# Succeeds when PATH is a volume's mount point: not a link, and on another file system than its parent (by statfs, so
+# hidden or not).
+mount_point() {
+    perl -e "$STATFS_PERL"'
+        my $path = $ARGV[0] =~ s{/+$}{}r;
+        exit 1 if defined(readlink $path) || !$!{EINVAL};
+        my $parent = $path =~ s{/[^/]*$}{}r;
+        my ($self, $up) = (fsid($path), fsid($parent eq "" ? "/" : $parent));
+        exit(defined $self && defined $up && $self ne $up ? 0 : 1)' "$1"
+}
+
+# Succeeds unless DIR is on HFS+, where a directory can have hard links (link(2) needs no privilege there), and a
+# directory in it, DIR included, has more than one link or can't be checked: one it can't list, or one hidden by its ACL
+# (a hidden file or link is fine: rm doesn't follow either). Volumes mounted inside are left out: nothing enters them.
+unshared_tree() {
+    perl -e "$STATFS_PERL"'
+        my $root = shift;
+        exit 0 unless (fstype($root) // "") eq "hfs";
+        my $device = (lstat $root)[0];
+        exit 1 unless defined $device;
+        sub check {
+            my ($dir) = @_;
+            exit 1 unless (directory_links($dir) // 0) == 1;
+            opendir(my $handle, $dir) or exit 1;
+            for my $name (grep { $_ ne "." && $_ ne ".." } readdir $handle) {
+                my $path = "$dir/$name";
+                unless (lstat $path) {
+                    next if $!{ENOENT};
+                    exit 1 unless $!{EACCES};
+                    next if defined(readlink $path) || !$!{EINVAL}; # a hidden link
+                    next if !opendir(my $probe, $path) && $!{ENOTDIR}; # a hidden file
+                    exit 1; # a hidden directory
+                }
+                check($path) if -d _ && (lstat _)[0] == $device;
+            }
+        }
+        check($root);' "$1"
+}
+
+# Unmounts every volume mounted at or inside DIR (a generator's disk image, left by a fetch killed outright; any file
+# system, a network share too), deepest first, so removing DIR never reaches into one; then detaches each disk image
+# they came from, unless another of its volumes is mounted outside DIR. By mount point, `umount -f`; an image by its
+# first device (`hdiutil detach MOUNTPOINT` failed, "Resource busy", once the directory had been renamed). No
+# `diskutil`: it hung on freshly added volumes, and `umount -f` and `hdiutil detach` cover the cases. Each step is
+# reported only when it worked; a volume still mounted is kept out of the removal by `rm -x`, `find -x`, and the device
+# and file-system checks before every change. A mount is DIR's when DIR is the mount point or one of its parents, by
+# identity, not spelling: mount lists the kernel's (/Users/…), DIR may be another (/System/Volumes/Data/Users/…, or
+# another letter case).
+detach_mounts_under() {
+    local action target
+    while IFS=$'\t' read -r action target; do
+        case "$action" in
+            unmount)
+                if umount -f "$target" 2> /dev/null; then note "unmounted $target"; fi ;;
+            detach)
+                if hdiutil detach -quiet "$target" 2> /dev/null || hdiutil detach -quiet -force "$target" 2> /dev/null; then
+                    note "detached $target"
+                fi ;;
+        esac
+    done < <(perl -e "$STATFS_PERL"'
+        my $dir = identity(shift);
+        exit 0 unless defined $dir;
+        my @mounts;
+        open(my $mount, "-|", "mount") or exit 1;
+        while (<$mount>) { push @mounts, [$1, $2] if m{^(.+?) on (/.*) \([^()]*\)$} }
+        my %identities;
+        sub within {
+            for (my $path = $_[0]; ; $path =~ s{/[^/]*$}{}) {
+                $path = "/" if $path eq "";
+                return 1 if ($identities{$path} //= identity($path) // "") eq $dir;
+                return 0 if $path eq "/";
+            }
+        }
+        my @inside = grep { within($_->[1]) } @mounts;
+        exit 0 unless @inside;
+        # Every device of every attached image, by image; and each image by its first device.
+        my (%image, %first, $index);
+        open(my $info, "-|", "hdiutil", "info") or exit 1;
+        while (<$info>) {
+            $index++ if /^=+$/;
+            next unless m{^(/dev/disk\S+)\s};
+            $image{$1} = $index;
+            $first{$index} //= $1;
+        }
+        my (%images, %elsewhere);
+        for (@mounts) {
+            my $which = $image{$_->[0]};
+            next unless defined $which;
+            if (within($_->[1])) { $images{$which} = 1 } else { $elsewhere{$which} = 1 }
+        }
+        print "unmount\t$_->[1]\n" for sort { length($b->[1]) <=> length($a->[1]) } @inside;
+        print "detach\t$first{$_}\n" for grep { !$elsewhere{$_} } sort keys %images;' "$1")
+}
+
+# Removes DIR (inside TestData). `present` says whether anything is left: neither rm's status (0, silently, for a DIR it
+# can't stat) nor `-e` (false for one whose ACL hides its attributes) can. A volume mounted at DIR itself is unmounted
+# first, and DIR refused if it can't be (`rm -x` would empty it: DIR's device is the volume's). On HFS+, where a
+# directory can be hard-linked (and rm would follow it out of DIR), DIR is refused, nothing changed, unless every
+# directory in it has one link and can be checked (unshared_tree). If anything is left, it
+# clears what stops it, without following links and without changing anything on another volume (rm and find with `-x`,
+# and every change made only to an entry on DIR's device, or, for one lstat can't read, DIR's file system by statfs; so
+# a mount point, which find still visits, is never changed), on DIR only when it is a directory:
+# - volumes mounted inside DIR are unmounted, and their images detached;
+# - DIR's ACL is removed when it's a directory hidden by it (denying readsecurity makes it unreadable to rm and find);
+# - a walk by readdir, which needs no stat, finds directories hidden the same way and removes their ACLs (a hidden file
+#   or link is left alone: it may be hard-linked from elsewhere, and rm unlinks it without a stat where deleting it is
+#   allowed), and opens and enters every directory, clearing the user-immutable and append-only flags, then the ACL (it
+#   can't change while the directory is locked), then giving read, write, and search to one that couldn't be opened or
+#   entered;
+# - each directory's flags, ACL (a "deny delete" entry), and mode, where they're set, in a few batched calls;
+# - the flags and ACLs of files whose every link is inside DIR, in a few batched calls, one path per file. A file
+#   hard-linked from elsewhere is someone else's too: its flags, mode, and ACL are left alone, and the removal then fails.
+# An entry both locked and hiding its attributes stays (chflags can't stat it; its ACL can't change while it's locked).
+# Fails if anything is left.
+remove_tree() {
+    in_testdata "$1"
+    if mount_point "$1"; then
+        detach_mounts_under "$1"
+        if mount_point "$1"; then
+            note "error: can't remove $1: a volume is mounted there"
+            return 1
+        fi
+    fi
+    # Before any rm: on HFS+ even a plain one would follow a directory hard link out of DIR.
+    if ! unshared_tree "$1"; then
+        note "error: can't remove $1: it is on HFS+, and a directory in it is hard-linked or can't be checked"
+        return 1
+    fi
+    rm -rf -x "$1" 2> /dev/null || true
+    present "$1" || return 0
+    if hidden_directory "$1"; then chmod -N "$1" 2> /dev/null || true; fi
+    # Only a directory gets the passes (a link, hidden or not, never: they would follow it).
+    if ! real_directory "$1"; then
+        note "error: can't remove $1: not a directory"
+        return 1
+    fi
+    detach_mounts_under "$1"
+    # The walk stays on DIR's volume: it enters only directories on DIR's device, and unhides an entry lstat can't read
+    # only on DIR's file system (statfs reads it: a mount point hidden by its ACL is another volume's root). With access
+    # tests, `-x` reads the ACL too.
+    perl -e "$STATFS_PERL"'
+        use filetest "access";
+        my $root = shift;
+        my $device = (lstat $root)[0];
+        my $volume = fsid($root);
+        exit 0 unless defined $device && defined $volume;
+        sub walk {
+            my ($dir) = @_;
+            my $opened = opendir(my $handle, $dir);
+            return unless $opened || $!{EACCES};
+            # One that cannot be opened or entered (its children could not be read, nor found by find).
+            unless ($opened && -x $dir) {
+                system("chflags", "nouchg,nouappnd", $dir);
+                system("chmod", "-N", $dir);
+                system("chmod", "u+rwx", $dir);
+                $opened or opendir($handle, $dir) or return;
+            }
+            my @names = grep { $_ ne "." && $_ ne ".." } readdir $handle;
+            closedir $handle;
+            for my $name (@names) {
+                my $path = "$dir/$name";
+                unless (lstat $path) {
+                    next unless $!{EACCES};
+                    # Hidden: only a directory has its ACL removed (not a link, readlink says, and it opens, or opendir
+                    # fails with EACCES, which only a directory gives), since a directory here is hard-linked from
+                    # nowhere (only HFS+ allows that, and unshared_tree refused it). A hidden file or link may be: it is
+                    # left alone, and rm unlinks it without a stat where deleting it is allowed (else the removal fails).
+                    next if defined(readlink $path) || !$!{EINVAL};
+                    if (opendir(my $probe, $path)) { closedir $probe } else { next unless $!{EACCES} }
+                    next unless (fsid($path) // "") eq $volume;
+                    system("chmod", "-N", $path);
+                    lstat $path or next;
+                }
+                walk($path) if -d _ && (lstat _)[0] == $device;
+            }
+        }
+        walk($root);' "$1" 2> /dev/null || true
+    # Directories only where flags, an ACL, or a mode stop the removal, and only those on DIR's device: `find -x` doesn't
+    # descend into another volume, but it still visits its mount point. Batched, flags first (an ACL can't change while a
+    # directory is locked); the walk already made every directory on the device one find can read. `chmod -N` without
+    # -h: with it, chmod can't remove an ACL that denies its owner listing (each path is a directory by lstat).
+    find -x "$1" -type d \( -flags +uchg -o -flags +uappnd -o -acl -o ! -perm -u+rwx \) -print0 2> /dev/null |
+        perl -0 -e '
+            my $device = (lstat shift)[0];
+            my @directories = grep { my @s = lstat $_; @s && -d _ && $s[0] == $device } map { chomp; $_ } <STDIN>;
+            sub batched { my ($command, @list) = @_; system(@$command, splice(@list, 0, 256)) while @list }
+            batched(["chflags", "-h", "nouchg,nouappnd"], @directories);
+            batched(["chmod", "-N"], @directories);
+            batched(["chmod", "-h", "u+rwx"], @directories);' "$1" 2> /dev/null || true
+    # Files only where flags or an ACL are set, on DIR's device, and only those whose every link is inside DIR (links
+    # counted by inode over DIR's files with more than one, when any candidate has more); one path per file, in batches
+    # of 256. Flags first: an ACL can't change while a file is locked. `chmod -N` without -h for a file (with it, chmod can't remove an
+    # ACL that denies its owner reading), with -h for a symbolic link.
+    find -x "$1" ! -type d \( -flags +uchg -o -flags +uappnd -o -acl \) -print0 2> /dev/null |
+        perl -0 -e '
+            my $root = shift;
+            my $device = (lstat $root)[0];
+            my @paths = map { chomp; $_ } <STDIN>;
+            my (%inside, %seen, @files, @links);
+            if (grep { my @s = lstat $_; @s && $s[3] > 1 } @paths) {
+                open(my $all, "-|", "find", "-x", $root, "!", "-type", "d", "-links", "+1", "-print0") or exit 1;
+                while (my $path = <$all>) {
+                    chomp $path;
+                    my @s = lstat $path or next;
+                    $inside{"$s[0]:$s[1]"}++;
+                }
+            }
+            for my $path (@paths) {
+                my @s = lstat $path or next;
+                next if $s[0] != $device || $seen{"$s[0]:$s[1]"}++;
+                next if $s[3] > 1 && ($inside{"$s[0]:$s[1]"} // 0) < $s[3];
+                push @{ -l _ ? \@links : \@files }, $path;
+            }
+            sub batched { my ($command, @list) = @_; system(@$command, splice(@list, 0, 256)) while @list }
+            batched(["chflags", "-h", "nouchg,nouappnd"], @files, @links);
+            batched(["chmod", "-N"], @files);
+            batched(["chmod", "-h", "-N"], @links);' "$1" 2> /dev/null || true
+    rm -rf -x "$1" || true
+    present "$1" || return 0
+    note "error: can't remove $1"
+    return 1
+}
+
+# rename(2): atomic, and unlike `mv` it never moves a directory into an existing one (it fails instead).
+rename_path() { perl -e 'rename($ARGV[0], $ARGV[1]) or die "error: can\x27t rename $ARGV[0] to $ARGV[1]: $!\n"' "$1" "$2"; }
+
+# Replaces SET's directory with STAGING: the old directory is renamed aside (into `.SET.old.XXXXXX`), the staging
+# directory renamed into its place, then the old one removed. If the second rename fails, the old set is renamed back
+# when its place is still empty; when another fetch put its own set there in between, this one tries again, so the
+# last fetch's set wins and neither nests in the other. Fails (leaving the new set in place) if the old one can't be
+# removed.
+swap_in() {
+    local staging="$1" set="$2" old attempt
+    in_testdata "$ROOT/$set"
+    for attempt in 1 2 3; do
+        old=""
+        if [[ -e "$ROOT/$set" || -L "$ROOT/$set" ]]; then
+            make_staging "$set" old || return 1
+            old="$STAGED"
+            if ! rename_path "$ROOT/$set" "$old/$set" 2> /dev/null; then
+                discard_staging "$old" # another fetch moved it first
+                continue
+            fi
+        fi
+        if rename_path "$staging" "$ROOT/$set" 2> /dev/null; then
+            rm -f "$staging.owner"
+            [[ -z "$old" ]] || remove_old "$old" || { GIVEN_UP="$GIVEN_UP$old"$'\n'; return 1; }
+            return 0
+        fi
+        [[ -z "$old" ]] || remove_old "$old" || { GIVEN_UP="$GIVEN_UP$old"$'\n'; return 1; }
+        note "$set was replaced by another fetch while this one swapped it in (attempt $attempt)"
+    done
+    note "error: couldn't swap $set into place: other fetches kept replacing it"
+    return 1
+}
+
+# Every file under DIR but the marker, sorted: "SHA-256  path" for files, "link path -> target" for links.
+manifest() {
+    perl -MFile::Find -MDigest::SHA -e '
+        my ($root, $marker) = @ARGV; my @lines;
+        find({ no_chdir => 1, wanted => sub {
+            my $rel = substr($File::Find::name, length $root); $rel =~ s{^/}{};
+            return if $rel eq "" || $rel eq $marker;
+            if (-l $File::Find::name) { push @lines, "link $rel -> " . readlink($File::Find::name) . "\n" }
+            elsif (-f _) { push @lines, Digest::SHA->new(256)->addfile($File::Find::name, "b")->hexdigest . "  $rel\n" }
+        } }, $root);
+        print sort @lines;' "$1" "$MARKER"
+}
+
+# What a generator reading SET depends on: a generated set's stamp; a downloaded set's pins and unpacked marker.
+input_state() {
+    if is_generated "$1"; then
+        cat "$ROOT/$1/$STAMP" 2> /dev/null || echo "not generated"
+    else
+        downloads_of "$1"
+        cat "$ROOT/$1/$MARKER" 2> /dev/null || true
+    fi
+}
+
+# A hash of what SET's generator makes it from: every file in the generator's directory (its scripts, and whatever
+# they read), Tools/lib/testdata.sh (the guard the generators source), and the state of each input set.
+generator_hash() {
+    local set="$1" dir files input tool
+    dir="$(dirname "$EXPERIMENTS_DIR/$(generator_of "$set")")"
+    files="$(cd "$dir" && find . -type f ! -name '.*' | LC_ALL=C sort)" || return 1
+    {
+        while IFS= read -r file; do
+            [[ -n "$file" ]] && (cd "$dir" && shasum -a 256 "$file")
+        done <<< "$files"
+        echo "lib/testdata.sh $(sha256 "$TOOLS_DIR/lib/testdata.sh")"
+        for tool in $(tools_of "$set"); do tool_version "$tool"; done
+        for input in $(inputs_of "$set"); do
+            echo "input $input"
+            input_state "$input"
+        done
+    } | shasum -a 256 | cut -d' ' -f1
+}
+
+# Downloads SET's files (each checked by SHA-256), then unpacks its snapshots if they need it. `|| return 1` on every
+# step: this runs in an `||` list, where `set -e` doesn't apply.
+fetch_set() {
+    local set="$1" url sum file target partial downloads="" failed=0 lines
+    lines="$(downloads_of "$set")"
+    in_testdata "$ROOT/$set"
+    while read -r _ url sum file; do
+        [[ -n "$file" ]] || continue
+        target="$ROOT/$set/$file"
+        if [[ -L "$target" ]]; then
+            note "error: $set/$file is a symbolic link (to $(readlink "$target")): remove it and fetch again"
+            failed=1
+            continue
+        fi
+        [[ -f "$target" && "$(sha256 "$target")" == "$sum" ]] && continue
+        in_testdata "$target"
+        mkdir -p "$ROOT/$set" || { note "error: can't create $ROOT/$set"; return 1; }
+        # Downloaded into staging of its own (removed on exit, or by the next fetch if this one is killed).
+        if [[ -z "$downloads" ]]; then
+            make_staging "$set" download || return 1
+            downloads="$STAGED"
+        fi
+        partial="$downloads/$file"
+        note "Downloading $set/$file"
+        if ! curl -fsSL --retry 3 -o "$partial" "$url"; then
+            rm -f "$partial"; note "error: download of $url failed"; failed=1; continue
+        fi
+        if [[ "$(sha256 "$partial")" != "$sum" ]]; then
+            rm -f "$partial"; note "error: $set/$file doesn't match its SHA-256"; failed=1; continue
+        fi
+        if ! chmod 644 "$partial" || ! rename_path "$partial" "$target"; then rm -f "$partial"; failed=1; break; fi
+    done <<< "$lines"
+    [[ -z "$downloads" ]] || discard_staging "$downloads" || failed=1
+    (( failed == 0 )) || return 1
+    grep -q '\.unpack\.tar\.gz$' <<< "$lines" || return 0
+    unpack_set "$set" "$lines"
+}
+
+# `*.unpack.tar.gz`: repository snapshots, unpacked (top directory stripped) with the set's other files into a staging
+# directory that replaces the set's. Skipped when the marker's tarball sums and manifest match the set as it is.
+unpack_set() {
+    local set="$1" lines="$2" url sum file sums="" staging
+    while read -r _ url sum file; do
+        [[ "$file" == *.unpack.tar.gz ]] && sums="$sums $sum"
+    done <<< "$lines"
+    if [[ -f "$ROOT/$set/$MARKER" ]] &&
+        [[ "$(cat "$ROOT/$set/$MARKER")" == "$(echo "sums$sums"; manifest "$ROOT/$set")" ]]; then
+        return 0
+    fi
+    note "Unpacking $set"
+    make_staging "$set" unpack || return 1
+    staging="$STAGED"
+    while read -r _ url sum file; do
+        [[ -n "$file" ]] || continue
+        if [[ "$file" == *.unpack.tar.gz ]]; then
+            tar -xzf "$ROOT/$set/$file" -C "$staging" --strip-components=1 ||
+                { note "error: $set/$file didn't unpack"; discard_staging "$staging"; return 1; }
+        fi
+    done <<< "$lines"
+    while read -r _ url sum file; do
+        [[ -n "$file" ]] || continue
+        ln "$ROOT/$set/$file" "$staging/$file" ||
+            { note "error: can't link $set/$file into $staging"; discard_staging "$staging"; return 1; }
+    done <<< "$lines"
+    { echo "sums$sums"; manifest "$staging"; } > "$staging/$MARKER" ||
+        { note "error: can't write $set's manifest"; discard_staging "$staging"; return 1; }
+    swap_in "$staging" "$set" || { discard_staging "$staging"; return 1; }
 }
 
 fetch_downloads() {
-    local wanted="$1" set url sum file target failed=0
-    while read -r set url sum file; do
-        [[ -n "$set" ]] || continue
-        grep -qx "$set" <<< "$wanted" || continue
-        target="$ROOT/$set/$file"
-        if ! [[ -f "$target" && "$(sha256 "$target")" == "$sum" ]]; then
-            in_testdata "$ROOT/$set"; in_testdata "$target"; in_testdata "$target.partial"
-            mkdir -p "$ROOT/$set"
-            note "Downloading $set/$file"
-            if ! curl -fsSL --retry 3 -o "$target.partial" "$url"; then
-                rm -f "$target.partial"; note "error: download of $url failed"; failed=1; continue
-            fi
-            if [[ "$(sha256 "$target.partial")" != "$sum" ]]; then
-                rm -f "$target.partial"; note "error: $set/$file doesn't match its SHA-256"; failed=1; continue
-            fi
-            mv "$target.partial" "$target"
-        fi
-        # `*.unpack.tar.gz`: a repository snapshot, unpacked into the set's directory (its top directory stripped),
-        # once per checksum.
-        if [[ "$file" == *.unpack.tar.gz ]]; then
-            local marker="$ROOT/$set/.unpacked-$sum"
-            [[ -f "$marker" ]] && continue
-            in_testdata "$marker"
-            note "Unpacking $set/$file"
-            if ! tar -xzf "$target" -C "$ROOT/$set" --strip-components=1; then
-                note "error: $set/$file didn't unpack"; failed=1; continue
-            fi
-            touch "$marker"
-        fi
-    done <<< "$DOWNLOADS"
+    local wanted="$1" set failed=0
+    for set in $(download_sets); do
+        grep -qxF -- "$set" <<< "$wanted" || continue
+        fetch_set "$set" || { failed=1; mark_failed "$set"; }
+    done
     return "$failed"
 }
 
-# Runs the generator into a staging directory, then replaces the set's directory with it.
+# Runs the generator into a staging directory, then replaces the set's directory with it. `|| return 1` on every
+# step: this runs in an `||` list, where `set -e` doesn't apply.
 generate() {
-    local set="$1" generator hash staging
+    local set="$1" generator hash staging input
+    [[ -n "$set" ]] || die "no set named"
     generator="$(generator_of "$set")"
     [[ -x "$EXPERIMENTS_DIR/$generator" ]] || { note "error: $generator isn't there or isn't executable"; return 1; }
-    hash="$(generator_hash "$generator")"
+    for input in $(inputs_of "$set"); do
+        failed_set "$input" && { note "error: not generating $set: its input $input failed"; return 1; }
+    done
+    hash="$(generator_hash "$set")" && [[ -n "$hash" ]] || { note "error: can't hash $generator's directory"; return 1; }
     if [[ -f "$ROOT/$set/$STAMP" && "$(cat "$ROOT/$set/$STAMP")" == "$hash" ]]; then return 0; fi
     note "Generating $set with $generator"
-    staging="$ROOT/.$set.partial"
-    [[ -n "$set" ]] || die "no set named"
-    in_testdata "$staging"; in_testdata "$ROOT/$set"
-    rm -rf "$staging"
-    mkdir "$staging"
-    if ! "$EXPERIMENTS_DIR/$generator" "$staging" >&2; then
-        rm -rf "$staging"; note "error: $generator failed"; return 1
+    make_staging "$set" generate || return 1
+    staging="$STAGED"
+    if ! PATH="$GENERATOR_PATH" "$EXPERIMENTS_DIR/$generator" "$staging" >&2; then
+        discard_staging "$staging"; note "error: $generator failed"; return 1
     fi
-    echo "$hash" > "$staging/$STAMP"
-    rm -rf "${ROOT:?}/$set"
-    mv "$staging" "$ROOT/$set"
+    echo "$hash" > "$staging/$STAMP" || { discard_staging "$staging"; note "error: can't write $set's stamp"; return 1; }
+    swap_in "$staging" "$set" || { discard_staging "$staging"; return 1; }
 }
 
 fetch() {
-    local wanted name failed=0
+    local wanted name input failed=0
     if (( $# )); then
         for name in "$@"; do check_set "$name"; done
-        wanted="$(printf '%s\n' "$@")"
+        wanted="$(with_inputs "$@" | sort -u)"
     else
         wanted="$(sets)"
     fi
+    for name in $(generated_sets); do
+        for input in $(inputs_of "$name"); do check_set "$input"; done
+    done
+    # TestData itself checked (not a symbolic link, unless TESTDATA_ALLOW_LINK=1) before the sweep removes anything in it.
+    in_testdata "$ROOT/.sweep"
+    sweep_staging
     fetch_downloads "$wanted" || failed=1
-    for name in $(echo "$GENERATED" | perl -ane 'print "$F[0]\n" if @F'); do
-        grep -qx "$name" <<< "$wanted" || continue
-        generate "$name" || failed=1
+    for name in $(generated_sets); do
+        grep -qxF -- "$name" <<< "$wanted" || continue
+        generate "$name" || { failed=1; mark_failed "$name"; }
     done
     (( failed == 0 )) || fail "some sets weren't fetched"
     list
 }
 
 list() {
-    local set url sum file
+    # A set another fetch is swapping in can vanish between the test and the read: it reads as missing.
+    local set url sum file files
     while read -r set url sum file; do
         [[ -n "$set" ]] || continue
-        if [[ -f "$ROOT/$set/$file" ]]; then
-            printf '%s\t%s\t%s\n' "$set" "$file" "$(stat -f %z "$ROOT/$set/$file")"
-        else
-            printf '%s\t%s\tmissing\n' "$set" "$file"
-        fi
+        printf '%s\t%s\t%s\n' "$set" "$file" "$(stat -f %z "$ROOT/$set/$file" 2> /dev/null || echo missing)"
     done <<< "$DOWNLOADS"
     while read -r set file; do
         [[ -n "$set" ]] || continue
-        if [[ -f "$ROOT/$set/$STAMP" ]]; then
-            (cd "$ROOT/$set" && find . -type f ! -name '.*' | sort | while read -r file; do
-                printf '%s\t%s\t%s\n' "$set" "${file#./}" "$(stat -f %z "$file")"
-            done)
+        if [[ -f "$ROOT/$set/$STAMP" ]] && files="$(cd "$ROOT/$set" 2> /dev/null && find . -type f ! -name '.*' | sort)"; then
+            while IFS= read -r file; do
+                [[ -n "$file" ]] || continue
+                printf '%s\t%s\t%s\n' "$set" "${file#./}" "$(stat -f %z "$ROOT/$set/${file#./}" 2> /dev/null || echo missing)"
+            done <<< "$files"
         else
             printf '%s\t*\tmissing\n' "$set"
         fi
     done <<< "$GENERATED"
+    sweep_staging --report
 }
 
 case "${1:-}" in

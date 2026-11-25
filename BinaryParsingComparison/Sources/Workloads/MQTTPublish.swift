@@ -61,22 +61,22 @@ public enum MQTTPublish {
             fields.add(flags.duplicate ? 1 : 0 as UInt8)
             fields.add(flags.retain ? 1 : 0 as UInt8)
             var packet = try reader.read(sectionPrefixedBy: LEB128.self, maxByteCount: 4)
-            fields.add(try packet.read(utf8PrefixedBy: Byte2.self).count) // The topic.
+            try fields.add(packet.read(utf8PrefixedBy: Byte2.self).count) // The topic.
             if flags.qualityOfService != .atMostOnce {
-                fields.add(try packet.read(UInt16.self)) // The packet identifier.
+                try fields.add(packet.read(UInt16.self)) // The packet identifier.
             }
             var properties = try packet.read(sectionPrefixedBy: LEB128.self, maxByteCount: 4)
             while !properties.isAtEnd {
                 switch try properties.read(LEB128.self, maxByteCount: 4) {
-                case 0x01: fields.add(try properties.read(UInt8.self)) // Payload format indicator.
-                case 0x02: fields.add(try properties.read(UInt32.self)) // Message expiry interval.
-                case 0x23: fields.add(try properties.read(UInt16.self)) // Topic alias.
-                case 0x03, 0x08: fields.add(try properties.read(utf8PrefixedBy: Byte2.self).count) // Content type, response topic.
-                case 0x09: fields.add(try properties.read(bytesPrefixedBy: Byte2.self).byteCount) // Correlation data.
-                case 0x0B: fields.add(try properties.read(LEB128.self, maxByteCount: 4)) // Subscription identifier.
+                case 0x01: try fields.add(properties.read(UInt8.self)) // Payload format indicator.
+                case 0x02: try fields.add(properties.read(UInt32.self)) // Message expiry interval.
+                case 0x23: try fields.add(properties.read(UInt16.self)) // Topic alias.
+                case 0x03, 0x08: try fields.add(properties.read(utf8PrefixedBy: Byte2.self).count) // Content type, response topic.
+                case 0x09: try fields.add(properties.read(bytesPrefixedBy: Byte2.self).byteCount) // Correlation data.
+                case 0x0B: try fields.add(properties.read(LEB128.self, maxByteCount: 4)) // Subscription identifier.
                 case 0x26: // User property: a name and a value.
-                    fields.add(try properties.read(utf8PrefixedBy: Byte2.self).count)
-                    fields.add(try properties.read(utf8PrefixedBy: Byte2.self).count)
+                    try fields.add(properties.read(utf8PrefixedBy: Byte2.self).count)
+                    try fields.add(properties.read(utf8PrefixedBy: Byte2.self).count)
                 default: throw .invalidValue
                 }
             }
@@ -104,24 +104,24 @@ public enum MQTTPublish {
             fields.add(flags >> 3 & 1)
             fields.add(flags & 1)
             var packet = try input.sliceSpan(byteCount: parseVariableByteInteger(&input))
-            fields.add(try utf8(&packet).count) // The topic.
+            try fields.add(utf8(&packet).count) // The topic.
             if qualityOfService != 0 {
-                fields.add(try UInt16(parsingBigEndian: &packet)) // The packet identifier.
+                try fields.add(UInt16(parsingBigEndian: &packet)) // The packet identifier.
             }
             var properties = try packet.sliceSpan(byteCount: parseVariableByteInteger(&packet))
             while !properties.isEmpty {
                 switch try parseVariableByteInteger(&properties) {
-                case 0x01: fields.add(try UInt8(parsing: &properties))
-                case 0x02: fields.add(try UInt32(parsingBigEndian: &properties))
-                case 0x23: fields.add(try UInt16(parsingBigEndian: &properties))
-                case 0x03, 0x08: fields.add(try utf8(&properties).count)
+                case 0x01: try fields.add(UInt8(parsing: &properties))
+                case 0x02: try fields.add(UInt32(parsingBigEndian: &properties))
+                case 0x23: try fields.add(UInt16(parsingBigEndian: &properties))
+                case 0x03, 0x08: try fields.add(utf8(&properties).count)
                 case 0x09:
                     let length = try Int(parsing: &properties, storedAsBigEndian: UInt16.self)
-                    fields.add(try properties.sliceSpan(byteCount: length).count)
-                case 0x0B: fields.add(try parseVariableByteInteger(&properties))
+                    try fields.add(properties.sliceSpan(byteCount: length).count)
+                case 0x0B: try fields.add(parseVariableByteInteger(&properties))
                 case 0x26:
-                    fields.add(try utf8(&properties).count)
-                    fields.add(try utf8(&properties).count)
+                    try fields.add(utf8(&properties).count)
+                    try fields.add(utf8(&properties).count)
                 default: throw MQTTPublishError()
                 }
             }

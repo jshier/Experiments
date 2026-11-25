@@ -122,7 +122,9 @@ public final class AEAArchive: Sendable {
             var segmentKeys: [DataKey] = []
             segmentKeys.reserveCapacity(segmentCount)
             var expectedMAC = Key32(repeating: 0)
-            for index in 0..<32 { expectedMAC[index] = prologue.firstClusterMAC[index] }
+            for index in 0..<32 {
+                expectedMAC[index] = prologue.firstClusterMAC[index]
+            }
             var offset = prologue.byteCount
             var rawOffset = 0
             var cluster = 0
@@ -181,7 +183,9 @@ public final class AEAArchive: Sendable {
                     offset += compressed
                     rawOffset += raw
                 }
-                for index in 0..<32 { expectedMAC[index] = header[infoCount + index] }
+                for index in 0..<32 {
+                    expectedMAC[index] = header[infoCount + index]
+                }
                 cluster += 1
             }
 
@@ -272,7 +276,7 @@ public final class AEAArchive: Sendable {
     /// Whether `checksum` is the one recorded for `segment` (compared in constant time).
     func checksumMatches(_ segment: Int, _ checksum: RawSpan) -> Bool {
         let count = rootHeader.checksum.byteCount
-        let checksums = self.checksums // Bound to a local, so its span lives for the comparison.
+        let checksums = checksums // Bound to a local, so its span lives for the comparison.
         return checksum.byteCount == count
             && constantTimeEquals(checksums.span.bytes.extracting((segment * count)..<(segment * count + count)), checksum)
     }
@@ -283,4 +287,3 @@ public final class AEAArchive: Sendable {
         return AEAKeys.equal(mac, macs.span.bytes.extracting((segment * 32)..<(segment * 32 + 32)))
     }
 }
-

@@ -1,3 +1,6 @@
+public import Bytes
+import BytesCompression
+public import BytesCompressionAsync
 public import Disk
 
 /// Why an archive couldn't be read, verified, or extracted.
@@ -26,8 +29,12 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     case authenticationFailed(String)
     /// A segment's decompressed bytes don't match its checksum.
     case checksumMismatch(segment: Int)
-    /// A segment didn't decompress to its recorded size.
-    case decompressionFailed(segment: Int, String)
+    /// A segment didn't decompress to its recorded size: the decoder's error (`BytesError/mismatch` for another size,
+    /// `trailingData` for a stream that ended before its stored bytes did).
+    case decompressionFailed(segment: Int, BytesError)
+    /// A `pbz` block (an `.aar`'s, a `.xip`'s content's, or one of a `pbz` stream inside an archive's segments) didn't
+    /// decompress to its recorded size: the decoder's error, as for ``decompressionFailed(segment:_:)``.
+    case blockDecompressionFailed(block: Int, BytesError)
     /// The segment compression isn't one this reader decodes.
     case unsupportedCompression(UInt8)
     /// The Apple Archive stream inside is malformed.
@@ -43,20 +50,21 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     public var description: String {
         switch self {
         case .notAnAEAFile: "not an Apple Encrypted Archive"
-        case .unsupportedProfile(let profile): "unknown profile \(profile)"
-        case .missingKey(let what): "the archive is encrypted: it needs \(what)"
-        case .invalidHeader(let what): "invalid header: \(what)"
+        case let .unsupportedProfile(profile): "unknown profile \(profile)"
+        case let .missingKey(what): "the archive is encrypted: it needs \(what)"
+        case let .invalidHeader(what): "invalid header: \(what)"
         case .truncated: "the archive is truncated"
         case .invalidSignature: "the signature doesn't verify"
-        case .untrustedSigningKey(let why): "untrusted signing key: \(why)"
-        case .incorrectKey(let what): "the key or password doesn't open the archive (\(what))"
-        case .authenticationFailed(let what): "authentication failed: \(what)"
-        case .checksumMismatch(let segment): "segment \(segment) doesn't match its checksum"
-        case .decompressionFailed(let segment, let why): "segment \(segment) failed to decompress: \(why)"
-        case .unsupportedCompression(let byte): "unsupported segment compression '\(Unicode.Scalar(byte))'"
-        case .invalidArchive(let why): "invalid Apple Archive stream: \(why)"
-        case .unsafePath(let path): "unsafe path: \(path)"
-        case .disk(let error): error.description
+        case let .untrustedSigningKey(why): "untrusted signing key: \(why)"
+        case let .incorrectKey(what): "the key or password doesn't open the archive (\(what))"
+        case let .authenticationFailed(what): "authentication failed: \(what)"
+        case let .checksumMismatch(segment): "segment \(segment) doesn't match its checksum"
+        case let .decompressionFailed(segment, why): "segment \(segment) failed to decompress: \(why)"
+        case let .blockDecompressionFailed(block, why): "block \(block) failed to decompress: \(why)"
+        case let .unsupportedCompression(byte): "unsupported segment compression '\(Unicode.Scalar(byte))'"
+        case let .invalidArchive(why): "invalid Apple Archive stream: \(why)"
+        case let .unsafePath(path): "unsafe path: \(path)"
+        case let .disk(error): error.description
         case .cancelled: "cancelled"
         }
     }
@@ -73,11 +81,27 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     /// an archive file that ends early, cancellation).
     init(_ error: DiskError) {
         switch error {
-        case .unsafePath(let path): self = .unsafePath(path)
+        case let .unsafePath(path): self = .unsafePath(path)
         // `InputFile` reading the archive: it ends before its format says.
         case .endOfFile: self = .truncated
         case .cancelled: self = .cancelled
         default: self = .disk(error)
+        }
+    }
+}
+
+extension AEAError: BlockDecodingFailure {
+    /// The decoding engine's failure (BytesCompressionAsync's, decoding segments and `pbz` blocks) as the archive's: a
+    /// block that didn't decode as ``decompressionFailed(segment:_:)`` (an indexed stream's: the archive's segments) or
+    /// ``blockDecompressionFailed(block:_:)`` (a `pbz` stream's), framing as ``invalidArchive(_:)``, a block of an
+    /// uncompressed stream that isn't stored as ``unsupportedCompression(_:)`` (`-`), cancellation as ``cancelled``.
+    public init(_ error: BlockDecodingError) {
+        switch error {
+        case .decoding(.cancelled, _, _), .cancelled: self = .cancelled
+        case let .decoding(error, block, .indexed): self = .decompressionFailed(segment: block, error)
+        case let .decoding(error, block, .pbz), let .decoding(error, block, .slice): self = .blockDecompressionFailed(block: block, error)
+        case .notCompressed: self = .unsupportedCompression(AppleArchiveCompression.none.rawValue)
+        case let .framing(error): self = .invalidArchive(error.description)
         }
     }
 }

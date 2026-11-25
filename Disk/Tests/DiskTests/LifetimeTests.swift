@@ -1,6 +1,6 @@
+@_spi(Testing) @testable import Disk
 import BytesTestSupport
 import Darwin
-@_spi(Testing) @testable import Disk
 import Foundation
 import System
 import Testing
@@ -100,9 +100,9 @@ import Testing
                         if index == 0 { first = token }
                         if index == 3 { try planner.addExtendedAttributes(blob.span.bytes, to: token) }
                     }
-                    if let first { try withPath("link") { (path) throws(DiskError) in try planner.hardLink(path, to: first) } }
-                    try withPath("symbolic") { (path) throws(DiskError) in try planner.symbolicLink(path, target: Array("f0".utf8).span.bytes) }
-                    try withPath("d0") { (path) throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o755)) }
+                    if let first { try withPath("link") { path throws(DiskError) in try planner.hardLink(path, to: first) } }
+                    try withPath("symbolic") { path throws(DiskError) in try planner.symbolicLink(path, target: Array("f0".utf8).span.bytes) }
+                    try withPath("d0") { path throws(DiskError) in _ = try planner.directory(path, metadata: EntryMetadata(mode: 0o755)) }
                 }
             }
         }

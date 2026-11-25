@@ -74,6 +74,7 @@ enum Conformance {
             let line = status == 0 ? "\(escaped(method)) \(escaped(target)) \(version)" : "\(version) \(status) \(escaped(reason))"
             return "\(line), \(fields.count) fields, \(framing), body \(body.count) bytes, ends at \(end)"
         }
+
         func field(_ name: String) -> [UInt8]? {
             fields.first { String(decoding: $0.name, as: UTF8.self).lowercased() == name.lowercased() }?.value
         }
@@ -92,12 +93,13 @@ enum Conformance {
             case .partial: "partial"
             }
         }
-        var message: Message? { if case .accept(let message) = self { message } else { nil } }
+
+        var message: Message? { if case let .accept(message) = self { message } else { nil } }
         var description: String {
             switch self {
-            case .accept(let message): "accept (\(message))"
-            case .reject(let error, let stage): "reject (\(stage.rawValue): \(error))"
-            case .partial(let stage): "partial (\(stage.rawValue))"
+            case let .accept(message): "accept (\(message))"
+            case let .reject(error, stage): "reject (\(stage.rawValue): \(error))"
+            case let .partial(stage): "partial (\(stage.rawValue))"
             }
         }
     }
@@ -138,14 +140,14 @@ enum Conformance {
                 head: while true {
                     let bytes = all.extracting(0..<limit)
                     switch try parser.next(in: bytes) {
-                    case .requestLine(let line):
+                    case let .requestLine(line):
                         message.method = array(line.method)
                         message.target = array(line.target)
                         message.version = line.version
-                    case .field(let field):
+                    case let .field(field):
                         message.fields.append(Field(name: array(field.name), value: array(field.value)))
                         if observeError == nil { do throws(HTTP1Error) { try framing.observe(field) } catch { observeError = error } }
-                    case .end(let length):
+                    case let .end(length):
                         message.headByteCount = length
                         break head
                     case .needsMore:
@@ -157,14 +159,14 @@ enum Conformance {
                 head: while true {
                     let bytes = all.extracting(0..<limit)
                     switch try parser.next(in: bytes) {
-                    case .statusLine(let line):
+                    case let .statusLine(line):
                         message.version = line.version
                         message.status = line.status.code
                         message.reason = array(line.reasonPhrase)
-                    case .field(let field):
+                    case let .field(field):
                         message.fields.append(Field(name: array(field.name), value: array(field.value)))
                         if observeError == nil { do throws(HTTP1Error) { try framing.observe(field) } catch { observeError = error } }
-                    case .end(let length):
+                    case let .end(length):
                         message.headByteCount = length
                         break head
                     case .needsMore:
@@ -183,7 +185,7 @@ enum Conformance {
             case .request:
                 message.framing = try framing.requestBody(version: message.version, method: HTTPMethod(message.method.span.bytes))
                 if options.validatesHost { try framing.validateHost(version: message.version) }
-            case .response(let method):
+            case let .response(method):
                 message.framing = try framing.responseBody(status: HTTPStatus(uncheckedCode: message.status), version: message.version,
                                                            requestMethod: method)
             }
@@ -199,7 +201,7 @@ enum Conformance {
         switch message.framing {
         case .none:
             break
-        case .length(let length):
+        case let .length(length):
             while message.headByteCount + length > limit {
                 guard more() else { return .partial(.body) }
             }
@@ -217,8 +219,8 @@ enum Conformance {
                     var consumed = 0
                     let bytes = all.extracting(position..<limit)
                     switch try decoder.next(in: bytes, consumed: &consumed) {
-                    case .data(let data): message.body += array(data)
-                    case .trailer(let field): message.trailers.append(Field(name: array(field.name), value: array(field.value)))
+                    case let .data(data): message.body += array(data)
+                    case let .trailer(field): message.trailers.append(Field(name: array(field.name), value: array(field.value)))
                     case .end:
                         position += consumed
                         break body

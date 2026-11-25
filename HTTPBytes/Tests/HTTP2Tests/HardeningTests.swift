@@ -20,7 +20,7 @@ import Testing
         var decoder = HPACKDecoder()
         var store = HTTPFieldStore()
         #expect(throws: HPACKError.malformedField) { try decoder.decode(block.span.bytes, into: &store) }
-        #expect(store.count == 1)            // :method, before the malformed field
+        #expect(store.count == 1) // :method, before the malformed field
         #expect(HPACKError.malformedField.http2Error(stream: HTTP2StreamID(1)) == .stream(HTTP2StreamID(1), .protocolError))
         // The block was decoded to its end: the decoder takes the next one.
         var next = HTTPFieldStore()
@@ -29,10 +29,10 @@ import Testing
         #expect(next.count == 1 && next.field(at: 0).knownName == .pseudoPath)
 
         let rejected: [[UInt8]] = [
-            [0x00, 0x03] + Self.bytes("X-B") + [0x01] + Self.bytes("v"),                  // an uppercase name
-            [0x00, 0x04] + Self.bytes(":foo") + [0x01] + Self.bytes("v"),                 // an unknown pseudo-header
-            [0x00, 0x01] + Self.bytes("a") + [0x02] + Self.bytes(" v"),                   // a leading space
-            [0x0F, 0x2A, 0x07] + Self.bytes("chunked"),                                   // transfer-encoding (static 57)
+            [0x00, 0x03] + Self.bytes("X-B") + [0x01] + Self.bytes("v"), // an uppercase name
+            [0x00, 0x04] + Self.bytes(":foo") + [0x01] + Self.bytes("v"), // an unknown pseudo-header
+            [0x00, 0x01] + Self.bytes("a") + [0x02] + Self.bytes(" v"), // a leading space
+            [0x0F, 0x2A, 0x07] + Self.bytes("chunked"), // transfer-encoding (static 57)
             [0x00, 0x0A] + Self.bytes("connection") + [0x05] + Self.bytes("close"),
             [0x00, 0x02] + Self.bytes("te") + [0x04] + Self.bytes("gzip"),
         ]
@@ -58,9 +58,9 @@ import Testing
         #expect(throws: HPACKError.malformedField) { try decoder.decode(block.span.bytes, into: &store) }
         #expect(decoder.tableCount == 2)
         let older: [UInt8] = [0xBF], newer: [UInt8] = [0xBE]
-        #expect(throws: HPACKError.malformedField) { try decoder.decode(older.span.bytes, into: &store) }   // 63: a: x\ry
+        #expect(throws: HPACKError.malformedField) { try decoder.decode(older.span.bytes, into: &store) } // 63: a: x\ry
         var later = HTTPFieldStore()
-        try decoder.decode(newer.span.bytes, into: &later)                                             // 62: b: z
+        try decoder.decode(newer.span.bytes, into: &later) // 62: b: z
         #expect(later.count == 1 && text(later.field(at: 0).name) == "b")
     }
 
@@ -68,7 +68,7 @@ import Testing
     @Test func decodeIntoFinishesATooLargeBlock() throws {
         var decoder = HPACKDecoder(maximumHeaderListSize: 50)
         var store = HTTPFieldStore()
-        let block: [UInt8] = [0x82, 0x40, 0x01, 0x61, 0x01, 0x62, 0x84]      // :method GET (42), a: b (34), :path / (38)
+        let block: [UInt8] = [0x82, 0x40, 0x01, 0x61, 0x01, 0x62, 0x84] // :method GET (42), a: b (34), :path / (38)
         #expect(throws: HPACKError.headerListTooLarge) { try decoder.decode(block.span.bytes, into: &store) }
         #expect(tableEntries(decoder) == fields([("a", "b")]))
         var next = HTTPFieldStore()
@@ -117,7 +117,7 @@ import Testing
         var lost = HPACKDecoder()
         let invalid: [UInt8] = [0x80], valid: [UInt8] = [0x82]
         #expect(throws: HPACKError.invalidIndex) { _ = try lost.next(in: invalid.span.bytes) }
-        #expect(throws: HPACKError.unfinishedBlock) { _ = try lost.next(in: invalid.span.bytes) }   // the same block again
+        #expect(throws: HPACKError.unfinishedBlock) { _ = try lost.next(in: invalid.span.bytes) } // the same block again
         #expect(throws: HPACKError.unfinishedBlock) { _ = try lost.next(in: valid.span.bytes) }
         #expect(throws: HPACKError.unfinishedBlock) { try lost.skipRest(of: valid.span.bytes) }
         lost.resetBlock()
@@ -127,13 +127,13 @@ import Testing
     /// A raw literal name longer than the scratch buffer: the value decodes into the buffer from its start (the name
     /// stays in the block), not from past the buffer's end.
     @Test func longRawNameThenHuffmanValue() throws {
-        var decoder = HPACKDecoder(maximumTableSize: 32, maximumHeaderListSize: 50)   // scratch: 50 bytes
+        var decoder = HPACKDecoder(maximumTableSize: 32, maximumHeaderListSize: 50) // scratch: 50 bytes
         // Incremental indexing, a new name: raw, 128 bytes (127 + 1); the value Huffman-coded "aaaa" ('a' is 00011).
         var block: [UInt8] = [0x40, 0x7F, 0x01] + [UInt8](repeating: 0x6E, count: 128)
         block += [0x83, 0x18, 0xC6, 0x3F]
         #expect(throws: HPACKError.headerListTooLarge) { _ = try decodeAll(&decoder, block) }
         try decoder.skipRest(of: block.span.bytes)
-        #expect(decoder.tableCount == 0)            // larger than the table: inserting it emptied it
+        #expect(decoder.tableCount == 0) // larger than the table: inserting it emptied it
         #expect(try decodeAll(&decoder, [0x82]).count == 1)
         // With room for it, the same field decodes: the value is right.
         var roomy = HPACKDecoder(maximumTableSize: 32, maximumHeaderListSize: 4_096)
@@ -142,13 +142,34 @@ import Testing
         #expect(decoded.map(\.name.count) == [128])
     }
 
+    /// With both limits 0, every literal with a value is too large: after the first, each was skipped by a recursive
+    /// call, one frame per literal. A 1 MiB block of them (55,000) now skips in a loop.
+    @Test func manySkippedLiteralsDontRecurse() throws {
+        var decoder = HPACKDecoder(maximumTableSize: 0, maximumHeaderListSize: 0)
+        // Without indexing, a new raw name "a", a Huffman-coded value of 24 'a's (00011 each: 120 bits, 15 bytes).
+        var bits = 0, count = 0, value: [UInt8] = []
+        for _ in 0..<24 {
+            bits = bits << 5 | 0b00011
+            count += 5
+            while count >= 8 {
+                count -= 8; value.append(UInt8(truncatingIfNeeded: bits >> count))
+            }
+        }
+        let literal: [UInt8] = [0x00, 0x01, 0x61, 0x80 | UInt8(value.count)] + value
+        let block = Array([[UInt8]](repeating: literal, count: (1 << 20) / literal.count).joined())
+        #expect(throws: HPACKError.headerListTooLarge) { _ = try decodeAll(&decoder, block) }
+        try decoder.skipRest(of: block.span.bytes)
+        // Ready for the next block (with a limit of 0, any field is too large; not `unfinishedBlock`).
+        #expect(throws: HPACKError.headerListTooLarge) { _ = try decodeAll(&decoder, [0x82]) }
+    }
+
     // MARK: - The encoder: HTTP/1 fields to HTTP/2
 
     /// The review's case: fields from an HTTP/1 head kept their casing (`X-Request-Id`), and connection-specific fields
     /// went through, both malformed in HTTP/2.
     @Test(arguments: [false, true])
     func http1FieldsAreEncodedAsHTTP2Fields(huffman: Bool) throws {
-        let longName = "X-" + String(repeating: "Long-Name-", count: 20)     // past the encoder's first scratch size
+        let longName = "X-" + String(repeating: "Long-Name-", count: 20) // past the encoder's first scratch size
         // As an HTTP/1 head's fields are stored: names as sent, known names looked up ignoring case.
         let head: [(String, String)] = [
             ("Host", "a"), ("X-Request-Id", "7"), ("Connection", "keep-alive, X-Hop"), ("Transfer-Encoding", "chunked"),
@@ -156,7 +177,9 @@ import Testing
             ("Content-Type", "text/plain"), (longName, "v"), ("User-agent", "u"),
         ]
         var store = HTTPFieldStore()
-        for (name, value) in head { try store.append(name: Self.bytes(name).span.bytes, value: Self.bytes(value).span.bytes) }
+        for (name, value) in head {
+            try store.append(name: Self.bytes(name).span.bytes, value: Self.bytes(value).span.bytes)
+        }
         var encoder = HPACKEncoder()
         encoder.usesHuffmanCoding = huffman
         let block = try encodeBlock(&encoder, store)
@@ -176,7 +199,7 @@ import Testing
         // `te: trailers` is kept.
         var trailers = HTTPFieldStore()
         try trailers.append(.te, value: Self.bytes("trailers").span.bytes)
-        #expect(try decodeAll(&decoder, try encodeBlock(&encoder, trailers)).map(\.name) == ["te"])
+        #expect(try decodeAll(&decoder, encodeBlock(&encoder, trailers)).map(\.name) == ["te"])
     }
 
     // MARK: - Frames
@@ -185,9 +208,9 @@ import Testing
     /// the frame and parsed it again.
     @Test func streamErrorsReportTheFrameSize() throws {
         var parser = HTTP2FrameParser()
-        let priority = frame(2, stream: 1, [0, 0, 0, 0, 16, 0])                 // PRIORITY of 6 bytes
-        let windowUpdate = frame(8, stream: 5, [0, 0, 0, 0])                    // a stream increment of 0
-        let selfPriority = frame(2, stream: 7, [0, 0, 0, 7, 16])                // PRIORITY on itself
+        let priority = frame(2, stream: 1, [0, 0, 0, 0, 16, 0]) // PRIORITY of 6 bytes
+        let windowUpdate = frame(8, stream: 5, [0, 0, 0, 0]) // a stream increment of 0
+        let selfPriority = frame(2, stream: 7, [0, 0, 0, 7, 16]) // PRIORITY on itself
         let ping = frame(6, [1, 2, 3, 4, 5, 6, 7, 8])
         let bytes = priority + windowUpdate + selfPriority + ping
         var unread = bytes.span.bytes
@@ -223,7 +246,7 @@ import Testing
         var unread = bytes.span.bytes
         var consumed = 0
         switch try parser.next(in: unread, consumed: &consumed) {
-        case .rejectedHeaders(let stream, let block, let endHeaders, let error):
+        case let .rejectedHeaders(stream, block, endHeaders, error):
             #expect(stream == HTTP2StreamID(3) && !endHeaders && error == .stream(HTTP2StreamID(3), .protocolError))
             #expect(block.byteCount == 6)
             try pending.append(block)
@@ -233,7 +256,7 @@ import Testing
         #expect(consumed == headers.count)
         unread = unread.extracting(droppingFirst: consumed)
         switch try parser.next(in: unread, consumed: &consumed) {
-        case .continuation(let stream, let block, let endHeaders):
+        case let .continuation(stream, block, endHeaders):
             #expect(stream == HTTP2StreamID(3) && endHeaders)
             try pending.append(block)
         default:
@@ -241,7 +264,9 @@ import Testing
         }
         // Decoded and discarded: the table has the literal, as the peer's encoder expects.
         var discarded = 0
-        while try decoder.next(in: pending.block) != nil { discarded += 1 }
+        while try decoder.next(in: pending.block) != nil {
+            discarded += 1
+        }
         #expect(discarded == 3)
         #expect(tableEntries(decoder) == fields([("a", "b")]))
         // With END_HEADERS, nothing continues it.
@@ -257,14 +282,18 @@ import Testing
         var buffer = HTTP2FieldBlockBuffer()
         #expect(buffer.isEmpty)
         let fragment: [UInt8] = [0x82]
-        for _ in 0..<64 { try buffer.append(fragment.span.bytes) }
+        for _ in 0..<64 {
+            try buffer.append(fragment.span.bytes)
+        }
         #expect(throws: HTTP2Error.connection(.enhanceYourCalm)) { try buffer.append(fragment.span.bytes) }
         buffer.removeAll()
         // Empty fragments count: an endless run of empty CONTINUATION frames is a flood too.
         let empty: [UInt8] = []
         try buffer.append(empty.span.bytes)
         #expect(!buffer.isEmpty && buffer.count == 1)
-        for _ in 1..<64 { try buffer.append(empty.span.bytes) }
+        for _ in 1..<64 {
+            try buffer.append(empty.span.bytes)
+        }
         #expect(throws: HTTP2Error.connection(.enhanceYourCalm)) { try buffer.append(empty.span.bytes) }
         // A smaller limit.
         var small = HTTP2FieldBlockBuffer(maximumFragmentCount: 2)

@@ -427,7 +427,7 @@ extension BytesWriter {
     ///   - bitOrder: The order of bits within each byte.
     /// - Returns: The new position.
     @usableFromInline
-    internal static func _writeUnalignedBytes(
+    static func _writeUnalignedBytes(
         _ bytes: UInt128, count: Int, to span: inout MutableRawSpan, at position: _Position, bitOrder: BitOrder
     ) -> _Position {
         var position = position
@@ -443,14 +443,14 @@ extension BytesWriter {
 
 // MARK: - Bits
 
-extension BytesWriter {
+public extension BytesWriter {
     /// Writes `value`'s `width` bits, in ``bitOrder``.
     ///
     /// - Parameter value: The bits to write.
     /// - Throws: ``BytesError/insufficientCapacity`` if fewer than `width` bits remain. Nothing is written.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write<let width: Int>(_ value: Bits<width>) throws(BytesError) {
+    mutating func write<let width: Int>(_ value: Bits<width>) throws(BytesError) {
         Bits<width>._checkWidth()
         _assumeInvariant()
         if width == 8, likely(_bitOffset == 0) {
@@ -497,7 +497,7 @@ extension BytesWriter {
     /// - Throws: ``BytesError/insufficientCapacity`` if no bit remains. Nothing is written.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write(_ flag: Bool) throws(BytesError) {
+    mutating func write(_ flag: Bool) throws(BytesError) {
         try write(Bit(flag))
     }
 
@@ -513,7 +513,7 @@ extension BytesWriter {
     /// - Precondition: `bitCount` is 0 through 64.
     @inlinable @inline(__always)
     @_lifetime(self: copy self)
-    public mutating func write(_ value: UInt64, bitCount: Int) throws(BytesError) {
+    mutating func write(_ value: UInt64, bitCount: Int) throws(BytesError) {
         precondition(bitCount >= 0 && bitCount <= 64, "Bit count must be 0 through 64")
         _assumeInvariant()
         guard likely(remainingBitCount >= bitCount) else { throw .insufficientCapacity }
@@ -538,7 +538,7 @@ extension BytesWriter {
     }
 
     /// A writer's position: byte offset, bit offset, and the partly written byte (see `_partial`).
-    @usableFromInline typealias _Position = (byteOffset: Int, bitOffset: Int, partial: UInt64)
+    @usableFromInline internal typealias _Position = (byteOffset: Int, bitOffset: Int, partial: UInt64)
 
     /// Writes bits at a position: merges them with the partly written current byte and stores exactly the
     /// bytes they reach. Capacity already checked. Bits past the end of the last byte written are zero.
@@ -551,7 +551,7 @@ extension BytesWriter {
     ///   - bitOrder: The order of bits within each byte.
     /// - Returns: The new position.
     @inlinable @inline(__always)
-    static func _writeBits(
+    internal static func _writeBits(
         _ value: UInt64, count: Int, to span: inout MutableRawSpan, at position: _Position, bitOrder: BitOrder
     ) -> _Position {
         let bitOffset = position.bitOffset
@@ -677,7 +677,6 @@ public extension GenericBytesWriter {
             unsafe BytesWriter._copyLong(source, to: &destination, at: offset)
         }
     }
-
 }
 
 // Not generic: see `_writeUnalignedBytes`.
@@ -694,7 +693,7 @@ extension BytesWriter {
     ///   - destination: The memory written to.
     ///   - offset: Where in `destination` the copy starts.
     @unsafe @usableFromInline @inline(never)
-    internal static func _copyLong(_ source: RawSpan, to destination: inout MutableRawSpan, at offset: Int) {
+    static func _copyLong(_ source: RawSpan, to destination: inout MutableRawSpan, at offset: Int) {
         destination.withUnsafeMutableBytes { destination in
             source.withUnsafeBytes { source in
                 unsafe destination.baseAddress!.advanced(by: offset)
@@ -702,7 +701,6 @@ extension BytesWriter {
             }
         }
     }
-
 }
 
 public extension GenericBytesWriter {
@@ -938,16 +936,16 @@ extension BytesWriter {
     ///   - bytes: The memory copied within.
     ///   - offset: Where the copy is written.
     @unsafe @usableFromInline @inline(never)
-    internal static func _copyRepeating(distance: Int, count: Int, in bytes: inout MutableRawSpan, at offset: Int) {
+    static func _copyRepeating(distance: Int, count: Int, in bytes: inout MutableRawSpan, at offset: Int) {
         // Unsafe: an unchecked load. Safe: it ends at `offset`, before the bytes this writes.
         let element = unsafe Load.block(distance, from: bytes.bytes, at: offset &- distance)
         unsafe _fill(UInt128(element), period: distance, byteCount: count, in: &bytes, at: offset)
     }
 }
 
-public extension GenericBytesWriter {
+extension GenericBytesWriter {
     @unsafe @inlinable @inline(always)
-    internal static func _move<T: ConvertibleFromBytes & ConvertibleToBytes & BitwiseCopyable>(_: T.Type, from source: Int, to destination: Int, in bytes: inout MutableRawSpan) {
+    static func _move<T: ConvertibleFromBytes & ConvertibleToBytes & BitwiseCopyable>(_: T.Type, from source: Int, to destination: Int, in bytes: inout MutableRawSpan) {
         let value = unsafe bytes.bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: source, as: T.self)
         unsafe bytes.storeBytes(of: value, toUncheckedByteOffset: destination, as: T.self)
     }
@@ -1284,7 +1282,6 @@ public extension GenericBytesWriter {
     mutating func write<T: ByteGroup>(_ values: Span<T.Integer>, as _: T.Type, _ byteOrder: ByteOrder) throws(BytesError) {
         try write(T.self, byteOrder, count: values.count) { unsafe values[unchecked: $0] }
     }
-
 }
 
 public extension BytesWriter {
@@ -1362,7 +1359,6 @@ public extension BytesWriter {
     mutating func write<let width: Int>(_ values: Span<Bits<width>>) throws(BytesError) {
         try write(Bits<width>.self, count: values.count) { unsafe values[unchecked: $0] }
     }
-
 }
 
 public extension GenericBytesWriter {

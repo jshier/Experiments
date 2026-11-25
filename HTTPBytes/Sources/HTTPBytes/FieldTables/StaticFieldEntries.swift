@@ -88,7 +88,8 @@ package struct StaticFieldEntries: ~Copyable {
             // (`lowercaseBytes` is an immortal span), constant data that lives forever.
             let name = nameBytes.withUnsafeBytes { $0.baseAddress! }
             unsafe (entries + index).initialize(to: StaticFieldEntry(
-                name: name, value: value, nameCount: Int32(nameBytes.byteCount), valueCount: Int32(valueCount), knownName: known))
+                name: name, value: value, nameCount: Int32(nameBytes.byteCount), valueCount: Int32(valueCount), knownName: known
+            ))
             guard listed else { continue }
             let last = lastByName[Int(known)]
             if last == 0xFF {

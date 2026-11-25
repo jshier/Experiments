@@ -35,12 +35,13 @@ public struct ExamplePCAPNG: ExpressibleByParsing {
             throw ExampleTestError()
         }
 
-        self.header = try ExampleSectionHeader(parsing: &input)
-        self.blocks = try Array(
+        header = try ExampleSectionHeader(parsing: &input)
+        blocks = try Array(
             parsingAll: &input,
             parser: { [header] input in
                 try ExampleBlock(parsing: &input, endianness: header.endianness)
-            })
+            }
+        )
     }
 }
 
@@ -56,7 +57,8 @@ public enum ExampleBlock {
         parsing input: inout ParserSpan, code: UInt32, endianness: Endianness
     ) throws -> Self {
         let blockLength = try Int(
-            parsing: &input, storedAs: UInt32.self, endianness: endianness)
+            parsing: &input, storedAs: UInt32.self, endianness: endianness
+        )
 
         var slice = try input.sliceSpan(byteCount: blockLength - 12)
         let data = Array(parsingRemainingBytes: &slice)
@@ -75,13 +77,16 @@ public enum ExampleBlock {
             switch code {
             case 0x0A0D_0D0A:
                 throw ExampleTestError(
-                    description: "Parsing the header through the general block interface")
+                    description: "Parsing the header through the general block interface"
+                )
             case 0x0000_0001:
                 try .interfaceDescription(
-                    ExampleInterfaceDescription(parsing: &input, endianness: endianness))
+                    ExampleInterfaceDescription(parsing: &input, endianness: endianness)
+                )
             case 0x0000_0006:
                 try .enhancedPacket(
-                    ExampleEnhancedPacket(parsing: &input, endianness: endianness))
+                    ExampleEnhancedPacket(parsing: &input, endianness: endianness)
+                )
             default:
                 try .custom(parsing: &input, code: code, endianness: endianness)
             }
@@ -104,9 +109,10 @@ extension ExampleBlockOption {
     init(parsing input: inout ParserSpan, endianness: Endianness) throws {
         let optionCode = try UInt16(parsing: &input, endianness: endianness)
         let optionSize = try Int(
-            parsing: &input, storedAs: UInt16.self, endianness: endianness)
+            parsing: &input, storedAs: UInt16.self, endianness: endianness
+        )
 
-        let optionFieldSize = optionSize.roundedUpTo32Bits  // includes padding
+        let optionFieldSize = optionSize.roundedUpTo32Bits // includes padding
         let paddingBytes = optionFieldSize - optionSize
 
         // Grab the option slice and discard the padding
@@ -114,7 +120,8 @@ extension ExampleBlockOption {
         try input.seek(toRelativeOffset: paddingBytes)
 
         self = try Self(
-            parsing: &valueSlice, for: optionCode, endianness: endianness)
+            parsing: &valueSlice, for: optionCode, endianness: endianness
+        )
     }
 }
 
@@ -175,7 +182,7 @@ public struct ExampleSectionHeader: Equatable {
         let _rawblockLength = try UInt32(parsingLittleEndian: &input)
         let magicNumber = try UInt32(parsingLittleEndian: &input)
 
-        self.endianness =
+        endianness =
             switch magicNumber {
             case Self.byteOrderMagic: .little
             case Self.byteOrderMagic.byteSwapped: .big
@@ -184,22 +191,19 @@ public struct ExampleSectionHeader: Equatable {
 
         let _correctOrderBlockLength =
             endianness.isBigEndian
-            ? _rawblockLength.byteSwapped
-            : _rawblockLength
+                ? _rawblockLength.byteSwapped
+                : _rawblockLength
         guard let blockLength = Int(exactly: _correctOrderBlockLength),
-            blockLength >= fixedFieldSize
-        else {
-            throw ExampleTestError()
-        }
-        guard blockLength > fixedFieldSize else {
+              blockLength >= fixedFieldSize,
+              blockLength > fixedFieldSize else {
             throw ExampleTestError()
         }
 
-        self.majorVersion = try UInt16(parsing: &input, endianness: endianness)
-        self.minorVersion = try UInt16(parsing: &input, endianness: endianness)
+        majorVersion = try UInt16(parsing: &input, endianness: endianness)
+        minorVersion = try UInt16(parsing: &input, endianness: endianness)
 
         let _rawSectionLength = try Int64(parsing: &input, endianness: endianness)
-        self.sectionLength =
+        sectionLength =
             switch _rawSectionLength {
             case let length where length >= 0:
                 length
@@ -211,7 +215,7 @@ public struct ExampleSectionHeader: Equatable {
 
         let optionsLength = blockLength - 28
         var optionsSlice = try input.sliceSpan(byteCount: optionsLength)
-        self.options = try Array(parsingAll: &optionsSlice) { [endianness] slice in
+        options = try Array(parsingAll: &optionsSlice) { [endianness] slice in
             try Option(parsing: &slice, endianness: endianness)
         }
 
@@ -320,14 +324,15 @@ public struct ExampleInterfaceDescription {
         //    |                      Block Total Length                       |
         //    +---------------------------------------------------------------+
         let blockLength = try UInt32(parsing: &input, endianness: endianness)
-        self.linkType = try UInt16(parsing: &input, endianness: endianness)
+        linkType = try UInt16(parsing: &input, endianness: endianness)
         _ = try UInt16(parsing: &input, endianness: endianness)
-        self.snapshotLength = try Int(
-            parsing: &input, storedAs: UInt32.self, endianness: endianness)
+        snapshotLength = try Int(
+            parsing: &input, storedAs: UInt32.self, endianness: endianness
+        )
 
         let optionsLength = Int(blockLength - 20)
         var optionsSlice = try input.sliceSpan(byteCount: optionsLength)
-        self.options = try Array(parsingAll: &optionsSlice) { [endianness] slice in
+        options = try Array(parsingAll: &optionsSlice) { [endianness] slice in
             try Option(parsing: &slice, endianness: endianness)
         }
 
@@ -359,7 +364,8 @@ extension ExampleInterfaceDescription.Option: ExampleBlockOption {
                 try .ipv6Address(
                     UInt64(parsing: &input, endianness: endianness),
                     UInt64(parsing: &input, endianness: endianness),
-                    UInt8(parsing: &input))
+                    UInt8(parsing: &input)
+                )
             case 6:
                 try .macAddress(UInt64(parsing: &input, endianness: endianness) >> 16)
             case 7:
@@ -368,7 +374,8 @@ extension ExampleInterfaceDescription.Option: ExampleBlockOption {
                 try .interfaceSpeed(UInt64(parsing: &input, endianness: endianness))
             case 9:
                 try .timestampResolution(
-                    ExampleTimestampResolution(_resolutionByte: UInt8(parsing: &input)))
+                    ExampleTimestampResolution(_resolutionByte: UInt8(parsing: &input))
+                )
             case 10:
                 try .timeZone(String(parsingUTF8: &input, count: 4))
             case 11:
@@ -379,7 +386,8 @@ extension ExampleInterfaceDescription.Option: ExampleBlockOption {
                 try .fcsLength(Int(parsing: &input, storedAs: UInt8.self))
             case 14:
                 try .timestampOffset(
-                    Int(parsing: &input, storedAs: UInt64.self, endianness: endianness))
+                    Int(parsing: &input, storedAs: UInt64.self, endianness: endianness)
+                )
             default:
                 throw ExampleTestError(description: "Unrecognized option")
             }
@@ -403,21 +411,23 @@ public struct ExampleEnhancedPacket {
                 switch code {
                 case 0: .twosComplement
                 case 1: .xor
-
                 case 2:
                     try .crc32(UInt32(parsing: &input, endianness: endianness))
                 case 3:
                     try .md5(
                         UInt64(parsing: &input, endianness: endianness),
-                        UInt64(parsing: &input, endianness: endianness))
+                        UInt64(parsing: &input, endianness: endianness)
+                    )
                 case 4:
                     try .sha1(
                         UInt64(parsing: &input, endianness: endianness),
                         UInt64(parsing: &input, endianness: endianness),
-                        UInt8(parsing: &input))
+                        UInt8(parsing: &input)
+                    )
                 case 5:
                     try .toeplitz(
-                        UInt32(parsing: &input, endianness: endianness))
+                        UInt32(parsing: &input, endianness: endianness)
+                    )
                 default:
                     throw ExampleTestError(description: "Invalid hash algorithm \(code)")
                 }
@@ -497,14 +507,17 @@ public struct ExampleEnhancedPacket {
         //    +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
 
         let blockLength = try Int(
-            parsing: &input, storedAs: UInt32.self, endianness: endianness)
-        self.interfaceID = try UInt32(parsing: &input, endianness: endianness)
-        self.timestampHigh = try UInt32(parsing: &input, endianness: endianness)
-        self.timestampLow = try UInt32(parsing: &input, endianness: endianness)
-        self.capturedLength = try Int(
-            parsing: &input, storedAs: UInt32.self, endianness: endianness)
-        self.originalLength = try Int(
-            parsing: &input, storedAs: UInt32.self, endianness: endianness)
+            parsing: &input, storedAs: UInt32.self, endianness: endianness
+        )
+        interfaceID = try UInt32(parsing: &input, endianness: endianness)
+        timestampHigh = try UInt32(parsing: &input, endianness: endianness)
+        timestampLow = try UInt32(parsing: &input, endianness: endianness)
+        capturedLength = try Int(
+            parsing: &input, storedAs: UInt32.self, endianness: endianness
+        )
+        originalLength = try Int(
+            parsing: &input, storedAs: UInt32.self, endianness: endianness
+        )
 
         let paddedPacketLength = capturedLength.roundedUpTo32Bits
         let paddingLength = paddedPacketLength - capturedLength
@@ -513,11 +526,11 @@ public struct ExampleEnhancedPacket {
         // Packet parsing
         var packetSlice = try input.sliceSpan(byteCount: capturedLength)
         try input.seek(toRelativeOffset: paddingLength)
-        self.packetData = try Packet(parsing: &packetSlice, endianness: endianness)
+        packetData = try Packet(parsing: &packetSlice, endianness: endianness)
 
         // Options parsing
         var optionsSlice = try input.sliceSpan(byteCount: optionsByteCount)
-        self.options = try Array(parsingAll: &optionsSlice) { [endianness] slice in
+        options = try Array(parsingAll: &optionsSlice) { [endianness] slice in
             try Option(parsing: &slice, endianness: endianness)
         }
 
@@ -546,7 +559,8 @@ extension ExampleEnhancedPacket.Option: ExampleBlockOption {
                 try .flags(UInt32(parsing: &input, endianness: endianness))
             case 3:
                 try .hash(
-                    ExampleEnhancedPacket.HashAlgorithm(parsing: &input, endianness: endianness))
+                    ExampleEnhancedPacket.HashAlgorithm(parsing: &input, endianness: endianness)
+                )
             case 4:
                 try .dropCount(UInt64(parsing: &input, endianness: endianness))
             case 5:
@@ -565,20 +579,22 @@ extension ExampleEnhancedPacket.Option: ExampleBlockOption {
 
 extension ExampleEnhancedPacket.Packet {
     init(parsing input: inout ParserSpan, endianness: Endianness) throws {
-        self.hasPreamble =
+        hasPreamble =
             try UInt64(parsing: &input, endianness: endianness)
-            == 0x55_55_55_55_55_55_55_5d
+                == 0x55_55_55_55_55_55_55_5D
 
-        self.destinationAddress = try ExampleEnhancedPacket.MACAddress(
-            address: UInt64(parsing: &input, endianness: endianness, byteCount: 6))
-        self.sourceAddres = try ExampleEnhancedPacket.MACAddress(
-            address: UInt64(parsing: &input, endianness: endianness, byteCount: 6))
+        destinationAddress = try ExampleEnhancedPacket.MACAddress(
+            address: UInt64(parsing: &input, endianness: endianness, byteCount: 6)
+        )
+        sourceAddres = try ExampleEnhancedPacket.MACAddress(
+            address: UInt64(parsing: &input, endianness: endianness, byteCount: 6)
+        )
 
-        self.type = try UInt16(parsing: &input, endianness: endianness)
+        type = try UInt16(parsing: &input, endianness: endianness)
 
         var dataSlice = try input.sliceSpan(byteCount: input.count - 4)
-        self.data = Array(parsingRemainingBytes: &dataSlice)
+        data = Array(parsingRemainingBytes: &dataSlice)
 
-        self.fcs = try UInt32(parsing: &input, endianness: endianness)
+        fcs = try UInt32(parsing: &input, endianness: endianness)
     }
 }

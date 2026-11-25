@@ -5,6 +5,160 @@ Each step is saved as a named baseline in `.benchmarkBaselines/` and can be re-c
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 The 2026-11-19 section below compares this machine's numbers with an M1 Max's (baseline `m1max`).
 
+## 2026-11-24, latest: the archive-coverage set, its tests, and a row (M1 Max, under load)
+
+Tests and benchmarks now run on generated sets only; the Xcode archives in `~/Scratch` are for opt-in timing and
+NativeAEA's conformance check (AGENTS.md). The new set, `archive-coverage` (`Tools/test-data fetch archive-coverage`,
+generator `Disk/Fixtures/archive-coverage`, about 100 MB, 20 s), is one deterministic tree (fixed seeds and times; two
+runs give the same manifests item for item) with what an extraction meets: 2,000 small files in 40 directories, large
+text, random and zero files, 24 levels, 255-byte ASCII and UTF-8 names and an 800-byte path, NFC and NFD names, emoji,
+relative, absolute, dangling, directory, chained, and parent symbolic links, hard links across directories, extended
+attributes (empty to 200 KB, Finder info, resource forks, on a directory and on a link), ACLs, read-only, private,
+setuid, setgid, and sticky modes, `UF_HIDDEN` and `UF_NODUMP`, and APFS-compressed files of each codec; plus a tree of
+names that collide only by case, made on a case-sensitive disk image. NativeZip's archives of it: `ditto -c -k
+--sequesterRsrc --keepParent` (`tree-ditto.zip`) and `zip -r -y` (`tree-zip-y.zip`), with the manifests of what
+`ditto -x -k` made of each at generation time (DiskTestSupport's `TreeManifest`: type, mode, flags, time, size, SHA-256,
+link target, attributes by size and SHA-256, ACL text, hard-link groups; paths compared by their bytes).
+
+**What NativeZip does differently from `ditto -x -k`** (each in the tests' tables, which must stay exact):
+
+- `ditto` sets a directory's time before writing the files in it, so only directories holding nothing but directories
+  keep their archived time (Archive Utility's order, AGENTS.md 2026-11-21); NativeZip sets every directory's.
+- `ditto -x -k` drops the AppleDouble entry `ditto -c` writes for a symbolic link's attributes; NativeZip sets them
+  on the link.
+- For paths too long for a `._` name beside them, `ditto` leaves empty directories under `__MACOSX`; NativeZip makes
+  none.
+- `ditto -x -k` reads Info-ZIP's times an hour late (the archived local time with today's daylight-saving offset; the
+  tree's times are in September, the set was made in November), so zip-y.json's times depend on where and when it was
+  made: the test computes those differences from source.json. NativeZip reads the extended-timestamp field's UTC time.
+- Everything else matches: contents, names byte for byte (NFD and NFC as archived; `decomposesNames` off), modes
+  (special bits dropped by both by default), ACLs and resource forks from AppleDouble, flags (both drop `UF_HIDDEN`,
+  `UF_NODUMP`, and `UF_COMPRESSED`: ZIP has no field for them), hard links as copies.
+- Case collisions (`collisions-ditto.zip`, `collisions-zip-y.zip`): `ditto -x -k` reports them and carries on (exit 1)
+  with a mixed tree; NativeZip replaces files (its default) and stops with `Already exists: collisions/Name` at a file
+  where a directory is.
+
+Tests: `ZipCoverageTests.extractsDittosArchiveAsDittoDoes` (fast, 1.7 s in debug), `ZipCoverageBulkTests` (Info-ZIP's
+archive, one writer, the collisions).
+
+**Row** `Extract coverage tree: ditto AppleDouble` (taken while NativeAEA's conformance check extracted Xcode, so times
+are under load; 8 samples), beside `Extract 2,000 small files: Bytes` from the same run:
+
+| Row | Instructions | Mallocs | Syscalls | Wall p50 |
+|---|---|---|---|---|
+| Extract 2,000 small files: Bytes | 2,825 M | 2,409 | 11 K | 192 ms |
+| Extract coverage tree: ditto AppleDouble (2,170 items, 2,066 of them files; 4,436 ZIP entries) | 3,215 M | 23 K | 18 K | 204 ms |
+
+The coverage tree's mallocs are ten times the plain tree's for about as many items: nearly every item has an
+AppleDouble entry (the generator's session put `com.apple.provenance` on everything), and merging them costs about 9
+allocations an item. Not chased here; `Tools/allocations --history` would attribute them.
+
+## 2026-11-24, later (fix plan D4): LZMA's output limit in the decoder (baselines `fix-E1-before` → `fix-E1-after`)
+
+`Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D4 (review §3.8). An LZMA entry whose stream ends with its marker
+(general-purpose flag bit 1) gave the decoder no size, only a window hint, so `ZipDecoder` counted the output itself
+(`outputLimit`, `produced`) and threw `sizeMismatch` after the chunk that ran past the entry's size: up to 1 MiB of
+output past it, and in the whole-buffer path (small unencrypted entries) the decoder decoded on to the buffer's end
+and failed as `.decoding(.mismatch)`. Now `DecompressionFormat.zipLZMA` gives the size as `.lzma(maximumSize:)`, which
+BytesCompression's decoders enforce exactly, both streaming (`LZMADecoder`) and whole (`LZMA2Decoder`): the symbol
+that would write the first byte past it throws `BytesError.limitExceeded`, nothing past it is written. `ZipDecoder`
+keeps only the size, to report that as before: `sizeMismatch(entry, expected: size, actual: size + 1)` (the decoder
+stops at the first byte past; `ZipError`'s doc says so). Its own counting is gone.
+
+- Tests: `LZMADecoderTests.endMarkerStreamPastItsSizeStopsThere` (three vectors at their size less one, half, and 1:
+  whole path) and `StagedInputTests.endMarkerLZMAPastItsSizeStopsThere` (a ZipCrypto entry, so streamed from staged
+  input). With the decoder's maximum ignored, both fail (12 issues): the whole path's error was `.decoding(.mismatch)`,
+  and the streamed one the per-chunk size check's `sizeMismatch`, after the chunk past the size.
+- Instructions: every row equal (`Inflate + CRC … LZMA`, `xz`, and the other methods: 0.0 to ±0.1%; the benchmark
+  archives' LZMA entries have no end marker, and the per-chunk counting cost nothing measurable either).
+
+## 2026-11-24 (fix plan, phase A): contents checked per chunk, staged input's end
+
+`Writeups/BytesCompression-Fix-Plan-2026-11-23.md`, items A1 and A2 (reproducers in
+`~/Scratch/compression-review-2026-11-23/`).
+
+**Contents stop at the recorded size (A1, review §1.2).** Both `contents(of:…)` forms (the decoder's own loop for
+`ZipError` bodies, and `readContents` for bodies with their own errors) checked an entry's size only after its last
+chunk, so a streamed entry was handed to the body whatever it decoded to: a 1 MB entry declaring 2 MiB (zeros) streamed
+a gigabyte through `nunzip -p`, and `contents(of:) -> Data` appended all of it. Now each chunk is checked before the
+body sees it (`sizeMismatch` at the first past the size; `nunzip -p` writes about 1.1 MB). A stored entry is refused
+before the body when its stored (compressed) size isn't its recorded size: nothing ties the two together, so a stored
+entry claiming a gigabyte compressed and 10 bytes uncompressed was handed over whole. Extraction already checked per
+chunk (`ZipContentSource`). Tests `HostileSizeTests.contentsStopAtTheRecordedSize` (with the check disabled, the body
+saw 8 MiB) and `storedEntryLargerThanItsSizeIsRefused`.
+
+**An encrypted entry's frames (A2, review §1.1).** `ZipDecoder` stages decrypted input for `ChunkedDecompressor`; a
+ZipCrypto zstd entry of two frames whose first ended exactly where the first 256 KB fill did was refused ("Size
+mismatch … expected 263132 bytes, got 262132"): the frame's end was taken for the entry's. `ChunkedDecompressor` now
+treats such an end as final only once the input has ended (BytesCompression/RESULTS.md, 2026-11-24); `refillInput`
+ends the staged input when the ciphertext is used up, and no longer throws itself when there's none. Test
+`StagedInputTests.twoFramesWithTheFirstEndingAtAFill` (first frame `stagingCapacity` − 1, exactly, + 1 bytes;
+encrypted in the test with ZipCrypto); `zz-boundary.zip` now tests OK. NativeZip's 63 tests pass.
+
+## 2026-11-23 (stage 3): sizes bounded where the directory is parsed; LZMA's reset by groups (baselines `stage3-before` → `stage3-after`, M1 Max)
+
+**The trap.** A ZIP64 extra field gives 64-bit sizes and offsets, and the parser took them as given. An archive of `x`
+and `._x` whose `._x` claimed 2^63 bytes ended the extraction with SIGTRAP before anything was written: `expected.bytes +=
+Int(clamping: entry.uncompressedSize)` clamped to `Int.max`, and the next file's addition overflowed. Two more sites waited
+behind it: an offset near 2^64 plus an archive's leading bytes (`localHeaderOffset + leading`, UInt64, a trap while parsing
+an archive with data before it), and the AppleDouble merge's `reserveCapacity(Int(entry.uncompressedSize))` (up to 64 MB
+reserved on a claim; the 64 MB guard before it kept `Int(_:)` from trapping).
+
+**The fix, at the source.** `readCentralDirectoryEntry` refuses any compressed size, uncompressed size, or local header
+offset of 2^62 or more after ZIP64 resolution (`ZipArchive.maximumSize`; NativeAEA's root header's bound), as
+`ZipError.invalidRecord(.invalidValue, "central directory entry N")`; the ZIP64 end record's entry count, directory size, and
+offset get the same bound. Below 2^62 every value converts to `Int`, and an offset plus the leading bytes, or a size plus a
+position, can't overflow. Totals over many entries still can (four entries of 2^62 − 1), so `ZipExtractor.add` sums the
+expected and unplanned bytes with saturation, and Disk's `ExtractionProgress.addExpected` saturates too (two archives each
+saturated at `Int.max` trapped there). The AppleDouble merge reserves at most 64 KiB and grows as it reads.
+
+Tests (`HostileSizeTests`, archives built in the test, nothing checked in), each failing before the fix (two by trapping:
+signal 5) and passing after:
+
+| Test | Before | After |
+|---|---|---|
+| `sizePastIntMaxIsRefused`: the reproducer, `._x` at 2^63 | parsed (extraction then trapped) | refused at parse |
+| `fieldsAreBoundedAtTwoToThe62` (each of the three ZIP64 fields): 2^62 refused, 2^62 − 1 accepted and read as given | 2^62 accepted | as stated |
+| `offsetWithLeadingDataIsRefused`: offset 2^64 − 1 after 16 leading bytes | trap (UInt64 overflow) in `ZipArchive(url:)` | refused |
+| `largestAcceptedSizesExtractWithoutOverflow`: four entries of 2^62 − 1, a real one, a false 64 MB `._small`, added twice to one extractor with progress | trap summing | 10 size mismatches, the real files written, `expectedBytes == Int.max` |
+
+Cost: "Parse central directory (2,000 entries)" 4,309 → 4,325 K instructions (+0.4%, the three compares per entry); the
+rest of the parsing and locating rows within ±0.3%.
+
+**The input-conversion sweep, NativeZip.** Every conversion and checked addition of a directory value was read: the
+`UInt64(UInt16/UInt32)` widenings of the fixed header; `Int(header.nameLength)` and the other 16-bit lengths; `UInt32(UInt16)`
+IDs; `readSizedID`'s `value <= UInt32.max` before `UInt32(_:)`; `ZipContentSource`'s `Int(exactly:)` of the size;
+`ZipDecoder`'s `Int(exactly:)` before the formats; `contents(of:)`'s `Data(capacity: min(size, 1 << 30))`; the extraction's
+`Int(clamping:)` sizes (now each below 2^62, summed with saturation); `Int32(index)` for entry and tag numbers (an archive
+would need 2^31 entries, a central directory of at least 98 GB: not reachable); the benchmark-only `ByteReader` parser's
+`Int(clamping:)`. Reachable: the three sites above, all fixed.
+
+**LZMA's reset** (BytesCompression's change: `LZMAWorkspace` reset a 16-byte group per store) on new rows, `small.zip`'s
+2,000 files (4–16 KB) each as its own LZMA or xz entry (`Fixtures.prepareSmallMethod`, one `xz -6` run, the archive written
+by the fixture):
+
+| Row (instructions) | before | after |
+|---|---:|---:|
+| Inflate + CRC 2,000 small files: LZMA | 1,423 M | 1,366 M (−4.0%) |
+| Inflate + CRC 2,000 small files: xz | 1,427 M | 1,370 M (−4.0%) |
+| Inflate + CRC 32 MB text: LZMA / xz; Extract 32 MB text: LZMA / xz | 1,412 / 1,427 / 1,444 / 1,459 M | equal (≤ +0.1%) |
+| Every other decode row; mallocs on every row | | equal |
+
+(28 K instructions per entry, the reset's count. "Extract 2,000 small files: Bytes" read −7.8%: kernel work, which moves
+±5–10% between runs, as before.)
+
+## 2026-11-23 (later): the decoding pump moved to BytesCompression (baselines `unify-before` → `unify-after`, M1 Max)
+
+`ZipDecoder`'s buffers, its three modes (whole, history, stream), and its stepping are BytesCompression's
+`ChunkedDecompressor` now; the method `switch` and the LZMA header are `DecompressionFormat(zipMethod:uncompressedSize:)`,
+`LZMAProperties(zipHeader:)`, and `.zipLZMA(_:uncompressedSize:hasEndMarker:)`. What's ZIP's stayed here: decryption
+(into the pump's staged input, which returns `.needsInput` mid-chunk and resumes it), the LZMA end-marker limit, CRC-32,
+and `ZipError`. Every decoding row is equal (Inflate + CRC: text 147 M, bzip2 1,534 M, LZMA 1,412 M, xz 1,427 M,
+ZipCrypto 241 M, AES-256 181 M), but 2,000 small files 162 → 161 M and the stored ZipCrypto row 493 → 492 M with one
+malloc fewer (the 256 KB staged input is made on the first compressed encrypted entry, not a stored one). `ZipDecoder.swift`
+572 → 421 lines. Record and table: [BytesCompression/RESULTS.md](../../BytesCompression/RESULTS.md) (2026-11-23,
+later).
+
 ## 2026-11-23: safe APIs where they're free (baselines `safe-arch-before` → `safe-arch-after`, M1 Max, under load)
 
 The survey's "safe now at no cost" list (Writeups/Library-Survey-2026-11-23.md, "Unsafe code") had three NativeZip

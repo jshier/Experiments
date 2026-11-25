@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTestSupport
 import Foundation
 import Testing
@@ -31,7 +31,9 @@ struct RFC8448 {
             index += 1
         }
         precondition(index < lines.count, "No \(heading) #\(occurrence)")
-        while !lines[index].drop(while: { $0 == " " }).hasPrefix(field + " (") { index += 1 }
+        while !lines[index].drop(while: { $0 == " " }).hasPrefix(field + " (") {
+            index += 1
+        }
         let line = lines[index]
         let open = line.firstIndex(of: "(")!, close = line.firstIndex(of: ")")!
         let count = Int(line[line.index(after: open)..<close].split(separator: " ")[0])!
@@ -52,7 +54,9 @@ struct RFC8448 {
 
 extension TLSSecret {
     var array: [UInt8] { Array(unsafeUninitializedCapacity: bytes.byteCount) { buffer, count in
-        for index in 0..<bytes.byteCount { buffer[index] = bytes.load(fromByteOffset: index, as: UInt8.self) }
+        for index in 0..<bytes.byteCount {
+            buffer[index] = bytes.load(fromByteOffset: index, as: UInt8.self)
+        }
         count = bytes.byteCount
     } }
 }
@@ -125,12 +129,12 @@ func openRecord(_ protection: inout TLSRecordProtection, _ record: [UInt8]) thro
 
         // (heading, occurrence, secret, content type, sequence number)
         let records: [(String, Int, TLSSecret, TLSContentType, UInt64)] = [
-            ("{server}  send handshake record", 2, serverHandshake, .handshake, 0),          // EncryptedExtensions … Finished
-            ("{client}  send handshake record", 2, clientHandshake, .handshake, 0),          // client Finished
-            ("{server}  send handshake record", 3, serverApplication, .handshake, 0),        // NewSessionTicket
+            ("{server}  send handshake record", 2, serverHandshake, .handshake, 0), // EncryptedExtensions … Finished
+            ("{client}  send handshake record", 2, clientHandshake, .handshake, 0), // client Finished
+            ("{server}  send handshake record", 3, serverApplication, .handshake, 0), // NewSessionTicket
             ("{client}  send application_data record", 1, clientApplication, .applicationData, 0),
             ("{server}  send application_data record", 1, serverApplication, .applicationData, 1),
-            ("{client}  send alert record", 1, clientApplication, .alert, 1),               // close_notify
+            ("{client}  send alert record", 1, clientApplication, .alert, 1), // close_notify
             ("{server}  send alert record", 1, serverApplication, .alert, 2),
         ]
         for (heading, occurrence, secret, type, sequence) in records {
@@ -277,10 +281,10 @@ func openRecord(_ protection: inout TLSRecordProtection, _ record: [UInt8]) thro
         #expect(open([23, 3, 3, 0, 4, 1, 2, 3, 4]) == .badRecordMAC)
         // An alert of the wrong length: decode_error.
         var fresh = TLSRecordProtection(secret: secret)
-        #expect(open(try sealRecord(&fresh, [1, 0, 0], type: .alert)) == .decodeError)
+        #expect(try open(sealRecord(&fresh, [1, 0, 0], type: .alert)) == .decodeError)
         // A zero-length handshake record: unexpected_message.
         fresh = TLSRecordProtection(secret: secret)
-        #expect(open(try sealRecord(&fresh, [], type: .handshake)) == .unexpectedMessage)
+        #expect(try open(sealRecord(&fresh, [], type: .handshake)) == .unexpectedMessage)
         // A record cut short at the end of the stream.
         fresh = TLSRecordProtection(secret: secret)
         let whole = try sealRecord(&fresh, [9, 9, 9], type: .applicationData)

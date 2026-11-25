@@ -61,11 +61,11 @@ extension HTTPFieldName {
     }
 }
 
-extension HTTPFieldName {
+package extension HTTPFieldName {
     /// The name at table index `index`, which the caller knows is below ``knownCount`` (an index from a generated
     /// table, such as HPACK's static table's names): no check.
     @inlinable @inline(__always)
-    package init(tableIndex index: UInt8) {
+    init(tableIndex index: UInt8) {
         self.init(uncheckedIndex: index)
     }
 }

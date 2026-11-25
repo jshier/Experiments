@@ -23,9 +23,10 @@ enum SharedSource {
 #if !APPEX_PRODUCT
 import UIKit
 
+@MainActor
 extension SharedSource {
     /// Extension-unsafe API, compiled only into the app.
-    @MainActor static func openSettings() {
+    static func openSettings() {
         UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
     }
 }
@@ -34,9 +35,10 @@ extension SharedSource {
 #if NEG_UNGUARDED_SHARED_SOURCE
 import UIKit
 
+@MainActor
 extension SharedSource {
     /// Negative test: the same call without the guard. Expected: an error in the widget only.
-    @MainActor static func openSettingsUnguarded() {
+    static func openSettingsUnguarded() {
         UIApplication.shared.open(URL(string: UIApplication.openSettingsURLString)!)
     }
 }

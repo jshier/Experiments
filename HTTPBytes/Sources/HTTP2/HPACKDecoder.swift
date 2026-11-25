@@ -75,6 +75,9 @@ struct HPACKDecodedField {
     @inlinable static var field: UInt8 { 0 }
     @inlinable static var neverIndexedField: UInt8 { 1 }
     @inlinable static var end: UInt8 { 2 }
+    /// Internal to the decoder: a literal too large to decode, skipped in a block already past its limit; the decoder
+    /// goes on to the next representation (never returned).
+    @inlinable static var skipped: UInt8 { 3 }
 
     @inlinable @inline(__always)
     init(name: UnsafeRawPointer, nameCount: Int, value: UnsafeRawPointer, valueCount: Int, knownName: UInt8, characters: UInt8,
@@ -258,7 +261,8 @@ public struct HPACKDecoder: ~Copyable {
             // Unsafe: addresses of the old table's entries, read while it lives (copied into the new one).
             _ = unsafe larger.insert(
                 name: table.address(Int(entry.offset)), nameCount: Int(entry.nameCount), knownName: entry.knownName,
-                value: table.address(entry.valueOffset), valueCount: Int(entry.valueCount), flags: entry.flags)
+                value: table.address(entry.valueOffset), valueCount: Int(entry.valueCount), flags: entry.flags
+            )
         }
         return larger
     }
@@ -280,10 +284,12 @@ public struct HPACKDecoder: ~Copyable {
         // Unsafe: spans over the entry's bytes in the table. Safe: they depend on the decoder (borrowed), which can't
         // change the table while they live.
         let value = unsafe _overrideLifetime(
-            RawSpan(_unsafeStart: table.address(entry.valueOffset), byteCount: Int(entry.valueCount)), borrowing: self)
+            RawSpan(_unsafeStart: table.address(entry.valueOffset), byteCount: Int(entry.valueCount)), borrowing: self
+        )
         // Unsafe and safe as for the value.
         let name = unsafe _overrideLifetime(
-            RawSpan(_unsafeStart: table.address(Int(entry.offset)), byteCount: Int(entry.nameCount)), borrowing: self)
+            RawSpan(_unsafeStart: table.address(Int(entry.offset)), byteCount: Int(entry.nameCount)), borrowing: self
+        )
         return HTTPFieldView(name: name, value: value, knownName: known)
     }
 
@@ -489,7 +495,8 @@ public struct HPACKDecoder: ~Copyable {
                     let entry = statics[index]
                     field = unsafe HPACKDecodedField(
                         name: entry.name, nameCount: Int(entry.nameCount), value: entry.value, valueCount: Int(entry.valueCount),
-                        knownName: entry.knownName, characters: 3, status: HPACKDecodedField.field)
+                        knownName: entry.knownName, characters: 3, status: HPACKDecodedField.field
+                    )
                 } else {
                     let dynamic = index &- 61
                     guard dynamic <= table.count else { return fail(.invalidIndex) }
@@ -497,7 +504,8 @@ public struct HPACKDecoder: ~Copyable {
                     field = unsafe HPACKDecodedField(
                         name: table.address(Int(entry.offset)), nameCount: Int(entry.nameCount),
                         value: table.address(entry.valueOffset), valueCount: Int(entry.valueCount),
-                        knownName: entry.knownName, characters: entry.flags, status: HPACKDecodedField.field)
+                        knownName: entry.knownName, characters: entry.flags, status: HPACKDecodedField.field
+                    )
                 }
                 offset = position
                 return account(field)
@@ -523,7 +531,12 @@ public struct HPACKDecoder: ~Copyable {
                 continue
             }
             // Literal (RFC 7541 §6.2): with incremental indexing (01), without indexing (0000), never indexed (0001).
-            return unsafe literal(base, count, position, first)
+            let field = unsafe literal(base, count, position, first)
+            guard field.status == HPACKDecodedField.skipped else { return field }
+            // Skipped past the limit: on to the next representation in this loop. (It recursed once per skipped
+            // literal: with both limits 0, a 1 MiB block of them could overflow a task's stack.)
+            position = offset
+            guard position < count else { return endBlock() }
         }
     }
 
@@ -585,7 +598,7 @@ public struct HPACKDecoder: ~Copyable {
             nameCount = Int(entry.nameCount)
             characters = entry.flags & DynamicFieldTableEntry.nameIsValid
         }
-        let valueString = unsafe self.string(base, count, &position, scratchOffset: used, skips: tooLarge)
+        let valueString = unsafe string(base, count, &position, scratchOffset: used, skips: tooLarge)
         if valueString.status != 0 {
             if valueString.status != tooLargeStatus { return fail(HPACKError(code: valueString.status)) }
             tooLarge = true
@@ -597,7 +610,7 @@ public struct HPACKDecoder: ~Copyable {
             // Larger than the scratch, which is at least the table's setting: an entry would empty the table.
             if indexing { table.removeAll() }
             listSize = Int.max / 2
-            if exceededLimit { return unsafe literal(continuing: base, count) }
+            if exceededLimit { return HPACKDecodedField(status: HPACKDecodedField.skipped) }
             exceededLimit = true
             stallForSkip()
             return HPACKDecodedField(error: .headerListTooLarge)
@@ -607,7 +620,7 @@ public struct HPACKDecoder: ~Copyable {
         }
         if indexing {
             let number = unsafe table.insert(name: name, nameCount: nameCount, knownName: known, value: value, valueCount: valueCount,
-                                                  flags: characters)
+                                             flags: characters)
             if number >= 0 {
                 // The entry's own bytes: the name it was given may have been an evicted entry's, now overwritten.
                 let entry = table.entry(number: number)
@@ -619,13 +632,8 @@ public struct HPACKDecoder: ~Copyable {
         // Unsafe: unchecked unwraps. Safe: past the too-large case, both strings have addresses (decoded or in the block).
         return account(unsafe HPACKDecodedField(
             name: name.unsafelyUnwrapped, nameCount: nameCount, value: value.unsafelyUnwrapped, valueCount: valueCount,
-            knownName: known, characters: characters, status: status))
-    }
-
-    /// After a field too large to decode was skipped in a block already past its limit: the next representation.
-    @inline(never)
-    mutating func literal(continuing base: UnsafePointer<UInt8>, _ count: Int) -> HPACKDecodedField {
-        unsafe decodeNext(base, count)
+            knownName: known, characters: characters, status: status
+        ))
     }
 
     /// Whether a value's characters are valid (RFC 9113 §8.2.1): for a Huffman-coded one, the decoder said whether it had

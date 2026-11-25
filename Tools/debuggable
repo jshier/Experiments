@@ -10,7 +10,7 @@
 # (allocations, counters, profile, sample-top, runtime-count) do this themselves; use this for everything
 # else, e.g.:
 #   xctrace record --template Leaks --launch -- "$(Tools/debuggable .build/release/tool)" ARGS
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 [[ "${1:-}" == -h || "${1:-}" == --help ]] && usage
 [[ $# -eq 1 ]] || usage 2
 scratch_dir

@@ -1,6 +1,6 @@
+@testable import Disk
 import BytesTestSupport
 import Darwin
-@testable import Disk
 import DiskTestSupport
 import Foundation
 import System
@@ -45,11 +45,11 @@ import Testing
         options.stopsOnFirstFailure = false
         let outside = setup.outside.path
         let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-            try withPath("a") { (path) throws(DiskError) in try planner.symbolicLink(path, target: Array(outside.utf8).span.bytes) }
+            try withPath("a") { path throws(DiskError) in try planner.symbolicLink(path, target: Array(outside.utf8).span.bytes) }
             _ = try await planFile(&planner, "a/victim", index: 0, size: 7)
             _ = try await planFile(&planner, "a/new", index: 1, size: 3)
-            try withPath("a/fifo") { (path) throws(DiskError) in try planner.specialFile(path, .fifo) }
-            try withPath("a/sub") { (path) throws(DiskError) in try planner.directory(path) }
+            try withPath("a/fifo") { path throws(DiskError) in try planner.specialFile(path, .fifo) }
+            try withPath("a/sub") { path throws(DiskError) in try planner.directory(path) }
         }
         try setup.checkOutside()
         // The link wasn't made: a directory is in its place.
@@ -89,7 +89,7 @@ import Testing
             options.stopsOnFirstFailure = false
             let report = try await Extraction.run(into: destination, source: source, settings: options) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 _ = try await planFile(&planner, "evil/sub/file", index: 0, size: 1)
-                try withPath("evil/dir") { (path) throws(DiskError) in try planner.directory(path) }
+                try withPath("evil/dir") { path throws(DiskError) in try planner.directory(path) }
             }
             #expect(report.failures.count == 2)
             try setup.checkOutside()
@@ -143,7 +143,7 @@ import Testing
         await #expect(throws: ExtractionError<DiskError, DecodingFailure>.self) {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
                 let plain = try await planFile(&planner, "plain", index: 0, size: 1)
-                try withPath("other") { (path) throws(DiskError) in try planner.hardLink(path, to: plain) }
+                try withPath("other") { path throws(DiskError) in try planner.hardLink(path, to: plain) }
             }
         }
     }
@@ -174,7 +174,7 @@ import Testing
         let source = ArraySource([])
         await #expect(throws: ExtractionError<DiskError, DecodingFailure>.self) {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-                try withPath("null") { (path) throws(DiskError) in try planner.specialFile(path, .characterDevice(0x0300_0002)) }
+                try withPath("null") { path throws(DiskError) in try planner.specialFile(path, .characterDevice(0x0300_0002)) }
             }
         }
         var options = DestinationOptions()

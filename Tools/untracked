@@ -7,27 +7,40 @@
 #
 # usage: Tools/untracked [--timeout SECONDS] [--keep DIR] -- COMMAND [ARGS...]
 #
-#   --timeout S   give up after S seconds: the job is removed (killing the command) and the exit status is 1
-#   --keep DIR    keep the job's files (stdout, stderr, status, environment) in DIR
+#   --timeout S   give up after S seconds: the command is stopped, the job removed, and the exit status is 1
+#   --keep DIR    keep the job's files (stdout, stderr, status, environment) in DIR; a run there replaces the last one's
 #
 # The command runs in this directory with this environment (every exported variable: PATH, HOME, TMPDIR,
-# TOOLCHAINS, DEVELOPER_DIR, …), standard input from /dev/null. Its standard output and error stream back to this
-# tool's, through files, as it writes them. The tool's exit status is the command's.
+# TOOLCHAINS, DEVELOPER_DIR, …; whatever their names, they reach only the command, never the wrapper's own shell), this
+# umask, and this soft descriptor limit, standard input from /dev/null. It does run at launchd's scheduling priority for
+# submitted jobs (`ps -o pri` 20, against 31 for a terminal's commands): a lower priority than this shell's, which only
+# root could raise. Its standard output and error stream back to this tool's, through files, as it writes them. The
+# tool's exit status is the command's.
 #
-# How: `launchctl submit` with a unique label (in the user's launchd domain), a wrapper that runs the command once
-# and records its exit status, then `launchctl remove`. A submitted job is kept alive (restarted when it exits), so
-# the wrapper sleeps after the command until it's removed, and never runs it twice. Interrupting this tool removes
-# the job too.
+# How: `launchctl submit` with a unique label (in the user's launchd domain) and a wrapper (passed inline, so it doesn't
+# depend on the job's files) that runs the command once, in a process group of its own, and records its exit status.
+# The wrapper watches this tool's PID: when the tool is gone, however it ended (SIGKILL included), the wrapper stops
+# the command's process group (TERM, then KILL after 5 s), deletes the job's directory (unless it's --keep's: it holds
+# a copy of the caller's environment), and removes its own job. The job's own files are written with umask 077,
+# whatever the caller's, and a job launchd can't start (no PID, no start marker after 5 s) fails the run with launchd's
+# exit status rather than waiting forever. Removing the job (this tool does
+# when the command ends, at --timeout, or when interrupted) sends the wrapper TERM, which stops the command the same
+# way. launchd restarts a submitted job that exits: a restarted wrapper (the first one killed outright) stops the
+# first one's command, removes the job, and this tool then fails ("gone without a status"). The command's launcher
+# writes its PID and start (seconds since the epoch) to the job's `command` file before it execs (so a wrapper killed
+# right after forking still leaves them); the restarted wrapper stops that PID only when its `ps` start time, read in
+# the C locale and UTC, is at most 10 s before the recorded one and not after it, so a reused PID is left alone. A
+# process the command moves into a process group of its own isn't followed.
 #
 # example:
 #   Tools/untracked -- swift test --package-path NativeZipArchive --filter restoresALinksAttributes
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
-timeout= keep=
+timeout='' keep=''
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --timeout) timeout="$2"; shift ;;
-        --keep) keep="$2"; shift ;;
+        --timeout) need_value "$@"; need_number "$1" "$2"; timeout="$2"; shift ;;
+        --keep) need_value "$@"; keep="$2"; shift ;;
         -h|--help) usage ;;
         --) shift; break ;;
         *) die "unknown option $1 (the command goes after --)" ;;
@@ -35,8 +48,11 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 [[ $# -gt 0 ]] || usage 2
-[[ -z "$timeout" || "$timeout" =~ ^[0-9]+$ ]] || die "--timeout takes whole seconds"
 have launchctl || die "needs launchctl (macOS)"
+# The caller's umask is the command's (the wrapper applies it); the job's own files are this tool's, private, and must
+# stay readable to it and to launchd whatever the caller's umask (with 0477, launchd couldn't start the job at all).
+caller_umask="$(umask)"
+umask 077
 
 if [[ -n "$keep" ]]; then
     mkdir -p "$keep" || die "can't make $keep"
@@ -47,47 +63,147 @@ else
 fi
 LABEL="local.experiments.untracked.$$.$RANDOM"
 
-# The environment, NUL-separated (values may hold newlines), and the working directory.
+# A reused --keep directory holds the last run's files: without its status and start marker, a new wrapper runs the
+# command and this tool waits for the new status.
+rm -f "$JOB_DIR/status" "$JOB_DIR/status.partial" "$JOB_DIR/started" "$JOB_DIR/command" "$JOB_DIR/command.partial"
+# What the command inherits from this shell: the environment, NUL-separated (values may hold newlines), the working
+# directory, the umask, and the soft descriptor limit.
 env -0 > "$JOB_DIR/environment"
 pwd > "$JOB_DIR/directory"
+echo "$caller_umask" > "$JOB_DIR/umask"
+ulimit -Sn > "$JOB_DIR/nofile"
 : > "$JOB_DIR/stdout"
 : > "$JOB_DIR/stderr"
 
-# Runs the command once: launchd restarts a submitted job whenever it exits, so a second start only waits to be
-# removed. The variables bash itself sets (or that describe this tool's shell) aren't carried over.
-cat > "$JOB_DIR/run.sh" <<'EOF'
-#!/bin/bash
-dir="$1"; shift
-if [[ -e "$dir/started" ]]; then exec /bin/sleep 86400; fi
-: > "$dir/started"
-while IFS= read -r -d '' entry; do
-    case "${entry%%=*}" in
-        PWD|OLDPWD|SHLVL|_|BASH_*|SHELLOPTS|BASHOPTS) ;;
-        *) export "$entry" ;;
+# The command's launcher (Perl, run by the wrapper in the command's directory): replaces launchd's environment with the
+# caller's, read from the job's file (only into the command's environment, never into the wrapper's shell, where names
+# such as `dir` or `label` would clobber the wrapper's own variables), puts itself in a process group of its own,
+# writes its PID and start time (seconds since the epoch) to the job's `command` file, takes the caller's umask (only
+# now: the job's own files stay this tool's to read), and execs the command.
+# shellcheck disable=SC2016 # Perl's variables.
+LAUNCHER='my $dir = shift;
+open(my $e, "<", "$dir/environment") or die "untracked: can\x27t read $dir/environment: $!\n";
+my %env;
+{
+    local $/ = "\0";
+    while (my $entry = <$e>) {
+        chomp $entry;
+        my ($k, $v) = split /=/, $entry, 2;
+        next if !defined $v || $k =~ /^(PWD|OLDPWD|SHLVL|_|BASH_.*|SHELLOPTS|BASHOPTS)$/;
+        $env{$k} = $v;
+    }
+}
+%ENV = %env;
+setpgrp(0, 0);
+my $f;
+open($f, ">", "$dir/command.partial") and print $f "$$ " . time() . "\n" and close($f)
+    and rename("$dir/command.partial", "$dir/command");
+my $u;
+if (open($u, "<", "$dir/umask") and defined(my $mask = <$u>)) {
+    chomp $mask;
+    umask(oct($mask)) if $mask =~ /^[0-7]+$/;
+}
+exec { $ARGV[0] } @ARGV or do { print STDERR "untracked: can\x27t run $ARGV[0]: $!\n"; exit 127 };'
+
+# Whether PID still is the command whose launcher recorded EPOCH (seconds since the epoch) just after it started: its
+# `ps` start time, read in the C locale and UTC, must be at or before EPOCH and at most 10 s before it (a slow
+# launcher). A reused PID, even one leading a process group, started later or much earlier, isn't.
+# shellcheck disable=SC2016 # Perl's variables.
+SAME_PROCESS='use Time::Local qw(timegm);
+my ($pid, $epoch) = @ARGV;
+my $line = `LC_ALL=C TZ=UTC0 /bin/ps -o lstart= -p $pid 2>/dev/null`;
+my ($mon, $day, $h, $m, $s, $y) = $line =~ /^\s*\w+\s+(\w+)\s+(\d+)\s+(\d+):(\d+):(\d+)\s+(\d+)/ or exit 1;
+my %months; @months{qw(Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec)} = 0 .. 11;
+exit 1 unless exists $months{$mon};
+my $after = $epoch - timegm($s, $m, $h, $day, $months{$mon}, $y);
+exit($after >= 0 && $after <= 10 ? 0 : 1);'
+
+# The wrapper, run by launchd as `bash -c WRAPPER untracked DIR LABEL TOOL_PID TOOL_START LAUNCHER SAME_PROCESS SCRATCH
+# COMMAND…`. SCRATCH is the job directory when this tool made it (no --keep): a wrapper that finds the tool gone (killed
+# outright, so its own cleanup never ran) removes it, since it holds a copy of the caller's whole environment.
+# shellcheck disable=SC2016 # Expanded by the wrapper's bash, not this one.
+WRAPPER='
+dir="$1" label="$2" tool="$3" tool_start="$4" launcher="$5" same_process="$6" scratch="$7"; shift 7
+remove() { /bin/launchctl remove "$label" 2>/dev/null; exit 0; }
+discard() {
+    case "$scratch" in
+        */experiments-tool.*) /bin/rm -rf "$scratch" ;;
     esac
-done < "$dir/environment"
+}
+# A start time as process_start in common.sh gives it (C locale, UTC, padding collapsed): the environment of the job
+# may set another time zone or locale than the tool did.
+started() {
+    local when
+    when="$(LC_ALL=C TZ=UTC0 /bin/ps -o lstart= -p "$1" 2>/dev/null)" || return 0
+    echo $when
+}
+tool_alive() { [[ "$(started "$tool")" == "$tool_start" ]]; }
+command=
+stop_command() {
+    [[ -n "$command" ]] || return 0
+    kill -TERM -- "-$command" 2>/dev/null || return 0
+    for i in 1 2 3 4 5 6 7 8 9 10; do kill -0 -- "-$command" 2>/dev/null || return 0; /bin/sleep 0.5; done
+    kill -KILL -- "-$command" 2>/dev/null
+}
+# A restart (the marker exists: the first wrapper was killed outright), or job files that are gone: nothing to run.
+# The command the first wrapper started is stopped if it still runs: its PID and start, written by its launcher before
+# it exec-ed (so even a wrapper killed right after forking leaves them), must match a live process. Then the job goes.
+if [[ -e "$dir/started" || ! -d "$dir" ]]; then
+    read -r pid epoch < "$dir/command" 2>/dev/null
+    if [[ "$pid" =~ ^[0-9]+$ && "$epoch" =~ ^[0-9]+$ ]] && /usr/bin/perl -e "$same_process" "$pid" "$epoch"; then
+        command="$pid"
+        stop_command
+    fi
+    tool_alive || discard
+    remove
+fi
+: > "$dir/started"
+trap "stop_command; exit 143" TERM
+trap "stop_command; exit 130" INT HUP
+# The soft descriptor limit of the caller (launchd gives 256), for the command to inherit. (The umask is the launcher'"'"'s
+# to set, just before it execs: under the caller'"'"'s, this wrapper might not be able to write a status this tool can read.)
+ulimit -Sn "$(/bin/cat "$dir/nofile")" 2>/dev/null ||
+    echo "untracked: could not set the descriptor limit $(/bin/cat "$dir/nofile") (hard limit $(ulimit -Hn))" >&2
 if cd "$(/bin/cat "$dir/directory")"; then
-    "$@" < /dev/null
+    /usr/bin/perl -e "$launcher" "$dir" "$@" < /dev/null &
+    command=$!
+    while kill -0 "$command" 2>/dev/null; do
+        if ! tool_alive; then stop_command; discard; remove; fi
+        /bin/sleep 0.5
+    done
+    wait "$command"
     rc=$?
+    command=
 else
     rc=126
 fi
 echo "$rc" > "$dir/status.partial" && /bin/mv "$dir/status.partial" "$dir/status"
-exec /bin/sleep 86400
-EOF
-chmod +x "$JOB_DIR/run.sh"
+# Until this tool removes the job (or is gone), stay: launchd would restart a wrapper that exits.
+while tool_alive; do /bin/sleep 0.5; done
+discard
+remove
+'
 
 removed=no
 remove_job() {
     [[ $removed == yes ]] && return 0
     removed=yes
     launchctl remove "$LABEL" 2>/dev/null || true
+    # The job is listed until its wrapper has stopped the command and exited: wait for that (at most 15 s).
+    local tries
+    for ((tries = 0; tries < 60; tries++)); do
+        launchctl list "$LABEL" > /dev/null 2>&1 || return 0
+        sleep 0.25
+    done
+    note "untracked: $LABEL is still loaded 15 s after its removal"
 }
-# Removing the job also ends the command if it's still running (launchd signals the job's process group).
+# Removing the job sends the wrapper TERM, and it stops the command's process group.
 trap 'remove_job; [[ -n "${SCRATCH:-}" ]] && rm -rf "$SCRATCH"' EXIT
 trap 'note "untracked: interrupted, removing $LABEL"; exit 130' INT TERM HUP
 
-launchctl submit -l "$LABEL" -o "$JOB_DIR/stdout" -e "$JOB_DIR/stderr" -- /bin/bash "$JOB_DIR/run.sh" "$JOB_DIR" "$@" ||
+tool_start="$(process_start $$)"
+launchctl submit -l "$LABEL" -o "$JOB_DIR/stdout" -e "$JOB_DIR/stderr" -- \
+    /bin/bash -c "$WRAPPER" untracked "$JOB_DIR" "$LABEL" "$$" "$tool_start" "$LAUNCHER" "$SAME_PROCESS" "${SCRATCH:-}" "$@" ||
     die "launchctl submit failed"
 note "untracked: running as launchd job $LABEL"
 
@@ -114,7 +230,17 @@ while [[ ! -e "$JOB_DIR/status" ]]; do
     if [[ -n "$timeout" ]] && (( SECONDS - started >= timeout )); then
         forward
         remove_job
-        fail "untracked: no result after ${timeout} s; removed $LABEL"
+        fail "untracked: no result after ${timeout} s; stopped the command and removed $LABEL"
+    fi
+    # A job launchd can't start keeps being retried, with no PID and no `started` marker: fail after 5 s, with its status.
+    if [[ ! -e "$JOB_DIR/started" ]] && (( SECONDS - started >= 5 )); then
+        info="$(launchctl list "$LABEL" 2> /dev/null || true)"
+        if [[ "$info" != *'"PID" ='* ]]; then
+            last="$(echo "$info" | perl -ne 'print $1 if /"LastExitStatus" = (\d+)/')"
+            forward
+            remove_job
+            die "untracked: launchd couldn't start $LABEL in 5 s (its last exit status: ${last:-none})"
+        fi
     fi
     # A job that launchd couldn't start (or that died before recording a status) never writes one.
     if ! launchctl list "$LABEL" > /dev/null 2>&1; then

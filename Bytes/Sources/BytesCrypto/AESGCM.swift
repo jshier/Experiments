@@ -89,7 +89,9 @@ public struct AESGCM: Sendable {
         aes = AES(key: key)
         let h = aes.encrypt(.zero)
         var bytes = InlineArray<16, UInt8>(repeating: 0)
-        for index in 0..<16 { bytes[index] = h[index] }
+        for index in 0..<16 {
+            bytes[index] = h[index]
+        }
         let element = FieldElement(bytes.span.bytes, at: 0)
         hashKey = element
         #if HardwareCrypto && arch(arm64) && !Portable
@@ -102,7 +104,7 @@ public struct AESGCM: Sendable {
             power = AESGCM.multiply(power, element)
         }
         self.powers = powers
-        self.powerSums = sums
+        powerSums = sums
         #endif
     }
 
@@ -185,7 +187,9 @@ public struct AESGCM: Sendable {
     static func counterBlocks(_ nonce: RawSpan) -> (j0: InlineArray<16, UInt8>, counter: AES.Counter) {
         precondition(nonce.byteCount == 12, "AES-GCM nonces are 12 bytes here")
         var block = InlineArray<16, UInt8>(repeating: 0)
-        for index in 0..<12 { block[index] = nonce.load(fromByteOffset: index, as: UInt8.self) }
+        for index in 0..<12 {
+            block[index] = nonce.load(fromByteOffset: index, as: UInt8.self)
+        }
         block[15] = 1
         var counter = AES.Counter(bigEndian32BitCounterIn: block.span.bytes)
         _ = counter.next() // J₀ itself encrypts the tag, below.
@@ -198,7 +202,9 @@ public struct AESGCM: Sendable {
         let lengths = FieldElement(low: UInt64(ciphertextByteCount) &<< 3, high: UInt64(aadByteCount) &<< 3)
         hash = multiply(FieldElement(low: hash.low ^ lengths.low, high: hash.high ^ lengths.high), hashKey)
         var block = SIMD16<UInt8>.zero
-        for index in 0..<16 { block[index] = j0[index] }
+        for index in 0..<16 {
+            block[index] = j0[index]
+        }
         let mask = aes.encrypt(block)
         var tag = InlineArray<16, UInt8>(repeating: 0)
         for index in 0..<8 {
@@ -223,7 +229,9 @@ public struct AESGCM: Sendable {
         }
         if offset < bytes.byteCount {
             var padded = InlineArray<16, UInt8>(repeating: 0)
-            for index in 0..<(bytes.byteCount &- offset) { padded[index] = bytes.load(fromByteOffset: offset &+ index, as: UInt8.self) }
+            for index in 0..<(bytes.byteCount &- offset) {
+                padded[index] = bytes.load(fromByteOffset: offset &+ index, as: UInt8.self)
+            }
             let block = FieldElement(padded.span.bytes, at: 0)
             hash = multiply(FieldElement(low: hash.low ^ block.low, high: hash.high ^ block.high), hashKey)
         }
@@ -333,7 +341,9 @@ public struct AESGCM: Sendable {
             low = .zero; middle = .zero; high = .zero
             if batch == batches {
                 // The last group's hash, alone.
-                for index in 0..<8 { unsafe accumulate(previous, index, index == 0) }
+                for index in 0..<8 {
+                    unsafe accumulate(previous, index, index == 0)
+                }
                 y = AESGCM.reduceInVectors(low: low, middle: middle, high: high)
                 break
             }

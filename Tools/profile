@@ -3,62 +3,162 @@
 # recorded with xctrace and symbolicated from dSYMs, so code inlined into a hot loop is attributed to the
 # function it came from (e.g. a C helper or `@inline(__always)` Swift function), not just its caller.
 #
-# usage: Tools/profile [--top N] [--high-frequency] [--keep FILE.trace] -- PROGRAM [ARGS...]
-#        Tools/profile [--top N] --trace FILE.trace --dsym BINARY_OR_DSYM
+# usage: Tools/profile [--top N] [--high-frequency] [--keep FILE.trace] [--time-limit T] [--timeout S] -- PROGRAM [ARGS...]
+#        Tools/profile [--top N] [--keep FILE.trace] --trace FILE.trace --dsym BINARY_OR_DSYM
 #
 #   --top N            functions per thread (default 12)
 #   --high-frequency   sample at a higher rate (Time Profiler's high-frequency option)
-#   --keep FILE.trace  keep the symbolicated recording (open in Instruments for call trees and source)
+#   --keep FILE.trace  keep the symbolicated recording (open in Instruments for call trees and source): a new path
+#                      ending in .trace, or an earlier recording (replaced)
+#   --time-limit T     stop recording after T (xctrace's units: 500ms, 5s, 2m; plain numbers are seconds) and
+#                      report what was sampled; PROGRAM is ended
+#   --timeout S        without --time-limit, a run longer than S seconds (default 300) is stopped and the tool fails
 #   --dsym             for --trace: the binary (a dSYM is made with dsymutil) or an existing .dSYM
 #
 # Output, per thread, busiest first, tab-separated: thread, samples, share of the thread, function. Samples
 # are the leaf (self) frame of each 1 ms sample. Needs debug info (SwiftPM release builds have it: -g); the
-# dSYM is made from PROGRAM with dsymutil, because xctrace won't symbolicate a SwiftPM binary without one.
+# dSYM is made from PROGRAM with dsymutil, because xctrace won't symbolicate a SwiftPM binary without one. A recording
+# with no samples exits 2 ("no samples"). One the dSYM names nothing in (every sample outside PROGRAM's own code, or a
+# --dsym that isn't the recorded program's) is shown, and kept, unsymbolicated, with a note saying so.
+#
+# xctrace itself stops PROGRAM at the time limit; if xctrace hangs past that (waiting on an authorization prompt),
+# it's interrupted 60 s later, and only the processes it started are stopped.
 #
 # Compared with Tools/sample-top: lower overhead, kernel-integrated, and inlined frames; sample-top needs no
 # Instruments and attaches to a running process.
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 have yq || die "needs yq: brew install yq"
 have jq || die "needs jq: brew install jq"
 
-top=12 high= keep= trace= dsym=
+top=12 high='' keep='' trace='' dsym='' limit='' timeout=300
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --top) top="$2"; shift ;;
+        --top) need_value "$@"; need_number "$1" "$2"; top="$2"; shift ;;
         --high-frequency) high=1 ;;
-        --keep) keep="$2"; shift ;;
-        --trace) trace="$2"; shift ;;
-        --dsym) dsym="$2"; shift ;;
+        --keep) need_value "$@"; keep="$2"; shift ;;
+        --trace) need_value "$@"; trace="$2"; shift ;;
+        --dsym) need_value "$@"; dsym="$2"; shift ;;
+        --time-limit) need_value "$@"; limit="$2"; shift ;;
+        --timeout) need_value "$@"; need_number "$1" "$2"; timeout="$2"; shift ;;
         -h|--help) usage ;;
         --) shift; break ;;
         *) die "unknown option $1" ;;
     esac
     shift
 done
+need_xcode_tools # once here, not in every `| demangle` subshell, and before anything is recorded
+
+# xctrace's --time-limit in whole seconds (rounded up), for the backstop; dies on anything else: no leading zeros
+# (bash would read 08 as octal), and at most 10,000,000 s, so the arithmetic can't wrap.
+limit_seconds() {
+    local number unit seconds
+    [[ "$1" =~ ^([1-9][0-9]{0,9})(ms|s|m|h)?$ ]] ||
+        die "--time-limit takes a whole number from 1, with ms, s, m, or h (5s), not '$1'"
+    number="${BASH_REMATCH[1]}" unit="${BASH_REMATCH[2]}"
+    need_number --time-limit "$number"
+    case "$unit" in
+        ms) seconds=$(((number + 999) / 1000)) ;;
+        m) seconds=$((number * 60)) ;;
+        h) seconds=$((number * 3600)) ;;
+        *) seconds="$number" ;;
+    esac
+    (( seconds <= 10000000 )) || die "--time-limit $1 is longer than 10,000,000 s"
+    echo "$seconds"
+}
+
+# How the recording ended, from its table of contents, for messages about an empty table: " (the recording ended: …)".
+ended() {
+    local reason
+    reason="$(xctrace export --input "$trace" --toc 2> /dev/null | perl -ne 'print $1 if m{<end-reason>(.*?)</end-reason>}' || true)"
+    [[ -z "$reason" ]] || echo " (the recording ended: $reason)"
+}
+
+# --keep: a path ending in .trace that doesn't exist, or an earlier recording (a .trace directory with Instruments'
+# form.template), which is replaced. Anything else is refused, never removed.
+check_keep() {
+    [[ "$1" == *.trace ]] || die "--keep takes a path ending in .trace: $1"
+    if [[ -e "$1" || -L "$1" ]]; then
+        [[ -d "$1" && ! -L "$1" && -f "$1/form.template" ]] ||
+            die "--keep $1 exists and isn't an Instruments recording: refusing to replace it"
+    fi
+}
+
 scratch_dir
 if [[ -z "$trace" ]]; then
     [[ $# -ge 1 ]] || usage 2
-    trace="$SCRATCH/run.trace"
+    recording_limit="${timeout}s"
+    backstop="$timeout"
+    if [[ -n "$limit" ]]; then
+        seconds="$(limit_seconds "$limit")"
+        [[ "$limit" =~ [a-z]$ ]] || limit="${limit}s"
+        recording_limit="$limit"
+        (( seconds > backstop )) && backstop="$seconds"
+    fi
     program="$(debuggable "$1")"; shift
     dsym="$program"
-    xctrace record --template 'Time Profiler' --show-recording-options 2>/dev/null |
-        jq --argjson h "$([[ -n "$high" ]] && echo true || echo false)" '.["Time Profiler"].highFrequencySampling = $h' > "$SCRATCH/options.json"
+    [[ -z "$keep" ]] || check_keep "$keep"
+    trace="$SCRATCH/run.trace"
+    with_timeout 60 xctrace record --template 'Time Profiler' --show-recording-options > "$SCRATCH/template.json" 2>/dev/null ||
+        die "xctrace couldn't list the Time Profiler template's options"
+    jq --argjson h "$([[ -n "$high" ]] && echo true || echo false)" '.["Time Profiler"].highFrequencySampling = $h' \
+        "$SCRATCH/template.json" > "$SCRATCH/options.json"
     note "recording $(basename "$program") with Time Profiler…"
-    xctrace record --template 'Time Profiler' --recording-options "$SCRATCH/options.json" --output "$trace" --launch -- "$program" "$@" \
-        > "$SCRATCH/record.log" 2>&1 || { tail -5 "$SCRATCH/record.log" >&2; die "xctrace record failed ($AUTH_HINT)"; }
+    status=0
+    with_timeout $((backstop + 60)) xctrace record --template 'Time Profiler' --recording-options "$SCRATCH/options.json" \
+        --output "$trace" --time-limit "$recording_limit" --launch -- "$program" "$@" \
+        > "$SCRATCH/record.log" 2>&1 < /dev/null || status=$?
+    [[ $status != 124 ]] || fail "xctrace didn't finish within $((backstop + 60)) s and was stopped ($AUTH_HINT)"
+    [[ -d "$trace" ]] || { tail -5 "$SCRATCH/record.log" >&2; die "xctrace record failed ($AUTH_HINT)"; }
+    if [[ -z "$limit" ]] && grep -q 'Reached specified time limit' "$SCRATCH/record.log"; then
+        fail "$(basename "$program") didn't finish in ${timeout} s (--timeout) and was stopped"
+    fi
+else
+    [[ -n "$dsym" ]] || usage 2
+    [[ -z "$keep" ]] || check_keep "$keep"
+    [[ -z "$keep" || ! "$keep" -ef "$trace" ]] || die "--keep would replace the --trace input; give another path"
 fi
-[[ -d "$trace" && -n "$dsym" ]] || usage 2
+[[ -d "$trace" ]] || die "no trace $trace"
+# Samples are counted before symbolicating: xctrace refuses to symbolicate a recording with none ("No dSYMs were found
+# or relevant"), which would hide the reason.
+if ! xctrace export --input "$trace" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' \
+    > "$SCRATCH/raw.xml" 2> "$SCRATCH/export.err"; then
+    grep -q 'did not match anything' "$SCRATCH/export.err" && die "no samples in $trace$(ended): it has no time profile"
+    tail -3 "$SCRATCH/export.err" >&2
+    die "xctrace couldn't export the time profile from $trace"
+fi
+grep -q '<row' "$SCRATCH/raw.xml" || die "no samples in $trace$(ended)"
+subject="$(basename "$dsym" .dSYM)" # the program's name, for messages
 if [[ "$dsym" != *.dSYM ]]; then
     xcrun dsymutil "$dsym" -o "$SCRATCH/program.dSYM" > /dev/null 2>&1 || die "dsymutil failed for $dsym"
     dsym="$SCRATCH/program.dSYM"
 fi
 symbolicated="${keep:-$SCRATCH/symbolicated.trace}"
-rm -rf "$symbolicated"
-xctrace symbolicate --input "$trace" --dsym "$dsym" --output "$symbolicated" > "$SCRATCH/symbolicate.log" 2>&1 ||
-    { tail -3 "$SCRATCH/symbolicate.log" >&2; die "xctrace symbolicate failed"; }
-
-xctrace export --input "$symbolicated" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' 2>/dev/null |
-    yq -p xml -o json '.' | jq -r --argjson top "$top" '
+[[ ! -d "$symbolicated" ]] || rm -rf "$symbolicated"
+if xctrace symbolicate --input "$trace" --dsym "$dsym" --output "$symbolicated" > "$SCRATCH/symbolicate.log" 2>&1; then
+    # Exported to files, not through a pipeline: under `set -e` a failing export would end the tool with 1 and no word.
+    if ! xctrace export --input "$symbolicated" --xpath '/trace-toc/run[@number="1"]/data/table[@schema="time-profile"]' \
+        > "$SCRATCH/profile.xml" 2> "$SCRATCH/export.err"; then
+        tail -3 "$SCRATCH/export.err" >&2
+        die "xctrace couldn't export the time profile from $symbolicated"
+    fi
+elif grep -q 'No dSYMs were found or relevant' "$SCRATCH/symbolicate.log"; then
+    # xctrace found nothing the dSYM could name: the samples are all outside the program's own code (it ended in dyld
+    # or a system library), or the dSYM isn't this recording's program. The system's frames are named already, so the
+    # recording is shown (and kept) unsymbolicated.
+    note "the dSYM names none of the samples: either they're all outside $subject's own code, or the dSYM doesn't match the recorded program (showing them unsymbolicated)"
+    cp "$SCRATCH/raw.xml" "$SCRATCH/profile.xml"
+    if [[ -n "$keep" ]]; then
+        [[ ! -d "$keep" ]] || rm -rf "$keep"
+        cp -R "$trace" "$keep" || die "couldn't copy the recording to $keep"
+    fi
+else
+    tail -3 "$SCRATCH/symbolicate.log" >&2
+    die "xctrace symbolicate failed"
+fi
+yq -p xml -o json '.' "$SCRATCH/profile.xml" > "$SCRATCH/profile.json" || die "couldn't read the exported time profile"
+rows="$(jq '[.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end] | length' "$SCRATCH/profile.json" 2> /dev/null || echo 0)"
+[[ "$rows" != 0 ]] || die "no samples in $trace$(ended)"
+jq -r --argjson top "$top" '
     ([.. | objects | select(has("+@id"))] | map({key: .["+@id"], value: .}) | from_entries) as $ids
     | def r: if type == "object" and has("+@ref") then $ids[.["+@ref"]] else . end;
     [.["trace-query-result"].node.row // [] | if type == "array" then .[] else . end
@@ -67,4 +167,4 @@ xctrace export --input "$symbolicated" --xpath '/trace-toc/run[@number="1"]/data
     | group_by(.thread) | map({thread: .[0].thread, total: length, frames: (group_by(.frame) | map({frame: .[0].frame, n: length}) | sort_by(-.n))})
     | sort_by(-.total) | .[]
     | .thread as $t | .total as $total | .frames[0:$top][]
-    | [$t, .n, ((.n / $total * 1000 | round / 10 | tostring) + "%"), .frame] | @tsv' | demangle
+    | [$t, .n, ((.n / $total * 1000 | round / 10 | tostring) + "%"), .frame] | @tsv' "$SCRATCH/profile.json" | demangle

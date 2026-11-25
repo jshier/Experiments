@@ -21,13 +21,16 @@ enum P256FieldModulus: MontgomeryModulus {
     static var modulus: InlineArray<6, UInt64> {
         @inline(__always) get { [0xFFFF_FFFF_FFFF_FFFF, 0x0000_0000_FFFF_FFFF, 0, 0xFFFF_FFFF_0000_0001, 0, 0] }
     }
+
     static var negativeInverse: UInt64 { @inline(__always) get { 1 } }
     static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get { [0x0000_0000_0000_0003, 0xFFFF_FFFB_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFE, 0x0000_0004_FFFF_FFFD, 0, 0] }
     }
+
     static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0x0000_0000_0000_0001, 0xFFFF_FFFF_0000_0000, 0xFFFF_FFFF_FFFF_FFFF, 0x0000_0000_FFFF_FFFE, 0, 0] }
     }
+
     static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get { [0xFFFF_FFFF_FFFF_FFFD, 0x0000_0000_FFFF_FFFF, 0, 0xFFFF_FFFF_0000_0001, 0, 0] }
     }
@@ -38,13 +41,16 @@ enum P256OrderModulus: MontgomeryModulus {
     static var modulus: InlineArray<6, UInt64> {
         @inline(__always) get { [0xF3B9_CAC2_FC63_2551, 0xBCE6_FAAD_A717_9E84, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_0000_0000, 0, 0] }
     }
+
     static var negativeInverse: UInt64 { @inline(__always) get { 0xCCD1_C8AA_EE00_BC4F } }
     static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get { [0x8324_4C95_BE79_EEA2, 0x4699_799C_49BD_6FA6, 0x2845_B239_2B6B_EC59, 0x66E1_2D94_F3D9_5620, 0, 0] }
     }
+
     static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0x0C46_353D_039C_DAAF, 0x4319_0552_58E8_617B, 0, 0x0000_0000_FFFF_FFFF, 0, 0] }
     }
+
     static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get { [0xF3B9_CAC2_FC63_254F, 0xBCE6_FAAD_A717_9E84, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_0000_0000, 0, 0] }
     }
@@ -58,6 +64,7 @@ enum P384FieldModulus: MontgomeryModulus {
              0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF]
         }
     }
+
     static var negativeInverse: UInt64 { @inline(__always) get { 0x0000_0001_0000_0001 } }
     static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get {
@@ -65,9 +72,11 @@ enum P384FieldModulus: MontgomeryModulus {
              0x0000_0002_0000_0000, 0x0000_0000_0000_0001, 0]
         }
     }
+
     static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0xFFFF_FFFF_0000_0001, 0x0000_0000_FFFF_FFFF, 0x0000_0000_0000_0001, 0, 0, 0] }
     }
+
     static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0x0000_0000_FFFF_FFFD, 0xFFFF_FFFF_0000_0000, 0xFFFF_FFFF_FFFF_FFFE,
@@ -84,6 +93,7 @@ enum P384OrderModulus: MontgomeryModulus {
              0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF]
         }
     }
+
     static var negativeInverse: UInt64 { @inline(__always) get { 0x6ED4_6089_E88F_DC45 } }
     static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get {
@@ -91,9 +101,11 @@ enum P384OrderModulus: MontgomeryModulus {
              0xD40D_4917_4AAB_1CC5, 0x3FB0_5B7A_2826_6895, 0x0C84_EE01_2B39_BF21]
         }
     }
+
     static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0x1313_E695_333A_D68D, 0xA7E5_F24D_B74F_5885, 0x389C_B27E_0BC8_D220, 0, 0, 0] }
     }
+
     static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0xECEC_196A_CCC5_2971, 0x581A_0DB2_48B0_A77A, 0xC763_4D81_F437_2DDF,
@@ -141,6 +153,7 @@ enum P256Curve: PrimeCurve {
     static var b: Field {
         @inline(__always) get { Field(montgomery: [0xD89C_DF62_29C4_BDDF, 0xACF0_05CD_7884_3090, 0xE5A2_20AB_F721_2ED6, 0xDC30_061D_0487_4834, 0, 0]) }
     }
+
     static var generator: AffinePoint<Self> {
         @inline(__always) get {
             AffinePoint(
@@ -149,9 +162,11 @@ enum P256Curve: PrimeCurve {
             )
         }
     }
+
     static var squareRootExponent: InlineArray<6, UInt64> {
         @inline(__always) get { [0, 0x0000_0000_4000_0000, 0x4000_0000_0000_0000, 0x3FFF_FFFF_C000_0000, 0, 0] }
     }
+
     static var order: InlineArray<6, UInt64> { @inline(__always) get { P256OrderModulus.modulus } }
     static var objectIdentifier: ASN1ObjectIdentifier { .prime256v1 }
     static let generatorTable = JacobianPoint<P256Curve>.oddMultiples(of: generator, count: 64)
@@ -169,6 +184,7 @@ enum P384Curve: PrimeCurve {
                                0xE337_4BEE_9493_8AE2, 0xB62B_21F4_1F02_2094, 0xCD08_114B_604F_BFF9])
         }
     }
+
     static var generator: AffinePoint<Self> {
         @inline(__always) get {
             AffinePoint(
@@ -179,12 +195,14 @@ enum P384Curve: PrimeCurve {
             )
         }
     }
+
     static var squareRootExponent: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0x0000_0000_4000_0000, 0xBFFF_FFFF_C000_0000, 0xFFFF_FFFF_FFFF_FFFF,
              0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0x3FFF_FFFF_FFFF_FFFF]
         }
     }
+
     static var order: InlineArray<6, UInt64> { @inline(__always) get { P384OrderModulus.modulus } }
     static var objectIdentifier: ASN1ObjectIdentifier { .secp384r1 }
     static let generatorTable = JacobianPoint<P384Curve>.oddMultiples(of: generator, count: 64)
@@ -235,15 +253,15 @@ struct AffinePoint<C: PrimeCurve>: Sendable {
         let prefix = bytes.load(fromByteOffset: 0, as: UInt8.self)
         switch prefix {
         case 0x04:
-            guard bytes.byteCount == 1 &+ 2 &* count else { throw .invalidValue }
-            guard let x = C.Field(bigEndian: bytes.extracting(1..<(1 &+ count))),
+            guard bytes.byteCount == 1 &+ 2 &* count,
+                  let x = C.Field(bigEndian: bytes.extracting(1..<(1 &+ count))),
                   let y = C.Field(bigEndian: bytes.extracting((1 &+ count)..<(1 &+ 2 &* count))),
                   let point = AffinePoint(validatingX: x, y: y)
             else { throw .invalidValue }
             self = point
         case 0x02, 0x03:
-            guard bytes.byteCount == 1 &+ count else { throw .invalidValue }
-            guard let x = C.Field(bigEndian: bytes.extracting(1..<(1 &+ count))),
+            guard bytes.byteCount == 1 &+ count,
+                  let x = C.Field(bigEndian: bytes.extracting(1..<(1 &+ count))),
                   let point = AffinePoint(x: x, yIsOdd: prefix == 0x03)
             else { throw .invalidValue }
             self = point
@@ -386,7 +404,7 @@ struct JacobianPoint<C: PrimeCurve>: Sendable {
     }
 
     /// P + Q: "add-2007-bl" (11 multiplications, 5 squarings), doubling when P = Q.
-    static func + (p: Self, q: Self) -> Self {
+    static func +(p: Self, q: Self) -> Self {
         if p.isIdentity { return q }
         if q.isIdentity { return p }
         let z1z1 = p.z.squared
@@ -435,7 +453,9 @@ struct JacobianPoint<C: PrimeCurve>: Sendable {
         var multiples = [Self(point)]
         multiples.reserveCapacity(count)
         let twice = Self(point).doubled
-        for index in 1..<count { multiples.append(multiples[index &- 1] + twice) }
+        for index in 1..<count {
+            multiples.append(multiples[index &- 1] + twice)
+        }
         // prefix[i] = Z₀⋯Zᵢ; then walk back with the inverse of the whole product.
         var prefix = [C.Field](repeating: .one, count: count)
         var running = C.Field.one

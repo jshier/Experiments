@@ -30,8 +30,8 @@ public struct ExampleBPList {
     }
 }
 
-extension ExampleBPList {
-    public struct Trailer {
+public extension ExampleBPList {
+    struct Trailer {
         public var topObjectIndex: Int
         public var objectReferenceSize: Int
         public var offsetTable: [Int]
@@ -54,12 +54,14 @@ extension ExampleBPList: ExpressibleByParsing {
     @inlinable
     public init(parsing input: inout ParserSpan) throws {
         var trailerSlice = try input.seeking(toOffsetFromEnd: 32)
-        self.trailer = try Trailer(parsing: &trailerSlice)
+        trailer = try Trailer(parsing: &trailerSlice)
 
         var topObjectInput = try input.seeking(
-            toAbsoluteOffset: trailer.topObjectOffset)
-        self.topObject = try Object(
-            parsing: &topObjectInput, trailingObject: trailer)
+            toAbsoluteOffset: trailer.topObjectOffset
+        )
+        topObject = try Object(
+            parsing: &topObjectInput, trailingObject: trailer
+        )
     }
 }
 
@@ -69,18 +71,20 @@ extension ExampleBPList.Trailer {
         _ = try input.sliceSpan(byteCount: 6)
 
         let offsetSize = try Int(parsing: &input, storedAs: UInt8.self)
-        self.objectReferenceSize = try Int(parsing: &input, storedAs: UInt8.self)
+        objectReferenceSize = try Int(parsing: &input, storedAs: UInt8.self)
 
         let objectCount = try Int(parsing: &input, storedAsBigEndian: UInt64.self)
-        self.topObjectIndex = try Int(
-            parsing: &input, storedAsBigEndian: UInt64.self)
+        topObjectIndex = try Int(
+            parsing: &input, storedAsBigEndian: UInt64.self
+        )
         let offsetStart = try Int(parsing: &input, storedAsBigEndian: UInt64.self)
 
         var prefix = try input.seeking(toAbsoluteOffset: offsetStart)
         var slice = try prefix.sliceSpan(byteCount: offsetSize * objectCount)
-        self.offsetTable = try Array(parsingAll: &slice) { slice in
+        offsetTable = try Array(parsingAll: &slice) { slice in
             let unsignedValue = try UInt(
-                parsingBigEndian: &slice, byteCount: offsetSize)
+                parsingBigEndian: &slice, byteCount: offsetSize
+            )
             return try Int(throwingOnOverflow: unsignedValue)
         }
     }
@@ -89,11 +93,11 @@ extension ExampleBPList.Trailer {
 extension Int {
     @inlinable
     init(parsingBPListCount input: inout ParserSpan, countMarker: UInt8) throws {
-        if countMarker != 0xf {
+        if countMarker != 0xF {
             self = Int(countMarker)
         } else {
             let size = try UInt8(parsing: &input)
-            let count = 1 << (Int(size & 0xf))
+            let count = 1 << Int(size & 0xF)
             let unsignedResult = try UInt(parsingBigEndian: &input, byteCount: count)
             guard let result = Int(exactly: unsignedResult) else {
                 throw ExampleTestError(description: "")
@@ -103,8 +107,8 @@ extension Int {
     }
 }
 
-extension ExampleBPList {
-    public enum Object {
+public extension ExampleBPList {
+    enum Object {
         case null
         case boolean(Bool)
         case int(Int64)
@@ -120,41 +124,41 @@ extension ExampleBPList {
             switch self {
             case .null: 0
             case .boolean, .int, .real, .date: 1
-            case .data(let data): data.count
-            case .string(let str): str.count
+            case let .data(data): data.count
+            case let .string(str): str.count
             case .uid: 1
-            case .array(let array): array.count
-            case .dictionary(let dict): dict.count
+            case let .array(array): array.count
+            case let .dictionary(dict): dict.count
             }
         }
 
         public var asArray: [Object]? {
             switch self {
-            case .array(let array): array
+            case let .array(array): array
             default: nil
             }
         }
 
         public var asDictionary: [String: Object]? {
             switch self {
-            case .dictionary(let dict): dict
+            case let .dictionary(dict): dict
             default: nil
             }
         }
 
         public var asString: String? {
             switch self {
-            case .string(let str): str
+            case let .string(str): str
             default: nil
             }
         }
 
         @inlinable
         init(parsingIndexAndObject input: inout ParserSpan, trailingObject: Trailer)
-            throws
-        {
+            throws {
             let index = try Int(
-                parsingBigEndian: &input, byteCount: trailingObject.objectReferenceSize)
+                parsingBigEndian: &input, byteCount: trailingObject.objectReferenceSize
+            )
             let offset = try trailingObject.offsetTable[throwing: index]
             var objectBuffer = try input.seeking(toAbsoluteOffset: offset)
             self = try Object(parsing: &objectBuffer, trailingObject: trailingObject)
@@ -164,23 +168,28 @@ extension ExampleBPList {
         init(parsing input: inout ParserSpan, trailingObject: Trailer) throws {
             let marker = try UInt8(parsing: &input)
 
-            switch (marker &>> 4, marker & 0x0f) {
+            switch (marker &>> 4, marker & 0x0F) {
             // Null and false/true all have specific markers
             case (0x0, 0x0):
                 self = .null
+
             case (0x0, 0x8):
                 self = .boolean(false)
+
             case (0x0, 0x9):
                 self = .boolean(true)
 
             // Integers and floating-point values use 2^size bytes
-            case (0x1, let size):
+            case let (0x1, size):
                 self = try .int(
-                    Int64(parsingBigEndian: &input, byteCount: Int(1 << size)))
-            case (0x2, let size):
+                    Int64(parsingBigEndian: &input, byteCount: Int(1 << size))
+                )
+
+            case let (0x2, size):
                 // Is this correct if size != 3 / aka a 64-bit float?
                 let value = try UInt64(
-                    parsingBigEndian: &input, byteCount: Int(1 << size))
+                    parsingBigEndian: &input, byteCount: Int(1 << size)
+                )
                 self = .real(Double(bitPattern: value))
 
             case (0x3, 0x3):
@@ -190,60 +199,71 @@ extension ExampleBPList {
             // Types with a 'count marker' either store the count or use the next
             // byte to store the next group of bytes to store the size of the count
             // and then the count itself.
-            case (0x4, let countMarker):
+            case let (0x4, countMarker):
                 // Data
                 let count = try Int(
-                    parsingBPListCount: &input, countMarker: countMarker)
+                    parsingBPListCount: &input, countMarker: countMarker
+                )
                 self = try .data(Array(parsing: &input, byteCount: count))
 
-            case (0x5, let countMarker):
+            case let (0x5, countMarker):
                 // ASCII string
                 let count = try Int(
-                    parsingBPListCount: &input, countMarker: countMarker)
+                    parsingBPListCount: &input, countMarker: countMarker
+                )
                 self = try .string(String(parsingUTF8: &input, count: count))
 
-            case (0x6, let countMarker):
+            case let (0x6, countMarker):
                 // UTF-16 string
                 let count = try Int(
-                    parsingBPListCount: &input, countMarker: countMarker)
+                    parsingBPListCount: &input, countMarker: countMarker
+                )
                 self = try .string(String(parsingUTF16: &input, codeUnitCount: count))
 
-            case (0x8, let byteCount):
+            case let (0x8, byteCount):
                 // UID
                 let count = Int(byteCount + 1)
                 self = try .data(Array(parsing: &input, byteCount: count))
 
-            case (0xa, let countMarker):
+            case let (0xA, countMarker):
                 // Array
                 let count = try Int(
-                    parsingBPListCount: &input, countMarker: countMarker)
+                    parsingBPListCount: &input, countMarker: countMarker
+                )
                 var slice = try input.sliceSpan(
                     objectStride: trailingObject.objectReferenceSize,
-                    objectCount: count)
+                    objectCount: count
+                )
                 let array = try Array(parsingAll: &slice) { buffer in
                     try Object(
-                        parsingIndexAndObject: &buffer, trailingObject: trailingObject)
+                        parsingIndexAndObject: &buffer, trailingObject: trailingObject
+                    )
                 }
                 self = .array(array)
 
-            case (0xd, let countMarker):
+            case let (0xD, countMarker):
                 // Dictionary
                 let count = try Int(
-                    parsingBPListCount: &input, countMarker: countMarker)
+                    parsingBPListCount: &input, countMarker: countMarker
+                )
                 var keysSlice = try input.sliceSpan(
                     objectStride: trailingObject.objectReferenceSize,
-                    objectCount: count)
+                    objectCount: count
+                )
                 var valuesSlice = try input.sliceSpan(
                     objectStride: trailingObject.objectReferenceSize,
-                    objectCount: count)
+                    objectCount: count
+                )
 
                 var result: [String: Object] = [:]
                 while !keysSlice.isEmpty {
                     let key = try Object(
-                        parsingIndexAndObject: &keysSlice, trailingObject: trailingObject)
+                        parsingIndexAndObject: &keysSlice, trailingObject: trailingObject
+                    )
                     let object = try Object(
-                        parsingIndexAndObject: &valuesSlice, trailingObject: trailingObject)
-                    guard case .string(let str) = key else {
+                        parsingIndexAndObject: &valuesSlice, trailingObject: trailingObject
+                    )
+                    guard case let .string(str) = key else {
                         throw ExampleTestError(description: "Invalid key")
                     }
                     result[str] = object
@@ -256,4 +276,3 @@ extension ExampleBPList {
         }
     }
 }
-

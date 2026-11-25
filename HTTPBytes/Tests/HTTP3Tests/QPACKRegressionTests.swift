@@ -1,6 +1,6 @@
 import Bytes
-import BytesTestSupport
 import BytesTesting
+import BytesTestSupport
 import HTTP3
 import HTTPBytes
 import Testing
@@ -24,7 +24,7 @@ func prefixInteger(_ value: Int, bits: Int, flags: UInt8) -> [UInt8] {
 /// `bytes` Huffman-coded.
 func huffman(_ bytes: [UInt8]) -> [UInt8] {
     var output = [UInt8](repeating: 0, count: bytes.count * 4 + 16)
-    let count = output.withOutputRawSpan { (span) -> Int in
+    let count = output.withOutputRawSpan { span -> Int in
         try! HPACKHuffman.encode(bytes.span.bytes, into: &span)
         return span.byteCount
     }
@@ -34,7 +34,7 @@ func huffman(_ bytes: [UInt8]) -> [UInt8] {
 /// The decoder's pending decoder stream bytes that fit `room`.
 func decoderInstructions(_ decoder: inout QPACKDecoder, room: Int) -> [UInt8] {
     var output = [UInt8](repeating: 0, count: room)
-    let written = output.withOutputRawSpan { (span) -> Int in
+    let written = output.withOutputRawSpan { span -> Int in
         decoder.writeDecoderInstructions(into: &span)
         return span.byteCount
     }
@@ -76,8 +76,8 @@ func nextGivesField(_ decoder: inout QPACKDecoder, _ section: RawSpan) throws(QP
 func encodeWithoutInstructionRoom(_ encoder: inout QPACKEncoder, _ fields: borrowing HTTPFieldStore, stream: UInt64) throws(QPACKError) -> [UInt8] {
     var section = [UInt8](repeating: 0, count: 4_096)
     var instructions: [UInt8] = []
-    let count = try section.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
-        try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+    let count = try section.withOutputRawSpan { sectionSpan throws(QPACKError) -> Int in
+        try instructions.withOutputRawSpan { instructionSpan throws(QPACKError) -> Int in
             try encoder.encode(fields, stream: stream, indexing: .prefer, into: &sectionSpan, instructions: &instructionSpan)
             return sectionSpan.byteCount
         }
@@ -96,7 +96,9 @@ func encodeWithoutInstructionRoom(_ encoder: inout QPACKEncoder, _ fields: borro
         // Required Insert Count 1 (encoded 2), Base 1, the entry by relative index 0.
         let section: [UInt8] = [0x02, 0x00, 0x80]
         let large: UInt64 = (1 << 62) - 4
-        for stream in [large, large - 4, 128] { #expect(try decodeSection(&decoder, section, stream: stream)?.count == 1) }
+        for stream in [large, large - 4, 128] {
+            #expect(try decodeSection(&decoder, section, stream: stream)?.count == 1)
+        }
         try applyEncoderStream(&decoder, [0x41, 0x63, 0x01, 0x64])
         let span = section.span.bytes
         #expect(try decoder.begin(span, stream: large - 8))
@@ -104,7 +106,9 @@ func encodeWithoutInstructionRoom(_ encoder: inout QPACKEncoder, _ fields: borro
         while try decoder.next(in: span) != nil {}
         // Written a few bytes at a time: the increment comes only after every queued byte.
         var stream: [UInt8] = []
-        for _ in 0..<20 { stream += decoderInstructions(&decoder, room: 3) }
+        for _ in 0..<20 {
+            stream += decoderInstructions(&decoder, room: 3)
+        }
         let instructions = decoderStreamInstructions(stream)
         #expect(instructions.acknowledged == [large, large - 4, 128, large - 8])
         #expect(instructions.increments == [1])
@@ -207,12 +211,12 @@ func encodeWithoutInstructionRoom(_ encoder: inout QPACKEncoder, _ fields: borro
         // on characters (RFC 9114 §4.2), as `HTTP3FieldValidator` does: a malformed message, H3_MESSAGE_ERROR.
         let nulHuffman = huffman([0x61, 0x00])
         let cases: [(section: [UInt8], valid: Bool)] = [
-            (hexBytes("0000 52 03 610162"), true),                          // age: "a\u{1}b": other controls are allowed
-            (hexBytes("0000 24 3a666f6f 0178"), true),                      // ":foo": characters valid (its place is the validator's)
-            (hexBytes("0000 52 03 610062"), false),                         // NUL
-            (hexBytes("0000 52 03 610d62"), false),                         // CR
-            (hexBytes("0000 52 03 206162"), false),                         // a leading space
-            (hexBytes("0000 23 416263 0178"), false),                       // an uppercase name
+            (hexBytes("0000 52 03 610162"), true), // age: "a\u{1}b": other controls are allowed
+            (hexBytes("0000 24 3a666f6f 0178"), true), // ":foo": characters valid (its place is the validator's)
+            (hexBytes("0000 52 03 610062"), false), // NUL
+            (hexBytes("0000 52 03 610d62"), false), // CR
+            (hexBytes("0000 52 03 206162"), false), // a leading space
+            (hexBytes("0000 23 416263 0178"), false), // an uppercase name
             (hexBytes("0000 52") + [0x80 | UInt8(nulHuffman.count)] + nulHuffman, false), // NUL, Huffman-coded
         ]
         for (section, valid) in cases {
@@ -265,7 +269,9 @@ func encodeWithoutInstructionRoom(_ encoder: inout QPACKEncoder, _ fields: borro
         var decoder = QPACKDecoder(maximumTableCapacity: 220, decoderStreamCapacity: 32)
         try applyEncoderStream(&decoder, QPACKExampleTests.capacityAndInserts)
         let dynamic = hexBytes("0381 10 11")
-        for stream in 0..<3 { #expect(try decodeSection(&decoder, dynamic, stream: (1 << 50) + UInt64(stream) * 4)?.count == 2) }
+        for stream in 0..<3 {
+            #expect(try decodeSection(&decoder, dynamic, stream: (1 << 50) + UInt64(stream) * 4)?.count == 2)
+        }
         // A section that needs no acknowledgment begins anyway (it once threw decoderStreamFull).
         let staticBytes = hexBytes("0000 c1 d1"), staticOnly = staticBytes.span.bytes
         #expect(try decoder.begin(staticOnly, stream: 100))
@@ -349,7 +355,9 @@ enum QPACKTableModel {
         var model: [Field] = []
         var inserted = 0, capacity = 0
         func size() -> Int { model.reduce(0) { $0 + $1.name.count + $1.value.count + 32 } }
-        func evict(to limit: Int) { while size() > limit { model.removeFirst() } }
+        func evict(to limit: Int) { while size() > limit {
+            model.removeFirst()
+        } }
         for operation in 0..<operations {
             var bytes: [UInt8] = []
             let kind = random(10)

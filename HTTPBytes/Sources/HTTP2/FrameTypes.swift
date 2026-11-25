@@ -23,7 +23,7 @@ public struct HTTP2StreamID: Sendable, Hashable, Comparable, CustomStringConvert
     /// Whether a client opened it (odd identifiers).
     @inlinable public var isClientInitiated: Bool { rawValue & 1 == 1 }
 
-    @inlinable public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
+    @inlinable public static func <(lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
 
     public var description: String { "stream \(rawValue)" }
 }
@@ -121,7 +121,7 @@ public enum HTTP2Error: Error, Sendable, Hashable {
     @inlinable
     public var code: HTTP2ErrorCode {
         switch self {
-        case .connection(let code), .stream(_, let code): code
+        case let .connection(code), let .stream(_, code): code
         }
     }
 }

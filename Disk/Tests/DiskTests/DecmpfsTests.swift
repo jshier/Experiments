@@ -1,7 +1,7 @@
+@testable import Disk
 import Bytes
 import BytesTestSupport
 import Darwin
-@testable import Disk
 import DiskTestSupport
 import Foundation
 import System
@@ -72,7 +72,9 @@ import Testing
         let files = Self.cases
         var writer = ArchiveStreamWriter()
         writer.directory("")
-        for (path, bytes) in files { writer.file(path, bytes, diskCompression: type) }
+        for (path, bytes) in files {
+            writer.file(path, bytes, diskCompression: type)
+        }
         let stream = directory.path("files.aar")
         try Data(writer.bytes).write(to: stream)
         let reference = directory.path("reference")
@@ -125,7 +127,9 @@ import Testing
         #expect(decmpfsType(out.appending(path: "image.png")) == nil)
         #expect(decmpfsType(out.appending(path: "mostly-random")) == nil)
         #expect(decmpfsType(out.appending(path: "half-random")) == 8)
-        for (path, bytes) in files { #expect(try readItem(at: out.appending(path: path)).contents == bytes, "\(path)") }
+        for (path, bytes) in files {
+            #expect(try readItem(at: out.appending(path: path)).contents == bytes, "\(path)")
+        }
         // The short last chunk (30 bytes, under LZVN's room): stored raw behind 0x06.
         let stored = decmpfsStoredBytes(out.appending(path: "short-tail"))
         let fork = Array(stored.dropFirst(16))

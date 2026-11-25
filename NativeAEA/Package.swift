@@ -22,6 +22,7 @@ let package = Package(
         .package(url: "https://github.com/apple/swift-argument-parser", from: "1.8.2"),
         .package(url: "https://github.com/ordo-one/benchmark", from: "1.38.1"),
         .package(path: "../Bytes"),
+        .package(path: "../BytesCompression"),
         .package(path: "../Disk"),
     ],
     targets: [
@@ -29,10 +30,12 @@ let package = Package(
             name: "NativeAEA",
             dependencies: [
                 .product(name: "Bytes", package: "Bytes"),
-                // The pipeline's waits: `Continuation`, `WaiterQueue`, `AsyncQueue` (Buffers.swift, BlockStream.swift).
+                // The pipeline's waits: `Continuation`, `WaiterQueue` (AEAPayload's decision), and Disk's.
                 .product(name: "BytesAsync", package: "Bytes"),
-                // LZMA2 (xz) segments.
-                .product(name: "BytesCompression", package: "Bytes"),
+                // The codecs, chosen by `DecompressionFormat(aeaSegment:)`/`(pbzBlock:)`, and `pbz` framing (`PBZ`).
+                .product(name: "BytesCompression", package: "BytesCompression"),
+                // The engine decoding segments and `pbz` blocks in parallel, and its buffer pool.
+                .product(name: "BytesCompressionAsync", package: "BytesCompression"),
                 // HKDF, HMAC-SHA256, and SHA-256 for the archive's MACs and checksums.
                 .product(name: "BytesCrypto", package: "Bytes"),
                 // `@BinaryRecord` for the formats' fixed records (AEARecords.swift).
@@ -68,6 +71,8 @@ let package = Package(
                 .product(name: "DiskTestSupport", package: "Disk"),
                 .product(name: "Bytes", package: "Bytes"),
                 .product(name: "BytesAsync", package: "Bytes"),
+                // The decoding engine's source protocol, for a source that cancels its consumer (CancellationTests).
+                .product(name: "BytesCompressionAsync", package: "BytesCompression"),
                 .product(name: "BytesCrypto", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "BytesTesting", package: "Bytes"),
@@ -85,8 +90,8 @@ let package = Package(
                 .product(name: "Disk", package: "Disk"),
                 // The segment benchmarks' decoders: BytesCompression's, and Compression's as the reference.
                 .product(name: "Bytes", package: "Bytes"),
-                .product(name: "BytesCompression", package: "Bytes"),
-                .product(name: "BytesReferenceCodecs", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
+                .product(name: "BytesReferenceCodecs", package: "BytesCompression"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),
             ],

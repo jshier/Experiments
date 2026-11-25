@@ -1,7 +1,7 @@
+@testable import Disk
 import BytesAsync
 import BytesTestSupport
 import Darwin
-@testable import Disk
 import DiskTestSupport
 import Foundation
 import System
@@ -27,10 +27,12 @@ import Testing
                 }
             }
         }
-        while planned.value < cancelAfter { try await Task.sleep(for: .milliseconds(1)) }
+        while planned.value < cancelAfter {
+            try await Task.sleep(for: .milliseconds(1))
+        }
         task.cancel()
         let result = await task.result
-        guard case .failure(let error) = result, case .disk(.cancelled)? = error as? ExtractionError<DiskError, DecodingFailure> else {
+        guard case let .failure(error) = result, case .disk(.cancelled)? = error as? ExtractionError<DiskError, DecodingFailure> else {
             Issue.record("expected cancellation, got \(result)")
             return
         }
@@ -60,7 +62,7 @@ import Testing
         let queued = RelaxedCounter()
         let task = Task {
             try await Extraction.run(into: destination, source: source) { (planner: inout Planner<ArraySource>) throws(DiskError) in
-                let file = try await withPathAsync("big") { (path) async throws(DiskError) in
+                let file = try await withPathAsync("big") { path async throws(DiskError) in
                     try await planner.beginLargeFile(path, size: size, storage: .compressed(.appleArchive), first: bytes.span.bytes, minimumPieceSize: 100_000)
                 }
                 for index in pieces.indices {
@@ -70,7 +72,9 @@ import Testing
                 }
             }
         }
-        while queued.value < 5 { try await Task.sleep(for: .milliseconds(1)) }
+        while queued.value < 5 {
+            try await Task.sleep(for: .milliseconds(1))
+        }
         task.cancel()
         _ = await task.result
         #expect(source.releaseCount == queued.value + source.retainCount || source.releaseCount == queued.value + 1 + source.retainCount)

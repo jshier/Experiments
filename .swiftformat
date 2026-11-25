@@ -3,6 +3,11 @@
 --symlinks ignore
 --swiftversion 6.4
 --language-mode 6
+# Build products, downloaded and generated test data, and generated tables (their generators write them; formatting
+# would only fight them: lowercase hex across thousands of literals).
+--exclude **/.build,TestData,**/checkouts
+--exclude BytesCompression/Sources/BytesCompression/BrotliDictionaryData.swift,BytesCompression/Sources/BytesCompression/BrotliTableData.swift
+--exclude HTTPBytes/Sources/HTTPBytes/Huffman/HuffmanTables.swift,HTTPBytes/Sources/HTTPBytes/Generated
 
 # format options
 

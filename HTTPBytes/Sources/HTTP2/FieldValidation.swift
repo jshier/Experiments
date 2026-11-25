@@ -9,17 +9,17 @@ public typealias HTTP2FieldError = HTTPFieldSectionError
 /// checks ``HPACKField``s with the decoder's verdict on their characters.
 public typealias HTTP2FieldValidator = HTTPFieldSectionValidator
 
-extension HTTPFieldSectionError {
+public extension HTTPFieldSectionError {
     /// The stream error to answer with: PROTOCOL_ERROR (RFC 9113 §8.1.1).
     @inlinable
-    public func http2Error(stream: HTTP2StreamID) -> HTTP2Error { .stream(stream, .protocolError) }
+    func http2Error(stream: HTTP2StreamID) -> HTTP2Error { .stream(stream, .protocolError) }
 }
 
-extension HTTPFieldSectionValidator {
+public extension HTTPFieldSectionValidator {
     /// Checks a decoded field: its characters only if the decoder didn't (``HPACKField/hasValidCharacters``: it checks a
     /// literal once, and dynamic table entries keep the verdict), then its place.
     @inlinable
-    public mutating func check(_ field: borrowing HPACKField) throws(HTTPFieldSectionError) {
+    mutating func check(_ field: borrowing HPACKField) throws(HTTPFieldSectionError) {
         try check(name: field.name, value: field.value, knownName: field.knownName, charactersChecked: field.hasValidCharacters)
     }
 }

@@ -129,7 +129,9 @@ enum AEAKeys {
             key.mac[index] = output[index]
             key.cipher[index] = output[32 + index]
         }
-        for index in 0..<16 { key.iv[index] = output[64 + index] }
+        for index in 0..<16 {
+            key.iv[index] = output[64 + index]
+        }
         return key
     }
 

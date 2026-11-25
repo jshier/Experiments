@@ -50,6 +50,7 @@ let package = Package(
     platforms: [.macOS(.v27)],
     dependencies: [
         .package(path: "../Bytes"),
+        .package(path: "../BytesCompression"),
         .package(path: "../MQTT"),
         // The revision this was built and measured with: the package changes quickly, along with the
         // toolchain it requires.
@@ -66,7 +67,7 @@ let package = Package(
             name: "SocketStream",
             dependencies: [
                 .product(name: "Bytes", package: "Bytes"),
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
                 .product(name: "BytesCrypto", package: "Bytes"),
                 .product(name: "BytesAsync", package: "Bytes"),
                 .product(name: "MQTT", package: "MQTT"),
@@ -90,7 +91,7 @@ let package = Package(
             dependencies: [
                 "SocketStream",
                 .product(name: "Bytes", package: "Bytes"),
-                .product(name: "BytesCompression", package: "Bytes"),
+                .product(name: "BytesCompression", package: "BytesCompression"),
                 .product(name: "BytesCrypto", package: "Bytes"),
                 .product(name: "BytesTestSupport", package: "Bytes"),
                 .product(name: "Benchmark", package: "benchmark"),

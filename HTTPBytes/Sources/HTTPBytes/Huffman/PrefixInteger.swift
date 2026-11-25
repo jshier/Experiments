@@ -52,7 +52,9 @@ public enum HPACKPrefixInteger {
         if value < mask { return 1 }
         var rest = value &- mask
         var count = 2
-        while rest >= 128 { rest &>>= 7; count &+= 1 }
+        while rest >= 128 {
+            rest &>>= 7; count &+= 1
+        }
         return count
     }
 

@@ -46,7 +46,7 @@ struct Field: Equatable, CustomStringConvertible {
     }
 
     /// Name and value: the N bit is checked where it matters (the automatic policy sets it on short cookies).
-    static func == (lhs: Self, rhs: Self) -> Bool { lhs.name == rhs.name && lhs.value == rhs.value }
+    static func ==(lhs: Self, rhs: Self) -> Bool { lhs.name == rhs.name && lhs.value == rhs.value }
 
     var description: String {
         "\(String(decoding: name, as: UTF8.self)): \(String(decoding: value, as: UTF8.self))\(neverIndexed ? " (N)" : "")"
@@ -75,7 +75,7 @@ func tableEntries(_ decoder: borrowing QPACKDecoder) -> [Field] {
 /// The decoder's pending decoder stream bytes.
 func decoderInstructions(_ decoder: inout QPACKDecoder) -> [UInt8] {
     var output = [UInt8](repeating: 0, count: 4_096)
-    let written = output.withOutputRawSpan { (span) -> Int in
+    let written = output.withOutputRawSpan { span -> Int in
         decoder.writeDecoderInstructions(into: &span)
         return span.byteCount
     }
@@ -111,8 +111,8 @@ func encodeSection(_ encoder: inout QPACKEncoder, _ fields: borrowing HTTPFieldS
     var section = [UInt8](repeating: 0, count: 1 << 17)
     var instructions = [UInt8](repeating: 0, count: 1 << 17)
     var instructionCount = 0
-    let sectionCount = try section.withOutputRawSpan { (sectionSpan) throws(QPACKError) -> Int in
-        try instructions.withOutputRawSpan { (instructionSpan) throws(QPACKError) -> Int in
+    let sectionCount = try section.withOutputRawSpan { sectionSpan throws(QPACKError) -> Int in
+        try instructions.withOutputRawSpan { instructionSpan throws(QPACKError) -> Int in
             defer { instructionCount = instructionSpan.byteCount }
             try encoder.encode(fields, stream: stream, indexing: indexing, into: &sectionSpan, instructions: &instructionSpan)
             return sectionSpan.byteCount
@@ -179,9 +179,13 @@ enum QIFCorpus {
         var offset = 0
         while offset + 12 <= data.count {
             var stream: UInt64 = 0
-            for index in 0..<8 { stream = stream << 8 | UInt64(data[offset + index]) }
+            for index in 0..<8 {
+                stream = stream << 8 | UInt64(data[offset + index])
+            }
             var length = 0
-            for index in 8..<12 { length = length << 8 | Int(data[offset + index]) }
+            for index in 8..<12 {
+                length = length << 8 | Int(data[offset + index])
+            }
             offset += 12
             guard offset + length <= data.count else { break }
             records.append((stream, Array(data[offset..<offset + length])))
@@ -197,7 +201,7 @@ enum QIFCorpus {
         var decoder = QPACKDecoder(maximumTableCapacity: capacity, maximumBlockedStreams: blocked, maximumFieldSectionSize: 1 << 20)
         if startsFull {
             var instruction = [UInt8](repeating: 0, count: 8)
-            let count = instruction.withOutputRawSpan { (span) -> Int in
+            let count = instruction.withOutputRawSpan { span -> Int in
                 try! HPACKPrefixInteger.write(capacity, prefixBits: 5, flags: 0x20, into: &span)
                 return span.byteCount
             }

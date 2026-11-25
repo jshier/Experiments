@@ -46,10 +46,10 @@ public struct HTTPFieldName: Sendable, Hashable, CustomStringConvertible {
     @inlinable
     public var lowercaseBytes: RawSpan {
         @_lifetime(immortal) get {
-        let range = Self.range(index)
-        // Unsafe: a span of a static table. Safe: the table is a global constant, never freed or changed, so the span
-        // stays valid for the whole program (`immortal`).
-        return unsafe _overrideLifetime(Self.lowercaseTable.extracting(range), borrowing: ())
+            let range = Self.range(index)
+            // Unsafe: a span of a static table. Safe: the table is a global constant, never freed or changed, so the span
+            // stays valid for the whole program (`immortal`).
+            return unsafe _overrideLifetime(Self.lowercaseTable.extracting(range), borrowing: ())
         }
     }
 
@@ -57,9 +57,9 @@ public struct HTTPFieldName: Sendable, Hashable, CustomStringConvertible {
     @inlinable
     public var canonicalBytes: RawSpan {
         @_lifetime(immortal) get {
-        let range = Self.range(index)
-        // Unsafe and safe as for `lowercaseBytes`.
-        return unsafe _overrideLifetime(Self.canonicalTable.extracting(range), borrowing: ())
+            let range = Self.range(index)
+            // Unsafe and safe as for `lowercaseBytes`.
+            return unsafe _overrideLifetime(Self.canonicalTable.extracting(range), borrowing: ())
         }
     }
 
@@ -121,11 +121,14 @@ extension HTTPFieldName {
             // selected by `long`, which LLVM doesn't relate to the count. +12 instructions a name, 2026-11-23.)
             let a = UInt64(UInt32(littleEndian: unsafe name.unsafeLoadUnaligned(fromUncheckedByteOffset: 0, as: UInt32.self)))
             let b = UInt64(UInt32(littleEndian: unsafe name.unsafeLoadUnaligned(
-                fromUncheckedByteOffset: long ? 4 : 0, as: UInt32.self)))
+                fromUncheckedByteOffset: long ? 4 : 0, as: UInt32.self
+            )))
             let c = UInt64(UInt32(littleEndian: unsafe name.unsafeLoadUnaligned(
-                fromUncheckedByteOffset: count &- 4, as: UInt32.self)))
+                fromUncheckedByteOffset: count &- 4, as: UInt32.self
+            )))
             let d = UInt64(UInt32(littleEndian: unsafe name.unsafeLoadUnaligned(
-                fromUncheckedByteOffset: long ? count &- 8 : count &- 4, as: UInt32.self)))
+                fromUncheckedByteOffset: long ? count &- 8 : count &- 4, as: UInt32.self
+            )))
             let fold: UInt64 = long ? 0x2020_2020_2020_2020 : 0x2020_2020
             return ((long ? a | b &<< 32 : a) | fold, (long ? d | c &<< 32 : c) | fold)
         }
@@ -149,7 +152,7 @@ extension HTTPFieldName {
         let range = range(index)
         // The length and both words in one test.
         guard (FieldNameTable.firstWords[entry] ^ first) | (FieldNameTable.lastWords[entry] ^ last)
-                | UInt64(truncatingIfNeeded: range.count ^ count) == 0 else { return nil }
+            | UInt64(truncatingIfNeeded: range.count ^ count) == 0 else { return nil }
         // Over 16 bytes, the middle the two words didn't cover.
         if count > 16, !asciiCaseInsensitiveEqual(name.extracting(8..<count &- 8), lowercase: lowercaseTable, at: range.lowerBound &+ 8) {
             return nil

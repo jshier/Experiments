@@ -1,9 +1,9 @@
-import BytesTestSupport
+@testable import NativeAEA
 import BytesTesting
+import BytesTestSupport
 import Disk
 import DiskTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -149,18 +149,19 @@ import Testing
             return try makeAEA(stream, keys: SharedFixtures.keys.get(), in: directory, blockSize: blockSize)
         }
     }
+
     private static let xcodeStyle64k = makeXcodeStyleAEA("64k")
     private static let xcodeStyle1k = makeXcodeStyleAEA("1k")
     private static let xcodeStyle1m = makeXcodeStyleAEA("1m")
 
     /// The shared Xcode-style archive in segments of `blockSize`, its signing key, and its files.
-    private static func xcodeStyleArchive(blockSize: String = "64k") throws -> (URL, SigningKeys, [String: [UInt8]]) {
+    static func xcodeStyleArchive(blockSize: String = "64k") throws -> (URL, SigningKeys, [String: [UInt8]]) {
         let url = switch blockSize {
         case "1k": try xcodeStyle1k.get()
         case "1m": try xcodeStyle1m.get()
         default: try xcodeStyle64k.get()
         }
-        return (url, try SharedFixtures.keys.get(), try xcodeStyle.get().files)
+        return try (url, SharedFixtures.keys.get(), xcodeStyle.get().files)
     }
 
     /// Every mode at every segment size, but LZBITMAP forks (`.archived`, the slowest to encode in debug builds)
@@ -236,7 +237,9 @@ import Testing
                 ("text", testBytes(3_000_000, seed: 9, compressible: true)),
                 ("random", testBytes(3_000_000, seed: 10, compressible: false)),
             ]
-            for (path, bytes) in files { writer.file(path, bytes, diskCompression: 14, flags: 0x20) }
+            for (path, bytes) in files {
+                writer.file(path, bytes, diskCompression: 14, flags: 0x20)
+            }
             let stream = directory.path("decisions.aar")
             try writer.write(to: stream)
             let reference = directory.path("reference")
@@ -257,7 +260,7 @@ import Testing
         let statistics = try await opened.extract(to: FilePath(destination.path))
         #expect(statistics.unreleasedBuffers == 0)
         for (path, bytes) in files {
-            #expect(Array(try Data(contentsOf: destination.appending(path: path))) == bytes, "\(path)")
+            #expect(try Array(Data(contentsOf: destination.appending(path: path))) == bytes, "\(path)")
             let expected = decmpfsType(reference.appending(path: path))
             #expect(decmpfsType(destination.appending(path: path)) == expected, "\(path): Apple's \(expected.map(String.init) ?? "plain")")
         }
@@ -300,7 +303,7 @@ import Testing
         var compressed = 0
         for (path, bytes, codec) in files {
             let mine = destination.appending(path: path), theirs = reference.appending(path: path)
-            #expect(Array(try Data(contentsOf: mine)) == bytes, "\(path)")
+            #expect(try Array(Data(contentsOf: mine)) == bytes, "\(path)")
             let type = decmpfsType(theirs)
             #expect(decmpfsType(mine) == type, "\(path): Apple's \(type.map(String.init) ?? "plain")")
             if codec == 14 { #expect(decmpfsStoredBytes(mine) == decmpfsStoredBytes(theirs), "\(path): stored bytes") }
@@ -376,7 +379,7 @@ import Testing
         try await archive.extract(to: destination)
         // Disk's error as it threw it: the first entry that's there.
         let error = await #expect(throws: AEAError.self) { try await archive.extract(to: destination) }
-        guard case .disk(.exists(let path))? = error else {
+        guard case let .disk(.exists(path))? = error else {
             Issue.record("expected an existing entry, got \(String(describing: error))")
             return
         }

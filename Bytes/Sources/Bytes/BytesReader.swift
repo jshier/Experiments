@@ -16,8 +16,14 @@ public enum BytesError: Error, Hashable, Sendable {
     case mismatch
     /// ``GenericBytesReader/read(_:count:)`` was asked to view memory that isn't aligned for its element type.
     case misaligned
-    /// A ``BytesWriter`` has less room left than the write needs.
+    /// A ``BytesWriter``, or a codec's output buffer, has less room left than the write needs: more room would let
+    /// it go on.
     case insufficientCapacity
+    /// A limit the caller set was reached: a decoder's most output (`maximumSize`), window (Zstandard's
+    /// `maximumWindowSize`), or dictionary (LZMA's `maximumDictionarySize`), or a parallel decoder's memory budget, in
+    /// `BytesCompression`. The data may be valid, but it needs more than the caller allows; unlike
+    /// ``insufficientCapacity``, more room in the output wouldn't help.
+    case limitExceeded
     /// A field's value isn't valid for the type it's read as: an undefined enum case, malformed UTF-8, a
     /// LEB128 integer longer than allowed, a negative seek offset, or a length too large for its prefix when
     /// writing.
@@ -682,7 +688,7 @@ extension BytesReader {
     ///   - bitOrder: The order of bits within each byte.
     /// - Returns: The bytes, the first in the low bits.
     @usableFromInline
-    internal static func _unalignedBytes(_ count: Int, in span: RawSpan, atByte byteOffset: Int, bit: Int, bitOrder: BitOrder) -> UInt128 {
+    static func _unalignedBytes(_ count: Int, in span: RawSpan, atByte byteOffset: Int, bit: Int, bitOrder: BitOrder) -> UInt128 {
         var value: UInt128 = 0
         for index in 0..<count {
             let byte = _bits(8, in: span, atByte: byteOffset &+ index, bit: bit, bitOrder: bitOrder)
@@ -1219,7 +1225,6 @@ public extension GenericBytesReader {
         }
         _byteOffset = start &+ count &* T.byteCount
     }
-
 }
 
 public extension BytesReader {
@@ -1367,7 +1372,6 @@ public extension BytesReader {
         }
         _byteOffset = start &+ blocks &* byteCount
     }
-
 }
 
 public extension GenericBytesReader {

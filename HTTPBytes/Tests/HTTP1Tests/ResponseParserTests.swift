@@ -15,13 +15,13 @@ struct ParsedResponse: Equatable, CustomStringConvertible {
 func parseResponse(_ parser: inout HTTP1ResponseParser, _ bytes: RawSpan, into head: inout ParsedResponse) throws(HTTP1Error) -> Bool {
     while true {
         switch try parser.next(in: bytes) {
-        case .statusLine(let line):
+        case let .statusLine(line):
             head.version = "\(line.version)"
             head.status = line.status.code
             head.reason = string(line.reasonPhrase)
-        case .field(let field):
+        case let .field(field):
             head.fields.append([string(field.name), string(field.value)])
-        case .end(let headByteCount):
+        case let .end(headByteCount):
             head.byteCount = headByteCount
             return true
         case .needsMore:

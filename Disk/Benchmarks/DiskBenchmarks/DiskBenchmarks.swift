@@ -23,7 +23,9 @@ func measure(_ benchmark: Benchmark, _ name: String, _ body: (FilePath) async th
     let before = SyscallCounter.total
     var waits = 0
     benchmark.startMeasurement()
-    for index in benchmark.scaledIterations { waits += try await body(paths[index]).plannerWaits }
+    for index in benchmark.scaledIterations {
+        waits += try await body(paths[index]).plannerWaits
+    }
     benchmark.stopMeasurement()
     let iterations = max(1, benchmark.scaledIterations.count)
     if SyscallCounter.isEnabled { benchmark.measurement(diskSyscalls, (SyscallCounter.total - before) / iterations) }
@@ -143,7 +145,7 @@ let benchmarks: @Sendable () -> Void = {
             defer { destination.close() }
             return try await Extraction.run(into: destination, source: source, settings: streamed) { (planner: inout Planner<PieceWriter>) throws(DiskError) in
                 let name = Array("large.bin".utf8)
-                try await planner.file(try EntryPath(validating: name.span.bytes), size: tree.byteCount, contents: 0)
+                try await planner.file(EntryPath(validating: name.span.bytes), size: tree.byteCount, contents: 0)
             }
         }
     }
@@ -167,7 +169,7 @@ let benchmarks: @Sendable () -> Void = {
         for _ in benchmark.scaledIterations {
             for entry in tree.entries where entry.kind == .file {
                 let contents = RawSpan(_unsafeStart: tree.contents.baseAddress! + entry.data.lowerBound, byteCount: entry.data.count)
-                try writer.writeFile(try EntryPath(validating: tree.path(entry)), contents: contents)
+                try writer.writeFile(EntryPath(validating: tree.path(entry)), contents: contents)
             }
         }
         benchmark.stopMeasurement()
@@ -193,7 +195,9 @@ let benchmarks: @Sendable () -> Void = {
             let paths = Output.paths(benchmark.scaledIterations.count, "probe-attrs")
             try? FileManager.default.createDirectory(at: Output.root, withIntermediateDirectories: true)
             benchmark.startMeasurement()
-            for index in benchmark.scaledIterations { Probe.smallFiles(in: paths[index].string, count: 2_000, bytes: probeBytes, combined: combined) }
+            for index in benchmark.scaledIterations {
+                Probe.smallFiles(in: paths[index].string, count: 2_000, bytes: probeBytes, combined: combined)
+            }
         }
     }
     let identical = SampleBytes.text(32_768, seed: 4)
@@ -202,7 +206,9 @@ let benchmarks: @Sendable () -> Void = {
             let paths = Output.paths(benchmark.scaledIterations.count, "probe-clone")
             try? FileManager.default.createDirectory(at: Output.root, withIntermediateDirectories: true)
             benchmark.startMeasurement()
-            for index in benchmark.scaledIterations { Probe.identicalFiles(in: paths[index].string, count: 2_000, bytes: identical, clone: clone) }
+            for index in benchmark.scaledIterations {
+                Probe.identicalFiles(in: paths[index].string, count: 2_000, bytes: identical, clone: clone)
+            }
         }
     }
     for method in Probe.LargeWrite.allCases {

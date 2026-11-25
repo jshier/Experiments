@@ -20,12 +20,13 @@
 #
 # example (the trivially destroyable ~Escapable struct whose release survives LowerAggregateInstrs):
 #   Tools/sil-trace Client.swift 'spans4' 'release_value|destroy' -- -I . -enable-experimental-feature Lifetimes
-source "$(dirname "$0")/lib/common.sh"
+source "$(dirname "$0")/lib/common.sh" || exit 2
 
-target_package= target_name= debug= positional=() swiftc_args=()
+target_package='' target_name='' debug='' positional=() swiftc_args=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        --target) target_package="$2"; target_name="$3"; shift 2 ;;
+        --target) [[ $# -ge 3 && -n "$2" && -n "$3" ]] || die "--target needs PACKAGE_DIR TARGET"
+            target_package="$2"; target_name="$3"; shift 2 ;;
         --debug) debug=--debug ;;
         -h|--help) usage ;;
         --) shift; swiftc_args=("$@"); break ;;
@@ -33,13 +34,14 @@ while [[ $# -gt 0 ]]; do
     esac
     shift
 done
+need_xcode_tools
 scratch_dir
 
 compile() { # compile ARGS...: SIL, with extra args
     if [[ -n "$target_package" ]]; then
         "$TOOLS_DIR/swiftc-target" $debug "$target_package" "$target_name" -- "$@"
     else
-        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos27" -module-name "$module" "${swiftc_args[@]}" "$file" "$@"
+        xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos27" -module-name "$module" ${swiftc_args[@]+"${swiftc_args[@]}"} "$file" "$@"
     fi
 }
 if [[ -n "$target_package" ]]; then
@@ -48,6 +50,7 @@ if [[ -n "$target_package" ]]; then
 else
     [[ ${#positional[@]} -eq 3 ]] || usage 2
     file="${positional[0]}" function_pattern="${positional[1]}" match="${positional[2]}"
+    [[ -f "$file" ]] || die "no file $file"
     # A fixed module name: without one, swiftc names the module after the output file, and mangled names differ.
     module="$(basename "$file" .swift | perl -pe 'chomp; s/\W/_/g; s/^(\d)/_$1/')"
 fi
@@ -56,7 +59,7 @@ fi
 compile -emit-sil -o "$SCRATCH/out.sil" 2> "$SCRATCH/log" || { grep error "$SCRATCH/log" >&2; die "compile failed"; }
 perl -ne 'print "$1\n" if /^sil .*@(\$\S+)\s*:/' "$SCRATCH/out.sil" | sort -u > "$SCRATCH/names"
 mangled="$(paste "$SCRATCH/names" <(demangle < "$SCRATCH/names") |
-    PATTERN="$function_pattern" perl -F'\t' -ane 'chomp $F[1]; if ($F[1] =~ /$ENV{PATTERN}/ || $F[0] =~ /$ENV{PATTERN}/) { print $F[0]; exit }')"
+    PATTERN="$function_pattern" perl -F'\t' -ane 'chomp $F[1]; if ($F[1] =~ /$ENV{PATTERN}/ || $F[0] =~ /$ENV{PATTERN}/) { print $F[0] unless $found++ }')"
 [[ -n "$mangled" ]] || fail "no SIL function matching /$function_pattern/"
 note "tracing $(echo "$mangled" | demangle) ($mangled)"
 

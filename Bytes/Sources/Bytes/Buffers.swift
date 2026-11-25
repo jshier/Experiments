@@ -468,5 +468,4 @@ public struct ByteBuffer: ~Copyable, @unchecked Sendable {
         _end &+= unsafe output.finalize(for: free)
         return result
     }
-
 }

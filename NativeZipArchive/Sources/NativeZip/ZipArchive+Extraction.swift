@@ -113,7 +113,7 @@ public struct ZipExtractionFailure: Error, Sendable, CustomStringConvertible {
     public var description: String { "\(path): \(error)" }
 }
 
-extension ZipArchive {
+public extension ZipArchive {
     /// Extracts `entries` (all of them by default) beneath `destination`.
     ///
     /// A ``ZipExtractor`` with one archive: see it for how the work is planned and written. The first failure is
@@ -127,10 +127,10 @@ extension ZipArchive {
     /// - Throws: The errors of ``ZipArchive/contents(of:using:password:_:)-77zt7`` for damaged entries; ``ZipError/disk(_:)`` for file
     ///   system failures; ``ZipError/cancelled`` if the task is cancelled.
     @concurrent
-    public func extract(_ entries: [ZipEntry]? = nil, to destination: FilePath, options: ZipExtractionOptions = .init()) async throws(ZipError) {
+    func extract(_ entries: [ZipEntry]? = nil, to destination: FilePath, options: ZipExtractionOptions = .init()) async throws(ZipError) {
         _ = try await ZipExtractor.extract(
             into: destination, maxConcurrency: writers(for: entries, options), stopOnFirstError: true, progress: options.progress
-        ) { (extractor) async throws(ZipError) in
+        ) { extractor async throws(ZipError) in
             try await extractor.add(self, entries: entries, options: options)
         }
     }
@@ -140,10 +140,10 @@ extension ZipArchive {
     /// duplicate of the destination's descriptor (`Destination.reopened(with:)`), so nothing is looked up by path.
     /// Everything extracted gets the destination's quarantine (its options'); the directory itself is left as it is.
     @concurrent
-    public func extract(_ entries: [ZipEntry]? = nil, into destination: Destination, options: ZipExtractionOptions = .init()) async throws(ZipError) {
+    func extract(_ entries: [ZipEntry]? = nil, into destination: Destination, options: ZipExtractionOptions = .init()) async throws(ZipError) {
         _ = try await ZipExtractor.extract(
             into: destination, maxConcurrency: writers(for: entries, options), stopOnFirstError: true, progress: options.progress
-        ) { (extractor) async throws(ZipError) in
+        ) { extractor async throws(ZipError) in
             try await extractor.add(self, entries: entries, options: options)
         }
     }
@@ -338,8 +338,8 @@ public struct ZipExtractor: ~Copyable {
         } catch {
             target.close()
             switch error {
-            case .plan(let error), .source(let error): throw error
-            case .disk(let error): throw ZipError(error)
+            case let .plan(error), let .source(error): throw error
+            case let .disk(error): throw ZipError(error)
             }
         }
         // The extraction's own descriptor (opened or reopened for it): its last use was Disk's last pass.
@@ -352,8 +352,8 @@ public struct ZipExtractor: ~Copyable {
             let (jobIndex, entryIndex) = record.tags[failure.tag]
             let job = record.jobs[Int(jobIndex)]
             let error: ZipError = switch failure.error {
-            case .disk(let error): ZipError(error)
-            case .source(let error): error
+            case let .disk(error): ZipError(error)
+            case let .source(error): error
             }
             let relative = failure.path.hasPrefix(job.prefix) ? String(failure.path.dropFirst(job.prefix.count)) : failure.path
             failures.append((failure.tag, ZipExtractionFailure(
@@ -408,7 +408,7 @@ public struct ZipExtractor: ~Copyable {
         var expected = (entries: 0, bytes: 0)
         for entry in selected where !(options.junkPaths && entry.kind == .directory) {
             expected.entries += 1
-            if entry.kind == .file { expected.bytes += Int(clamping: entry.uncompressedSize) }
+            if entry.kind == .file { expected.bytes = Self.adding(entry.uncompressedSize, to: expected.bytes) }
         }
         progress?.addExpected(entries: expected.entries, bytes: expected.bytes)
         var unplanned = (entries: 0, bytes: 0)
@@ -438,11 +438,18 @@ public struct ZipExtractor: ~Copyable {
             }
             if !planned {
                 unplanned.entries += 1
-                if entry.kind == .file { unplanned.bytes += Int(clamping: entry.uncompressedSize) }
+                if entry.kind == .file { unplanned.bytes = Self.adding(entry.uncompressedSize, to: unplanned.bytes) }
             }
         }
         if unplanned.entries > 0 { progress?.addExpected(entries: -unplanned.entries, bytes: -unplanned.bytes) }
         return record.failures[failureCount...].map(\.failure)
+    }
+
+    /// `total` plus an entry's `size`, saturating at `Int.max`: each size is below 2^62 (the directory's bound), but an
+    /// archive can claim as many as it likes.
+    private static func adding(_ size: UInt64, to total: Int) -> Int {
+        let (sum, overflow) = total.addingReportingOverflow(Int(clamping: size))
+        return overflow ? .max : sum
     }
 
     /// The AppleDouble entries among `selected` that describe another selected entry: which entries they are (not
@@ -475,7 +482,9 @@ public struct ZipExtractor: ~Copyable {
             guard ZipArchive.Method.isSupported(entry.method), !entry.isEncrypted || options.password != nil else { continue }
             if linkDecoder == nil { linkDecoder = ZipDecoder() }
             var bytes: [UInt8] = []
-            bytes.reserveCapacity(Int(entry.uncompressedSize))
+            // What the directory claims, up to 64 KiB (AppleDouble files are attributes: kilobytes); a resource fork
+            // larger than that grows the array as it's read, never on the size's word alone.
+            bytes.reserveCapacity(Int(min(entry.uncompressedSize, 64 << 10)))
             // One that can't be read is planned as a file, where its error is reported.
             guard (try? job.archive.contents(of: entry, using: &linkDecoder!, password: options.password) { bytes.append(copying: $0) }) != nil,
                   let appleDouble = AppleDouble(
@@ -495,7 +504,9 @@ public struct ZipExtractor: ~Copyable {
         guard bytes.count < EntryPath.maximumByteCount else { throw .unsafePath(prefix) }
         _ = try EntryPath(validating: bytes.span.bytes)
         if path.count < bytes.count + 1 + Int(PATH_MAX) { path = [UInt8](repeating: 0, count: bytes.count + 1 + Int(PATH_MAX) * 2) }
-        for (index, byte) in bytes.enumerated() { path[index] = byte }
+        for (index, byte) in bytes.enumerated() {
+            path[index] = byte
+        }
         path[bytes.count] = UInt8(ascii: "/")
         return bytes.count + 1
     }
@@ -525,7 +536,7 @@ public struct ZipExtractor: ~Copyable {
         if path.count < prefixCount + nameBytes.byteCount { path += [UInt8](repeating: 0, count: prefixCount + nameBytes.byteCount - path.count) }
         let sanitized: EntryPath.Sanitized
         do throws(DiskError) {
-            sanitized = try path.withOutputRawSpan(overwritingFrom: prefixCount) { (output) throws(DiskError) in
+            sanitized = try path.withOutputRawSpan(overwritingFrom: prefixCount) { output throws(DiskError) in
                 try EntryPath.sanitize(nameBytes, into: &output)
             }
         } catch {
@@ -669,7 +680,7 @@ public struct ZipExtractor: ~Copyable {
     private static func cleaned(_ name: String) -> FilePath {
         var bytes = [UInt8](repeating: 0, count: name.utf8.count)
         let nameBytes = name.utf8.span.bytes
-        let count = (try? bytes.withOutputRawSpan { (output) throws(DiskError) in try EntryPath.sanitize(nameBytes, into: &output).count }) ?? 0
+        let count = (try? bytes.withOutputRawSpan { output throws(DiskError) in try EntryPath.sanitize(nameBytes, into: &output).count }) ?? 0
         return FilePath(String(decoding: bytes[..<count], as: UTF8.self))
     }
 
@@ -682,10 +693,14 @@ public struct ZipExtractor: ~Copyable {
     /// its new length.
     private mutating func junkPath(at start: Int, count: Int) -> Int {
         var slash = start + count - 1
-        while slash >= start, path[slash] != UInt8(ascii: "/") { slash -= 1 }
+        while slash >= start, path[slash] != UInt8(ascii: "/") {
+            slash -= 1
+        }
         guard slash >= start else { return count }
         let leaf = start + count - (slash + 1)
-        for offset in 0..<leaf { path[start + offset] = path[slash + 1 + offset] }
+        for offset in 0..<leaf {
+            path[start + offset] = path[slash + 1 + offset]
+        }
         return leaf
     }
 
@@ -751,7 +766,7 @@ struct ClaimKey: Hashable {
         byte &- UInt8(ascii: "A") < 26 ? byte | 0x20 : byte
     }
 
-    static func == (lhs: ClaimKey, rhs: ClaimKey) -> Bool {
+    static func ==(lhs: ClaimKey, rhs: ClaimKey) -> Bool {
         guard lhs.root == rhs.root else { return false }
         if lhs.caseSensitive { return lhs.path == rhs.path }
         guard lhs.isASCII, rhs.isASCII else { return lhs.path.lowercased() == rhs.path.lowercased() }

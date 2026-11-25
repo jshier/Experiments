@@ -35,7 +35,9 @@ public struct SplitMix64: RandomNumberGenerator, Sendable {
     public mutating func bytes(_ count: Int) -> [UInt8] {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(count)
-        for _ in 0..<count { bytes.append(UInt8(truncatingIfNeeded: next())) }
+        for _ in 0..<count {
+            bytes.append(UInt8(truncatingIfNeeded: next()))
+        }
         return bytes
     }
 

@@ -95,7 +95,9 @@ public struct WaiterQueue<Element> {
         if _count == slots.count {
             // Past the reserved capacity: unroll into a larger ring, oldest first.
             var grown: [Element?] = Array(repeating: nil, count: slots.count * 2)
-            for index in 0..<_count { grown[index] = slots[(head + index) % slots.count] }
+            for index in 0..<_count {
+                grown[index] = slots[(head + index) % slots.count]
+            }
             slots = grown
             head = 0
         }
@@ -130,7 +132,9 @@ public struct WaiterQueue<Element> {
     public mutating func removeAll() -> [Element] {
         var all: [Element] = []
         all.reserveCapacity(count)
-        while let element = popFirst() { all.append(element) }
+        while let element = popFirst() {
+            all.append(element)
+        }
         return all
     }
 }

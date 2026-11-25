@@ -18,10 +18,13 @@ import System
 //   iterations (`setup` reads the archive into the page cache instead), 3 and 2 times. A real archive runs once.
 
 /// The synthetic archive `Tools/test-data fetch nativeaea-synthetic` makes, and optionally a real one named by
-/// `NATIVEAEA_ARCHIVE` (with `NATIVEAEA_SIGN_PUB` if its certificate chain isn't Apple's). The real one isn't in the
-/// repository: Xcode's (`Xcode_27.3_beta_2.aea`, about 10 s an extraction) was kept in `~/Scratch`:
+/// `NATIVEAEA_ARCHIVE` (with `NATIVEAEA_SIGN_PUB` if its certificate chain isn't Apple's).
 ///
-///     NATIVEAEA_ARCHIVE=~/Scratch/Xcode_27.3_beta_2.aea swift package --disable-sandbox benchmark
+/// The real archive's rows (named `Xcode`) are opt-in, for local timing only: every default row runs on generated
+/// `TestData` sets, which any clone can make again. Xcode's archive is the user's download in `~/Scratch`
+/// (`Xcode_27.3_beta_2.aea`, about 10 s an extraction), never in the repository:
+///
+///     NATIVEAEA_ARCHIVE=~/Scratch/Xcode_27.3_beta_2.aea swift package --disable-sandbox benchmark --filter '.*Xcode.*'
 enum Fixtures {
     static let directory = TestData.directory(set: "nativeaea-synthetic")
     static let synthetic = directory.appending(path: "synthetic.aea")
@@ -268,7 +271,7 @@ let benchmarks: @Sendable () -> Void = {
             let options = AEAReadOptions()
             let archive = fixture.archive
             for _ in benchmark.scaledIterations {
-                blackHole(try await archive.forEachEntry(options: options) { _ in })
+                try await blackHole(archive.forEachEntry(options: options) { _ in })
             }
         }
 
@@ -302,9 +305,42 @@ let benchmarks: @Sendable () -> Void = {
                 let archive = fixture.archive
                 benchmark.startMeasurement()
                 for _ in benchmark.scaledIterations {
-                    blackHole(try await archive.extract(to: destination, options: options))
+                    try await blackHole(archive.extract(to: destination, options: options))
                 }
             }
+        }
+    }
+
+    // MARK: The coverage tree
+
+    // The archive-coverage set's LZFSE `.aar` (`Tools/test-data fetch archive-coverage`; the coverage tests' tree, so
+    // the row moves with the set): 2,000 small files and a few large ones (14 MB), with what the synthetic archive
+    // barely has: symbolic links of every kind, hard links across directories, extended attributes and resource forks,
+    // ACLs, read-only and special modes, flags, 24 levels, long and Unicode names, and files `aa archive` marked
+    // compressed (written plain: no `AFT`). The work after the writers (links, ACLs, directories' metadata) is a larger
+    // share here. About 0.1 s an extraction: 20 samples; each extracts into its own directory, removed in the teardown.
+    let coverage = TestData.directory(set: "archive-coverage").appending(path: "tree-lzfse-1m.aar")
+    Benchmark(
+        "Extract: coverage tree",
+        configuration: .init(
+            metrics: threadedMetrics,
+            warmupIterations: 1,
+            maxDuration: .seconds(3),
+            maxIterations: 20,
+            setup: {
+                _ = try TestData.file(set: "archive-coverage", name: "tree-lzfse-1m.aar") // Says which fetch to run.
+                Fixtures.removeOutput()
+            },
+            teardown: { Fixtures.removeOutput() }
+        )
+    ) { (benchmark: Benchmark) async throws in
+        let archive = try AppleArchiveFile(path: FilePath(coverage.path))
+        defer { archive.close() }
+        let options = AEAExtractionOptions()
+        let destination = FilePath(Fixtures.output.appending(path: "coverage-\(UUID().uuidString)").path)
+        benchmark.startMeasurement()
+        for _ in benchmark.scaledIterations {
+            try await blackHole(archive.extract(to: destination, options: options))
         }
     }
 }

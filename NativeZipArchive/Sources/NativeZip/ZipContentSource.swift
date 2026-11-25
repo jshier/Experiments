@@ -70,7 +70,7 @@ struct ZipContentSource: ContentSource {
 
     // MARK: Writing an entry
 
-    nonisolated(nonsending) private static func write(
+    private nonisolated(nonsending) static func write(
         _ entry: ZipEntry, of job: ArchiveJob, to output: inout FileOutput, state: SourceState
     ) async throws(EntryError<ZipError>) {
         let archive = job.archive
@@ -108,7 +108,7 @@ struct ZipContentSource: ContentSource {
 
     /// An unencrypted stored entry, from the mapped archive.
     @unsafe
-    nonisolated(nonsending) private static func writeStored(
+    private nonisolated(nonsending) static func writeStored(
         _ entry: ZipEntry, payload: UnsafeRawBufferPointer, size: Int, to output: inout FileOutput
     ) async throws(EntryError<ZipError>) {
         guard payload.count == size else {
@@ -130,7 +130,7 @@ struct ZipContentSource: ContentSource {
 
     /// Writes `bytes` to the file: Disk's errors as `EntryError.disk`.
     @inline(__always)
-    nonisolated(nonsending) private static func writeBytes(_ bytes: RawSpan, to output: inout FileOutput) async throws(EntryError<ZipError>) {
+    private nonisolated(nonsending) static func writeBytes(_ bytes: RawSpan, to output: inout FileOutput) async throws(EntryError<ZipError>) {
         do throws(DiskError) {
             try await output.write(bytes)
         } catch {
@@ -150,7 +150,7 @@ struct ZipContentSource: ContentSource {
 
     /// Decodes a chunk, writes it, then decodes the next, on the writer's task.
     @unsafe
-    nonisolated(nonsending) private static func writeInline(
+    private nonisolated(nonsending) static func writeInline(
         _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, to output: inout FileOutput
     ) async throws(EntryError<ZipError>) {
         // Unsafe: the writer's decoder (see `write`); chunks point into its buffers, which nothing else writes until
@@ -181,7 +181,7 @@ struct ZipContentSource: ContentSource {
     /// Decodes in a child task while the writer writes the previous chunk: two buffers alternate (see
     /// ``ZipDecoder/nextChunk(into:)``), handed over by a ``ChunkHandoff``.
     @unsafe
-    nonisolated(nonsending) private static func writeOverlapped(
+    private nonisolated(nonsending) static func writeOverlapped(
         _ entry: ZipEntry, decoder: UnsafeMutablePointer<ZipDecoder?>, size: Int, to output: inout FileOutput
     ) async throws(EntryError<ZipError>) {
         // Unsafe (here and at `close` and `fail` below): a handoff of `Chunk`s, which are pointers into the decoder's
@@ -318,7 +318,9 @@ final class SourceState: Sendable {
             if !woken.isEmpty { state.waiters.removeAll { $0.tag == tag } }
             return woken
         }
-        for continuation in woken { continuation.resume() }
+        for continuation in woken {
+            continuation.resume()
+        }
     }
 
     /// Waits until the job with `tag` has been written. It was queued before the caller's job, so a writer has it or
@@ -334,5 +336,4 @@ final class SourceState: Sendable {
             if now { continuation.resume() }
         }
     }
-
 }

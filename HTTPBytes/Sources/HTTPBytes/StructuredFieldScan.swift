@@ -26,7 +26,9 @@ enum StructuredFieldScan {
     @inlinable @inline(__always)
     static func spacesEnd(_ bytes: RawSpan, from start: Int) -> Int {
         var position = start
-        while position < bytes.byteCount, byte(bytes, position) == 0x20 { position &+= 1 }
+        while position < bytes.byteCount, byte(bytes, position) == 0x20 {
+            position &+= 1
+        }
         return position
     }
 
@@ -34,7 +36,9 @@ enum StructuredFieldScan {
     @inlinable @inline(__always)
     static func whitespaceEnd(_ bytes: RawSpan, from start: Int) -> Int {
         var position = start
-        while position < bytes.byteCount, case let byte = byte(bytes, position), byte == 0x20 || byte == 0x09 { position &+= 1 }
+        while position < bytes.byteCount, case let byte = byte(bytes, position), byte == 0x20 || byte == 0x09 {
+            position &+= 1
+        }
         return position
     }
 
@@ -244,7 +248,9 @@ enum StructuredFieldScan {
         let start = position &+ 1
         let end = bytes.extracting(droppingFirst: start).firstByteOffset(where: base64Stop).map { start &+ $0 } ?? count
         var offset = end
-        while offset < count, byte(bytes, offset) == 0x3D { offset &+= 1 }
+        while offset < count, byte(bytes, offset) == 0x3D {
+            offset &+= 1
+        }
         guard offset < count, byte(bytes, offset) == 0x3A, offset &- end <= 2, (end &- start) & 3 != 1 else {
             throw .invalidByteSequence
         }
@@ -316,13 +322,13 @@ enum StructuredFieldScan {
             let number = try Self.number(bytes, &position)
             return number.isDecimal ? .decimal(HTTPStructuredDecimal(uncheckedThousandths: number.value)) : .integer(number.value)
         case 0x22:
-            return .string(try string(bytes, &position))
+            return try .string(string(bytes, &position))
         case 0x41...0x5A, 0x61...0x7A, 0x2A:
             let start = position
             position = tokenEnd(bytes, from: start)
             return .token(bytes.extracting(start..<position))
         case 0x3A:
-            return .byteSequence(try byteSequence(bytes, &position))
+            return try .byteSequence(byteSequence(bytes, &position))
         case 0x3F:
             guard position &+ 1 < bytes.byteCount, case let value = byte(bytes, position &+ 1), value | 1 == 0x31 else {
                 throw .invalidBoolean
@@ -338,7 +344,7 @@ enum StructuredFieldScan {
             guard !number.isDecimal else { throw .invalidDate }
             return .date(number.value)
         case 0x25:
-            return .displayString(try displayString(bytes, &position))
+            return try .displayString(displayString(bytes, &position))
         default:
             throw .invalidBareItem
         }
@@ -352,7 +358,9 @@ enum StructuredFieldScan {
         let count = bytes.byteCount
         guard start < count, isKeyStart(byte(bytes, start)) else { throw .invalidKey }
         var offset = start &+ 1
-        while offset < count, isKeyCharacter(byte(bytes, offset)) { offset &+= 1 }
+        while offset < count, isKeyCharacter(byte(bytes, offset)) {
+            offset &+= 1
+        }
         return offset
     }
 
@@ -423,9 +431,9 @@ enum StructuredFieldScan {
     @_lifetime(copy bytes)
     static func member(_ bytes: RawSpan, _ position: inout Int) throws(HTTPStructuredFieldError) -> HTTPStructuredMember {
         if position < bytes.byteCount, byte(bytes, position) == 0x28 {
-            return .innerList(try innerList(bytes, &position))
+            return try .innerList(innerList(bytes, &position))
         }
-        return .item(try item(bytes, &position))
+        return try .item(item(bytes, &position))
     }
 
     /// The Dictionary member at `position`: a key, then `=` and a value, or parameters (the value is `true`).

@@ -64,7 +64,7 @@ final class HPACKFixture: @unchecked Sendable {
         self.offsets = offsets
         self.setEnds = setEnds
         let encodedBlocks = encoded ?? hpackEncodeEach(sets: stores)
-        blocks = encodedBlocks.flatMap { $0 }
+        blocks = encodedBlocks.flatMap(\.self)
         var end = 0
         blockEnds = encodedBlocks.map { end += $0.count; return end }
         nioBlocks = encodedBlocks.map { NIOCore.ByteBuffer(bytes: $0) }
@@ -116,7 +116,7 @@ func hpackEncodeEach(sets: [HTTPFieldStore]) -> [[UInt8]] {
     encoder.removesConnectionSpecificFields = false
     var output = [UInt8](repeating: 0, count: 1 << 16)
     return sets.map { store in
-        let written = try! output.withOutputRawSpan { (span) throws(HPACKError) -> Int in
+        let written = try! output.withOutputRawSpan { span throws(HPACKError) -> Int in
             try encoder.encode(store, into: &span)
             return span.byteCount
         }
@@ -136,6 +136,7 @@ nonisolated(unsafe) var sharedEncoder: HTTP2.HPACKEncoder = {
     encoder.removesConnectionSpecificFields = false
     return encoder
 }()
+
 nonisolated(unsafe) var encoderOutput = [UInt8](repeating: 0, count: 1 << 20)
 nonisolated(unsafe) var nioOutput = ByteBufferAllocator().buffer(capacity: 1 << 20)
 nonisolated(unsafe) var lshpackOutput = [UInt8](repeating: 0, count: 1 << 20)
@@ -148,7 +149,7 @@ nonisolated(unsafe) var lshpackBlockEnds = [Int](repeating: 0, count: 4_096)
 @inline(never)
 func hpackDecodeHTTPBytes(_ fixture: HPACKFixture, _ decoder: inout HTTP2.HPACKDecoder) -> Int {
     decoder.reset()
-    let blocks = fixture.blocks          // a local: a span of a class's stored array lasts only for the access
+    let blocks = fixture.blocks // a local: a span of a class's stored array lasts only for the access
     let all = blocks.span.bytes
     var start = 0
     var total = 0
@@ -233,7 +234,7 @@ func hpackEncodeHTTPBytes(_ fixture: HPACKFixture, _ encoder: inout HTTP2.HPACKE
                           blockEnds: UnsafeMutableBufferPointer<Int>? = nil) -> Int {
     encoder.reset()
     do throws(HPACKError) {
-        return try output.withOutputRawSpan { (span) throws(HPACKError) -> Int in
+        return try output.withOutputRawSpan { span throws(HPACKError) -> Int in
             for (index, store) in fixture.stores.enumerated() {
                 try encoder.encode(store, into: &span)
                 blockEnds?[index] = span.byteCount
@@ -253,7 +254,7 @@ func hpackEncodeC(_ fixture: HPACKFixture, _ encode: HPACKCEncoder, _ output: in
                     blockEnds.withUnsafeMutableBufferPointer { ends in
                         flat.withMemoryRebound(to: CChar.self) { chars in
                             encode(chars.baseAddress, offsets.baseAddress, setEnds.baseAddress, setEnds.count,
-                                                out.baseAddress, out.count, ends.baseAddress)
+                                   out.baseAddress, out.count, ends.baseAddress)
                         }
                     }
                 }
@@ -289,7 +290,9 @@ func hpackBlocksDecode(_ bytes: [UInt8], ends: [Int], to fixture: HPACKFixture) 
         let span = block.span.bytes
         var fields: [(name: [UInt8], value: [UInt8])] = []
         do throws(HPACKError) {
-            while let field = try decoder.next(in: span) { fields.append((Array(copying: field.name), Array(copying: field.value))) }
+            while let field = try decoder.next(in: span) {
+                fields.append((Array(copying: field.name), Array(copying: field.value)))
+            }
         } catch { return false }
         let expected = fixture.sets[index]
         guard fields.count == expected.count, zip(fields, expected).allSatisfy({ $0.name == $1.name && $0.value == $1.value }) else {
@@ -328,7 +331,9 @@ func reportEncodedSize(_ encoder: String, _ corpus: String, _ bytes: Int) {
 func registerHPACKBenchmarks() {
     func register(_ name: String, setup: @escaping () -> Int, _ run: @escaping () -> Int) {
         Benchmark(name) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         } setup: {
             precondition(setup() > 0, "\(name): failed")
         }
@@ -398,7 +403,9 @@ func registerHPACKBenchmarks() {
     ]
     for (name, run) in gates {
         Benchmark(name, configuration: zeroAllocations) { benchmark in
-            for _ in benchmark.scaledIterations { blackHole(run()) }
+            for _ in benchmark.scaledIterations {
+                blackHole(run())
+            }
         } setup: {
             precondition(run() > 0, "\(name): failed")
         }

@@ -106,9 +106,9 @@ final class Tree: @unchecked Sendable {
     /// synthetic archive mixes them.
     static func bytes(_ size: Int, seed: UInt64, kind: UInt64) -> [UInt8] {
         switch kind % 20 {
-        case 0..<10: return SampleBytes.text(size, seed: seed)
-        case 10..<19: return SampleBytes.periodic(size, period: 4_096, seed: seed)
-        default: return SampleBytes.random(size, seed: seed)
+        case 0..<10: SampleBytes.text(size, seed: seed)
+        case 10..<19: SampleBytes.periodic(size, period: 4_096, seed: seed)
+        default: SampleBytes.random(size, seed: seed)
         }
     }
 
@@ -208,7 +208,9 @@ func extract(
     let destination = try Destination(path, options: destinationOptions)
     defer { destination.close() }
     var blob = ExtendedAttributeBlob()
-    for name in ["com.example.one", "com.example.two", "com.example.three"] { blob.append(name: name, value: SampleBytes.text(40, seed: 1).span.bytes) }
+    for name in ["com.example.one", "com.example.two", "com.example.three"] {
+        blob.append(name: name, value: SampleBytes.text(40, seed: 1).span.bytes)
+    }
     let attributes = blob.bytes
     // Archived files have times: every file gets one (one `fsetattrlist` with the mode).
     let times = EntryTimes(modification: Timestamp(seconds: 1_700_000_000))

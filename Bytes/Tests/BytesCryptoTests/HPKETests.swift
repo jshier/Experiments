@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTesting
 import BytesTestSupport
 import CryptoKit
@@ -16,11 +16,13 @@ struct HPKEVector: Decodable {
     struct Encryption: Decodable {
         let aad, ct, nonce, pt: String
     }
+
     struct Export: Decodable {
         let exporter_context: String
         let L: Int
         let exported_value: String
     }
+
     let mode: Int
     let kem_id: Int
     let kdf_id: Int
@@ -113,7 +115,7 @@ func unwrapArchiveKey(privateKeyPEM: String, encRequest: [UInt8], wrappedKey: [U
             var recipient = try HPKE.Recipient(privateKey: key, aead: aead, info: info.span.bytes,
                                                encapsulatedKey: Array(cryptoKitSender.encapsulatedKey).span.bytes)
             for message in messages {
-                let sealed = Array(try cryptoKitSender.seal(Data(message), authenticating: Data(aad)))
+                let sealed = try Array(cryptoKitSender.seal(Data(message), authenticating: Data(aad)))
                 #expect(try recipient.open(sealed, aad) == message)
             }
             // Bytes seals, CryptoKit opens.
@@ -122,7 +124,7 @@ func unwrapArchiveKey(privateKeyPEM: String, encRequest: [UInt8], wrappedKey: [U
                                                                   encapsulatedKey: Data(sender.encapsulatedKey))
             for message in messages {
                 let sealed = sender.seal(message.span.bytes, authenticating: aad.span.bytes)
-                #expect(Array(try cryptoKitRecipient.open(Data(sealed), authenticating: Data(aad))) == message)
+                #expect(try Array(cryptoKitRecipient.open(Data(sealed), authenticating: Data(aad))) == message)
             }
             // A tampered message, or one opened out of order, fails.
             let first = messages[0]
@@ -168,12 +170,12 @@ func unwrapArchiveKey(privateKeyPEM: String, encRequest: [UInt8], wrappedKey: [U
     /// archives' `com.apple.wkms.fcs-response` entries are.
     @Test func archiveKeyVector() throws {
         let pem = """
-            -----BEGIN PRIVATE KEY-----
-            MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcE2vf7sxF+/HeNyN
-            7QF75EOxo9pkSXF3jx3Fy5CZRtyhRANCAATdKMblphdkxZBlfGtuGpOG/IqKtx6v
-            7cRcC26oF1vXOtdVb+jJoxM6c0gJg8OeNV9kO8f5/EOwRszlvbq5FnGG
-            -----END PRIVATE KEY-----
-            """
+        -----BEGIN PRIVATE KEY-----
+        MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgcE2vf7sxF+/HeNyN
+        7QF75EOxo9pkSXF3jx3Fy5CZRtyhRANCAATdKMblphdkxZBlfGtuGpOG/IqKtx6v
+        7cRcC26oF1vXOtdVb+jJoxM6c0gJg8OeNV9kO8f5/EOwRszlvbq5FnGG
+        -----END PRIVATE KEY-----
+        """
         let enc = Array(Data(base64Encoded: "BGmvNnjp1oDWMOT995dPJ0lbRsedFZWafnMsoh77lN+5Y4u6p0sNGUbG90SppcR30mzzzWY44nV/qbsmSymYRfI=")!)
         let wrapped = Array(Data(base64Encoded: "cPM6htjgnNZd6xQ7Mi15BBW3tdvVcagQEBCfLNSa+XLVcGE7Yf50DPCkwma30x/I")!)
         let key = try unwrapArchiveKey(privateKeyPEM: pem, encRequest: enc, wrappedKey: wrapped)
@@ -189,7 +191,7 @@ func unwrapArchiveKey(privateKeyPEM: String, encRequest: [UInt8], wrappedKey: [U
     /// key, `base64:…` as `aea` prints it, in `expected-key.txt`. Neither is checked in.
     @Test(.enabled(if: ProcessInfo.processInfo.environment["AEA_FCS_SAMPLE"] != nil))
     func realArchive() throws {
-        let directory = URL(filePath: try #require(ProcessInfo.processInfo.environment["AEA_FCS_SAMPLE"]))
+        let directory = try URL(filePath: #require(ProcessInfo.processInfo.environment["AEA_FCS_SAMPLE"]))
         let files = try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
         let archive = try #require(files.first { $0.pathExtension == "aea" })
         // The prologue: "AEA1", profile and scrypt strength (4 bytes), the auth data's size (u32, little-endian), then
@@ -198,7 +200,7 @@ func unwrapArchiveKey(privateKeyPEM: String, encRequest: [UInt8], wrappedKey: [U
         defer { try? handle.close() }
         let header = try #require(try handle.read(upToCount: 12))
         let authSize = Int(header[8]) | Int(header[9]) << 8 | Int(header[10]) << 16 | Int(header[11]) << 24
-        let auth = Array(try #require(try handle.read(upToCount: authSize)))
+        let auth = try Array(#require(try handle.read(upToCount: authSize)))
         var entries: [String: [UInt8]] = [:]
         var offset = 0
         while offset + 4 <= auth.count {
@@ -212,15 +214,15 @@ func unwrapArchiveKey(privateKeyPEM: String, encRequest: [UInt8], wrappedKey: [U
         let response = try #require(entries["com.apple.wkms.fcs-response"])
         let json = try #require(try JSONSerialization.jsonObject(with: Data(response)) as? [String: String])
         let encText = try #require(json["enc-request"]), wrappedText = try #require(json["wrapped-key"])
-        let enc = Array(try #require(Data(base64Encoded: encText)))
-        let wrapped = Array(try #require(Data(base64Encoded: wrappedText)))
+        let enc = try Array(#require(Data(base64Encoded: encText)))
+        let wrapped = try Array(#require(Data(base64Encoded: wrappedText)))
         #expect(enc.count == 65 && wrapped.count == 48)
         // The key named by the key URL's last path component.
-        let keyURL = String(decoding: try #require(entries["com.apple.wkms.fcs-key-url"]), as: UTF8.self)
+        let keyURL = try String(decoding: #require(entries["com.apple.wkms.fcs-key-url"]), as: UTF8.self)
         let keyName = try #require(URL(string: keyURL)).lastPathComponent
         let keys = try #require(try JSONSerialization.jsonObject(with: Data(contentsOf: directory.appending(path: "fcs-keys.json"))) as? [String: String])
         let encodedPEM = try #require(keys.first { $0.key.caseInsensitiveCompare(keyName) == .orderedSame }?.value)
-        let pem = String(decoding: try #require(Data(base64Encoded: encodedPEM)), as: UTF8.self)
+        let pem = try String(decoding: #require(Data(base64Encoded: encodedPEM)), as: UTF8.self)
         let key = try unwrapArchiveKey(privateKeyPEM: pem, encRequest: enc, wrappedKey: wrapped)
         let expected = try String(contentsOf: directory.appending(path: "expected-key.txt"), encoding: .utf8)
             .trimmingCharacters(in: .whitespacesAndNewlines)

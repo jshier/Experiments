@@ -9,7 +9,9 @@ import Testing
     @Test func counterAddsFromThreads() {
         let counter = RelaxedCounter()
         DispatchQueue.concurrentPerform(iterations: 8) { _ in
-            for _ in 0..<1_000 { counter.add() }
+            for _ in 0..<1_000 {
+                counter.add()
+            }
             counter.add(5)
             counter.add(-5)
         }
@@ -28,14 +30,16 @@ import Testing
         #expect((0..<5).allSatisfy { counters.value(at: $0) == 3 })
         let copy = counters
         DispatchQueue.concurrentPerform(iterations: 8) { lane in
-            for _ in 0..<1_000 { copy.add(at: lane % 5) }
+            for _ in 0..<1_000 {
+                copy.add(at: lane % 5)
+            }
         }
         // Lanes 0–7 over 5 counters: indexes 0, 1, 2 get two lanes each, 3 and 4 one.
         #expect((0..<5).map { counters.value(at: $0) } == [2_003, 2_003, 2_003, 1_003, 1_003])
         counters.store(1, at: 4)
         #expect(counters.withAtomic(at: 4) { $0.subtract(1, ordering: .acquiringAndReleasing).newValue } == 0)
         #expect(counters.add(-3, at: 0) == 2_000)
-        #expect(RelaxedCounters(count: 0).count == 0)
+        #expect(RelaxedCounters(count: 0).isEmpty)
     }
 
     /// Every index below the limit is claimed exactly once, across threads, then `nil` for everyone.
@@ -45,12 +49,16 @@ import Testing
         let claims = Mutex([Int: Int]())
         let localClaims = Mutex([Int: Int]())
         DispatchQueue.concurrentPerform(iterations: 6) { _ in
-            while let index = counter.claim(below: limit) { claims.withLock { $0[index, default: 0] += 1 } }
-            while let index = local.claim(below: limit) { localClaims.withLock { $0[index, default: 0] += 1 } }
+            while let index = counter.claim(below: limit) {
+                claims.withLock { $0[index, default: 0] += 1 }
+            }
+            while let index = local.claim(below: limit) {
+                localClaims.withLock { $0[index, default: 0] += 1 }
+            }
         }
         for found in [claims.withLock { $0 }, localClaims.withLock { $0 }] {
             #expect(found.count == limit)
-            #expect(found.keys.allSatisfy { 0 <= $0 && $0 < limit })
+            #expect(found.keys.allSatisfy { $0 >= 0 && $0 < limit })
             #expect(found.values.allSatisfy { $0 == 1 })
         }
         #expect(counter.claim(below: limit) == nil)
@@ -97,7 +105,9 @@ import Testing
         let task = Task {
             await withPriority(.utility) {
                 // Waits for cancellation (bounded, so a failure doesn't hang the suite).
-                for _ in 0..<2_000 where !Task.isCancelled { try? await Task.sleep(for: .milliseconds(5)) }
+                for _ in 0..<2_000 where !Task.isCancelled {
+                    try? await Task.sleep(for: .milliseconds(5))
+                }
                 return Task.isCancelled
             }
         }

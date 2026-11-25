@@ -1,7 +1,7 @@
+@testable import NativeAEA
 import Bytes
 import BytesTestSupport
 import Foundation
-@testable import NativeAEA
 import System
 import Testing
 
@@ -24,7 +24,7 @@ import Testing
             // As for signing keys: `aea` rejects a scalar whose DER shortens.
             for _ in 0..<20 {
                 try ExternalTool.run("/usr/bin/openssl", ["ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out", recipientPrivate.path])
-                let text = String(decoding: try ExternalTool.output("/usr/bin/openssl", ["ec", "-in", recipientPrivate.path, "-text", "-noout"]), as: UTF8.self)
+                let text = try String(decoding: ExternalTool.output("/usr/bin/openssl", ["ec", "-in", recipientPrivate.path, "-text", "-noout"]), as: UTF8.self)
                 if !text.contains("priv:\n    00:") { break }
             }
             try ExternalTool.run("/usr/bin/openssl", ["ec", "-in", recipientPrivate.path, "-pubout", "-out", recipientPublic.path])
@@ -84,7 +84,7 @@ import Testing
             #expect(archive.prologue.profile.rawValue == profile)
             #expect((archive.signer != nil) == [2, 4].contains(profile))
             // The identifier is what `aea id` prints.
-            let id = String(decoding: try ExternalTool.output("/usr/bin/aea", ["id", "-i", url.path]), as: UTF8.self)
+            let id = try String(decoding: ExternalTool.output("/usr/bin/aea", ["id", "-i", url.path]), as: UTF8.self)
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             let identifier = archive.identifier
             #expect(String(hexadecimal: identifier.span.bytes) == id)
@@ -94,13 +94,13 @@ import Testing
                 var options = AEAReadOptions()
                 options.decodeThreads = threads
                 let statistics = try await archive.decrypt(to: FilePath(output.path), overwrite: true, options: options)
-                #expect(Array(try Data(contentsOf: output)) == contents, "\(compression), \(threads)")
+                #expect(try Array(Data(contentsOf: output)) == contents, "\(compression), \(threads)")
                 #expect(statistics.unreleasedBuffers == 0)
             }
             // Ranges: inside one segment, across segments, to the end, empty.
             for range in [10..<20, 65_000..<140_000, 450_000..<500_001, 7..<7] {
                 try await archive.decrypt(to: FilePath(output.path), range: range, overwrite: true)
-                #expect(Array(try Data(contentsOf: output)) == Array(contents[range]), "\(range)")
+                #expect(try Array(Data(contentsOf: output)) == Array(contents[range]), "\(range)")
             }
         }
     }
@@ -132,7 +132,7 @@ import Testing
             options.input = input
             options.decodeThreads = 3
             let statistics = try await archive.decrypt(to: FilePath(output.path), overwrite: true, options: options)
-            #expect(Array(try Data(contentsOf: output)) == contents, "\(input)")
+            #expect(try Array(Data(contentsOf: output)) == contents, "\(input)")
             #expect(statistics.unreleasedBuffers == 0)
         }
 
@@ -163,7 +163,7 @@ import Testing
         let hex = key.map { String(format: "%02x", $0) }.joined()
         let base64 = Data(key).base64EncodedString()
         for text in [hex, "hex:\(hex)", "base64:\(base64)", " base64:\(base64)\n"] {
-            guard case .symmetric(let decoded) = try AEADecryptionKey.symmetric(text: text) else {
+            guard case let .symmetric(decoded) = try AEADecryptionKey.symmetric(text: text) else {
                 Issue.record("not a symmetric key: \(text)")
                 continue
             }
@@ -173,7 +173,7 @@ import Testing
         // decodes it to the same key, BytesBase64 rejects it.
         let alphabet = Array("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
         var characters = Array(base64)
-        characters[42] = alphabet[try #require(alphabet.firstIndex(of: characters[42])) + 1]
+        characters[42] = try alphabet[#require(alphabet.firstIndex(of: characters[42])) + 1]
         let nonCanonical = String(characters)
         #expect(Data(base64Encoded: nonCanonical).map(Array.init) == key)
         #expect(throws: AEAError.self) { _ = try AEADecryptionKey.symmetric(text: "base64:\(nonCanonical)") }
@@ -181,7 +181,7 @@ import Testing
     }
 
     @Test(arguments: [1, 3, 5])
-    func rejectsWrongKeys(_ profile: Int) async throws {
+    func rejectsWrongKeys(_ profile: Int) throws {
         let directory = try TemporaryDirectory()
         defer { directory.remove() }
         let keys = try Keys(in: directory)
@@ -225,7 +225,7 @@ import Testing
         let statistics = try await opened.extract(to: FilePath(destination.path))
         #expect(statistics.unreleasedBuffers == 0)
         for (path, bytes) in files {
-            #expect(Array(try Data(contentsOf: destination.appending(path: path))) == bytes, "\(path)")
+            #expect(try Array(Data(contentsOf: destination.appending(path: path))) == bytes, "\(path)")
         }
     }
 }

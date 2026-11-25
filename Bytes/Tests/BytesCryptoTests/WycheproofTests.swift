@@ -50,10 +50,12 @@ struct VectorSplit: Sendable {
         var fast = Set<VectorPosition>()
         for positions in members.values {
             let count = min(perClass, positions.count)
-            for k in 0..<count { fast.insert(positions[k * positions.count / count]) }
+            for k in 0..<count {
+                fast.insert(positions[k * positions.count / count])
+            }
         }
         self.fast = all.filter { fast.contains($0) }
-        self.bulk = all.filter { !fast.contains($0) }
+        bulk = all.filter { !fast.contains($0) }
     }
 
     /// One of `count` interleaved shards of `positions`, so a file's vectors spread across test cases.
@@ -73,11 +75,13 @@ struct AEADVectors: Decodable {
         let tagSize: Int
         let tests: [Vector]
     }
+
     struct Vector: Decodable {
         let tcId: Int
         let key, iv, aad, msg, ct, tag: String
         let result: String
     }
+
     let testGroups: [Group]
 }
 
@@ -86,11 +90,13 @@ struct MACVectors: Decodable {
         let tagSize: Int
         let tests: [Vector]
     }
+
     struct Vector: Decodable {
         let tcId: Int
         let key, msg, tag: String
         let result: String
     }
+
     let testGroups: [Group]
 }
 
@@ -98,12 +104,14 @@ struct HKDFVectors: Decodable {
     struct Group: Decodable {
         let tests: [Vector]
     }
+
     struct Vector: Decodable {
         let tcId: Int
         let ikm, salt, info, okm: String
         let size: Int
         let result: String
     }
+
     let testGroups: [Group]
 }
 
@@ -113,6 +121,7 @@ protocol TestedAEAD {
     func seal(_ message: inout MutableRawSpan, nonce: RawSpan, authenticating aad: RawSpan) -> InlineArray<16, UInt8>
     func open(_ message: inout MutableRawSpan, nonce: RawSpan, authenticating aad: RawSpan, tag: RawSpan) throws(BytesError)
 }
+
 extension AESGCM: TestedAEAD {}
 extension ChaCha20Poly1305: TestedAEAD {}
 

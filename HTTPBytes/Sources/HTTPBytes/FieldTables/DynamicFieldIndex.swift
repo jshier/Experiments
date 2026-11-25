@@ -20,7 +20,9 @@ package struct DynamicFieldIndex: ~Copyable {
     @inlinable
     package init(slots: Int) {
         var buckets = 16
-        while buckets < 2 &* slots { buckets &<<= 1 }
+        while buckets < 2 &* slots {
+            buckets &<<= 1
+        }
         bucketMask = buckets &- 1
         // Unsafe: allocations owned by this index, freed in `deinit`; buckets start empty (-1).
         unsafe fieldHashes = UnsafeMutablePointer<UInt64>.allocate(capacity: slots)

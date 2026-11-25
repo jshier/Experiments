@@ -31,7 +31,8 @@ public enum ZipError: Error, Sendable, Equatable, CustomStringConvertible {
     /// The named entry's decompressed data doesn't match its recorded CRC-32.
     case crcMismatch(String, expected: UInt32, actual: UInt32)
     /// The named entry's contents aren't its recorded size: a stored entry's payload, or what a compressed entry
-    /// decoded to (`actual`: as far as decoding went, past `expected` when it produced too much).
+    /// decoded to (`actual`: as far as decoding went, past `expected` when it produced too much; for an LZMA stream
+    /// with an end marker, `expected + 1`: its decoder stops at the first byte past).
     case sizeMismatch(String, expected: UInt64, actual: UInt64)
     /// The named entry's compressed data didn't decode: the decoder's error (`BytesError`: `invalidValue` for invalid
     /// data, `insufficientData` for a stream that ends before its end, `trailingData`, …).

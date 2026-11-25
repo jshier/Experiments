@@ -1,5 +1,5 @@
-import BytesBase64
 import Bytes
+import BytesBase64
 import BytesTestSupport
 import Foundation
 import Testing
@@ -50,7 +50,9 @@ func decodingError(_ text: [UInt8], alphabet: Base64.Alphabet = .standard, paddi
         let lines = Data(bytes).base64EncodedString(options: [.lineLength64Characters, .endLineWithCarriageReturn, .endLineWithLineFeed])
         #expect(try Base64.decodedBytes(ignoringWhitespaceIn: lines) == bytes)
         var spread = " \t"
-        for character in Base64.encodedString(bytes.span.bytes) { spread += "\(character) \n" }
+        for character in Base64.encodedString(bytes.span.bytes) {
+            spread += "\(character) \n"
+        }
         #expect(try Base64.decodedBytes(ignoringWhitespaceIn: spread) == bytes)
         #expect(try Base64.decodedBytes(ignoringWhitespaceIn: spread.utf8Span.span.bytes) == bytes)
         #expect(throws: LocatedBytesError.self) { _ = try Base64.decodedBytes(ignoringWhitespaceIn: lines + "\u{0B}") }

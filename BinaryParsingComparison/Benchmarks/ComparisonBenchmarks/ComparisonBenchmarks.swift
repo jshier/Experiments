@@ -29,17 +29,20 @@ let checkedMacroRecords = Lazy {
     let directory = directoryFixture.value
     precondition(try! CentralDirectory.parseWithBytesMacros(directory.span.bytes) == CentralDirectory.parseWithBytes(directory.span.bytes))
 }
+
 /// 768 KB of random bytes: both integer widths fit.
 let integersFixture = Lazy {
     var rng = SystemRandomNumberGenerator()
     return (0..<(3 << 18)).map { _ in UInt8.random(in: 0...255, using: &rng) }
 }
+
 /// swift-help (10.6 MB, 64-bit ELF: 9 program headers, 56 sections) decompressed from swift-help.lz4, the same
 /// bytes as the example's ELF/swift-help.
 let swiftHelpFixture = Lazy {
     let compressed = dataFile("swift-help.lz4")
     return try! LZ4.decodeWithBytes(compressed.span.bytes)
 }
+
 /// swift-help's headers, parsed once, and the same bytes as `Data`, for the section-name benchmarks; each name
 /// checked against the example's.
 let helpHeadersFixture = Lazy {
@@ -51,6 +54,7 @@ let helpHeadersFixture = Lazy {
     }
     return (headers: headers, data: data)
 }
+
 /// 10,000 PUBLISH packets, 2.2 MB; both parsers checked for the same result.
 let publishesFixture = Lazy {
     let stream = makeMQTTPublishStream(packetCount: 10_000)
@@ -213,6 +217,7 @@ let benchmarks: @Sendable () -> Void = {
     }
 
     // MARK: ELF, PNG, PCAPNG, and binary property lists: swift-binary-parsing's examples, ported
+
     //
     // Each port builds the example's own result types, so both sides allocate the same results. Each pair is
     // checked for the same result once, in its benchmarks' setup (the tests compare every value).

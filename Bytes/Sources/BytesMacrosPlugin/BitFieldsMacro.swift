@@ -81,7 +81,7 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
                 let valueType: String = switch kind {
                 case .bool: throw MacroError("A Bool field is a @Flag", at: property.declaration)
                 case .integer: "Int"
-                case .bits(let type), .rawRepresentable(let type): type
+                case let .bits(type), let .rawRepresentable(type): type
                 }
                 if let bits = property.argument("bits") {
                     return Field(name: property.name, type: property.type, kind: kind,
@@ -114,52 +114,52 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
         conformingTo protocols: [TypeSyntax], in context: some MacroExpansionContext
     ) throws -> [DeclSyntax] {
         try context.reportingAtProperties {
-        let storage = try storage(of: node)
-        let fields = try fields(of: declaration, storage: storage)
-        let access = declaration.accessPrefix
-        let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
+            let storage = try storage(of: node)
+            let fields = try fields(of: declaration, storage: storage)
+            let access = declaration.accessPrefix
+            let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
 
-        var decode = reservedRanges(of: node).map { "try rawValue.requireZero(BitField<Int>(bits: \($0)))" }
-        var encode: [String] = []
-        for field in fields {
-            switch field.kind {
-            case .bool, .bits:
-                decode.append("self.\(field.name) = rawValue[\(field.descriptor)]")
-                encode.append("raw[\(field.descriptor)] = \(field.name)")
-            case .integer(let type):
-                decode.append("self.\(field.name) = \(type)(truncatingIfNeeded: rawValue[\(field.descriptor)])")
-                encode.append("raw[\(field.descriptor)] = Int(\(field.name))")
-            case .rawRepresentable:
-                decode.append("self.\(field.name) = try rawValue.value(of: \(field.descriptor))")
-                encode.append("raw[\(field.descriptor)] = \(field.name)")
+            var decode = reservedRanges(of: node).map { "try rawValue.requireZero(BitField<Int>(bits: \($0)))" }
+            var encode: [String] = []
+            for field in fields {
+                switch field.kind {
+                case .bool, .bits:
+                    decode.append("self.\(field.name) = rawValue[\(field.descriptor)]")
+                    encode.append("raw[\(field.descriptor)] = \(field.name)")
+                case let .integer(type):
+                    decode.append("self.\(field.name) = \(type)(truncatingIfNeeded: rawValue[\(field.descriptor)])")
+                    encode.append("raw[\(field.descriptor)] = Int(\(field.name))")
+                case .rawRepresentable:
+                    decode.append("self.\(field.name) = try rawValue.value(of: \(field.descriptor))")
+                    encode.append("raw[\(field.descriptor)] = \(field.name)")
+                }
             }
-        }
-        let parameters = fields.map { "\($0.name): \($0.type)" }.joined(separator: ", ")
-        let assignments = fields.map { "self.\($0.name) = \($0.name)" }.joined(separator: "\n")
+            let parameters = fields.map { "\($0.name): \($0.type)" }.joined(separator: ", ")
+            let assignments = fields.map { "self.\($0.name) = \($0.name)" }.joined(separator: "\n")
 
-        return [
-            """
-            \(raw: inlinable)\(raw: access)init(\(raw: parameters)) {
-            \(raw: assignments)
-            }
-            """,
-            """
-            /// Decodes every field from `rawValue`, checking its reserved bits.
-            ///
-            /// - Throws: `BytesError.invalidValue` if a reserved bit is set or a field has no matching case.
-            \(raw: inlinable)\(raw: access)init(rawValue: \(raw: storage.type)) throws(BytesError) {
-            \(raw: decode.joined(separator: "\n"))
-            }
-            """,
-            """
-            /// The fields packed into one value.
-            \(raw: inlinable)\(raw: access)var rawValue: \(raw: storage.type) {
-            var raw: \(raw: storage.type) = \(raw: storage.zero)
-            \(raw: encode.joined(separator: "\n"))
-            return raw
-            }
-            """,
-        ]
+            return [
+                """
+                \(raw: inlinable)\(raw: access)init(\(raw: parameters)) {
+                \(raw: assignments)
+                }
+                """,
+                """
+                /// Decodes every field from `rawValue`, checking its reserved bits.
+                ///
+                /// - Throws: `BytesError.invalidValue` if a reserved bit is set or a field has no matching case.
+                \(raw: inlinable)\(raw: access)init(rawValue: \(raw: storage.type)) throws(BytesError) {
+                \(raw: decode.joined(separator: "\n"))
+                }
+                """,
+                """
+                /// The fields packed into one value.
+                \(raw: inlinable)\(raw: access)var rawValue: \(raw: storage.type) {
+                var raw: \(raw: storage.type) = \(raw: storage.zero)
+                \(raw: encode.joined(separator: "\n"))
+                return raw
+                }
+                """,
+            ]
         }
     }
 
@@ -169,13 +169,13 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
     ) throws -> [ExtensionDeclSyntax] {
         // Errors are reported once, by the member expansion: here they just mean no extension.
         do {
-        let storage = try storage(of: node)
-        let access = declaration.accessPrefix
-        let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
-        let (conformances, mode) = storage.inCursorOrder
-            ? ("ByteOrderedParsable, ByteOrderedWritable", "ByteOrderedCursorMode")
-            : ("BinaryParsable, BinaryWritable", "BytesCursorMode")
-        let declaration: DeclSyntax = """
+            let storage = try storage(of: node)
+            let access = declaration.accessPrefix
+            let inlinable = access.isEmpty ? "@inline(__always) " : "@inlinable @inline(__always) "
+            let (conformances, mode) = storage.inCursorOrder
+                ? ("ByteOrderedParsable, ByteOrderedWritable", "ByteOrderedCursorMode")
+                : ("BinaryParsable, BinaryWritable", "BytesCursorMode")
+            let declaration: DeclSyntax = """
             extension \(type.trimmed): \(raw: conformances), FixedSizeBinary {
             \(raw: inlinable)\(raw: access)init<Mode: \(raw: mode)>(parsing reader: inout GenericBytesReader<Mode>) throws(BytesError) {
             try self.init(rawValue: \(raw: storage.read("reader")))
@@ -186,7 +186,7 @@ public struct BitFieldsMacro: MemberMacro, ExtensionMacro {
             \(raw: inlinable)\(raw: access)static var byteCount: Int { \(raw: storage.byteCount) }
             }
             """
-        return [declaration.cast(ExtensionDeclSyntax.self)]
+            return [declaration.cast(ExtensionDeclSyntax.self)]
         } catch {
             return []
         }

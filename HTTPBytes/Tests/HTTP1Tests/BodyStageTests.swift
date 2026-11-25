@@ -18,7 +18,7 @@ import Testing
         var output = [UInt8](repeating: 0, count: room)
         while true {
             let flush: TransformFlush = delivered == coded.count ? .finish : .none
-            let progress = try output.withOutputRawSpan(overwritingFrom: 0) { (span) throws(HTTP1Error) in
+            let progress = try output.withOutputRawSpan(overwritingFrom: 0) { span throws(HTTP1Error) in
                 try stage.transform(pending.span.bytes, into: &span, flush: flush)
             }
             body += output[..<progress.produced]
@@ -61,7 +61,7 @@ import Testing
             reading: while true {
                 var used = 0
                 switch try left.stage.nextTrailer(in: left.left.span.bytes.extracting(droppingFirst: position), consumed: &used) {
-                case .trailer(let field): read.append("\(string(field.name)): \(string(field.value))")
+                case let .trailer(field): read.append("\(string(field.name)): \(string(field.value))")
                 case .end: position += used; break reading
                 case .data, .needsMore: Issue.record("unexpected event after the last chunk"); break reading
                 }
@@ -135,7 +135,9 @@ import Testing
             var output = [UInt8](repeating: 0, count: room)
             let progress = output.withOutputRawSpan(overwritingFrom: 0) { span in stage.transform(data.span.bytes, into: &span, flush: .none) }
             var best = 0
-            for size in 1...room where size + String(size, radix: 16).count + 4 <= room { best = size }
+            for size in 1...room where size + String(size, radix: 16).count + 4 <= room {
+                best = size
+            }
             #expect(progress.consumed == best, "room \(room)")
             #expect(progress.produced == (best == 0 ? 0 : best + String(best, radix: 16).count + 4), "room \(room)")
         }

@@ -124,7 +124,9 @@ public struct QPACKEncoder: ~Copyable {
     /// one per 128, 46,959).
     static func historySlots(capacity: Int) -> Int {
         var slots = 64
-        while slots < capacity / 64 { slots &<<= 1 }
+        while slots < capacity / 64 {
+            slots &<<= 1
+        }
         return slots
     }
 
@@ -258,7 +260,9 @@ public struct QPACKEncoder: ~Copyable {
         let usesTable = tableAnnounced && table.maximumSize > 0 && sectionCount < maximumUnacknowledgedSections
         var blocking = 0
         if usesTable {
-            for position in 0..<sectionCount where unsafe sectionRequired[position] > knownReceivedCount { blocking &+= 1 }
+            for position in 0..<sectionCount where unsafe sectionRequired[position] > knownReceivedCount {
+                blocking &+= 1
+            }
         }
         return QPACKSectionState(base: table.inserted, usesTable: usesTable, mayBlock: usesTable && blocking < peerBlockedStreams)
     }
@@ -318,7 +322,8 @@ public struct QPACKEncoder: ~Copyable {
                 // Unsafe: the spans' own bytes, read within their counts during the call.
                 unsafe encodeField(
                     name: name.baseAddress, nameCount: name.count, value: value.baseAddress, valueCount: value.count,
-                    knownName: knownName?.index ?? 0xFF, strategy: strategy, &lines, &encoderStream, &state)
+                    knownName: knownName?.index ?? 0xFF, strategy: strategy, &lines, &encoderStream, &state
+                )
             }
         }
     }
@@ -331,13 +336,12 @@ public struct QPACKEncoder: ~Copyable {
                               _ encoderStream: inout FieldEncoderOutput, _ state: inout QPACKSectionState) -> Bool {
         let none = Int(statics.noIndex)
         let staticIndex = statics.index(ofName: knownName)
-        let policy: Int
-        switch strategy {
-        case .disable: policy = 1
-        case .avoid: policy = 2
-        case .prefer: policy = 3
+        let policy: Int = switch strategy {
+        case .disable: 1
+        case .avoid: 2
+        case .prefer: 3
         case .automatic:
-            policy = knownName == 0xFF ? 0 : HTTPFieldIndexingStrategy.automaticPolicy(HTTPFieldName(tableIndex: knownName), valueCount)
+            knownName == 0xFF ? 0 : HTTPFieldIndexingStrategy.automaticPolicy(HTTPFieldName(tableIndex: knownName), valueCount)
         }
         let neverIndexed = policy == 1
         // A whole match in the static table: the name's entries, by their chain.
@@ -480,7 +484,9 @@ public struct QPACKEncoder: ~Copyable {
     @usableFromInline
     func roomByEvicting(_ entrySize: Int, _ state: QPACKSectionState) -> Bool {
         var limit = Swift.min(knownReceivedCount, state.minimum)
-        for position in 0..<sectionCount { limit = Swift.min(limit, unsafe sectionMinimum[position]) }
+        for position in 0..<sectionCount {
+            limit = Swift.min(limit, unsafe sectionMinimum[position])
+        }
         var size = table.size
         var number = table.oldest
         while size &+ entrySize > table.maximumSize {
@@ -556,7 +562,9 @@ public struct QPACKEncoder: ~Copyable {
         let limit = insertedBytes &- drainingDistance
         var boundary = Swift.max(drainingBelow, table.oldest)
         // Unsafe: unchecked reads. Safe: masked slots of live entries (oldest ≤ boundary < inserted).
-        while boundary < table.inserted, unsafe entryStarts[boundary & table.entryMask] < limit { boundary &+= 1 }
+        while boundary < table.inserted, unsafe entryStarts[boundary & table.entryMask] < limit {
+            boundary &+= 1
+        }
         drainingBelow = boundary
     }
 

@@ -12,7 +12,9 @@ import Testing
         // Compressible: words from a small vocabulary.
         let words = ["alpha", "beta", "gamma", "delta", "epsilon", "zeta", "eta", "theta"].map { Array($0.utf8) + [0x20] }
         var bytes: [UInt8] = []
-        while bytes.count < 300_000 { bytes += words[Int(generator.next() % 8)] }
+        while bytes.count < 300_000 {
+            bytes += words[Int(generator.next() % 8)]
+        }
         return bytes
     }()
 
@@ -24,7 +26,7 @@ import Testing
         while true {
             let piece = Array(body[offset..<min(body.count, offset + 7_000)])
             let flush: TransformFlush = offset + piece.count == body.count ? .finish : .none
-            let progress = try output.withOutputRawSpan(overwritingFrom: written) { (span) throws(HTTPPayloadError) in
+            let progress = try output.withOutputRawSpan(overwritingFrom: written) { span throws(HTTPPayloadError) in
                 try encoder.encode(piece.span.bytes, into: &span, flush: flush)
             }
             written += progress.produced
@@ -52,7 +54,7 @@ import Testing
                 offset += take
             }
             let input = pending
-            let progress = try out.withOutputRawSpan { (span) throws(HTTPPayloadError) in try decoder.decode(input.span.bytes, into: &span) }
+            let progress = try out.withOutputRawSpan { span throws(HTTPPayloadError) in try decoder.decode(input.span.bytes, into: &span) }
             result += out[..<progress.produced]
             pending.removeFirst(progress.consumed)
             if progress.status == .finished { break }
@@ -80,7 +82,7 @@ import Testing
     @Test func rawDeflateUnderDeflate() throws {
         var encoder = DeflateEncoder(format: .raw, level: 6)
         var output = [UInt8](repeating: 0, count: Self.body.count)
-        let written = try output.withOutputRawSpan { (span) throws(BytesError) in
+        let written = try output.withOutputRawSpan { span throws(BytesError) in
             try encoder.compressAll(Self.body.span.bytes, into: &span)
             return span.byteCount
         }
@@ -89,7 +91,7 @@ import Testing
 
     @Test func stackedCodings() throws {
         // Applied gzip, then br: `Content-Encoding: gzip, br`.
-        let coded = try Self.encode(try Self.encode(Self.body, .gzip), .brotli)
+        let coded = try Self.encode(Self.encode(Self.body, .gzip), .brotli)
         #expect(try Self.decode(coded, contentEncoding: "gzip, br", step: 3_000) == Self.body)
         #expect(try Self.decode(coded, contentEncoding: "identity, GZIP , br", step: 70_000) == Self.body)
     }
@@ -104,20 +106,33 @@ import Testing
     }
 
     /// One decoder for several bodies, each coded differently (as on one connection), stacked and not, with a body cut
-    /// short in between: a reset leaves nothing of the last body behind.
+    /// short in between: a reset leaves nothing of the last body behind. gzip's and deflate's bodies (zlib, and raw
+    /// DEFLATE under the name) share BytesCompression's one DEFLATE decoder, reset to each container.
     @Test func resetForEachBody() throws {
         let small = Array(Self.body.prefix(20_000))
         let gzip = try Self.encode(small, .gzip), brotli = try Self.encode(small, .brotli)
         let stacked = try Self.encode(gzip, .brotli)
+        let zlib = try Self.encode(small, .deflate)
+        var rawEncoder = DeflateEncoder(format: .raw, level: 6)
+        var raw = [UInt8](repeating: 0, count: small.count + 1_024)
+        let rawCount = try raw.withOutputRawSpan { span throws(BytesError) in
+            try rawEncoder.compressAll(small.span.bytes, into: &span)
+            return span.byteCount
+        }
+        raw.removeSubrange(rawCount...)
         var decoder = try HTTPContentDecoder(applied: .identity)
         var out = [UInt8](repeating: 0, count: 64 << 10)
         func decodeAll(_ coded: [UInt8], _ encoding: String, cut: Int = 0) throws -> [UInt8] {
             try decoder.reset(contentEncoding: Array(encoding.utf8).span.bytes)
             let input = Array(coded.dropLast(cut))
-            let progress = try out.withOutputRawSpan { (span) throws(HTTPPayloadError) in try decoder.decode(input.span.bytes, into: &span) }
+            let progress = try out.withOutputRawSpan { span throws(HTTPPayloadError) in try decoder.decode(input.span.bytes, into: &span) }
             return Array(out[..<progress.produced])
         }
-        for (coded, encoding) in [(gzip, "gzip"), (brotli, "br"), (stacked, "gzip, br"), (gzip, "gzip"), (small, "identity")] {
+        let bodies = [
+            (gzip, "gzip"), (zlib, "deflate"), (brotli, "br"), (raw, "deflate"), (stacked, "gzip, br"), (zlib, "deflate"), (gzip, "gzip"),
+            (raw, "deflate"), (small, "identity"),
+        ]
+        for (coded, encoding) in bodies {
             _ = try decodeAll(coded, encoding, cut: coded.count / 3)
             if encoding != "identity" { #expect(throws: HTTPPayloadError.malformed) { try decoder.finish() } }
             #expect(try decodeAll(coded, encoding) == small, "\(encoding)")
@@ -164,7 +179,7 @@ import Testing
 
     /// Two codings: the outer stream cut short after the inner one ended is malformed, not finished.
     @Test func stackedFinishChecksEveryStage() throws {
-        let coded = try ContentCodingTests.encode(try ContentCodingTests.encode(Array(ContentCodingTests.body.prefix(5_000)), .gzip), .brotli)
+        let coded = try ContentCodingTests.encode(ContentCodingTests.encode(Array(ContentCodingTests.body.prefix(5_000)), .gzip), .brotli)
         #expect(throws: HTTPPayloadError.malformed) {
             _ = try ContentCodingTests.decode(Array(coded.dropLast(2)), contentEncoding: "gzip, br", step: 100_000)
         }
@@ -174,20 +189,21 @@ import Testing
 /// Bodies arrive in pieces that aren't contiguous (chunk data between size lines): each piece is passed once, never
 /// again with more after it, so the decoder must keep what a codec leaves unconsumed.
 @Suite struct ContentCodingPieceTests {
-    static func decodePieces(_ coded: [UInt8], contentEncoding: String, seed: UInt64) throws -> [UInt8] {
+    /// Decodes `coded` in pieces of 1 to 300 bytes chosen by `seed`, or of `pieceSize` bytes.
+    static func decodePieces(_ coded: [UInt8], contentEncoding: String, seed: UInt64, pieceSize: Int? = nil) throws -> [UInt8] {
         var decoder = try HTTPContentDecoder(contentEncoding: Array(contentEncoding.utf8).span.bytes)
         var generator = SplitMix64(seed: seed)
         var result: [UInt8] = []
         var out = [UInt8](repeating: 0, count: 1_000)
         var offset = 0
         while offset < coded.count {
-            let size = min(Int(generator.next() % 300) + 1, coded.count - offset)
+            let size = min(pieceSize ?? Int(generator.next() % 300) + 1, coded.count - offset)
             // A fresh array per piece: nothing contiguous with what came before.
             var piece = Array(coded[offset..<offset + size])
             offset += size
             while !piece.isEmpty {
                 let input = piece
-                let progress = try out.withOutputRawSpan { (span) throws(HTTPPayloadError) in try decoder.decode(input.span.bytes, into: &span) }
+                let progress = try out.withOutputRawSpan { span throws(HTTPPayloadError) in try decoder.decode(input.span.bytes, into: &span) }
                 result += out[..<progress.produced]
                 piece.removeFirst(progress.consumed)
                 if progress.consumed == 0, progress.produced == 0 { break }
@@ -195,7 +211,7 @@ import Testing
         }
         // Drain what's still buffered.
         while !decoder.isFinished {
-            let progress = try out.withOutputRawSpan { (span) throws(HTTPPayloadError) in try decoder.decode(RawSpan(), into: &span) }
+            let progress = try out.withOutputRawSpan { span throws(HTTPPayloadError) in try decoder.decode(RawSpan(), into: &span) }
             result += out[..<progress.produced]
             if progress.produced == 0 { break }
         }
@@ -208,9 +224,26 @@ import Testing
         let body = Array(ContentCodingTests.body.prefix(60_000))
         let codings = contentEncoding.split(separator: ",").map { String($0.filter { $0 != " " }) }
         var coded = body
-        for coding in codings { coded = try ContentCodingTests.encode(coded, HTTPContentCoding(token: Array(coding.utf8).span.bytes)!) }
+        for coding in codings {
+            coded = try ContentCodingTests.encode(coded, HTTPContentCoding(token: Array(coding.utf8).span.bytes)!)
+        }
         for seed in 0..<5 as Range<UInt64> {
             #expect(try Self.decodePieces(coded, contentEncoding: contentEncoding, seed: seed) == body, "seed \(seed)")
         }
+    }
+
+    /// Pieces of one byte, each passed once: what a codec holds back (a DEFLATE block's header, a Brotli prefix code, a
+    /// partial symbol) waits in the carry buffer, sized from the codecs' units (`DecompressionFormat.maximumUnitByteCount`:
+    /// 902 bytes, twice Brotli's, where it was 132 KiB; Brotli's largest headers are checked against its unit in
+    /// BytesCompression's StreamingUnitTests).
+    @Test(arguments: ["gzip", "br", "deflate", "zstd", "gzip, br"])
+    func aByteAtATime(contentEncoding: String) throws {
+        let body = Array(ContentCodingTests.body.prefix(20_000))
+        let codings = contentEncoding.split(separator: ",").map { String($0.filter { $0 != " " }) }
+        var coded = body
+        for coding in codings {
+            coded = try ContentCodingTests.encode(coded, HTTPContentCoding(token: Array(coding.utf8).span.bytes)!)
+        }
+        #expect(try Self.decodePieces(coded, contentEncoding: contentEncoding, seed: 0, pieceSize: 1) == body)
     }
 }

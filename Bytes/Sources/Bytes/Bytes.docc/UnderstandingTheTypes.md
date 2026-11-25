@@ -25,8 +25,9 @@ as it works; the few that own memory (``ByteBuffer``, ``Pipeline``) allocate onc
 | Field types | ``Byte2`` through ``Byte16``, ``Bits`` (``Bit``, ``Crumb``, ``Nibble``, ``Byte``) |
 
 The package's products: `Bytes` (everything above except the rows marked otherwise), `BytesMacros` (the
-`@BitFields` and `@BinaryRecord` macros, with their swift-syntax plugin: depend on it only if you use them), `BytesAsync` (asynchronous pipelines and sockets, and the waiting primitives of the packages built on Bytes), `BytesCompression` (DEFLATE, zlib, gzip, and
-Brotli, both directions; Zstandard, and LZMA, LZMA2, and `.xz`, decoding), `BytesCrypto` (ChaCha20-Poly1305 and TLS 1.3 records; P-256 and P-384 ECDSA verification and ECDH; HPKE), and `BytesFoundation` (`Data` with spans).
+`@BitFields` and `@BinaryRecord` macros, with their swift-syntax plugin: depend on it only if you use them), `BytesAsync` (asynchronous pipelines and sockets, and the waiting primitives of the packages built on Bytes), `BytesCrypto` (ChaCha20-Poly1305 and TLS 1.3 records; P-256 and P-384 ECDSA verification and ECDH; HPKE), and `BytesFoundation` (`Data` with spans).
+The codecs (DEFLATE, zlib, gzip, and Brotli, both directions; Zstandard, LZMA, LZMA2, `.xz`, bzip2, and Apple's LZ
+formats) are the `BytesCompression` module of a package of their own, `BytesCompression`, built on this one.
 
 The rest is extensions to the standard library's spans: copying between them, finding patterns in them, and
 building arrays and strings with a writer.

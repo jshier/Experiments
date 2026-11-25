@@ -16,7 +16,7 @@ All paths below are under `Sources/Disk/`.
 | Paths | `EntryPath` (`EntryPath.swift`) | A checked, canonical relative path: a `~Escapable` view of the caller's bytes |
 | Destination | `Destination`, `DestinationOptions` (`Destination.swift`) | The directory, the policies, and every entry primitive, synchronous |
 | Metadata | `EntryMetadata`, `EntryTimes`, `Owner`, `Quarantine`, `ExtendedAttributeBlob`, `AttributeList` (`Metadata.swift`) | Mode, owner, times, and flags in one call; xattr and ACL blobs |
-| APFS compression | `Storage`, `StoragePolicy`, `DiskCodec`, `ChunkEncoders`, `ForkUnpacker` (`Decmpfs.swift`) | `decmpfs` forms and Apple's storage rules |
+| APFS compression | `Storage`, `StoragePolicy`, `DiskCodec`, `ChunkEncoders`, `ForkUnpacker` (`Decmpfs.swift`) | `decmpfs` forms and Apple's storage rules; the chunks' codecs through BytesCompression's `Compressor` and `Decompressor` (`DiskCodec.compressionFormat`, `.decompressionFormat`: BytesCompression/ARCHITECTURE.md §1) |
 | One file | `FileWriter`, `WriterCore` (`FileWriter.swift`) | Compress, then make: the steps every writer runs |
 | The scheduler | `Extraction`, `Planner`, `ContentSource`/`PieceSource`, `FileOutput`, `ExtractionSettings`, `ExtractionReport`, `ExtractionProgress` (`Extraction.swift`, `Planner.swift`, `Writer.swift`, `PostPasses.swift`, `Sources.swift`, `Progress.swift`) | A whole tree, in parallel |
 | Single files | `MappedFile`, `OutputFile` (`Files.swift`) | Outside a destination: the archive a client reads, mapped; one file written at the caller's path |

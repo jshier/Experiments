@@ -31,7 +31,9 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         var list = HTTPListElements(bytes.span.bytes)
         var result: [String] = []
         do throws(HTTPFieldValueError) {
-            while let element = try list.next() { result.append(text(element)) }
+            while let element = try list.next() {
+                result.append(text(element))
+            }
         } catch { return nil }
         return result
     }
@@ -54,7 +56,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         var result: [String] = []
         do throws(HTTPFieldValueError) {
             while let parameter = try parameters.next() {
-                let value = written { (writer) throws(HTTPFieldValueError) in
+                let value = written { writer throws(HTTPFieldValueError) in
                     do throws(BytesError) { try parameter.value.write(to: &writer) } catch { throw .outputTooSmall }
                 }
                 result.append("\(text(parameter.name))=\(value ?? "?")")
@@ -96,7 +98,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         guard let type = try? HTTPMediaType(parsing: bytes.span.bytes) else { return nil }
         var charset: String? = nil
         if let value = type.charset {
-            charset = written { (writer) throws(HTTPFieldValueError) in
+            charset = written { writer throws(HTTPFieldValueError) in
                 do throws(BytesError) { try value.write(to: &writer) } catch { throw .outputTooSmall }
             }
         }
@@ -187,7 +189,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         switch HTTPRangeSet.resolve(bytes.span.bytes, length: length, into: &span) {
         case .ignore: return "ignore"
         case .unsatisfiable: return "416"
-        case .ranges(let count): return storage[..<count].map { "\($0.lowerBound)-\($0.upperBound - 1)" }.joined(separator: ",")
+        case let .ranges(count): return storage[..<count].map { "\($0.lowerBound)-\($0.upperBound - 1)" }.joined(separator: ",")
         }
     }
 
@@ -233,6 +235,17 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         }
     }
 
+    /// The most ranges a set may name (256), in descending order (each sorted in at the front), merged or not; one more
+    /// is ignored.
+    @Test func largestSets() {
+        let apart = (0..<256).reversed().map { "\($0 * 4)-\($0 * 4 + 1)" }.joined(separator: ",")
+        #expect(Self.resolve("bytes=" + apart, 2_000, storage: 256) == (0..<256).map { "\($0 * 4)-\($0 * 4 + 1)" }.joined(separator: ","))
+        #expect(Self.resolve("bytes=" + apart, 2_000, storage: 255) == "ignore")
+        let touching = (0..<256).reversed().map { "\($0 * 2)-\($0 * 2 + 1)" }.joined(separator: ",")
+        #expect(Self.resolve("bytes=" + touching, 2_000, storage: 1) == "0-511")
+        #expect(Self.resolve("bytes=" + touching + ",600-", 2_000, storage: 4) == "ignore")
+    }
+
     /// Go's ParseRangeTests. Go keeps ranges in request order unmerged and reports an unsatisfiable set as an error;
     /// here they're sorted and merged (overlapping or adjacent), and all-unsatisfiable is 416.
     @Test(arguments: [
@@ -258,7 +271,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         #expect(Self.resolve(value, length) == expected, "\(value)")
     }
 
-    @Test func contentRanges() throws {
+    @Test func contentRanges() {
         func parse(_ value: String) -> HTTPContentRange? { try? HTTPContentRange(parsing: b(value).span.bytes) }
         #expect(parse("bytes 0-499/1234") == HTTPContentRange(range: 0...499, completeLength: 1234))
         #expect(parse("bytes */1234") == HTTPContentRange(range: nil, completeLength: 1234))
@@ -267,11 +280,11 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
             #expect(parse(invalid) == nil, "\(invalid)")
         }
         let range = HTTPContentRange(range: 0...499, completeLength: 1234)
-        #expect(written { (writer) throws(HTTPFieldValueError) in
+        #expect(written { writer throws(HTTPFieldValueError) in
             do throws(BytesError) { try range.write(to: &writer) } catch { throw .outputTooSmall }
         } == "bytes 0-499/1234")
         let unsatisfied = HTTPContentRange(range: nil, completeLength: 0)
-        #expect(written { (writer) throws(HTTPFieldValueError) in
+        #expect(written { writer throws(HTTPFieldValueError) in
             do throws(BytesError) { try unsatisfied.write(to: &writer) } catch { throw .outputTooSmall }
         } == "bytes */0")
     }
@@ -284,7 +297,9 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         if list.isAny { return ["*"] }
         var result: [String] = []
         do throws(HTTPFieldValueError) {
-            while let tag = try list.next() { result.append((tag.isWeak ? "W/" : "") + text(tag.opaque)) }
+            while let tag = try list.next() {
+                result.append((tag.isWeak ? "W/" : "") + text(tag.opaque))
+            }
         } catch { return nil }
         return result
     }
@@ -462,7 +477,9 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         if list.isAny { return ["*"] }
         var result: [String] = []
         do throws(HTTPFieldValueError) {
-            while let token = try list.next() { result.append(text(token)) }
+            while let token = try list.next() {
+                result.append(text(token))
+            }
         } catch { return nil }
         return result
     }
@@ -477,7 +494,9 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         let upgrade = b("HTTP/2.0, SHTTP/1.3, IRC/6.9, RTA/x11, websocket")
         var protocols = HTTPUpgradeList(upgrade.span.bytes)
         var names: [String] = []
-        while let next = try? protocols.next() { names.append(text(next.name) + (optionalText(next.version).map { "/" + $0 } ?? "")) }
+        while let next = try? protocols.next() {
+            names.append(text(next.name) + (optionalText(next.version).map { "/" + $0 } ?? ""))
+        }
         #expect(names == ["HTTP/2.0", "SHTTP/1.3", "IRC/6.9", "RTA/x11", "websocket"])
     }
 
@@ -489,7 +508,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         while var pairs = try hops.next() {
             var hop: [String] = []
             while let pair = try pairs.next() {
-                let value = written { (writer) throws(HTTPFieldValueError) in
+                let value = written { writer throws(HTTPFieldValueError) in
                     do throws(BytesError) { try pair.value.write(to: &writer) } catch { throw .outputTooSmall }
                 }
                 hop.append("\(text(pair.name).lowercased())=\(value ?? "?")")
@@ -506,7 +525,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         if let token68 = credentials.token68 { parts.append(text(token68)) }
         var parameters = credentials.parameters
         while let parameter = parameters.next() {
-            let value = written { (writer) throws(HTTPFieldValueError) in
+            let value = written { writer throws(HTTPFieldValueError) in
                 do throws(BytesError) { try parameter.value.write(to: &writer) } catch { throw .outputTooSmall }
             }
             parts.append("\(text(parameter.name))=\(value ?? "?")")
@@ -525,7 +544,9 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         var challenges = HTTPChallenges(bytes.span.bytes)
         var result: [String] = []
         do throws(HTTPFieldValueError) {
-            while let challenge = try challenges.next() { result.append(describe(challenge)) }
+            while let challenge = try challenges.next() {
+                result.append(describe(challenge))
+            }
         } catch { return nil }
         return result
     }
@@ -541,7 +562,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         #expect(Self.authorization("Digest a=1, Basic") == nil, "one set of credentials")
         let basic = b("Basic QWxhZGRpbjpvcGVuIHNlc2FtZQ==")
         let credentials = try HTTPCredentials(parsing: basic.span.bytes)
-        #expect(written { (writer) throws(HTTPFieldValueError) in try credentials.writeBasicUserPass(to: &writer) } == "Aladdin:open sesame")
+        #expect(written { writer throws(HTTPFieldValueError) in try credentials.writeBasicUserPass(to: &writer) } == "Aladdin:open sesame")
     }
 
     @Test func challenges() {
@@ -564,7 +585,7 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         let bytes = b(value)
         guard let disposition = try? HTTPContentDisposition(parsing: bytes.span.bytes) else { return .none }
         var found = false
-        let name = written { (writer) throws(HTTPFieldValueError) in found = try disposition.writeFileName(to: &writer) }
+        let name = written { writer throws(HTTPFieldValueError) in found = try disposition.writeFileName(to: &writer) }
         return .some(found ? name : nil)
     }
 
@@ -605,11 +626,13 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         }
     }
 
-    @Test func cookies() throws {
+    @Test func cookies() {
         let value = b("SID=31d4d96e407aad42; lang=en-US;  quoted=\"a b\" ; novalue; =x; empty=")
         var cookies = HTTPCookies(value.span.bytes)
         var seen: [String] = []
-        while let cookie = cookies.next() { seen.append("\(text(cookie.name))=\(text(cookie.value))") }
+        while let cookie = cookies.next() {
+            seen.append("\(text(cookie.name))=\(text(cookie.value))")
+        }
         #expect(seen == ["SID=31d4d96e407aad42", "lang=en-US", "quoted=a b", "empty="])
         let langName = b("lang")
         let lang = optionalText(HTTPCookies.value(named: langName.span.bytes, in: value.span.bytes))
@@ -624,16 +647,16 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         cookie.isSecure = true
         cookie.isHTTPOnly = true
         cookie.sameSite = .lax
-        #expect(written { (writer) throws(HTTPFieldValueError) in try cookie.write(to: &writer) }
+        #expect(written { writer throws(HTTPFieldValueError) in try cookie.write(to: &writer) }
             == "SID=31d4d96e407aad42; Expires=Tue, 11 Jan 2011 00:44:02 GMT; Max-Age=3600; Domain=example.com; Path=/; Secure; HttpOnly; SameSite=Lax")
         for (badName, badValue) in [("a b", "x"), ("a", "x y"), ("a", "x;y"), ("a", "x,y"), ("a", "\"x"), ("", "x")] {
             let n = b(badName), v = b(badValue)
             let bad = HTTPSetCookie(name: n.span.bytes, value: v.span.bytes)
-            #expect(written { (writer) throws(HTTPFieldValueError) in try bad.write(to: &writer) } == nil, "\(badName)=\(badValue)")
+            #expect(written { writer throws(HTTPFieldValueError) in try bad.write(to: &writer) } == nil, "\(badName)=\(badValue)")
         }
         var noneInsecure = HTTPSetCookie(name: name.span.bytes, value: token.span.bytes)
         noneInsecure.sameSite = HTTPSetCookie.SameSite.none
-        #expect(written { (writer) throws(HTTPFieldValueError) in try noneInsecure.write(to: &writer) } == nil)
+        #expect(written { writer throws(HTTPFieldValueError) in try noneInsecure.write(to: &writer) } == nil)
     }
 
     static func components(_ target: String) -> String {
@@ -641,10 +664,14 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         let parts = HTTPTargetComponents(bytes.span.bytes)
         var segments = parts.pathSegments
         var path: [String] = []
-        while let segment = segments.next() { path.append(text(segment)) }
+        while let segment = segments.next() {
+            path.append(text(segment))
+        }
         var items = parts.queryItems
         var query: [String] = []
-        while let item = items.next() { query.append(text(item.name) + (optionalText(item.value).map { "=" + $0 } ?? "")) }
+        while let item = items.next() {
+            query.append(text(item.name) + (optionalText(item.value).map { "=" + $0 } ?? ""))
+        }
         return "\(parts.form) \(optionalText(parts.scheme) ?? "-") \(optionalText(parts.authority) ?? "-") [\(path.joined(separator: "|"))] "
             + "\(parts.query == nil ? "-" : "[" + query.joined(separator: "|") + "]")"
     }
@@ -673,12 +700,12 @@ func written(_ body: (inout AlignedBytesWriter) throws(HTTPFieldValueError) -> V
         #expect(Self.components("/path#fragment") == "origin - - [path] -")
 
         let encoded = b("/caf%C3%A9%20menu%2Fx+y")
-        #expect(written { (writer) throws(HTTPFieldValueError) in try HTTPPercentEncoding.decode(encoded.span.bytes, to: &writer) } == "/café menu/x+y")
+        #expect(written { writer throws(HTTPFieldValueError) in try HTTPPercentEncoding.decode(encoded.span.bytes, to: &writer) } == "/café menu/x+y")
         let decodedCount = try HTTPPercentEncoding.decodedByteCount(encoded.span.bytes)
         #expect(decodedCount == 15)
         for invalid in ["%", "%4", "%G0", "a%0g"] {
             let bytes = b(invalid)
-            #expect(written { (writer) throws(HTTPFieldValueError) in try HTTPPercentEncoding.decode(bytes.span.bytes, to: &writer) } == nil, "\(invalid)")
+            #expect(written { writer throws(HTTPFieldValueError) in try HTTPPercentEncoding.decode(bytes.span.bytes, to: &writer) } == nil, "\(invalid)")
         }
     }
 }

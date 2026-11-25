@@ -193,10 +193,14 @@ public func readTree(
         if parts.contains(.hardLinks), item.kind == .file { inodes[info.st_ino, default: []].append(relative) }
     }
     if parts.contains(.hardLinks) {
-        for path in result.keys { result[path]!.hardLinks = [] }
+        for path in result.keys {
+            result[path]!.hardLinks = []
+        }
         for group in inodes.values {
             let sorted = group.sorted()
-            for path in group { result[path]!.hardLinks = sorted }
+            for path in group {
+                result[path]!.hardLinks = sorted
+            }
         }
     }
     return result
@@ -276,7 +280,7 @@ private func readItem(path: String, including parts: TreeParts, ignoringAttribut
     }
     if parts.contains(.contents), kind == .file {
         do {
-            item.contents = Array(try Data(contentsOf: URL(filePath: path)))
+            item.contents = try Array(Data(contentsOf: URL(filePath: path)))
         } catch {
             throw TestFailure(description: "reading \(path): \(error)")
         }

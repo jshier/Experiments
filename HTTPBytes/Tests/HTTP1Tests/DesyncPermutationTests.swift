@@ -66,6 +66,7 @@ import Testing
         }
         return output
     }
+
     static func replace(_ bytes: [UInt8], _ target: String, _ replacement: String, all: Bool = true) -> [UInt8] {
         replace(bytes, latin1(target), latin1(replacement), all: all)
     }
@@ -233,10 +234,10 @@ import Testing
     /// What HTTPBytes made of a request: rejected, or framed (and how).
     static func verdict(_ request: [UInt8]) -> String {
         switch Conformance.parse(request) {
-        case .accept(let message):
+        case let .accept(message):
             switch message.framing {
             case .none: "none"
-            case .length(let length): "length \(length)"
+            case let .length(length): "length \(length)"
             case .chunked: "chunked"
             case .untilClose: "until close"
             }

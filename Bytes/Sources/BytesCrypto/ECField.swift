@@ -58,9 +58,9 @@ protocol ModularArithmetic: Sendable {
     static var zero: Self { get }
     static var one: Self { get }
 
-    static func + (a: Self, b: Self) -> Self
-    static func - (a: Self, b: Self) -> Self
-    static func * (a: Self, b: Self) -> Self
+    static func +(a: Self, b: Self) -> Self
+    static func -(a: Self, b: Self) -> Self
+    static func *(a: Self, b: Self) -> Self
     /// self · self.
     var squared: Self { get }
     /// self + self.
@@ -109,7 +109,9 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     @inline(__always)
     static func constant(_ value: InlineArray<6, UInt64>) -> InlineArray<limbs, UInt64> {
         var words = InlineArray<limbs, UInt64>(repeating: 0)
-        for index in 0..<limbs { words[index] = value[index] }
+        for index in 0..<limbs {
+            words[index] = value[index]
+        }
         return words
     }
 
@@ -136,20 +138,24 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         // Negative exactly when the borrow out exceeds the top word (both 0 or 1).
         let keep = 0 &- (borrow & ~top & 1)
         var result = InlineArray<limbs, UInt64>(repeating: 0)
-        for index in 0..<limbs { result[index] = (t[index] & keep) | (difference[index] & ~keep) }
+        for index in 0..<limbs {
+            result[index] = (t[index] & keep) | (difference[index] & ~keep)
+        }
         return result
     }
 
     @inline(__always)
-    static func + (a: Self, b: Self) -> Self {
+    static func +(a: Self, b: Self) -> Self {
         var sum = InlineArray<limbs, UInt64>(repeating: 0)
         var carry: UInt64 = 0
-        for index in 0..<limbs { (sum[index], carry) = addWithCarry(a.words[index], b.words[index], carry) }
+        for index in 0..<limbs {
+            (sum[index], carry) = addWithCarry(a.words[index], b.words[index], carry)
+        }
         return Self(montgomeryWords: subtractModulusIfAbove(sum, top: carry))
     }
 
     @inline(__always)
-    static func - (a: Self, b: Self) -> Self {
+    static func -(a: Self, b: Self) -> Self {
         var difference = InlineArray<limbs, UInt64>(repeating: 0)
         var borrow: UInt64 = 0
         for index in 0..<limbs {
@@ -188,7 +194,9 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
             montgomeryRow(a, b[4], &t, &top)
             montgomeryRow(a, b[5], &t, &top)
         } else {
-            for row in 0..<limbs { montgomeryRow(a, b[row], &t, &top) }
+            for row in 0..<limbs {
+                montgomeryRow(a, b[row], &t, &top)
+            }
         }
         return subtractModulusIfAbove(t, top: top)
     }
@@ -213,7 +221,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     }
 
     @inline(__always)
-    static func * (a: Self, b: Self) -> Self {
+    static func *(a: Self, b: Self) -> Self {
         Self(montgomeryWords: montgomeryProduct(a.words, b.words))
     }
 
@@ -253,10 +261,14 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
             reductionStep(4, &t, &extra)
             reductionStep(5, &t, &extra)
         } else {
-            for i in 0..<limbs { reductionStep(i, &t, &extra) }
+            for i in 0..<limbs {
+                reductionStep(i, &t, &extra)
+            }
         }
         var result = InlineArray<limbs, UInt64>(repeating: 0)
-        for index in 0..<limbs { result[index] = t[limbs &+ index] }
+        for index in 0..<limbs {
+            result[index] = t[limbs &+ index]
+        }
         return subtractModulusIfAbove(result, top: extra)
     }
 
@@ -283,7 +295,9 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     var zeroMask: UInt64 {
         @inline(__always) get {
             var bits: UInt64 = 0
-            for index in 0..<limbs { bits |= words[index] }
+            for index in 0..<limbs {
+                bits |= words[index]
+            }
             return BytesCrypto.zeroMask(bits)
         }
     }
@@ -291,14 +305,18 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     @inline(__always)
     func equalMask(_ other: Self) -> UInt64 {
         var bits: UInt64 = 0
-        for index in 0..<limbs { bits |= words[index] ^ other.words[index] }
+        for index in 0..<limbs {
+            bits |= words[index] ^ other.words[index]
+        }
         return BytesCrypto.zeroMask(bits)
     }
 
     @inline(__always)
     static func select(_ a: Self, _ b: Self, mask: UInt64) -> Self {
         var words = InlineArray<limbs, UInt64>(repeating: 0)
-        for index in 0..<limbs { words[index] = (a.words[index] & ~mask) | (b.words[index] & mask) }
+        for index in 0..<limbs {
+            words[index] = (a.words[index] & ~mask) | (b.words[index] & mask)
+        }
         return Self(montgomeryWords: words)
     }
 
@@ -306,7 +324,9 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         // A fixed 4-bit window: self⁰…self¹⁵, then four squarings and one multiplication per nibble.
         var table = InlineArray<16, Self>(repeating: .one)
         table[1] = self
-        for index in 2..<16 { table[index] = table[index &- 1] * self }
+        for index in 2..<16 {
+            table[index] = table[index &- 1] * self
+        }
         var result = Self.one
         var started = false
         for limb in (0..<limbs).reversed() {
@@ -388,11 +408,15 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
 
     init?(canonicalWords canonical: InlineArray<6, UInt64>) {
         var high: UInt64 = 0
-        for index in limbs..<6 { high |= canonical[index] }
+        for index in limbs..<6 {
+            high |= canonical[index]
+        }
         guard high == 0 else { return nil }
         let value = Self.constant(canonical)
         var borrow: UInt64 = 0
-        for index in 0..<limbs { (_, borrow) = subtractWithBorrow(value[index], M.modulus[index], borrow) }
+        for index in 0..<limbs {
+            (_, borrow) = subtractWithBorrow(value[index], M.modulus[index], borrow)
+        }
         guard borrow == 1 else { return nil }
         words = Self.montgomeryProduct(value, Self.constant(M.rSquared))
     }
@@ -418,7 +442,9 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     var canonicalWords: InlineArray<6, UInt64> {
         let value = canonical
         var words = InlineArray<6, UInt64>(repeating: 0)
-        for index in 0..<limbs { words[index] = value[index] }
+        for index in 0..<limbs {
+            words[index] = value[index]
+        }
         return words
     }
 
@@ -438,7 +464,9 @@ extension InlineArray where Element == UInt64 {
     var orAll: UInt64 {
         @inline(__always) get {
             var bits: UInt64 = 0
-            for index in 0..<count { bits |= self[index] }
+            for index in 0..<count {
+                bits |= self[index]
+            }
             return bits
         }
     }
@@ -447,7 +475,9 @@ extension InlineArray where Element == UInt64 {
     var isOne: Bool {
         @inline(__always) get {
             var high: UInt64 = 0
-            for index in 1..<count { high |= self[index] }
+            for index in 1..<count {
+                high |= self[index]
+            }
             return self[0] == 1 && high == 0
         }
     }
@@ -456,7 +486,9 @@ extension InlineArray where Element == UInt64 {
     @inline(__always)
     func isAtLeast(_ other: Self) -> Bool {
         var borrow: UInt64 = 0
-        for index in 0..<count { (_, borrow) = subtractWithBorrow(self[index], other[index], borrow) }
+        for index in 0..<count {
+            (_, borrow) = subtractWithBorrow(self[index], other[index], borrow)
+        }
         return borrow == 0
     }
 
@@ -464,7 +496,9 @@ extension InlineArray where Element == UInt64 {
     @inline(__always)
     mutating func subtract(_ other: Self) -> UInt64 {
         var borrow: UInt64 = 0
-        for index in 0..<count { (self[index], borrow) = subtractWithBorrow(self[index], other[index], borrow) }
+        for index in 0..<count {
+            (self[index], borrow) = subtractWithBorrow(self[index], other[index], borrow)
+        }
         return borrow
     }
 
@@ -472,15 +506,18 @@ extension InlineArray where Element == UInt64 {
     @inline(__always)
     mutating func add(_ other: Self) -> UInt64 {
         var carry: UInt64 = 0
-        for index in 0..<count { (self[index], carry) = addWithCarry(self[index], other[index], carry) }
+        for index in 0..<count {
+            (self[index], carry) = addWithCarry(self[index], other[index], carry)
+        }
         return carry
     }
 
     /// self >>= 1, with `top` (0 or 1) shifted in at the most significant bit.
     @inline(__always)
     mutating func shiftRightOne(top: UInt64) {
-        for index in 0..<(count &- 1) { self[index] = self[index] &>> 1 | self[index &+ 1] &<< 63 }
+        for index in 0..<(count &- 1) {
+            self[index] = self[index] &>> 1 | self[index &+ 1] &<< 63
+        }
         self[count &- 1] = self[count &- 1] &>> 1 | top &<< 63
     }
 }
-

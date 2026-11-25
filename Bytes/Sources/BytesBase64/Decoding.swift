@@ -321,7 +321,9 @@ extension Base64 {
                 }
                 // The whitespace: usually a line break, one or two bytes. (Checked loads: `offset < count`.)
                 offset = runEnd
-                while offset < count, _isWhitespace(text.load(fromByteOffset: offset, as: UInt8.self)) { offset &+= 1 }
+                while offset < count, _isWhitespace(text.load(fromByteOffset: offset, as: UInt8.self)) {
+                    offset &+= 1
+                }
             }
             try _decodeGathered(characters.span.bytes.extracting(first: gathered), at: gatheredStart, in: text,
                                 into: &writer, alphabet: alphabet, padding: padding)

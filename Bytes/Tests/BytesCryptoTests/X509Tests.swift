@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTesting
 import BytesTestSupport
 import Foundation
@@ -130,7 +130,7 @@ struct OpenSSLFields {
         defer { try? FileManager.default.removeItem(at: file) }
         guard (try? pem.write(to: file, atomically: true, encoding: .utf8)) != nil,
               let output = try? ExternalTool.output(openssl, ["x509", "-in", file.path, "-noout", "-serial", "-startdate", "-enddate", "-subject", "-nameopt", "RFC2253,-esc_msb,utf8",
-                                         "-text", "-certopt", "no_header,no_version,no_serial,no_issuer,no_validity,no_subject,no_sigdump,no_aux"]),
+                                                              "-text", "-certopt", "no_header,no_version,no_serial,no_issuer,no_validity,no_subject,no_sigdump,no_aux"]),
               let key = try? ExternalTool.output(openssl, ["x509", "-in", file.path, "-noout", "-pubkey"]) else { return nil }
         let text = String(decoding: output, as: UTF8.self)
         let lines = text.components(separatedBy: "\n")
@@ -287,7 +287,9 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
     }
     if var usages = certificate.extendedKeyUsage {
         var names: [String] = []
-        while let usage = usages.next() { names.append(extendedKeyUsageNames[usage] ?? usage.description) }
+        while let usage = usages.next() {
+            names.append(extendedKeyUsageNames[usage] ?? usage.description)
+        }
         #expect(fields.extendedKeyUsage == names.joined(separator: ", "), "\(label): extended key usage \(names) vs \(fields.extendedKeyUsage ?? "none")")
     } else {
         #expect(fields.extendedKeyUsage == nil, "\(label): extended key usage")
@@ -311,7 +313,7 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
     /// kind (`systemRootSample`) is checked field by field against OpenSSL and Security. `X509BulkTests` checks every
     /// root against them.
     @Test(.enabled(if: systemRootsPEM != nil && opensslPath != nil)) func systemRootCertificates() throws {
-        let roots = try X509Certificate.decodePEM(try #require(systemRootsPEM))
+        let roots = try X509Certificate.decodePEM(#require(systemRootsPEM))
         #expect(roots.count > 100)
         var selfSigned = 0
         for (index, der) in roots.enumerated() {
@@ -362,7 +364,7 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
     }
 
     @Test(.enabled(if: xcodeArchiveChainPEM != nil)) func xcodeArchiveChain() throws {
-        let chain = try X509Certificate.decodePEM(try #require(xcodeArchiveChainPEM))
+        let chain = try X509Certificate.decodePEM(#require(xcodeArchiveChainPEM))
         try #require(chain.count == 3)
         let leafDER = chain[0], intermediateDER = chain[1], rootDER = chain[2]
         let leaf = try X509Certificate(derEncoded: leafDER.span.bytes)
@@ -390,7 +392,9 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
             let directory = try TemporaryDirectory(prefix: "bytes-x509-xcode")
             defer { directory.remove() }
             let scratch = directory.url
-            for (index, der) in chain.enumerated() { try crossCheck(der, label: "Xcode chain \(index)", openssl: openssl, scratch: scratch) }
+            for (index, der) in chain.enumerated() {
+                try crossCheck(der, label: "Xcode chain \(index)", openssl: openssl, scratch: scratch)
+            }
         }
     }
 
@@ -398,7 +402,7 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
         let generated = try #require(GeneratedCertificates(), "openssl couldn't make the test certificates")
         defer { generated.remove() }
         for name in generated.files.keys.sorted() {
-            try crossCheck(try generated.der(name), label: name, openssl: opensslPath!, scratch: generated.directory)
+            try crossCheck(generated.der(name), label: name, openssl: opensslPath!, scratch: generated.directory)
         }
         let rootDER = try generated.der("root"), intermediateDER = try generated.der("intermediate"), leafDER = try generated.der("leaf")
         let rsaLeafDER = try generated.der("rsa-leaf"), rsaRootDER = try generated.der("rsa-root")
@@ -487,7 +491,9 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
         var samples: [[UInt8]] = []
         if let generated = GeneratedCertificates() {
             defer { generated.remove() }
-            for name in generated.files.keys.sorted() { samples.append(try generated.der(name)) }
+            for name in generated.files.keys.sorted() {
+                try samples.append(generated.der(name))
+            }
         }
         if let roots = systemRootsPEM.flatMap({ try? X509Certificate.decodePEM($0) }) { samples += roots.prefix(8) }
         if let chain = xcodeArchiveChainPEM.flatMap({ try? X509Certificate.decodePEM($0) }) { samples += chain }
@@ -577,21 +583,20 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
     /// Certificates built by hand around one malformed field each, which must be rejected.
     @Test func rejectsMalformedFields() throws {
         func tlv(_ tag: UInt8, _ contents: [UInt8]) -> [UInt8] {
-            var length: [UInt8]
-            if contents.count < 128 { length = [UInt8(contents.count)] }
-            else if contents.count < 256 { length = [0x81, UInt8(contents.count)] }
-            else { length = [0x82, UInt8(contents.count >> 8), UInt8(contents.count & 0xFF)] }
+            let length: [UInt8] = if contents.count < 128 { [UInt8(contents.count)] }
+            else if contents.count < 256 { [0x81, UInt8(contents.count)] }
+            else { [0x82, UInt8(contents.count >> 8), UInt8(contents.count & 0xFF)] }
             return [tag] + length + contents
         }
         let algorithm = tlv(0x30, tlv(0x06, [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x02]))
         let name = tlv(0x30, tlv(0x31, tlv(0x30, tlv(0x06, [0x55, 0x04, 0x03]) + tlv(0x0C, Array("Test".utf8)))))
         let validity = tlv(0x30, tlv(0x17, Array("260101000000Z".utf8)) + tlv(0x17, Array("270101000000Z".utf8)))
         let key = tlv(0x30, tlv(0x30, tlv(0x06, [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01]) + tlv(0x06, [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07]))
-                      + tlv(0x03, [0x00, 0x04] + [UInt8](repeating: 1, count: 64)))
+            + tlv(0x03, [0x00, 0x04] + [UInt8](repeating: 1, count: 64)))
         func certificate(version: [UInt8] = tlv(0xA0, tlv(0x02, [0x02])), serial: [UInt8] = tlv(0x02, [0x01]), innerAlgorithm: [UInt8]? = nil,
                          validity: [UInt8] = validity, extensions: [[UInt8]] = [], signature: [UInt8] = tlv(0x03, [0x00, 0x30, 0x00])) -> [UInt8] {
             var tbs = version + serial + (innerAlgorithm ?? algorithm) + name + validity + name + key
-            if !extensions.isEmpty { tbs += tlv(0xA3, tlv(0x30, extensions.flatMap { $0 })) }
+            if !extensions.isEmpty { tbs += tlv(0xA3, tlv(0x30, extensions.flatMap(\.self))) }
             return tlv(0x30, tlv(0x30, tbs) + algorithm + signature)
         }
         func parses(_ der: [UInt8]) -> Bool { (try? X509Certificate(derEncoded: der.span.bytes)) != nil }
@@ -603,27 +608,32 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
         #expect(parsed.basicConstraints == X509BasicConstraints(isCertificateAuthority: true, pathLengthConstraint: 3))
         #expect(parsed.keyUsage == .digitalSignature)
         #expect(parsed.subject.commonName == "Test")
-        #expect(parses(certificate(version: [])))                                    // v1, no extensions.
-        #expect(!parses(certificate(version: tlv(0xA0, tlv(0x02, [0x00])))))        // v1 written out (the default).
-        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x0E]) + tlv(0x01, [0x00]) + tlv(0x04, tlv(0x04, [1])))])))  // critical FALSE.
-        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x04, tlv(0x30, tlv(0x01, [0x00]))))])))  // cA FALSE.
-        #expect(parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x04, tlv(0x30, [])))])))  // Neither: an end entity.
+        #expect(parses(certificate(version: []))) // v1, no extensions.
+        #expect(!parses(certificate(version: tlv(0xA0, tlv(0x02, [0x00]))))) // v1 written out (the default).
+        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x0E]) + tlv(0x01, [0x00]) + tlv(0x04, tlv(0x04, [1])))]))) // critical FALSE.
+        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x04, tlv(0x30, tlv(0x01, [0x00]))))]))) // cA FALSE.
+        #expect(parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x04, tlv(0x30, [])))]))) // Neither: an end entity.
 
-        #expect(!parses(certificate(version: [], extensions: [basic])))              // Extensions in v1.
-        #expect(!parses(certificate(version: tlv(0xA0, tlv(0x02, [0x03])))))        // Version 4.
-        #expect(!parses(certificate(version: tlv(0xA0, tlv(0x02, [0x00, 0x02])))))  // Non-minimal integer.
-        #expect(!parses(certificate(serial: tlv(0x02, []))))                         // Empty integer.
-        #expect(!parses(certificate(serial: tlv(0x02, [0xFF, 0x80]))))               // Non-minimal negative.
+        #expect(!parses(certificate(version: [], extensions: [basic]))) // Extensions in v1.
+        #expect(!parses(certificate(version: tlv(0xA0, tlv(0x02, [0x03]))))) // Version 4.
+        #expect(!parses(certificate(version: tlv(0xA0, tlv(0x02, [0x00, 0x02]))))) // Non-minimal integer.
+        #expect(!parses(certificate(serial: tlv(0x02, [])))) // Empty integer.
+        #expect(!parses(certificate(serial: tlv(0x02, [0xFF, 0x80])))) // Non-minimal negative.
         #expect(!parses(certificate(innerAlgorithm: tlv(0x30, tlv(0x06, [0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x03]))))) // Mismatch.
-        #expect(!parses(certificate(validity: tlv(0x30, tlv(0x17, Array("260101000000Z".utf8))))))  // One time.
-        #expect(!parses(certificate(extensions: [basic, basic])))                    // Duplicate.
-        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x01, [0x01]) + tlv(0x04, tlv(0x30, [])))])))  // BOOLEAN 01.
-        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x0F]) + tlv(0x04, tlv(0x03, [0x07, 0x81])))])))  // Padding bits set.
+        #expect(!parses(certificate(validity: tlv(0x30, tlv(0x17, Array("260101000000Z".utf8)))))) // One time.
+        #expect(!parses(certificate(extensions: [basic, basic]))) // Duplicate.
+        // At most 64 extensions (more took quadratic time before the signature was checked); duplicates found among all.
+        func unknown(_ n: Int) -> [UInt8] { tlv(0x30, tlv(0x06, [0x2A, 0x03, UInt8(n)]) + tlv(0x04, [0x05, 0x00])) }
+        #expect(parses(certificate(extensions: (0..<64).map(unknown))))
+        #expect(!parses(certificate(extensions: (0..<65).map(unknown))))
+        #expect(!parses(certificate(extensions: (0..<63).map(unknown) + [unknown(0)]))) // First and 64th.
+        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x01, [0x01]) + tlv(0x04, tlv(0x30, [])))]))) // BOOLEAN 01.
+        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x0F]) + tlv(0x04, tlv(0x03, [0x07, 0x81])))]))) // Padding bits set.
         #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x04, tlv(0x30, tlv(0x02, [0xFF]))))]))) // Negative path length.
-        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x25]) + tlv(0x04, tlv(0x30, [])))])))  // Empty EKU.
+        #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x25]) + tlv(0x04, tlv(0x30, [])))]))) // Empty EKU.
         #expect(!parses(certificate(extensions: [tlv(0x30, tlv(0x06, [0x55, 0x1D, 0x13]) + tlv(0x04, tlv(0x30, []) + [0x00]))]))) // Trailing.
-        #expect(!parses(certificate(signature: tlv(0x03, [0x01, 0x30, 0x00]))))      // Signature with unused bits.
-        #expect(!parses(certificate(signature: tlv(0x04, [0x30, 0x00]))))            // Not a bit string.
+        #expect(!parses(certificate(signature: tlv(0x03, [0x01, 0x30, 0x00])))) // Signature with unused bits.
+        #expect(!parses(certificate(signature: tlv(0x04, [0x30, 0x00])))) // Not a bit string.
     }
 
     @Test func pem() throws {
@@ -637,12 +647,12 @@ func crossCheck(_ der: [UInt8], label: String, openssl: String, scratch: URL) th
         #expect(try X509Certificate.decodePEM("no blocks here") == [])
         #expect(try X509Certificate.decodePEM(block([1])) == [[1]])
         #expect(try X509Certificate.decodePEM(block([1, 2])) == [[1, 2]])
-        for bad in ["-----BEGIN CERTIFICATE-----\nAQ=\n-----END CERTIFICATE-----",          // Short padding.
-                    "-----BEGIN CERTIFICATE-----\nAR==\n-----END CERTIFICATE-----",         // Nonzero padding bits.
-                    "-----BEGIN CERTIFICATE-----\nAQ==AQ==\n-----END CERTIFICATE-----",     // Data after padding.
-                    "-----BEGIN CERTIFICATE-----\nAQ*=\n-----END CERTIFICATE-----",         // Outside the alphabet.
-                    "-----BEGIN CERTIFICATE-----\nAQID\n-----END PRIVATE KEY-----",         // Wrong end label.
-                    "-----BEGIN CERTIFICATE-----\nAQID\n"] {                                // No end.
+        for bad in ["-----BEGIN CERTIFICATE-----\nAQ=\n-----END CERTIFICATE-----", // Short padding.
+                    "-----BEGIN CERTIFICATE-----\nAR==\n-----END CERTIFICATE-----", // Nonzero padding bits.
+                    "-----BEGIN CERTIFICATE-----\nAQ==AQ==\n-----END CERTIFICATE-----", // Data after padding.
+                    "-----BEGIN CERTIFICATE-----\nAQ*=\n-----END CERTIFICATE-----", // Outside the alphabet.
+                    "-----BEGIN CERTIFICATE-----\nAQID\n-----END PRIVATE KEY-----", // Wrong end label.
+                    "-----BEGIN CERTIFICATE-----\nAQID\n"] { // No end.
             #expect(throws: BytesError.invalidValue, "\(bad)") { _ = try X509Certificate.decodePEM(bad) }
         }
     }
@@ -672,21 +682,27 @@ func exercise(_ certificate: borrowing X509Certificate) {
     func readAll(_ name: borrowing X509Name) {
         _ = name.commonName
         var attributes = name.attributes
-        while let attribute = attributes.next() { _ = attribute.string; _ = attribute.type.description }
+        while let attribute = attributes.next() {
+            _ = attribute.string; _ = attribute.type.description
+        }
     }
     readAll(certificate.issuer)
     readAll(certificate.subject)
     if var usages = certificate.extendedKeyUsage {
-        while let usage = usages.next() { _ = usage.description }
+        while let usage = usages.next() {
+            _ = usage.description
+        }
     }
     var extensions = certificate.extensions
-    while let item = extensions.next() { _ = item.identifier.description; _ = item.value.byteCount }
+    while let item = extensions.next() {
+        _ = item.identifier.description; _ = item.value.byteCount
+    }
 }
 
 /// Every system root against OpenSSL and Security, field by field.
 @Suite(.bulk) struct X509BulkTests {
     @Test(.enabled(if: systemRootsPEM != nil && opensslPath != nil)) func systemRootCertificates() throws {
-        let roots = try X509Certificate.decodePEM(try #require(systemRootsPEM))
+        let roots = try X509Certificate.decodePEM(#require(systemRootsPEM))
         #expect(roots.count > 100)
         #expect(try X509Tests.crossCheckRoots(roots) > 100)
     }

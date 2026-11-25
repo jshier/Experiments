@@ -140,18 +140,22 @@ public enum RSA {
         /// - Throws: ``BytesError/invalidValue`` for a modulus or exponent outside those ranges.
         public init(modulus: RawSpan, publicExponent: RawSpan) throws(BytesError) {
             var start = 0
-            while start < modulus.byteCount, modulus.byteOffsetLoad(start) == 0 { start &+= 1 }
+            while start < modulus.byteCount, modulus.byteOffsetLoad(start) == 0 {
+                start &+= 1
+            }
             let n = modulus.extracting(droppingFirst: start)
             start = 0
-            while start < publicExponent.byteCount, publicExponent.byteOffsetLoad(start) == 0 { start &+= 1 }
+            while start < publicExponent.byteCount, publicExponent.byteOffsetLoad(start) == 0 {
+                start &+= 1
+            }
             let e = publicExponent.extracting(droppingFirst: start)
 
             guard e.byteCount >= 1, e.byteCount <= 8 else { throw .invalidValue }
             var exponent: UInt64 = 0
-            for index in 0..<e.byteCount { exponent = exponent &<< 8 | UInt64(e.byteOffsetLoad(index)) }
-            guard exponent >= 3, exponent & 1 == 1 else { throw .invalidValue }
-
-            guard n.byteCount >= 1 else { throw .invalidValue }
+            for index in 0..<e.byteCount {
+                exponent = exponent &<< 8 | UInt64(e.byteOffsetLoad(index))
+            }
+            guard exponent >= 3, exponent & 1 == 1, n.byteCount >= 1 else { throw .invalidValue }
             let bits = n.byteCount &* 8 &- n.byteOffsetLoad(0).leadingZeroBitCount
             guard bits >= Self.minimumModulusBitCount, bits <= Self.maximumModulusBitCount,
                   n.byteOffsetLoad(n.byteCount &- 1) & 1 == 1 else { throw .invalidValue }
@@ -159,20 +163,19 @@ public enum RSA {
             let words: InlineArray<64, UInt64> = RSALimbs.read(bigEndian: n)
             let limbs = RSALimbs.arithmeticLimbCount(forBits: bits)
             let inverse = RSALimbs.negativeInverse(words[0])
-            let rSquared: InlineArray<64, UInt64>
-            switch limbs {
-            case 16: rSquared = RSAModulus<16>.rSquared(words, inverse, bits: bits)
-            case 24: rSquared = RSAModulus<24>.rSquared(words, inverse, bits: bits)
-            case 32: rSquared = RSAModulus<32>.rSquared(words, inverse, bits: bits)
-            case 48: rSquared = RSAModulus<48>.rSquared(words, inverse, bits: bits)
-            default: rSquared = RSAModulus<64>.rSquared(words, inverse, bits: bits)
+            let rSquared: InlineArray<64, UInt64> = switch limbs {
+            case 16: RSAModulus<16>.rSquared(words, inverse, bits: bits)
+            case 24: RSAModulus<24>.rSquared(words, inverse, bits: bits)
+            case 32: RSAModulus<32>.rSquared(words, inverse, bits: bits)
+            case 48: RSAModulus<48>.rSquared(words, inverse, bits: bits)
+            default: RSAModulus<64>.rSquared(words, inverse, bits: bits)
             }
             self.modulus = words
             self.rSquared = rSquared
-            self.negativeInverse = inverse
-            self.limbCount = limbs
+            negativeInverse = inverse
+            limbCount = limbs
             self.publicExponent = exponent
-            self.modulusBitCount = bits
+            modulusBitCount = bits
         }
 
         /// A key from DER: a SubjectPublicKeyInfo naming `rsaEncryption` (with its `NULL` parameters, as RFC 3279
@@ -183,7 +186,7 @@ public enum RSA {
         ///   ``init(modulus:publicExponent:)`` throws.
         public init(derRepresentation: RawSpan) throws(BytesError) {
             var outer = AlignedBytesReader(derRepresentation)
-            var sequence = AlignedBytesReader(try outer.readASN1Contents(.sequence))
+            var sequence = try AlignedBytesReader(outer.readASN1Contents(.sequence))
             try outer.expectASN1End()
             if sequence.nextASN1Tag == .integer {
                 let n = try sequence.readASN1UnsignedInteger()
@@ -192,13 +195,13 @@ public enum RSA {
                 try self.init(modulus: n, publicExponent: e)
                 return
             }
-            var algorithm = AlignedBytesReader(try sequence.readASN1Contents(.sequence))
-            guard ASN1ObjectIdentifier.rsaEncryption.matches(try algorithm.readASN1Contents(.objectIdentifier)),
+            var algorithm = try AlignedBytesReader(sequence.readASN1Contents(.sequence))
+            guard try ASN1ObjectIdentifier.rsaEncryption.matches(algorithm.readASN1Contents(.objectIdentifier)),
                   try algorithm.readASN1Contents(.null).byteCount == 0 else { throw .invalidValue }
             try algorithm.expectASN1End()
-            var key = AlignedBytesReader(try sequence.readASN1BitString())
+            var key = try AlignedBytesReader(sequence.readASN1BitString())
             try sequence.expectASN1End()
-            var values = AlignedBytesReader(try key.readASN1Contents(.sequence))
+            var values = try AlignedBytesReader(key.readASN1Contents(.sequence))
             try key.expectASN1End()
             let n = try values.readASN1UnsignedInteger()
             let e = try values.readASN1UnsignedInteger()
@@ -247,7 +250,9 @@ public enum RSA {
         public var pkcs1DERRepresentation: [UInt8] {
             let n = modulusBytes
             var e = InlineArray<8, UInt8>(repeating: 0)
-            for index in 0..<8 { e[index] = UInt8(truncatingIfNeeded: publicExponent &>> UInt64(56 &- 8 &* index)) }
+            for index in 0..<8 {
+                e[index] = UInt8(truncatingIfNeeded: publicExponent &>> UInt64(56 &- 8 &* index))
+            }
             var writer = DERWriter()
             writer.append(.sequence) { values in
                 values.appendUnsignedInteger(n.span.bytes)
@@ -277,9 +282,11 @@ public enum RSA {
         }
 
         /// Whether two keys have the same modulus and exponent.
-        public static func == (a: Self, b: Self) -> Bool {
+        public static func ==(a: Self, b: Self) -> Bool {
             guard a.publicExponent == b.publicExponent, a.modulusBitCount == b.modulusBitCount else { return false }
-            for index in 0..<a.limbCount where a.modulus[index] != b.modulus[index] { return false }
+            for index in 0..<a.limbCount where a.modulus[index] != b.modulus[index] {
+                return false
+            }
             return true
         }
 
@@ -307,9 +314,13 @@ public enum RSA {
             expected[1] = 1
             let prefixStart = k &- encodedCount
             expected[prefixStart &- 1] = 0
-            for index in 0..<prefixCount { expected[prefixStart &+ index] = prefix[index] }
+            for index in 0..<prefixCount {
+                expected[prefixStart &+ index] = prefix[index]
+            }
             let digestStart = prefixStart &+ prefixCount
-            for index in 0..<digestCount { expected[digestStart &+ index] = digest.byteOffsetLoad(index) }
+            for index in 0..<digestCount {
+                expected[digestStart &+ index] = digest.byteOffsetLoad(index)
+            }
             let encoded = expected.span.bytes.extracting(first: k)
             switch limbCount {
             case 16: return RSAModulus<16>.verify(signature, encoded, self)
@@ -355,7 +366,9 @@ enum RSALimbs {
         }
         if end > 0 {
             var word: UInt64 = 0
-            for offset in 0..<end { word = word &<< 8 | UInt64(bytes.byteOffsetLoad(offset)) }
+            for offset in 0..<end {
+                word = word &<< 8 | UInt64(bytes.byteOffsetLoad(offset))
+            }
             words[index] = word
         }
         return words
@@ -374,7 +387,9 @@ enum RSALimbs {
     /// −n₀⁻¹ mod 2⁶⁴ for odd n₀, by Newton's iteration: n₀ is its own inverse mod 8, and each step doubles the bits.
     static func negativeInverse(_ n0: UInt64) -> UInt64 {
         var inverse = n0
-        for _ in 0..<5 { inverse = inverse &* (2 &- n0 &* inverse) }
+        for _ in 0..<5 {
+            inverse = inverse &* (2 &- n0 &* inverse)
+        }
         return 0 &- inverse
     }
 }
@@ -394,7 +409,9 @@ enum RSAModulus<let limbs: Int> {
     @inline(__always)
     static func withWorkspace<R>(_ modulus: borrowing InlineArray<64, UInt64>, _ body: (UnsafeMutablePointer<UInt64>) -> R) -> R {
         var blocks = InlineArray<6, Limbs>(repeating: Limbs(repeating: 0))
-        for index in 0..<limbs { blocks[0][index] = modulus[index] }
+        for index in 0..<limbs {
+            blocks[0][index] = modulus[index]
+        }
         var span = blocks.mutableSpan
         // Unsafe: the blocks as one buffer of limbs (an InlineArray of UInt64 is laid out as its elements), for the
         // duration of `body`; the pointer doesn't escape it.
@@ -535,7 +552,7 @@ enum RSAModulus<let limbs: Int> {
         // Unsafe: unchecked write of the last limb; then `limbs` limbs of `result` and the modulus compared, and
         // subtracted in place.
         unsafe result[limbs &- 1] = column.t0
-        if column.t1 != 0 || !(unsafe isBelow(result, modulus)) { unsafe subtract(result, modulus) }
+        if unsafe column.t1 != 0 || !isBelow(result, modulus) { unsafe subtract(result, modulus) }
     }
 
     /// a²·R⁻¹ mod n into `result`, for a below n: ``multiply(_:_:_:_:_:into:)`` with each cross product aᵢaⱼ (i ≠ j)
@@ -566,7 +583,7 @@ enum RSAModulus<let limbs: Int> {
         // Unsafe: unchecked write of the last limb; then `limbs` limbs of `result` and the modulus compared, and
         // subtracted in place.
         unsafe result[limbs &- 1] = column.t0
-        if column.t1 != 0 || !(unsafe isBelow(result, modulus)) { unsafe subtract(result, modulus) }
+        if unsafe column.t1 != 0 || !isBelow(result, modulus) { unsafe subtract(result, modulus) }
     }
 
     /// Adds column `i` (below 2·limbs − 1) of a² to `column`'s t: twice the cross products aⱼaᵢ₋ⱼ (j < i − j), plus
@@ -617,7 +634,7 @@ enum RSAModulus<let limbs: Int> {
         // Unsafe: unchecked write of the last limb; then `limbs` limbs of `result` and the modulus compared, and
         // subtracted in place.
         unsafe result[limbs &- 1] = column.t0
-        if column.t1 != 0 || !(unsafe isBelow(result, modulus)) { unsafe subtract(result, modulus) }
+        if unsafe column.t1 != 0 || !isBelow(result, modulus) { unsafe subtract(result, modulus) }
     }
 
     /// base^exponent in Montgomery form, left to right a bit at a time, alternating between `accumulator` and
@@ -664,17 +681,21 @@ enum RSAModulus<let limbs: Int> {
                     unsafe x[index] = word &<< 1 | carry
                     carry = word &>> 63
                 }
-                if carry != 0 || !(unsafe isBelow(x, n)) { unsafe subtract(x, n) }
+                if unsafe carry != 0 || !isBelow(x, n) { unsafe subtract(x, n) }
             }
             for _ in 0..<3 {
                 unsafe square(x, n, inverse, q, into: y)
                 unsafe square(y, n, inverse, q, into: x)
             }
             var value = Limbs(repeating: 0)
-            for index in 0..<limbs { value[index] = unsafe x[index] }
+            for index in 0..<limbs {
+                value[index] = unsafe x[index]
+            }
             return value
         }
-        for index in 0..<limbs { words[index] = result[index] }
+        for index in 0..<limbs {
+            words[index] = result[index]
+        }
         return words
     }
 
@@ -685,7 +706,9 @@ enum RSAModulus<let limbs: Int> {
         let expected: Limbs = RSALimbs.read(bigEndian: encoded)
         let exponent = key.publicExponent, inverse = key.negativeInverse
         var rSquared = Limbs(repeating: 0)
-        for index in 0..<limbs { rSquared[index] = key.rSquared[index] }
+        for index in 0..<limbs {
+            rSquared[index] = key.rSquared[index]
+        }
         // Unsafe: a workspace of six blocks of `limbs` limbs, for the closure only (the pointer doesn't escape it).
         let result: Limbs? = unsafe withWorkspace(key.modulus) { workspace in
             // Unsafe (throughout): blocks of the workspace, indices below `limbs`.
@@ -702,12 +725,15 @@ enum RSAModulus<let limbs: Int> {
             let raised = unsafe power(base, exponent, n, inverse, q, x, y)
             unsafe reduce(raised, n, inverse, q, into: factor)
             var value = Limbs(repeating: 0)
-            for index in 0..<limbs { value[index] = unsafe factor[index] }
+            for index in 0..<limbs {
+                value[index] = unsafe factor[index]
+            }
             return value
         }
         guard let result else { return false }
-        for index in 0..<limbs where result[index] != expected[index] { return false }
+        for index in 0..<limbs where result[index] != expected[index] {
+            return false
+        }
         return true
     }
-
 }

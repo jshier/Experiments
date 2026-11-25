@@ -103,12 +103,18 @@ struct HashBuffer<let size: Int>: Sendable {
         block[count] = 0x80
         count &+= 1
         if count > size &- lengthByteCount {
-            for index in count..<size { block[index] = 0 }
+            for index in count..<size {
+                block[index] = 0
+            }
             compress(block.span.bytes)
             count = 0
         }
-        for index in count..<(size &- 8) { block[index] = 0 }
-        for index in 0..<8 { block[size &- 1 &- index] = UInt8(truncatingIfNeeded: bits &>> UInt64(8 &* index)) }
+        for index in count..<(size &- 8) {
+            block[index] = 0
+        }
+        for index in 0..<8 {
+            block[size &- 1 &- index] = UInt8(truncatingIfNeeded: bits &>> UInt64(8 &* index))
+        }
         compress(block.span.bytes)
     }
 }

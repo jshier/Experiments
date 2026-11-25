@@ -55,9 +55,9 @@ public enum WKMS {
     }
 }
 
-extension AEAArchive {
+public extension AEAArchive {
     /// Reads an archive's prologue without opening it: its profile and auth data, to find what decrypts it.
-    public static func prologue(at path: FilePath) throws(AEAError) -> AEAPrologue {
+    static func prologue(at path: FilePath) throws(AEAError) -> AEAPrologue {
         let file = try open(path)
         defer { file.close() }
         let fixed = try read(file, at: 0, count: AEAPrologue.fixedByteCount)

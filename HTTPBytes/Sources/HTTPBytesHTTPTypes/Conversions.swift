@@ -4,43 +4,43 @@ public import HTTPTypes
 // Conversions between HTTPBytes' values and swift-http-types', for code that hands parsed messages to APIs built on
 // swift-http-types. These copy (swift-http-types' fields are strings): use them at the boundary, not in a parse loop.
 
-extension HTTPMethod {
+public extension HTTPMethod {
     /// The method swift-http-types names `method`, or `nil` if it's longer than 16 bytes.
-    public init?(_ method: HTTPRequest.Method) {
+    init?(_ method: HTTPRequest.Method) {
         let bytes = Array(method.rawValue.utf8)
         self.init(bytes.span.bytes)
     }
 }
 
-extension HTTPRequest.Method {
+public extension HTTPRequest.Method {
     /// The same method in swift-http-types.
-    public init(_ method: HTTPMethod) {
+    init(_ method: HTTPMethod) {
         // A token's bytes are ASCII, so always a valid method.
         self.init(method.description)!
     }
 }
 
-extension HTTPStatus {
+public extension HTTPStatus {
     /// The same status as swift-http-types' `status`.
-    public init?(_ status: HTTPResponse.Status) {
+    init?(_ status: HTTPResponse.Status) {
         self.init(code: status.code)
     }
 }
 
-extension HTTPResponse.Status {
+public extension HTTPResponse.Status {
     /// The same status in swift-http-types, with RFC 9110's reason phrase.
-    public init(_ status: HTTPStatus) {
+    init(_ status: HTTPStatus) {
         self.init(code: status.code, reasonPhrase: status.description.split(separator: " ", maxSplits: 1).dropFirst().first.map(String.init) ?? "")
     }
 }
 
-extension HTTPFieldStore {
+public extension HTTPFieldStore {
     /// `fields` as a store: names and values copied, never-index strategies (`.disallow`) kept as
     /// ``HTTPFieldStore/neverIndexed``. Pseudo-header fields (swift-http-types keeps them apart) aren't included.
     ///
     /// - Throws: `HTTPFieldError` for a field whose value a store doesn't accept (swift-http-types accepts some it
     ///   doesn't, through `lenientValue`).
-    public init(_ fields: HTTPFields) throws(HTTPFieldError) {
+    init(_ fields: HTTPFields) throws(HTTPFieldError) {
         self.init()
         for field in fields {
             let name = Array(field.name.rawName.utf8), value = Array(field.value.utf8)
@@ -71,7 +71,9 @@ extension HTTPFields {
     static func bytes(_ span: RawSpan) -> [UInt8] {
         var bytes: [UInt8] = []
         bytes.reserveCapacity(span.byteCount)
-        for offset in 0..<span.byteCount { bytes.append(span.load(fromByteOffset: offset, as: UInt8.self)) }
+        for offset in 0..<span.byteCount {
+            bytes.append(span.load(fromByteOffset: offset, as: UInt8.self))
+        }
         return bytes
     }
 

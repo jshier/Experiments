@@ -159,7 +159,9 @@ public struct EntryPath: ~Escapable {
         while index < count {
             // One component: `index..<end`.
             var end = index
-            while end < count, byte(end) != 0x2F, byte(end) != 0 { end += 1 }
+            while end < count, byte(end) != 0x2F, byte(end) != 0 {
+                end += 1
+            }
             let length = end - index
             let isDot = length == 1 && byte(index) == 0x2E
             let isDotDot = length == 2 && byte(index) == 0x2E && byte(index + 1) == 0x2E
@@ -176,4 +178,3 @@ public struct EntryPath: ~Escapable {
         return Sanitized(count: written, adjusted: adjusted)
     }
 }
-

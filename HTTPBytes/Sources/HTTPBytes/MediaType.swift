@@ -117,7 +117,7 @@ public struct HTTPAcceptList: ~Escapable {
             let before = parameters.position
             guard let parameter = try parameters.next() else { break }
             if parameter.isNamed("q") {
-                guard case .token(let text) = parameter.value, let thousandths = HTTPWeight.thousandths(text) else { throw .invalidWeight }
+                guard case let .token(text) = parameter.value, let thousandths = HTTPWeight.thousandths(text) else { throw .invalidWeight }
                 weight = thousandths
                 ownEnd = before
                 // Extensions after the weight: checked, left out.
@@ -205,11 +205,11 @@ public struct HTTPAcceptList: ~Escapable {
     @inlinable
     static func parameterValuesEqual(_ a: borrowing HTTPParameterValue, _ b: borrowing HTTPParameterValue) -> Bool {
         switch b {
-        case .token(let token): a.equals(token, ignoringCase: true)
-        case .quoted(let string):
+        case let .token(token): a.equals(token, ignoringCase: true)
+        case let .quoted(string):
             switch a {
-            case .token(let token): string.equals(token, ignoringCase: true)
-            case .quoted(let other): string.equals(other, ignoringCase: true)
+            case let .token(token): string.equals(token, ignoringCase: true)
+            case let .quoted(other): string.equals(other, ignoringCase: true)
             }
         }
     }

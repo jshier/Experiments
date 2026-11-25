@@ -217,11 +217,15 @@ public struct HTTP1ChunkedDecoder: Sendable {
         let end = Swift.min(bytes.byteCount, start &+ limit &+ 1)
         var position = start
         @inline(__always) func skipWhitespace() {
-            while position < end, case let byte = bytes.byte(position), byte == .space || byte == .tab { position &+= 1 }
+            while position < end, case let byte = bytes.byte(position), byte == .space || byte == .tab {
+                position &+= 1
+            }
         }
         @inline(__always) func token() -> Int {
             let first = position
-            while position < end, isTokenByte(bytes.byte(position)) { position &+= 1 }
+            while position < end, isTokenByte(bytes.byte(position)) {
+                position &+= 1
+            }
             return position &- first
         }
         while true {

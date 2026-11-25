@@ -149,30 +149,30 @@ public enum Transfer {
         let keys = Protection.connectionKeys(suite: protection.suite)
         let result: PairResult
         do {
-        result = try await withThrowingTaskGroup(of: Int.self) { group in
-            group.addTask(executorPreference: senderExecutor) {
-                switch mode {
-                case .mqtt where protected: try await sendProtected(workload, to: address, protection: protection, keys: keys)
-                case .mqtt: try await sendPackets(workload, to: address)
-                case .raw: try await sendRaw(workload, to: address)
+            result = try await withThrowingTaskGroup(of: Int.self) { group in
+                group.addTask(executorPreference: senderExecutor) {
+                    switch mode {
+                    case .mqtt where protected: try await sendProtected(workload, to: address, protection: protection, keys: keys)
+                    case .mqtt: try await sendPackets(workload, to: address)
+                    case .raw: try await sendRaw(workload, to: address)
+                    }
                 }
+                let connection = try await listener.accept()
+                let (received, packets, wire): (Int, Int, Int)
+                switch mode {
+                case .mqtt where protected:
+                    let result = try await receiveProtected(workload, on: connection, protection: protection, keys: keys)
+                    (received, packets, wire) = (result.plain, result.packets, result.wire)
+                case .mqtt:
+                    let (bytes, count) = try await receivePackets(workload, on: connection)
+                    (received, packets, wire) = (bytes, count, bytes)
+                case .raw:
+                    let bytes = try await receiveRaw(workload, on: connection)
+                    (received, packets, wire) = (bytes, 0, bytes)
+                }
+                let sent = try await group.next()!
+                return PairResult(sent: sent, received: received, packets: packets, wire: wire)
             }
-            let connection = try await listener.accept()
-            let (received, packets, wire): (Int, Int, Int)
-            switch mode {
-            case .mqtt where protected:
-                let result = try await receiveProtected(workload, on: connection, protection: protection, keys: keys)
-                (received, packets, wire) = (result.plain, result.packets, result.wire)
-            case .mqtt:
-                let (bytes, count) = try await receivePackets(workload, on: connection)
-                (received, packets, wire) = (bytes, count, bytes)
-            case .raw:
-                let bytes = try await receiveRaw(workload, on: connection)
-                (received, packets, wire) = (bytes, 0, bytes)
-            }
-            let sent = try await group.next()!
-            return PairResult(sent: sent, received: received, packets: packets, wire: wire)
-        }
         } catch {
             // A listener must be closed before it's destroyed, or the executors trap (hiding `error`).
             try? await listener.close()

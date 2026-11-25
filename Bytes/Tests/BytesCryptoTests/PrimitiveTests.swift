@@ -1,5 +1,5 @@
-import Bytes
 @testable import BytesCrypto
+import Bytes
 import BytesTestSupport
 import CommonCrypto
 import CryptoKit
@@ -77,7 +77,7 @@ func hashed<H: HashFunction>(_ type: H.Type, _ bytes: [UInt8], splits: [Int]) ->
 }
 
 extension InlineArray: @retroactive Equatable where Element: Equatable {
-    public static func == (lhs: Self, rhs: Self) -> Bool { (0..<count).allSatisfy { lhs[$0] == rhs[$0] } }
+    public static func ==(lhs: Self, rhs: Self) -> Bool { (0..<count).allSatisfy { lhs[$0] == rhs[$0] } }
 }
 
 @Suite struct KeyDerivationTests {
@@ -168,7 +168,7 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
 
     /// CommonCrypto's AES-ECB of each counter block, as the reference for both counter layouts.
     static func referenceKeystream(key: [UInt8], counterBlocks: [[UInt8]]) -> [UInt8] {
-        let input = counterBlocks.flatMap { $0 }
+        let input = counterBlocks.flatMap(\.self)
         var output = [UInt8](repeating: 0, count: input.count)
         var moved = 0
         // Unsafe: CommonCrypto's pointers and lengths, each describing an array valid for the call.

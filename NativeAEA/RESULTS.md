@@ -7,6 +7,272 @@ and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIV
 synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
 M1 Max's (baseline `m1max`).
 
+## 2026-11-24, last: the archive-coverage set, tests by manifest, and the Xcode conformance check (M1 Max)
+
+**The rule now** (AGENTS.md): tests and default benchmark rows run on generated `TestData` sets; Xcode's archives in
+`~/Scratch` are only for opt-in timing (`NATIVEAEA_ARCHIVE`, the `Xcode` rows, unchanged) and the conformance check
+below. `FormatTests.verifiesXcodesCertificateChain` now skips visibly (`.enabled(if:)` with its reason) instead of
+returning early and passing; `XIPTests.verifiesXcodeSignatures` already did.
+
+**The set**, `archive-coverage` (`Tools/test-data fetch archive-coverage`, generator `Disk/Fixtures/archive-coverage`:
+`make-tree.py`, `make-archives.sh`, `manifest.py`; about 100 MB, 20 s). One deterministic tree (fixed seeds and times;
+two runs give the same manifests item for item, and the same `.aar` bytes): 2,000 small files, large text, random,
+and zero files, 24 levels, 255-byte ASCII and UTF-8 names and an 800-byte path, NFC and NFD names, emoji, symbolic
+links (relative, absolute, dangling, to a directory, to a link, to the parent), hard links across directories (one
+with attributes), extended attributes (empty to 200 KB, Finder info, resource forks, on a directory and on a link),
+ACLs with inheritance flags, read-only, private, setuid, setgid, and sticky modes, `UF_HIDDEN` and `UF_NODUMP`, and
+APFS-compressed files of each codec (inline, one chunk, many, and one left plain). Archived by `aa archive` (plain,
+and LZFSE 1m, LZMA 256k, LZ4 64k, zlib 4m, LZBITMAP 16k, LZRAVEN 1m), `aea encrypt` (profiles 0–5 with LZMA, LZFSE,
+LZ4, zlib, LZBITMAP, and none; their test keys beside them), `ditto -c -k --sequesterRsrc --keepParent`, `zip -r -y`;
+and a second tree of names that collide only by case, made on a case-sensitive disk image (`hdiutil`, no sudo,
+detached on exit). The generator extracts each archive once with `aa extract` or `ditto -x -k`, writes a manifest
+(type, mode, flags, time, size, SHA-256, link target, attributes by size and SHA-256, ACL text, hard-link groups;
+`com.apple.provenance` and `com.apple.quarantine` left out), and removes the extraction. Every `aa` archive must give
+the same manifest, and every `aea` payload must decrypt to `tree-raw.aar` byte for byte, or generation fails. `aa
+extract`'s manifest equals the source tree's exactly (`CoverageTests.aaKeepsEverythingTheTreeHolds`).
+
+**Tests.** `CoverageTests.extractsTheCoverageTreeAsAaDoes` (fast: profile 2, LZ4; 0.8 s in debug) and
+`CoverageBulkTests` (every codec, every profile, one thread with entries relative to parents, the collisions; the whole
+matrix 8 s in debug) compare NativeAEA's tree with aa.json through DiskTestSupport's new `TreeManifest` (paths by
+their bytes: Swift's `==` treats NFC and NFD as equal). One difference, kept in the table with its reason:
+
+- `aa archive` of an APFS-compressed file records `UF_COMPRESSED` in `FLG` but no `AFT` (the field naming the codec,
+  which Xcode's archives carry). `aa extract` compresses such files again with its default codec; NativeAEA compresses
+  only as `AFT` asks, so the 12 compressed files come out plain (contents equal). Worth deciding later: following
+  `FLG` with `aa`'s default would match it; the policy today matches every archive Apple ships.
+- Case collisions: `aa extract` reports them and carries on (exit 1); NativeAEA stops with `already exists: Name` at
+  a file where a directory is, with or without `overwrite`.
+
+Everything else matches `aa extract` exactly: Unicode names byte for byte, every link kind and its time, hard links,
+attributes on files, directories, and links, resource forks, ACLs, special modes, flags, nanosecond times.
+
+**Row** `Extract: coverage tree` (the LZFSE `.aar`): what the synthetic archive barely has (links, hard links,
+attributes, ACLs, special modes). One run, the machine otherwise idle, 17 samples:
+
+| Row | Instructions | Mallocs | Wall p50 | CPU p50 |
+|---|---|---|---|---|
+| Extract: coverage tree (2,170 items, 14 MB) | 3,225 M | 6,482 | 185 ms | 371 ms |
+| Extract: synthetic: archived (same run, for scale: 30,000 entries, 1 GB, compressed as `AFT` asks) | 412 G | 434 | 6.54 s | 48 s |
+
+About 3 mallocs an item against the synthetic archive's handful for the whole extraction: the attributes, ACLs, and
+links take the planner's allocating paths (attachments, the link and directory passes). Not chased here.
+
+**The conformance check** (`XcodeConformanceTests`, `NATIVEAEA_CONFORMANCE=1`): Xcode 27.3 beta 2's `.aea` against `aa
+extract` and its `.xip` against `xip --expand`, by manifests, so the two trees never exist at once: the reference's
+manifest is made once and cached in `TestData/local-xcode-reference/` (named for the archive and its size: 48 MB for
+the `.aea`, 91 MB for the `.xip`), and each extraction first requires `Tools/disk-space --check 20`. Run in release
+(`-c release -Xswiftc -enable-testing`): a debug build hadn't finished decoding the `.xip` after 15 minutes. Result
+(2026-11-24, M1 Max, release, both tests at once, 188 s with the `.aea` reference made, the `.xip`'s cached):
+
+- **`.aea` against `aa extract`: identical**, all 167,541 items (type, mode, flags with `UF_COMPRESSED`, nanosecond
+  times, sizes and SHA-256s, link targets, attributes, ACLs, hard-link groups). `aa` needs the signing key for
+  profile 0 (`-sign-pub`; without it, "Main key derivation failed"): the test gives it the leaf's public key from the
+  archive's own certificate chain.
+- **`.xip` against `xip --expand`: identical but for 1,874 directories' times.** `xip --expand` sets a directory's time
+  before it writes what the directory holds, so only directories of directories keep their archived times (the rest
+  read `now`), the pass order Archive Utility has (1,877 there, 2026-11-21). NativeAEA leaves every directory at its
+  extraction time unless `restoresXIPDirectoryTimes` restores them all; `AEAExtractionOptions`' comment said `xip
+  --expand` keeps none, and now says what it does. The test computes the expected set from the reference (each
+  directory whose time it kept) and requires exactly it.
+
+## 2026-11-24, latest: `pbz` headers through `PBZ.header`, the carry region ours to size (fix plan D1, D8)
+
+`Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D1 and D8 (review §3.3, §3.12), with BytesCompression's API:
+
+- **One `pbz` header reader.** The three places that read a `pbz` stream's header (the first AEA segment in
+  `AEAPayload`, an `.aar` in `AppleArchiveFile.init`, a `.xip`'s content) each detected the magic, checked the length,
+  and read the block size; now each calls `PBZ.header(_:)` (compression and block size, `nil` when the bytes don't
+  start a `pbz` stream, `PBZError.headerCutShort` when they start one but end within its 12 bytes, `.header` for a
+  block size of 0 or over 256 MiB). One difference: a `.xip` whose content starts `pbz` with another known letter and a
+  bad block size now reports the bad header rather than "isn't a pbzx stream". Test `readsThePBZHeader` (an `.aar` cut
+  at every length from 4 to 11 bytes, a block size of 0, 3 bytes of magic, an unknown letter).
+- **The carry region is NativeAEA's to size.** `BlockBufferPool` had Apple Archive's 64 KiB header limit built in;
+  now each engine is given `carryCapacity` (default none) and NativeAEA passes `AppleArchive.headerCarryCapacity`
+  (65,536: an Apple Archive header's 16-bit size, and the cpio walker's header, name, and link target limit) to every
+  source a walker reads: AEA segments, a `pbz` stream in them, `.aar` blocks and slices, a `.xip`'s blocks.
+  Decryption to a file (`decrypt(to:…)`) reads segments without walking them and passes 0, and the engine's staging for
+  a `pbz` stream inside segments has none: 64 KiB less address space per buffer there (never resident: a carry region
+  is touched only when a header is carried into it). The test above checks the pools of a `pbz` and a plain `.aar`.
+
+No hot path changed (the headers are read once per archive; the pool reads its carry size from an instance property
+instead of a constant, once per `bytes(_:at:count:)`): no benchmark rows were run. Tests: the default set (81 tests).
+
+## 2026-11-24, later: buffers within a budget, metadata refused at the header, XAR's TOC in linear time (fix plan B1–B3, B8's times; baselines `fix-A4-after` → `fix-B-aea-after`, M1 Max, under load)
+
+The review's §1.6 (pools sized by block count × block size), §1.7 (`XAT`/`ACL` blobs gathered whole), §1.8 (XAR's
+scanner quadratic in depth), and its minor `T`-time finding. Reproducers in `~/Scratch/compression-review-2026-11-23/files/`;
+`seg128.aea`'s key isn't recorded, so the measurements use one made the same way (`aa archive -a raw` of a 2 GiB file of
+zeros, `aea encrypt -profile 1 -b 128m -a lzfse`: 1,310,720 bytes, the review's size), with a known key. Release
+`nunarchiver`, `/usr/bin/time -l` (maximum resident set), `gtimeout 120`:
+
+| Input | Before | After |
+|---|---:|---:|
+| `xat-big-blocks.aar` (256 MiB lzma blocks, a 10 GiB `XAT`), listing | 5,110 MB, 1.45 s | 545 MB, 8.3 s |
+| the same, extracting | 27.3 GB (32.8 GB footprint), 7.2 s, then Disk's "extended attribute size" | 545 MB, 0.44 s: refused at the header |
+| 128 MiB segments (2 GiB of zeros), listing | 2,157 MB, 0.25 s | 949 MB, 0.30 s |
+| the same, extracting | 2,158 MB, 1.37 s | 411 MB, 1.57 s |
+| `xat-1g.aar` (one 1 GiB `XAT`), extracting | 4,238 MB, then Disk's error | 344 MB: refused at the header |
+| an 80,000,000-byte attribute from `aa archive`, extracting | 380 MB | 250 MB (the attribute restored) |
+| `deep10000.xip` / `deep20000` / `deep40000`, listing | 2.68 / 10.7 / 49.7 s | 0.01 s each |
+
+- **Buffers within a budget (B1).** `AEAReadOptions.bufferBudget` (1 GiB by default as first written; now 64 MiB per core and at least 1 GiB, below) bounds the bytes every pool the
+  engine sizes can take: the decoded blocks (writers' included), the decoders' read buffers, and a `pbz` stream's staging
+  inside segments (which gets what the segments' buffers leave: their `bufferByteCount`). The computation is
+  BytesCompressionAsync's `BlockBufferPool.sizing(…)`, the one place pool sizes are decided: over the budget, the held
+  buffers (writers) come down first, to as many as fit beside one decoder (the plan's `writers ≤ budget / blockSize − 2`,
+  read buffers counted); then the extra buffers; then the decoders, which the engine now runs as many of as the sizing
+  kept. The extraction runs no more writers than the pool's `heldBuffers`. Never below one decoder, one writer, and the
+  walk's buffers, so a 256 MiB-block archive still takes about 0.8 GiB listing (two buffers and a read buffer) and just
+  over 1 GiB extracting. AEA root headers with segments over 256 MiB are refused (`aea` writes at most 268,435,456).
+  - **Extra buffers before decoders, not after** (the plan had decoders first): an extra buffer only lets decoding run
+    ahead of the consumer, and with one decoder the extra buffers buy nothing, while a decoder is the parallelism. With
+    the plan's order, 128 MiB segments listed with one decoder and five extra buffers; this way six decoders and none,
+    in the same 7 buffers. The listing of 256 MiB blocks is slower (one decoder: 8.3 s against 1.45 s): that's the
+    memory bought.
+  - **The walk's own buffers were missing from the minimum, a hang** (found by breaking the writers' cut: it didn't hang,
+    which sent me looking). In blocks under 64 KiB (`aea -b 1k` makes 16 KiB segments), a large file compressed in
+    pieces has 64 KiB chunks spanning up to five pieces, and Disk's planner keeps the first four (a bridge) until the
+    fifth arrives; with one decoder, one writer, and no extra buffers (3 buffers: by the counts asked for, before this
+    change too, or by a small budget) the decoder waited for a buffer while the walk waited for its segment. The engine's
+    pools now count `consumerBuffers` (what the consumer holds while it waits: 1, or for NativeAEA's extraction walk
+    `ExtractionSink.walkBuffers`, the pieces a chunk can span less one, at most 7; 1 for blocks of 64 KiB and up), and
+    the budget never cuts them. The writers themselves aren't needed for liveness: with 6 writers in a pool of 3 the
+    extraction finished.
+  - **On the M3 Ultra the default cuts Xcode's counts.** With 16 MiB blocks the default counts take 594 MiB extracting
+    here (10 decoders, 8 extra, 8 writers, read buffers counted) and 851 MiB on 16 cores, under 1 GiB; on 32 cores with
+    24 writers they take 1,557 MiB, and a 1 GiB budget would leave 19 decoders and no extra buffers (listing: 31
+    decoders). So the default became 64 MiB per active processor, at least 1 GiB (`AEAReadOptions.defaultBufferBudget`):
+    1 GiB here, 2 GiB on 32 cores, keeping Xcode's counts on both (about 48 MiB a core). A flat 2 GiB was measured
+    and rejected: 128 MiB segments listed at 2,023 MB on this Mac (2,157 MB before the budget). The measurements above
+    are at 1 GiB, this Mac's default.
+- **Metadata blobs refused at the header (B2).** `AEAExtractionOptions.maximumMetadataByteCount` (256 MiB by default:
+  `aa archive` and `aa extract` carry an 80,000,000-byte attribute, so the review's 64 MiB would refuse what Apple writes)
+  bounds an entry's last `XAT` and `ACL` together, checked in `parseHeader` where the sizes are read, so nothing of them is
+  held (`invalidArchive("extended attributes and ACL of N bytes, over the limit of M")`). Listing and verifying hold no
+  blobs and take any size. The sink's array is reserved once, at the first blob, from the declared sizes (doubling took
+  the 80 MB attribute to 380 MB), and given back after an entry that took more than 1 MiB.
+- **XAR's TOC in linear time (B3).** `XMLScanner` keeps the path as bytes, appends a name at the start tag, cuts back at
+  the end tag (comparing the end tag's name with its bytes), and makes a `String` of it only up to 128 bytes (`""`
+  past that, which no reader matches; the deepest the readers use is 51). The plist scanner in `XIP.swift` is the same
+  type.
+- **Times (B8).** A `T` field whose nanoseconds aren't below 10^9 is refused at parse, naming the field
+  (`invalidArchive("MTM nanoseconds 1000000000")`); before, the entry was made and its `setattrlist` failed with `EINVAL`.
+
+Tests (`ResourceLimitsTests`, `ResourceLimitsBulkTests`; BytesCompression's `BlockDecoderTests.poolsStayWithinTheBudget`
+and `enginesDecodeWithinTheBudget`), each fix broken once: the budget ignored (`poolsStayWithinTheBudget` 64 issues, the
+engine test 3, `extractsWithinTheBudget`'s peak buffers 4: pools of 23 where 3 were budgeted); `walkBuffers` returning 1
+(`smallSegmentsExtractAtTheLeast`: both cases hit the one-minute limit, by the counts and by a zero budget); the segment
+cap, the metadata limit, and the nanoseconds check removed (`segmentsAreAtMost256MiB`, `metadataIsBoundedAtTheHeader`,
+`extractionRefusesMetadataOverTheLimit`, which then got "the stream ends inside an entry", and
+`timesWithABillionNanosecondsAreRefused` fail); HEAD's scanner (`deepAndWideTOCsScanInLinearTime` past its one-minute
+limit, killed after three; `scannerEventsMatchAReferenceParser`, Foundation's `XMLParser` as the reference on a TOC laid
+out as Xcode's, passes on both, as it should). The bulk tests extract `aa archive -b 64m` blocks (a 150 MB file across
+three) with the default budget, and `aa`'s 80 MB attribute.
+
+Instructions (p50, `Tools/bench-table NativeAEA fix-A4-after fix-B-aea-after --metric '[Ii]nstructions'`, 3
+significant digits): flat, as they should be (16 MiB segments fit the budget here, so no count changed; `parseHeader`'s
+new checks are in its out-of-line path for uncommon fields). Mallocs unchanged but the extraction rows' usual ±4.
+
+| Benchmark | `fix-A4-after` | `fix-B-aea-after` | Change |
+|---|---:|---:|---:|
+| List (decode, verify, parse): synthetic | 272 G | 272 G | 0.0% |
+| Extract: synthetic: none | 304 G | 303 G | −0.3% |
+| Extract: synthetic: lzfse | 545 G | 545 G | 0.0% |
+| Extract: synthetic: archived | 413 G | 413 G | 0.0% |
+| Extract: synthetic: archived: progress | 412 G | 412 G | 0.0% |
+| Decode segment 0: synthetic: bytes (no engine) | 1,191 M | 1,190 M | −0.1% |
+| Open and verify: synthetic | 1,876 K | 1,876 K | 0.0% |
+| Parse headers: synthetic segment 0 | 65 K | 65 K | 0.0% |
+
+## 2026-11-24: stops that can't hang, failures in block order, one source per initializer (fix plan A4; baselines `fix-A-before` → `fix-A4-after`, M1 Max, under load)
+
+The review's §1.4, §1.5, §3.2, §3.11, and its "minor" failure-order finding, in BytesCompressionAsync's engine and this
+package's stages (design: [BytesCompression/ARCHITECTURE.md](../BytesCompression/ARCHITECTURE.md) §3; here §4).
+
+- **The hang (§1.4).** A `pbz` stream inside AEA segments whose blocks span more segments than are in flight (`aa -b` of
+  32 MiB or more; the review's `big.aea`: 64 MiB blocks): when the walk ended early (its own error, here "no entry
+  magic"), the block stream's `stop(nil)` passed `nil` to the segments, which stopped their decoders without waking
+  their one consumer, the block stream's producer, waiting in the middle of a block for a segment no decoder would now
+  decode. Listing, verifying, and extracting `big.aea` timed out (`gtimeout 20`: exit 124); now each ends with the
+  walker's error in 0.01–0.13 s at 1, 2, 8, and 24 decoder threads (release `nunarchiver`), and `-o` decrypts it.
+  `stop(_:)` now passes `failure ?? .cancelled` upstream, and `stop(nil)` wakes the engine's own waiting consumer with
+  `.cancelled`, which clients never see (`withDecoding` returns the consumer's result; the stop comes after it).
+- **Slices of an upstream (§1.5)** can't be written: each source is its own initializer, constrained by what it asks of
+  the stage (`IndexedBlockStage`, `BlockReadingStage`, `UpstreamBlocks`), and no stage requirement traps by default.
+- **`AEASegmentStage` has no `decode` of its own (§3.11):** the engine's reading flow with hooks (`storedBytes` from the
+  mapping, MAC and decryption in `prepare`, the checksum in `verify`) covers every case its override did. Pools are
+  sized in one place (`BlockBufferPool.sized`), `payload` and `decrypt` read theirs from the engine; the payload keeps its
+  deferred tail (`heldUntilActivated: 1`).
+- **Failures in block order.** The error was the first in time (it could vary run to run); now it's the lowest failing
+  block's, after the blocks before it (as a sequential decoder), and a `pbz` block is named as one:
+  `blockDecompressionFailed(block:_:)`, "block N failed to decompress" (an `.aar` block's read "segment N").
+
+Tests (each broken once to see it fail): BytesCompression's `BlockDecoderStopTests` (the `big.aea` shape in memory: 512 KiB
+blocks in 4 KiB upstream blocks, the consumer stopping before any block, after one, with its own error, and a block
+failing, at 1, 2, 8 decoders: every pool's buffers back. With `stop(nil)` waking nobody, `stopWakesAWaitingConsumer`
+failed; with `nil` passed upstream too, 8 of 12 cases hit the one-minute limit. With failures first in time, both order
+tests failed), `BlockDecoderTests.readingStageHooks` (read or mapped, masked or not); here
+`CancellationTests.aWalkFailingInsideALargeBlockEnds` (2 MiB stored `pbz` blocks in 64 KiB segments, an archive then
+bytes that aren't one: listing, extracting, verifying at 1, 2, 8 decoders; on the old stop all three hit the time limit),
+`AppleArchiveFileTests.corruptBlocksFailCleanly` (the corrupted block's own `blockDecompressionFailed`, in an `.aar` and
+inside AEA segments), `FormatTests.detectsTampering` (without MACs, segment 2's error every time).
+
+Specialization: `Tools/calls --target NativeAEA NativeAEA '.*' --callee 'swift_getGenericMetadata|witness' --sum` has no
+generic metadata calls before or after; `AEAError`'s witness-table accessor call sites 324 → 321 (the override's gone),
+and one new site each for `AEASegmentStage` and `ArchiveFileStage`, in their conformances' witness-table instantiation
+(`BlockReadingStage`'s base conformance), not in code that runs per block.
+
+Instructions (p50, `Tools/bench-table NativeAEA fix-A-before fix-A4-after --metric Instructions`, 3 significant digits;
+mallocs unchanged but `Extract: archived`'s 434 → 438, within its run-to-run spread):
+
+| Benchmark | `fix-A-before` | `fix-A4-after` | Change |
+|---|---:|---:|---:|
+| List (decode, verify, parse): synthetic | 272 G | 272 G | 0.0% |
+| Extract: synthetic: none | 303 G | 304 G | +0.3% |
+| Extract: synthetic: lzfse | 545 G | 545 G | 0.0% |
+| Extract: synthetic: archived | 412 G | 413 G | +0.2% |
+| Extract: synthetic: archived: progress | 413 G | 412 G | −0.2% |
+| Decode segment 0: synthetic: bytes (no engine) | 1,190 M | 1,191 M | +0.1% |
+| Open and verify: synthetic | 1,876 K | 1,876 K | 0.0% |
+
+Flat: the Extract rows count the kernel's instructions too and move ±0.3% either way, and the row that doesn't use the
+engine moved as much.
+
+## 2026-11-23, stage 3: blob sizes that trapped in total; the input-conversion sweep
+
+**The trap.** Each Apple Archive blob field's size (`A`, `B`, `C` subtypes: `DAT`, `XAT`, `ACL`, any key) was bounded
+below 2^62, but the header's total wasn't: `entry.blobByteCount += count` with three `XATC` blobs of 2^62 − 1 overflowed
+(signal 5, confirmed by the new test before the fix), and two of them made the walker's `position + entry.blobByteCount`
+overflow. A plain or `pbz` `.aar` has no authentication, so any `.aar` (and `AppleArchive.parseHeader`) reached it; an
+`.aea`'s stream only with its key. The total is now kept below 2^62 as each size is (`addBlob`: `count < (1 << 62) −
+blobByteCount`, else `.invalidArchive("blob sizes")`), so the walker's position plus it can't overflow either. Test:
+`FormatTests.blobSizesAreBoundedInTotal` (three of 2^62 − 1, a total of exactly 2^62 two ways: refused; a total of
+2^62 − 1: accepted).
+
+**The sweep, NativeAEA and what it hands Disk** (the root header, cluster and segment headers, Apple Archive fields, XAR's
+TOC numbers, cpio, pbzx, WKMS' JSON): the root header's sizes `< 1 << 62` and segment size `< 1 << 31`, XAR integers of at
+most 18 digits, cpio's octal fields (6 digits, or 11 for times and sizes, converted with `exactly:`; the mode fixed earlier),
+`@BinaryRecord` fields (converted with `exactly:`), `truncatingIfNeeded:` for wide `UID8`/`MOD8` values on purpose, and
+Disk's widening of times and modes. Reachable beyond the trap above, not conversions, reported for later: a root header's
+segment size up to 2^31 − 1 sizes every block buffer pool (about 2 GiB per buffer; needs the archive's key, so profile 3's
+recipients' public key suffices); `XAT`/`ACL` blobs are gathered whole in memory (any size a `pbz` stream expands to); XAR's
+TOC scanner rebuilds the joined path per element (quadratic in nesting depth, before the TOC checksum); X.509's
+duplicate-extension check is quadratic past 16 extensions (BytesCrypto, before any signature check); `MTM`/`CTM`
+nanoseconds aren't checked below 10^9 (the kernel then refuses the entry's times). Theoretical (would need more than 2^31
+or 2^32 of something in memory or on disk): `UInt32(cluster)`, Disk's `acl_init(Int32(count))`.
+
+## 2026-11-23, latest: the decoding engine moved to BytesCompression (baselines `unify-before` → `unify-after`, M1 Max)
+
+`SegmentStream`, `BlockStream`, `SegmentBufferPool`, `SegmentCodec`, and `PBZ` are BytesCompressionAsync's
+`ParallelBlockDecoder<Stage>` and `BlockBufferPool`, and BytesCompression's `PBZ` and `AppleArchiveCompression` (was
+`AEACompression`) now, one engine for segments and `pbz` blocks; what's AEA's stayed: `AEASegmentStage` (read or map,
+MAC, decrypt, checksum around the engine's decode), `ArchiveFileStage`, `AEAPayload`, the walkers. `AEAError` composes
+the engine's errors (`decompressionFailed(segment:_:)` carries the `BytesError` now). Instructions equal on every row
+(List 272 G, Extract 303–546 G, Decode segment 0 1,191 → 1,190 M), mallocs within their run-to-run spread; the engine is
+specialized in this module (no generic dispatch per block). Library 5,151 → 4,278 lines. The record, the design, and
+the table: [BytesCompression/RESULTS.md](../BytesCompression/RESULTS.md) (2026-11-23, later) and
+[ARCHITECTURE.md](../BytesCompression/ARCHITECTURE.md); this package's ARCHITECTURE.md §4–5 name the new types.
+
 ## 2026-11-23, later: spans from the pool, not pointers (baselines `safe-arch-before` → `safe-arch-after`, M1 Max, under load)
 
 The survey's "safe now at no cost" list, NativeAEA's part (Writeups/Library-Survey-2026-11-23.md, "Unsafe code"). Lines

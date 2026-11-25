@@ -27,7 +27,7 @@ public struct HTTPDate: Sendable, Hashable, Comparable {
     public init(secondsSince1970: Int64) { self.secondsSince1970 = secondsSince1970 }
 
     @inlinable
-    public static func < (lhs: Self, rhs: Self) -> Bool { lhs.secondsSince1970 < rhs.secondsSince1970 }
+    public static func <(lhs: Self, rhs: Self) -> Bool { lhs.secondsSince1970 < rhs.secondsSince1970 }
 
     /// The current time, to the second (the system's real-time clock).
     public static var now: HTTPDate {
@@ -127,8 +127,14 @@ extension HTTPDate: CustomStringConvertible {
         let (first, second, third, fourth) = Self.imfFixdateWords(secondsSince1970)
         var bytes: [UInt8] = []
         bytes.reserveCapacity(29)
-        for word in [first, second, third] { for lane in 0..<8 { bytes.append(UInt8(truncatingIfNeeded: word &>> (8 &* lane))) } }
-        for lane in 0..<5 { bytes.append(UInt8(truncatingIfNeeded: fourth &>> (8 &* lane))) }
+        for word in [first, second, third] {
+            for lane in 0..<8 {
+                bytes.append(UInt8(truncatingIfNeeded: word &>> (8 &* lane)))
+            }
+        }
+        for lane in 0..<5 {
+            bytes.append(UInt8(truncatingIfNeeded: fourth &>> (8 &* lane)))
+        }
         return String(decoding: bytes, as: UTF8.self)
     }
 }
@@ -163,7 +169,9 @@ public struct HTTPDateCache: Sendable {
             text[8 &+ lane] = UInt8(truncatingIfNeeded: second &>> (8 &* lane))
             text[16 &+ lane] = UInt8(truncatingIfNeeded: third &>> (8 &* lane))
         }
-        for lane in 0..<5 { text[24 &+ lane] = UInt8(truncatingIfNeeded: fourth &>> (8 &* lane)) }
+        for lane in 0..<5 {
+            text[24 &+ lane] = UInt8(truncatingIfNeeded: fourth &>> (8 &* lane))
+        }
     }
 }
 
@@ -392,7 +400,9 @@ extension HTTPDate {
         // The full day name must be the date's.
         let name = immortalSpan(longDayName(weekday(days: daysAndTime(seconds &- (second == 60 ? 1 : 0)).days)))
         guard name.byteCount == nameLength else { return nil }
-        for index in 0..<nameLength where name.load(fromByteOffset: index, as: UInt8.self) != byte(index) { return nil }
+        for index in 0..<nameLength where name.load(fromByteOffset: index, as: UInt8.self) != byte(index) {
+            return nil
+        }
         return seconds
     }
 }

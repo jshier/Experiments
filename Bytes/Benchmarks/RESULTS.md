@@ -1,5 +1,12 @@
 # Bytes performance log
 
+> **Compression's record continues in [`BytesCompression/RESULTS.md`](../../BytesCompression/RESULTS.md).** On
+> 2026-11-23 the `BytesCompression` module moved to a package of its own, `../BytesCompression`, with its tests,
+> `CompressionBenchmarks` (and its baselines and thresholds), the reference libraries, and its records
+> (`RESULTS-zstd-encoder.md`, `RESULTS-bzip2.md`, `RESULTS-lz4-lzfse.md`, `RESULTS-lzbitmap.md`,
+> `RESULTS-lzraven.md`, `LZRAVEN-FORMAT.md`, now in `../../BytesCompression/Benchmarks/`). The sections below stay
+> as they were written: links to those files, and `CompressionBenchmarks` baselines, are now in that package.
+
 Medians (p50) from `swift package --disable-sandbox benchmark`, M3 Ultra, macOS 27.2, Swift 6.4.2. The
 2026-11-19 section compares these numbers with an Apple M1 Max (baselines `m1max*`); everything else below is M3 Ultra.
 Baselines are in `.benchmarkBaselines/`. The table below is baseline `modern` (re-run on 2026-11-09 with no
@@ -11,6 +18,90 @@ other benchmarks running); the 2026-11-12 sections have newer full runs. Compare
 Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module here, with the same API. Its log is
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
+
+## 2026-11-24: The loops re-check
+
+An adversarial review of the Tools found that `Tools/loops` took any backward branch to an earlier label as a loop's
+end, with the address range between as its body: it invented loops (a one-line loop compiled to 3 was reported as 10,
+nested 5 deep; 28 of 83 `DeflateDecoder` "loops" held a `ret`), split a loop with two back edges into two nested ones,
+gave a loop with a cold path laid out after the return two overlapping "innermost" loops (so `--forbid bl` passed with
+a call in the loop), missed loops whose header is the function's first instruction, and counted every tail call in an
+object as a one-instruction loop (103 in `BytesCompression.o`). `Tools/mca` analysed whatever it picked. It now finds
+natural loops from the control-flow graph, plus irreducible cycles (entered at more than one block: a vectorizer's
+remainder, Zstandard's retry loop), and reads jump tables (`Tools/lib/loops.pl`; checks in `Tools/tests/loops.sh`);
+over `BytesCompression.o` the count went from 4,142 loops (2,131 innermost) to 1,468 (1,193 innermost; 10 of them
+irreducible), 962 innermost loops identical in both. A first version without irreducible cycles dropped those 10
+(`--require strh` on `_RigidArray(repeating:count:)` failed); its review caught it.
+
+Every `Tools/loops` command quoted in AGENTS.md and the RESULTS files was run again with the old and new tool on the
+same objects. **No documented `--require`/`--forbid` check changed its result**, and the hot loops the optimization work
+measured (Base64's `encodeBlocks` 32 and `decodeBlocks` 49, SHA-512's 489, ChaCha20's 264-instruction double round,
+Adler-32's 16 and 26, the RSA product loops, LZVN's and LZBITMAP's group loops) are the same loops with the same counts.
+What changed, each corrected where it was written:
+
+| Claim | Old tool | Natural loops |
+|---|---|---|
+| BytesCompression/RESULTS.md, LZBITMAP `compressedChunk` "437 vs 438, 70 vs 69" | two overlapping innermost loops | one innermost loop of 477 instructions (both paths share its header) |
+| BytesCompression/Benchmarks/RESULTS-lz4-lzfse.md, "the LZ4 shortcut is a 30-instruction innermost loop" | a 30-instruction "loop" | the decode loop's fast path (208 instructions in 5 pieces) |
+| This file, `InflateStream.decodeSymbols` "the same 64 loops" | 64 (19 innermost) | 15 (12 innermost); before/after still equal |
+| MQTT/Benchmarks/RESULTS.md, "the same 11 `vector128` loops" | 11 | 6 (5 innermost); `MQTTPacket.init(parsing:)` has none |
+| Bytes/OPTIMIZATION.md, how a loop is found | backward branch | rewritten |
+
+Two stale numbers aren't the tool's: OPTIMIZATION.md's `farStop` loop is 49 instructions with either tool (29 was a
+probe's figure for a proposed fix), and BytesCompression's `LZMAWorkspace.reset` loop is 3 instructions with both, not
+4. Brotli's "87 → 77 loops" can't be rechecked (that code was reverted). Details: the fixer's `recheck.txt` in
+`~/Scratch/tools-fix.noindex/static.noindex/`.
+
+## 2026-11-24, E2: `MaskedTable`
+
+From the compression fix plan (`Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D9; the safe-access follow-ups' §3
+proposal). `MaskedTable<Element: BitwiseCopyable>` (MaskedTable.swift): a power-of-two count of entries, indexed by any
+`Int`, `table[index]` being entry `index & (count − 1)`, so the mask is the bounds check and the one audited `unsafe`
+is inside. Its memory is whole 64-byte lines at a 64-byte boundary, so `fill(_:groupedAs:)` (a `SIMD` group per
+store, its stride a divisor of 64) can't start misaligned or end inside a group, whatever the element type promises:
+the stride-typed tables' guarantee (`StrideTable` in BytesCompression) without making the group part of the type, which
+a table of structs (HTTPBytes' ring) couldn't have. Noncopyable, `Sendable` when its entries are (every write is
+`mutating`). `span` is `package` (only Bytes' tests use it); the rest is used by BytesCompression or HTTPBytes.
+
+Where it measured equal or better (BytesCompression/RESULTS.md and HTTPBytes/RESULTS.md, "E2"): DEFLATE's match tables
+(levels 2–9: −2 to −9% instructions, the span counts and their checks gone from the parsers), LZFSE's and LZVN's match
+lines (−0.7 to −3.8%; LZFSE on random input +1.5%, a register-allocation move), HTTPBytes' dynamic-table ring (flat). Where it didn't: Zstandard's tables (a run-time hash log, so
+a run-time mask: +1.2 to +5.4% even with base and mask in registers) and HTTPBytes' encoder index (each array's mask its
+own load: +0.2 to +0.8%); both stay on pointers.
+
+When the mask is constant it folds only if the optimizer still sees the index's range: a 15-bit hash doubled into a
+2-entry bucket (`hash << 1`, `(hash << 1) | 1`) kept a mask on every insert (LLVM merged the hand mask on the hash into
+the table's after the shift), so DEFLATE's level 1 keeps its bucket arithmetic on the table's `mutableSpan` with the
+count stated; the same table, `inout` through a large function, had its base reloaded at every searched position, so
+the LZ encoders take a local `mutableSpan` too. Tests: `MaskedTableTests` (wrapping indices, negative ones, group fills
+of 16-, 32-, and 64-byte groups on tables smaller than a group, struct entries, the 64-byte alignment); with the mask
+halved, 44 issues. Nothing measured in Bytes changed (no Bytes code uses it).
+
+The review of it after E2 found that a stride dividing 64 isn't enough: `SIMD3<Int32>` is 16 bytes with three lanes,
+and `SIMD3(repeating: 5)` is `[5, 5, 5, 0]` in memory (checked), so a fill grouped that way zeroed every fourth entry.
+`fill(_:groupedAs:)` now also requires the group's stride to be its lanes' (a constant: DEFLATE's clear loops are still
+two `stp` per iteration); `groupsWithAPaddingLaneTrap` (an exit test) fails without it.
+
+## 2026-11-24, later: `BytesError.limitExceeded`
+
+From the compression fix plan (`Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D3, review §3.7): a case for a limit
+the caller set (a decoder's `maximumSize`, Zstandard's `maximumWindowSize`, LZMA's and xz's `maximumDictionarySize`, in
+BytesCompression), apart from `insufficientCapacity`, the output's room. Clients told the two apart by looking at the
+output (HTTPBytes checked `freeCapacity` after a zstd decoder threw); now the error says which. Listed first, every
+exhaustive `switch` over `BytesError` in the repository (packages, the app, BytesProbe): one, NativeZip's
+`BytesError.zipError(_:)`, which takes it with the other cases its parser never throws. `ZipError` and `AEAError` keep
+it as a decoding error (`.decoding(.limitExceeded, entry)`, `.decompressionFailed(segment:, .limitExceeded)`); only
+`cancelled` is their own case. No row here moves (an enum case; nothing in Bytes throws it).
+
+## 2026-11-24: X.509 extensions capped at 64
+
+From the review of the unified compression package (`Writeups/BytesCompression-Review-2026-11-23.md` §1.11, plan B6):
+`X509Certificate`'s duplicate-extension check kept the first 16 identifiers and, past 16, re-read every earlier
+extension for each new one: 16,000 extensions (a 192 KB certificate) took 2.6 s, and a `.xip`'s leaf certificate is
+parsed before its RSA signature is checked. A certificate may now have at most 64 extensions (real ones have fewer than
+30; more is `invalidValue`), all kept in an `InlineArray<64, Range<Int>>`, and the re-reading is gone. Tests in
+`X509Tests.rejectsMalformedFields`: 64 distinct accepted, 65 refused (accepted with the cap at 65), a duplicate of the
+first at the 64th found.
 
 ## 2026-11-23, M1 Max, safe APIs where they're free (baselines `safe-bytes-before` → `safe-bytes-after`, `safe-bytes-final`)
 
@@ -108,7 +199,8 @@ call a client makes. Every change is within the run-to-run spread (zlib's own ro
 | Brotli encode q5 JSON (1.6 KB) | 291,283 | 291,284 | +1 |
 
 The DEFLATE decode loops are unchanged: `Tools/loops --target Bytes BytesCompression 'InflateStream\.decodeSymbols'`
-reports the same 64 loops (size, depth, instruction mix) before and after. The gzip header's fixed fields are read as
+reports the same 64 loops (size, depth, instruction mix) before and after. (Correction, 2026-11-24: 64 was the old
+`Tools/loops`' count; the natural loops are 15, 12 innermost. The before/after equality stands.) The gzip header's fixed fields are read as
 two words now (they went through a checked reader one at a time) and its CRC is computed only with FHCRC: that paid for
 keeping `gzipHeader` (the first version cost +133 instructions a member). Zero mallocs, including the new gates
 `Allocations:Inflate_gzip_members` and `…_streaming` (4 KB members).

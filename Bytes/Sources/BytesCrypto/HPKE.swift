@@ -104,15 +104,17 @@ public enum HPKE {
             // RFC 9180 stops at 2⁹⁶ − 1 messages; a 64-bit count stops sooner, and never wraps.
             guard sequence != .max else { throw .invalidValue }
             var nonce = baseNonce
-            for index in 0..<8 { nonce[4 &+ index] ^= UInt8(truncatingIfNeeded: sequence &>> UInt64(56 &- 8 &* index)) }
+            for index in 0..<8 {
+                nonce[4 &+ index] ^= UInt8(truncatingIfNeeded: sequence &>> UInt64(56 &- 8 &* index))
+            }
             return nonce
         }
 
         mutating func seal(_ message: inout MutableRawSpan, authenticating aad: RawSpan) throws(BytesError) -> InlineArray<16, UInt8> {
             let nonce = try currentNonce()
             let tag = switch cipher {
-            case .aesGCM(let aead): aead.seal(&message, nonce: nonce.span.bytes, authenticating: aad)
-            case .chaCha20Poly1305(let aead): aead.seal(&message, nonce: nonce.span.bytes, authenticating: aad)
+            case let .aesGCM(aead): aead.seal(&message, nonce: nonce.span.bytes, authenticating: aad)
+            case let .chaCha20Poly1305(aead): aead.seal(&message, nonce: nonce.span.bytes, authenticating: aad)
             }
             sequence &+= 1
             return tag
@@ -121,8 +123,8 @@ public enum HPKE {
         mutating func open(_ message: inout MutableRawSpan, authenticating aad: RawSpan, tag: RawSpan) throws(BytesError) {
             let nonce = try currentNonce()
             switch cipher {
-            case .aesGCM(let aead): try aead.open(&message, nonce: nonce.span.bytes, authenticating: aad, tag: tag)
-            case .chaCha20Poly1305(let aead): try aead.open(&message, nonce: nonce.span.bytes, authenticating: aad, tag: tag)
+            case let .aesGCM(aead): try aead.open(&message, nonce: nonce.span.bytes, authenticating: aad, tag: tag)
+            case let .chaCha20Poly1305(aead): try aead.open(&message, nonce: nonce.span.bytes, authenticating: aad, tag: tag)
             }
             // Only after the tag matched: a forged message doesn't desynchronize the ones after it.
             sequence &+= 1

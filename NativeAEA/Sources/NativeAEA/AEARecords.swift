@@ -33,16 +33,4 @@ struct SegmentSizes {
     @Field(Byte4.self) var stored: Int
 }
 
-/// A `pbz` stream's header: "pbz" and the algorithm letter, then the block size.
-@BinaryRecord(.bigEndian)
-struct PBZHeader {
-    @Field(Byte4.self) var magic: UInt32
-    @Field(Byte8.self) var blockSize: Int
-}
-
-/// A `pbz` block's header: its raw and stored sizes.
-@BinaryRecord(.bigEndian)
-struct PBZBlockHeader {
-    @Field(Byte8.self) var raw: Int
-    @Field(Byte8.self) var stored: Int
-}
+// (`pbz` framing, the streams' and blocks' headers, is BytesCompression's `PBZ`.)

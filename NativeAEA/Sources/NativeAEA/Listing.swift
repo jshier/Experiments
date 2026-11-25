@@ -1,4 +1,5 @@
 import BytesAsync
+import BytesCompressionAsync
 public import Disk
 import Foundation
 
@@ -19,6 +20,19 @@ public struct AEAReadOptions: Sendable {
     public var decodeThreads = ProcessInfo.processInfo.activeProcessorCount
     /// Decoded segments held at once beyond one per decoder: room for writing to lag decoding.
     public var extraBuffers = 8
+    /// Bytes of buffers decoding may take at once: decoded segments and blocks (writers' included), the decoders' read
+    /// buffers, and a `pbz` stream's staging inside segments. When the archive's blocks are large (`pbz` and AEA allow
+    /// 256 MiB), writers come down first (to as many as fit beside one decoder), then ``extraBuffers``, then
+    /// ``decodeThreads`` (BytesCompressionAsync's `BlockBufferPool.sizing`); never below one decoder, one writer, and
+    /// the walk's buffers, so a 256 MiB-block archive still takes about three blocks' worth. With 16 MiB blocks (Xcode's)
+    /// the default counts take 594 MiB extracting on 10 cores (8 performance), 851 MiB on 16 (12), 1,557 MiB on 32 (24):
+    /// about 48 MiB a core. The default, 64 MiB a core and at least 1 GiB (1 GiB on 10 cores, 2 GiB on 32), keeps them,
+    /// and it's what a hostile archive can make decoding take (a 2.6 MB `.aar` of 256 MiB blocks took 5.1 GB listing,
+    /// 27 GB extracting, before the budget; a flat 2 GiB left 128 MiB segments at 2.0 GB on 10 cores).
+    public var bufferBudget = AEAReadOptions.defaultBufferBudget
+
+    /// ``bufferBudget``'s default: 64 MiB per active processor, at least 1 GiB.
+    public static var defaultBufferBudget: Int { max(1 << 30, ProcessInfo.processInfo.activeProcessorCount &* (64 << 20)) }
     public var input = SegmentInput.read
     /// Check each segment's MAC (over its stored bytes) before decoding it.
     public var verifyMACs = true
@@ -71,7 +85,7 @@ public struct AEAStatistics: Sendable {
     public var phaseSeconds: [ExtractionPhase: Double] = [:]
 }
 
-extension AEAArchive {
+public extension AEAArchive {
     /// Decodes every segment and calls `body` with each entry, in order.
     ///
     /// Runs off the caller's actor; decoders are child tasks, and `body` is called on the calling task, one entry at a
@@ -79,7 +93,7 @@ extension AEAArchive {
     ///
     /// - Returns: Counts and timings.
     @concurrent @discardableResult
-    public func forEachEntry(options: AEAReadOptions = .init(), _ body: @escaping (AAEntry) -> Void) async throws(AEAError) -> AEAStatistics {
+    func forEachEntry(options: AEAReadOptions = .init(), _ body: @escaping (AAEntry) -> Void) async throws(AEAError) -> AEAStatistics {
         try await list(options, body)
     }
 
@@ -89,11 +103,11 @@ extension AEAArchive {
     /// - Returns: Counts and timings.
     /// - Throws: ``AEAError``: a failed check, a malformed stream, or cancellation.
     @concurrent @discardableResult
-    public func verify(options: AEAReadOptions = .init()) async throws(AEAError) -> AEAStatistics {
+    func verify(options: AEAReadOptions = .init()) async throws(AEAError) -> AEAStatistics {
         try await list(options, nil)
     }
 
-    nonisolated(nonsending) private func list(_ options: AEAReadOptions, _ body: ((AAEntry) -> Void)?) async throws(AEAError) -> AEAStatistics {
+    private nonisolated(nonsending) func list(_ options: AEAReadOptions, _ body: ((AAEntry) -> Void)?) async throws(AEAError) -> AEAStatistics {
         let started = MonotonicClock.now
         var statistics = try await Lister.list(payload(options, heldBeyondDecoding: 0), body)
         statistics.seconds = MonotonicClock.seconds(since: started)
@@ -114,8 +128,12 @@ struct DiskCompressionCounts {
     }
 
     func add(to counts: inout [UInt32: Int]) {
-        for type in 0..<16 where small[type] > 0 { counts[UInt32(type), default: 0] += small[type] }
-        for (type, count) in others { counts[type, default: 0] += count }
+        for type in 0..<16 where small[type] > 0 {
+            counts[UInt32(type), default: 0] += small[type]
+        }
+        for (type, count) in others {
+            counts[type, default: 0] += count
+        }
     }
 }
 
@@ -153,6 +171,8 @@ struct ListingSink: ArchiveSink, ~Copyable {
     let body: ((AAEntry) -> Void)?
     var statistics = AEAStatistics()
     var diskCompression = DiskCompressionCounts()
+    /// A listing holds no blobs: any size is read past.
+    var maximumMetadataByteCount: Int { .max }
 
     nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: RawSpan, buffer: Int) async throws(AEAError) {
         func string(_ range: AAHeaderRange?) -> String? {

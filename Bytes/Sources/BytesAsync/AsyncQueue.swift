@@ -88,7 +88,7 @@ public final class AsyncQueue<Element: Sendable>: Sendable {
         switch state.withLock({ $0.offer(element) }) {
         case .added: return true
         case .closed: return false
-        case .handed(let consumer):
+        case let .handed(consumer):
             consumer.resume(returning: element)
             return true
         case .full:
@@ -103,7 +103,7 @@ public final class AsyncQueue<Element: Sendable>: Sendable {
                 case .full: break
                 case .added: continuation.resume(returning: true)
                 case .closed: continuation.resume(returning: false)
-                case .handed(let consumer):
+                case let .handed(consumer):
                     consumer.resume(returning: element)
                     continuation.resume(returning: true)
                 }
@@ -160,8 +160,12 @@ public final class AsyncQueue<Element: Sendable>: Sendable {
             state.closed = true
             return (state.consumers.removeAll(), state.producers.removeAll().map(\.0))
         }
-        for consumer in consumers { consumer.resume(returning: nil) }
-        for producer in producers { producer.resume(returning: false) }
+        for consumer in consumers {
+            consumer.resume(returning: nil)
+        }
+        for producer in producers {
+            producer.resume(returning: false)
+        }
     }
 }
 

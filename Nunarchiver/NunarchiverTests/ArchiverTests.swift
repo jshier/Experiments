@@ -1,3 +1,4 @@
+@testable import Nunarchiver
 import Clocks
 import ComposableArchitecture
 import ComposableArchitectureTestSupport
@@ -5,8 +6,6 @@ import Disk
 import Foundation
 import Synchronization
 import Testing
-
-@testable import Nunarchiver
 
 // Every store here is a `TestStoreActor`: each test's feature runs on an actor of its own, so the tests run in
 // parallel with each other (and nothing here is `@MainActor` or serialized). Time is the suite's `TestClock`.
@@ -901,7 +900,9 @@ final class ScriptedExpander: ArchiveExpander {
         }
         // As the live expander: an expansion that isn't running has no progress to read.
         defer { script.withLock { $0.progress[id] = nil } }
-        for await outcome in outcomes { return outcome }
+        for await outcome in outcomes {
+            return outcome
+        }
         // The stream ends when the task is cancelled: clean up, as the live expander does.
         script.withLock { $0.cancelled.append(archive) }
         return .cancelled

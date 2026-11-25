@@ -22,7 +22,7 @@ let topics = Lazy {
 
 /// 1,000 pairs of equal 64-byte strings, in separate arrays (copied by `map`: `Array(array)` would share the storage,
 /// and `==` returns at once for identical storage): the comparison reads every byte.
-let equalPairs = Lazy { topics.value.map { ($0, $0.map { $0 }) } }
+let equalPairs = Lazy { topics.value.map { ($0, $0.map(\.self)) } }
 
 /// Match candidates as a compressor's match finder sees them: pairs of offsets in one buffer whose bytes agree for
 /// 3 to 258 bytes, then differ (DEFLATE's lengths), each pair in its own 532 bytes.
@@ -36,7 +36,9 @@ struct MatchCandidates {
         window = randomBuffer(byteCount: lengths.count * 532 + 16)
         for (index, length) in lengths.enumerated() {
             let first = index * 532, second = first + 266
-            for offset in 0..<length { window[second + offset] = window[first + offset] }
+            for offset in 0..<length {
+                window[second + offset] = window[first + offset]
+            }
             window[second + length] = window[first + length] ^ 1
             pairs.append((first, second))
             self.lengths.append(length)

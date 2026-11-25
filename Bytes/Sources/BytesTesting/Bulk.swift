@@ -1,5 +1,5 @@
-public import Testing
 internal import Foundation
+public import Testing
 
 // Bulk tests: the long sweeps (large inputs, corpora, every capacity, thousands of mutations) kept out of the
 // default run. Each lives in a suite named `…BulkTests` marked `.bulk`, and covers what its fast counterpart

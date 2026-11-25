@@ -30,7 +30,7 @@ import Testing
         var output = [UInt8](repeating: 0, count: room)
         while true {
             let flush: TransformFlush = closes && delivered == wire.count ? .finish : .none
-            let progress = try output.withOutputRawSpan(overwritingFrom: 0) { (span) throws(HTTPPayloadError) in
+            let progress = try output.withOutputRawSpan(overwritingFrom: 0) { span throws(HTTPPayloadError) in
                 try decoder.transform(pending.span.bytes, into: &span, flush: flush)
             }
             body += output[..<progress.produced]
@@ -94,7 +94,7 @@ import Testing
         let gzip = try ContentCodingTests.encode(Array(Self.body.prefix(5_000)), .gzip)
         // The gzip stream ends, but the chunked body hasn't: not finished until its last chunk arrives.
         var decoder = try HTTPBodyDecoder(framing: .chunked, contentEncoding: Array("gzip".utf8).span.bytes)
-        let withoutLastChunk = Self.chunked(gzip).dropLast(5).map { $0 }
+        let withoutLastChunk = Self.chunked(gzip).dropLast(5).map(\.self)
         var output: [UInt8] = []
         let progress = try decoder.transform(withoutLastChunk.span.bytes, appending: &output, flush: .none)
         #expect(progress.status == .needsInput)
@@ -128,8 +128,8 @@ import Testing
     func concatenatedStreamsDecodeWhole(coding: HTTPContentCoding) throws {
         let parts = [Array(Self.body.prefix(3_000)), Array(Self.body.dropFirst(3_000).prefix(10_000)), [], Array(Self.body.suffix(7))]
         let streams = try parts.map { try ContentCodingTests.encode($0, coding) }
-        let coded = streams.flatMap { $0 }
-        let expected = parts.flatMap { $0 }
+        let coded = streams.flatMap(\.self)
+        let expected = parts.flatMap(\.self)
         let next = Array("GET / HTTP/1.1\r\n".utf8)
         // Chunks that end exactly where each member does, then fixed-size chunks; pieces whole, odd, and a byte each.
         let byMember = streams.filter { !$0.isEmpty }.reduce(into: [UInt8]()) { wire, stream in
@@ -154,7 +154,7 @@ import Testing
 
     @Test func stackedTruncationIsCaughtAtTheEnd() throws {
         let plain = Array(Self.body.prefix(1_300))
-        let coded = try ContentCodingTests.encode(try ContentCodingTests.encode(plain, .gzip), .brotli)
+        let coded = try ContentCodingTests.encode(ContentCodingTests.encode(plain, .gzip), .brotli)
         var decoder = try HTTPContentDecoder(contentEncoding: Array("gzip, br".utf8).span.bytes)
         var output: [UInt8] = []
         let cut = Array(coded.dropLast(1))

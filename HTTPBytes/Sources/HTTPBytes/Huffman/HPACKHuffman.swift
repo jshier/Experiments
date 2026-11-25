@@ -137,7 +137,7 @@ func forbiddenBit(_ symbol: Int) -> UInt32 { symbol == 0 || symbol == 10 || symb
 /// Bits 0-4 of a table entry: bits consumed; bit 5: 0; bits 6-7: symbols (0: the first code is longer than 14 bits);
 /// bits 8-23: up to 2 symbols.
 let decodeTableBits: UInt64 = 14
-let decodeBatch = 4                 // 4 × 14 <= 56 bits per refill
+let decodeBatch = 4 // 4 × 14 <= 56 bits per refill
 
 /// The bit buffer: valid bits at the top of `bits`; their number in the low 6 bits of `count` (the fast loop subtracts
 /// whole table entries, leaving the bits above meaningless); `next`, the next input byte (past the end once the virtual
@@ -153,7 +153,7 @@ struct BitState {
 func endWord(_ input: UnsafeRawPointer?, _ inputCount: Int, _ next: Int) -> UInt64 {
     let remaining = inputCount &- next
     guard remaining > 0, let input = unsafe input else { return ~0 }
-    let ones = ~0 &>> UInt64(truncatingIfNeeded: remaining &<< 3)    // remaining is 1 through 7
+    let ones = ~0 &>> UInt64(truncatingIfNeeded: remaining &<< 3) // remaining is 1 through 7
     if inputCount >= 8 {
         // Unsafe: an unchecked load. Safe: inputCount >= 8. The last 8 bytes, moved up past those before `next`.
         let last = UInt64(bigEndian: unsafe input.loadUnaligned(fromByteOffset: inputCount &- 8, as: UInt64.self))
@@ -196,7 +196,9 @@ func canonicalSymbol(_ window: UInt64) -> (symbol: Int, length: Int) {
     let leadingOnes = (~UInt32(truncatingIfNeeded: window)).leadingZeroBitCount
     var length = Int(hpackHuffmanLengthByLeadingOnes[leadingOnes])
     // Terminates: the limit for length 31 is 2^32, above any window.
-    while window >= hpackHuffmanCanonicalLimit[length] { length &+= 1 }
+    while window >= hpackHuffmanCanonicalLimit[length] {
+        length &+= 1
+    }
     let index = Int(truncatingIfNeeded: window &>> UInt64(32 &- length)) &+ Int(hpackHuffmanCanonicalOffset[length])
     return (Int(hpackHuffmanCanonicalSymbols[index]), length)
 }
@@ -252,7 +254,7 @@ func decodeCarefully(
             continue
         }
         let position = state.next &<< 3 &- Int(truncatingIfNeeded: state.count)
-        if position &+ length > inputCount &<< 3 { return huffmanInvalid }   // into the virtual ones
+        if position &+ length > inputCount &<< 3 { return huffmanInvalid } // into the virtual ones
         guard out < capacity else { return huffmanOutputFull }
         // Unsafe: an unchecked store. Safe: out < capacity.
         unsafe output[out] = UInt8(truncatingIfNeeded: symbol)
@@ -275,13 +277,14 @@ func huffmanDecodeLoop(
     var count: UInt64 = 0
     var next = 0
     var out = 0
-    var seen: UInt32 = 0                            // entries ORed: bit 24 for NUL, LF, CR
-    let room = 3 &* decodeBatch &+ 1                // each lookup stores 4 bytes
+    var seen: UInt32 = 0 // entries ORed: bit 24 for NUL, LF, CR
+    let room = 3 &* decodeBatch &+ 1 // each lookup stores 4 bytes
     outer: while true {
         guard out &+ room <= capacity else {
             return unsafe decodeCarefully(
                 BitState(bits: bits, count: count & 63, next: next), table: table, input: input,
-                inputCount: inputCount, output: output, written: out, capacity: capacity, seen: seen)
+                inputCount: inputCount, output: output, written: out, capacity: capacity, seen: seen
+            )
         }
         let word = next &+ 8 <= inputCount
             // Unsafe: an unchecked load. Safe: next + 8 <= inputCount.
@@ -301,7 +304,8 @@ func huffmanDecodeLoop(
                     return UInt(bitPattern: inputCount &<< 3 &- position) <= 7 ? out | forbiddenFlag(seen) : huffmanInvalid
                 }
                 let (symbol, state) = unsafe decodeLong(
-                    BitState(bits: bits, count: count & 63, next: next), input: input, inputCount: inputCount)
+                    BitState(bits: bits, count: count & 63, next: next), input: input, inputCount: inputCount
+                )
                 if symbol < 0 { return symbol == decodeEnd ? out | forbiddenFlag(seen) : huffmanInvalid }
                 seen |= forbiddenBit(symbol)
                 (bits, count, next) = (state.bits, state.count, state.next)
@@ -347,7 +351,7 @@ package func huffmanDecode(
 @safe
 struct MSBWriter {
     var bits: UInt64 = 0
-    var pending: UInt64 = 0         // at most 7 after a flush
+    var pending: UInt64 = 0 // at most 7 after a flush
     var out: Int
     let base: UnsafeMutablePointer<UInt8>
     let capacity: Int
@@ -430,7 +434,8 @@ func addFour(_ e0: UInt64, _ e1: UInt64, _ e2: UInt64, _ e3: UInt64, _ writer: i
     }
     let ok: Bool
     (writer.bits, writer.pending, writer.out, ok) = unsafe addOneByOne(
-        e0, e1, e2, e3, writer.bits, writer.pending, writer.out, writer.base, writer.capacity)
+        e0, e1, e2, e3, writer.bits, writer.pending, writer.out, writer.base, writer.capacity
+    )
     return ok
 }
 
@@ -494,7 +499,8 @@ func huffmanEncodeBody(
                 if checksLimit && writer.out >= limit { return -3 }
                 guard addFour(
                     unsafe entries[Int(input[i])], unsafe entries[Int(input[i &+ 1])],
-                    unsafe entries[Int(input[i &+ 2])], unsafe entries[Int(input[i &+ 3])], &writer) else { return -1 }
+                    unsafe entries[Int(input[i &+ 2])], unsafe entries[Int(input[i &+ 3])], &writer
+                ) else { return -1 }
                 i &+= 4
             }
             let remaining = inputCount &- i
@@ -503,7 +509,8 @@ func huffmanEncodeBody(
                 guard addFour(
                     unsafe entries[Int(input[i])],
                     unsafe entries[remaining > 1 ? Int(input[i &+ 1]) : 256],
-                    unsafe entries[remaining > 2 ? Int(input[i &+ 2]) : 256], 0, &writer) else { return -1 }
+                    unsafe entries[remaining > 2 ? Int(input[i &+ 2]) : 256], 0, &writer
+                ) else { return -1 }
             }
         }
         guard writer.finish() else { return -1 }
@@ -545,7 +552,9 @@ func prefixLength(_ length: Int, mask: Int) -> Int {
     if length < mask { return 1 }
     var value = length &- mask
     var n = 2
-    while value >= 128 { value &>>= 7; n &+= 1 }
+    while value >= 128 {
+        value &>>= 7; n &+= 1
+    }
     return n
 }
 
@@ -558,7 +567,8 @@ func stringLiteral(
     // Huffman only if shorter: give up at `count` bytes of code (-3); full (-1) with room for the raw string means the
     // code wasn't shorter either. (A shorter code's prefix is never longer, so the whole literal is shorter too.)
     let n = unsafe huffmanEncodeBody(
-        input: input, inputCount: count, output: output, offset: 1, capacity: capacity, limit: count &+ 1)
+        input: input, inputCount: count, output: output, offset: 1, capacity: capacity, limit: count &+ 1
+    )
     if n < 0 || n >= count {
         let p = unsafe writeLengthPrefix(count, huffman: false, output, capacity, mask: mask, flags: flags)
         guard p > 0, p &+ count <= capacity else { return -1 }
