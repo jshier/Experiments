@@ -14,38 +14,75 @@ public import Synchronization
 /// Waits aren't cancellable one at a time: ``close()`` wakes every waiter (call it from the operation's one
 /// cancellation handler).
 public final class AsyncQueue<Element: Sendable>: Sendable {
+    /// A producer waiting for room, with the element it brings.
     @usableFromInline
-    struct State {
-        @usableFromInline var ring: [Element?]
+    struct Producer: ~Copyable, Sendable {
+        @usableFromInline var continuation: Continuation<Bool, Never>
+        @usableFromInline var element: Element
+
+        @inlinable
+        init(continuation: consuming Continuation<Bool, Never>, element: Element) {
+            self.continuation = continuation
+            self.element = element
+        }
+    }
+
+    /// An element taken, and the producer whose element moved in behind it (to resume with `true`).
+    @usableFromInline
+    struct Taken: ~Copyable, Sendable {
+        @usableFromInline var element: Element
+        @usableFromInline var producer: Continuation<Bool, Never>?
+
+        @inlinable
+        init(element: Element, producer: consuming Continuation<Bool, Never>?) {
+            self.element = element
+            self.producer = producer
+        }
+    }
+
+    @usableFromInline
+    struct State: ~Copyable {
+        /// The ring: `head..<head + count`, wrapping, holds the elements; the other slots are `nil`. A `UniqueArray`:
+        /// no copy-on-write check on a store.
+        @usableFromInline var ring: UniqueArray<Element?>
         @usableFromInline var head = 0
         @usableFromInline var count = 0
         @usableFromInline var closed = false
-        /// Consumers waiting on an empty queue, and producers on a full one, each with the element it brings.
-        @usableFromInline var consumers: WaiterQueue<Continuation<Element?>>
-        @usableFromInline var producers: WaiterQueue<(Continuation<Bool>, Element)>
+        /// Consumers waiting on an empty queue, and producers on a full one.
+        @usableFromInline var consumers: WaiterQueue<Continuation<Element?, Never>>
+        @usableFromInline var producers: WaiterQueue<Producer>
 
         @inlinable
         init(capacity: Int, waiters: Int) {
-            ring = Array(repeating: nil, count: max(1, capacity))
+            let capacity = max(1, capacity)
+            ring = UniqueArray(capacity: capacity) { output in
+                for _ in 0..<capacity {
+                    output.append(nil)
+                }
+            }
             consumers = WaiterQueue(capacity: waiters)
             producers = WaiterQueue(capacity: 4)
         }
 
+        /// The slot `offset` places after the head, wrapped by a compare.
+        @inlinable @inline(__always)
+        func slot(_ offset: Int) -> Int {
+            let index = head &+ offset
+            return index >= ring.count ? index &- ring.count : index
+        }
+
         /// Takes the oldest element, moving a waiting producer's in behind it.
         @inlinable
-        mutating func take() -> (element: Element, producer: Continuation<Bool>?)? {
+        mutating func take() -> Taken? {
             guard count > 0 else { return nil }
-            let element = ring[head]!
-            ring[head] = nil
-            head = (head + 1) % ring.count
-            count -= 1
-            var producer: Continuation<Bool>?
-            if let (waiting, waitingElement) = producers.popFirst() {
-                ring[(head + count) % ring.count] = waitingElement
-                count += 1
-                producer = waiting
-            }
-            return (element, producer)
+            let element = ring[head].take()!
+            head &+= 1
+            if head == ring.count { head = 0 }
+            count &-= 1
+            guard let waiting = producers.popFirst() else { return Taken(element: element, producer: nil) }
+            ring[slot(count)] = waiting.element
+            count &+= 1
+            return Taken(element: element, producer: waiting.continuation)
         }
 
         @inlinable
@@ -54,18 +91,25 @@ public final class AsyncQueue<Element: Sendable>: Sendable {
             // Consumers wait only on an empty queue: the element goes straight to the first.
             if let consumer = consumers.popFirst() { return .handed(consumer) }
             guard count < ring.count else { return .full }
-            ring[(head + count) % ring.count] = element
-            count += 1
+            ring[slot(count)] = element
+            count &+= 1
             return .added
         }
     }
 
-    // `Sendable` (as `Send` and `Receive` below): they leave the lock's closure holding only continuations and
-    // elements, both `Sendable`.
+    /// What `pop` does now, decided under the lock.
     @usableFromInline
-    enum Offer: Sendable {
+    enum Pop: ~Copyable, Sendable {
+        case taken(Taken)
+        case closed
+        case wait
+    }
+
+    /// What `push` does, decided under the lock: noncopyable, as it can carry a consumer's continuation out.
+    @usableFromInline
+    enum Offer: ~Copyable, Sendable {
         case added
-        case handed(Continuation<Element?>)
+        case handed(Continuation<Element?, Never>)
         case full
         case closed
     }
@@ -92,61 +136,59 @@ public final class AsyncQueue<Element: Sendable>: Sendable {
             consumer.resume(returning: element)
             return true
         case .full:
-            return await withContinuation { (continuation: Continuation<Bool>) in
+            var consumer: Continuation<Element?, Never>?
+            let added = await wait(in: state) { state, continuation in
                 // A consumer moves the element in and resumes this one with `true`; closing resumes it with `false`.
-                let offer = state.withLock { state in
-                    let offer = state.offer(element)
-                    if case .full = offer { state.producers.append((continuation, element)) }
-                    return offer
-                }
-                switch offer {
-                case .full: break
-                case .added: continuation.resume(returning: true)
-                case .closed: continuation.resume(returning: false)
-                case let .handed(consumer):
-                    consumer.resume(returning: element)
-                    continuation.resume(returning: true)
+                switch state.offer(element) {
+                case .full:
+                    state.producers.append(Producer(continuation: continuation.take()!, element: element))
+                    return nil
+                case .added: return true
+                case .closed: return false
+                case let .handed(waiting):
+                    // A consumer came since: resumed below, after this task's own answer is decided.
+                    consumer = consume waiting
+                    return true
                 }
             }
+            consumer?.resume(returning: element)
+            return added
         }
     }
 
     /// Takes the oldest element, suspending while the queue is empty; `nil` once it's closed and empty.
     @inlinable
     public nonisolated(nonsending) func pop() async -> Element? {
-        // `.some(nil)`: closed and empty; `nil`: wait.
-        let now: (element: Element, producer: Continuation<Bool>?)?? = state.withLock { state in
-            if let taken = state.take() { return .some(taken) }
-            return state.closed ? .some(nil) : nil
+        switch state.withLock({ state -> Pop in
+            if let taken = state.take() { return .taken(taken) }
+            return state.closed ? .closed : .wait
+        }) {
+        case var .taken(taken):
+            taken.producer.take()?.resume(returning: true)
+            return taken.element
+        case .closed: return nil
+        case .wait: break
         }
-        if let now {
-            guard let now else { return nil }
-            now.producer?.resume(returning: true)
-            return now.element
-        }
-        return await withContinuation { (continuation: Continuation<Element?>) in
-            let ready: (element: Element, producer: Continuation<Bool>?)?? = state.withLock { state in
-                if let taken = state.take() { return .some(taken) }
-                if state.closed { return .some(nil) }
-                state.consumers.append(continuation)
-                return nil
+        var producer: Continuation<Bool, Never>?
+        let element = await wait(in: state) { state, continuation -> Element?? in
+            if var taken = state.take() {
+                producer = taken.producer.take()
+                return .some(taken.element)
             }
-            guard let ready else { return }
-            guard let ready else {
-                continuation.resume(returning: nil)
-                return
-            }
-            ready.producer?.resume(returning: true)
-            continuation.resume(returning: ready.element)
+            if state.closed { return .some(nil) }
+            state.consumers.append(continuation.take()!)
+            return nil
         }
+        producer?.resume(returning: true)
+        return element
     }
 
     /// Takes every element left without waiting (after the tasks using the queue have ended), to release what they
     /// hold.
     @inlinable
     public func drain(_ body: (Element) -> Void) {
-        while let taken = state.withLock({ $0.take() }) {
-            taken.producer?.resume(returning: true)
+        while var taken = state.withLock({ $0.take() }) {
+            taken.producer.take()?.resume(returning: true)
             body(taken.element)
         }
     }
@@ -155,16 +197,29 @@ public final class AsyncQueue<Element: Sendable>: Sendable {
     /// producers waiting for room get `false` (as do later pushes).
     @inlinable
     public func close() {
-        let (consumers, producers) = state.withLock { state -> ([Continuation<Element?>], [Continuation<Bool>]) in
-            guard !state.closed else { return ([], []) }
+        var waiting = state.withLock { state -> Waiting in
+            guard !state.closed else { return Waiting(consumers: WaiterQueue(), producers: WaiterQueue()) }
             state.closed = true
-            return (state.consumers.removeAll(), state.producers.removeAll().map(\.0))
+            return Waiting(consumers: state.consumers.removeAll(), producers: state.producers.removeAll())
         }
-        for consumer in consumers {
+        while let consumer = waiting.consumers.popFirst() {
             consumer.resume(returning: nil)
         }
-        for producer in producers {
-            producer.resume(returning: false)
+        while let producer = waiting.producers.popFirst() {
+            producer.continuation.resume(returning: false)
+        }
+    }
+
+    /// The waiters ``close()`` takes out of the lock.
+    @usableFromInline
+    struct Waiting: ~Copyable, Sendable {
+        @usableFromInline var consumers: WaiterQueue<Continuation<Element?, Never>>
+        @usableFromInline var producers: WaiterQueue<Producer>
+
+        @inlinable
+        init(consumers: consuming WaiterQueue<Continuation<Element?, Never>>, producers: consuming WaiterQueue<Producer>) {
+            self.consumers = consumers
+            self.producers = producers
         }
     }
 }
@@ -182,54 +237,53 @@ public final class AsyncQueue<Element: Sendable>: Sendable {
 /// }
 /// ```
 public final class AsyncHandoff<Element: Sendable>: Sendable {
+    /// The producer, waiting for the consumer to take its element.
     @usableFromInline
-    struct State {
+    struct Producer: ~Copyable, Sendable {
+        @usableFromInline var continuation: Continuation<Bool, Never>
+        @usableFromInline var element: Element
+
+        @inlinable
+        init(continuation: consuming Continuation<Bool, Never>, element: Element) {
+            self.continuation = continuation
+            self.element = element
+        }
+    }
+
+    @usableFromInline
+    struct State: ~Copyable {
         /// The consumer, waiting for an element.
-        @usableFromInline var consumer: Continuation<Element?>?
+        @usableFromInline var consumer: Continuation<Element?, Never>?
         /// The producer, waiting for the consumer to take its element.
-        @usableFromInline var producer: (continuation: Continuation<Bool>, element: Element)?
+        @usableFromInline var producer: Producer?
         /// No more elements are coming.
         @usableFromInline var closed = false
         /// The consumer failed: elements are refused.
         @usableFromInline var failed = false
 
         @inlinable
-        init() {}
-
-        /// What `send` does now; a waiting consumer is taken out.
-        @inlinable
-        mutating func send() -> Send {
-            if failed { return .refused }
-            guard let waiting = consumer else { return .wait }
+        init() {
             consumer = nil
-            return .handed(waiting)
-        }
-
-        /// What `receive` does now; a waiting producer is taken out.
-        @inlinable
-        mutating func receive() -> Receive {
-            guard let (waiting, element) = producer else { return closed ? .closed : .wait }
             producer = nil
-            return .taken(element, producer: waiting)
         }
     }
 
-    /// What `send` does, decided under the lock.
+    /// What `send` does now, decided under the lock.
     @usableFromInline
-    enum Send: Sendable {
+    enum Send: ~Copyable, Sendable {
         /// Refused (the consumer failed).
         case refused
         /// Taken by the waiting consumer, which is to be resumed with it.
-        case handed(Continuation<Element?>)
+        case handed(Continuation<Element?, Never>)
         /// The consumer is busy: wait for it.
         case wait
     }
 
-    /// What `receive` does, decided under the lock.
+    /// What `receive` does now, decided under the lock.
     @usableFromInline
-    enum Receive: Sendable {
+    enum Receive: ~Copyable, Sendable {
         /// A waiting producer's element; the producer is to be resumed with `true`.
-        case taken(Element, producer: Continuation<Bool>)
+        case taken(Producer)
         /// No more elements.
         case closed
         /// Nothing yet: wait for the producer.
@@ -247,28 +301,31 @@ public final class AsyncHandoff<Element: Sendable>: Sendable {
     @inlinable
     public nonisolated(nonsending) func send(_ element: Element) async -> Bool {
         // Fast path: the consumer is already waiting (or has failed): no suspension.
-        switch state.withLock({ $0.send() }) {
+        switch state.withLock({ state -> Send in
+            if state.failed { return .refused }
+            guard let consumer = state.consumer.take() else { return .wait }
+            return .handed(consumer)
+        }) {
         case .refused: return false
         case let .handed(consumer):
             consumer.resume(returning: element)
             return true
         case .wait: break
         }
-        return await withContinuation { (continuation: Continuation<Bool>) in
+        var consumer: Continuation<Element?, Never>?
+        let sent = await wait(in: state) { state, continuation in
             // Again under the lock: the consumer may have come (or failed) since.
-            let ready = state.withLock { state in
-                let now = state.send()
-                if case .wait = now { state.producer = (continuation, element) }
-                return now
+            if state.failed { return false }
+            if let waiting = state.consumer.take() {
+                consumer = consume waiting
+                return true
             }
-            switch ready {
-            case .refused: continuation.resume(returning: false)
-            case let .handed(consumer):
-                consumer.resume(returning: element)
-                continuation.resume(returning: true)
-            case .wait: break // Stored: `receive` or `fail` resumes it.
-            }
+            precondition(state.producer == nil, "AsyncHandoff: one task sends")
+            state.producer = Producer(continuation: continuation.take()!, element: element)
+            return nil
         }
+        consumer?.resume(returning: element)
+        return sent
     }
 
     /// The next element, waiting for one; `nil` once the producer is done. Calling it again means the previous
@@ -276,28 +333,31 @@ public final class AsyncHandoff<Element: Sendable>: Sendable {
     @inlinable
     public nonisolated(nonsending) func receive() async -> Element? {
         // Fast path: the producer is already waiting with an element (or done): no suspension.
-        switch state.withLock({ $0.receive() }) {
-        case let .taken(element, producer):
-            producer.resume(returning: true)
+        switch state.withLock({ state -> Receive in
+            if let producer = state.producer.take() { return .taken(producer) }
+            return state.closed ? .closed : .wait
+        }) {
+        case let .taken(producer):
+            let element = producer.element
+            producer.continuation.resume(returning: true)
             return element
         case .closed: return nil
         case .wait: break
         }
-        return await withContinuation { (continuation: Continuation<Element?>) in
+        var producer: Continuation<Bool, Never>?
+        let element = await wait(in: state) { state, continuation -> Element?? in
             // Again under the lock: the producer may have sent (or closed) since.
-            let ready = state.withLock { state in
-                let now = state.receive()
-                if case .wait = now { state.consumer = continuation }
-                return now
+            if let waiting = state.producer.take() {
+                producer = consume waiting.continuation
+                return .some(waiting.element)
             }
-            switch ready {
-            case let .taken(element, producer):
-                producer.resume(returning: true)
-                continuation.resume(returning: element)
-            case .closed: continuation.resume(returning: nil)
-            case .wait: break // Stored: `send` or `close` resumes it.
-            }
+            if state.closed { return .some(nil) }
+            precondition(state.consumer == nil, "AsyncHandoff: one task receives")
+            state.consumer = continuation.take()
+            return nil
         }
+        producer?.resume(returning: true)
+        return element
     }
 
     /// No more elements: a waiting consumer gets `nil`, and so does every later `receive` (after an element a waiting
@@ -306,8 +366,7 @@ public final class AsyncHandoff<Element: Sendable>: Sendable {
     public func close() {
         let consumer = state.withLock { state in
             state.closed = true
-            defer { state.consumer = nil }
-            return state.consumer
+            return state.consumer.take()
         }
         consumer?.resume(returning: nil)
     }
@@ -317,9 +376,10 @@ public final class AsyncHandoff<Element: Sendable>: Sendable {
     public func fail() {
         let producer = state.withLock { state in
             state.failed = true
-            defer { state.producer = nil }
-            return state.producer?.continuation
+            return state.producer.take()
         }
-        producer?.resume(returning: false)
+        // Unwrapped first: `producer?.continuation.resume(…)` is "copy of noncopyable typed value. This is a compiler
+        // bug" (Swift 6.4).
+        if let producer = consume producer { producer.continuation.resume(returning: false) }
     }
 }

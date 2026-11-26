@@ -46,7 +46,7 @@ public struct HTTPEntityTag: ~Escapable {
         // etagc is 0x21, 0x23–0x7E, and obs-text: the first byte that isn't, found 16 at a time, must be the closing quote.
         guard position < count, let found = bytes.extracting(droppingFirst: position).firstByteOffset(where: { lanes in
             let vector = lanes.vector
-            return HTTPCharacters.matches((vector .<= SIMD16(repeating: 0x20)) .| (vector .== SIMD16(repeating: 0x7F))
+            return ByteMatches((vector .<= SIMD16(repeating: 0x20)) .| (vector .== SIMD16(repeating: 0x7F))
                 .| (vector .== SIMD16(repeating: 0x22)))
         }) else { return nil }
         position &+= found
@@ -73,7 +73,7 @@ public struct HTTPEntityTag: ~Escapable {
     public func write(to writer: inout AlignedBytesWriter) throws(HTTPFieldValueError) {
         guard !opaque.containsByte(where: { lanes in
             let vector = lanes.vector
-            return HTTPCharacters.matches((vector .<= SIMD16(repeating: 0x20)) .| (vector .== SIMD16(repeating: 0x7F))
+            return ByteMatches((vector .<= SIMD16(repeating: 0x20)) .| (vector .== SIMD16(repeating: 0x7F))
                 .| (vector .== SIMD16(repeating: 0x22)))
         }) else { throw .invalidEntityTag }
         do throws(BytesError) {

@@ -8,11 +8,11 @@
 /// let hasWildcard = topic.containsByte { $0.matching(UInt8(ascii: "+")) | $0.matching(UInt8(ascii: "#")) }
 /// ```
 ///
-/// Each test is two or three vector instructions on all 16 lanes (NEON, or SSE on x86), with no branches,
-/// using only lanewise wrapping arithmetic and bitwise operations. With Swift 6.4, the standard library's
-/// comparisons of two vectors (`a .== b`) are one instruction too, but those against a scalar
-/// (`v .== 0`) compile a lane at a time, and `SIMDMask.any()` is inlined in some loops and an
-/// out-of-line call in others. Swift 6.5 compiles all of them to vector instructions.
+/// Each test is one to three vector instructions on all 16 lanes (NEON, or SSE on x86), with no branches.
+/// They compare the lanes with a splatted vector: on Swift 6.4 the standard library's comparisons of two vectors
+/// (`a .== b`) are one instruction, while those against a scalar (`v .== 0`) compile a lane at a time, and
+/// `SIMDMask.any()` is inlined in some loops and an out-of-line call in others (Swift 6.5 compiles all of them to vector
+/// instructions). For a test of your own, compare two vectors and take the mask with ``ByteMatches/init(_:)``.
 @frozen
 public struct ByteLanes: Sendable {
     /// The 16 bytes, lane 0 first.
@@ -24,16 +24,16 @@ public struct ByteLanes: Sendable {
     @inlinable @inline(__always)
     public init(_ vector: SIMD16<UInt8>) { self.vector = vector }
 
-    /// Tests which lanes equal `byte`.
+    /// Tests which lanes equal `byte`: one `cmeq` against the splatted byte, its lanes all ones or zeros.
     ///
     /// - Parameter byte: The byte to look for.
     /// - Returns: The lanes equal to `byte`.
     @inlinable @inline(__always)
     public func matching(_ byte: UInt8) -> ByteMatches {
-        // `x &- 1 & ~x` has its high bit set exactly when `x` is 0: 1 through 0x80 lose no high bit to the
-        // subtraction, and 0x81 through 0xFF have it cleared by `~x`. Lanes don't borrow from each other.
-        let difference = vector ^ SIMD16(repeating: byte)
-        return ByteMatches(highBits: (difference &- 1) & ~difference)
+        // Two vectors compared: one instruction. (It was SWAR, `(d - 1) & ~d` of `d = v ^ byte`: three dependent vector
+        // instructions, and its lanes' low bits left set, so masks spread the high bit first. LLVM also merges tests
+        // that differ in one bit: `matching(0x2B) | matching(0x23)` is one `and` and one `cmeq`.)
+        ByteMatches(vector .== SIMD16(repeating: byte))
     }
 
     /// The lanes that aren't ASCII (0x80 and above): any lead or continuation byte of a multi-byte UTF-8
@@ -43,6 +43,11 @@ public struct ByteLanes: Sendable {
 }
 
 /// Which of 16 lanes matched a ``ByteLanes`` test: the high bit of each lane.
+///
+/// A comparison's lanes (``ByteLanes/matching(_:)-(UInt8)``, ``ByteLanes/matching(in:)``, ``init(_:)``) are all ones or
+/// zeros; others, built from high bits (``ByteLanes/nonASCII``, ``init(highBits:)``), leave the low bits arbitrary. The
+/// masks read only the high bits, so both combine freely; after a comparison, the spreading of the high bit through
+/// the lane that ``nibbleMask`` and ``ByteBlock``'s gather do costs nothing (LLVM sees the lanes are already full).
 @frozen
 public struct ByteMatches: Sendable {
     /// The high bit of each lane is set where it matched; the low bits are meaningless.
@@ -53,6 +58,20 @@ public struct ByteMatches: Sendable {
     /// - Parameter highBits: Lanes whose high bit is set where they matched; the low bits are ignored.
     @inlinable @inline(__always)
     public init(highBits: SIMD16<UInt8>) { self.highBits = highBits }
+
+    /// Creates matches from a comparison of two byte vectors: its lanes as they are, no instructions.
+    ///
+    /// ```swift
+    /// let controls = ByteMatches(lanes.vector .< SIMD16(repeating: 0x20))
+    /// ```
+    ///
+    /// - Parameter mask: The comparison's result. Compare two vectors (splat a scalar first): with Swift 6.4 the
+    ///   overloads taking a scalar compile a lane at a time.
+    @inlinable @inline(__always)
+    public init(_ mask: SIMDMask<SIMD16<Int8>>) {
+        // A mask's storage is its lanes, all ones (true) or zeros: the comparison's own register, reinterpreted.
+        self.init(highBits: bitCast(mask._storage, to: SIMD16<UInt8>.self))
+    }
 
     /// No lane matches.
     @inlinable @inline(__always)
@@ -163,7 +182,8 @@ public extension RawSpan {
     /// - Returns: `true` if `test` matched any byte; `false` for an empty span.
     @inlinable @inline(__always)
     func containsByte(where test: (ByteLanes) -> ByteMatches) -> Bool {
-        // Checked loads: the offsets are in bounds by construction, and the checks fold away.
+        // The short spans' loads are checked (each runs once, and their offsets are in bounds by construction); the
+        // main loop's are not (below).
         let count = byteCount
         guard count >= 16 else {
             let block: SIMD16<UInt8>
@@ -187,11 +207,17 @@ public extension RawSpan {
         }
         var found = ByteMatches.none
         var offset = 0
-        while offset < count &- 16 {
-            found = found | test(ByteLanes(load(fromByteOffset: offset, as: SIMD16<UInt8>.self)))
-            offset += 16 // Not `&+=`: a non-wrapping add tells the optimizer `offset` stays non-negative.
+        let last = count &- 16
+        while offset < last {
+            // Unsafe: an unchecked load. Safe: `0 <= offset < count - 16`, so the 16 bytes from `offset` are inside the
+            // span. (Checked loads kept a compare and a branch each in the loop, and `+=` an overflow check: 19
+            // instructions against 7 for a two-byte test. A typed view of 16-byte chunks costs about 6 to set up, too
+            // much for the short spans most scans see.)
+            found = found | test(ByteLanes(unsafe unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)))
+            offset &+= 16
         }
-        found = found | test(ByteLanes(load(fromByteOffset: count &- 16, as: SIMD16<UInt8>.self)))
+        // Checked: `count >= 16` is known here, so its check folds.
+        found = found | test(ByteLanes(load(fromByteOffset: last, as: SIMD16<UInt8>.self)))
         return found.any
     }
 
@@ -212,7 +238,7 @@ public extension RawSpan {
     /// - Returns: The offset of the first matching byte, or `nil` if none matches.
     @inlinable @inline(__always)
     func firstByteOffset(where test: (ByteLanes) -> ByteMatches) -> Int? {
-        // Checked loads: the offsets are in bounds by construction, and the checks fold away.
+        // As in `containsByte(where:)`: checked loads for short spans, unchecked in the main loop.
         let count = byteCount
         guard count >= 16 else {
             switch count {
@@ -245,14 +271,17 @@ public extension RawSpan {
             }
         }
         var offset = 0
-        while offset < count &- 16 {
-            if let lane = test(ByteLanes(load(fromByteOffset: offset, as: SIMD16<UInt8>.self))).firstIndex {
+        let last = count &- 16
+        while offset < last {
+            // Unsafe: an unchecked load. Safe: `0 <= offset < count - 16` (as in `containsByte(where:)`).
+            if let lane = test(ByteLanes(unsafe unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self))).firstIndex {
                 return offset &+ lane
             }
-            offset += 16 // Not `&+=`: a non-wrapping add tells the optimizer `offset` stays non-negative.
+            offset &+= 16
         }
-        guard let lane = test(ByteLanes(load(fromByteOffset: count &- 16, as: SIMD16<UInt8>.self))).firstIndex else { return nil }
-        return count &- 16 &+ lane
+        // Checked: `count >= 16` is known here, so its check folds.
+        guard let lane = test(ByteLanes(load(fromByteOffset: last, as: SIMD16<UInt8>.self))).firstIndex else { return nil }
+        return last &+ lane
     }
 
     /// Compares two spans' bytes 16 at a time, as ``containsByte(where:)`` scans: XOR each pair of
@@ -283,12 +312,14 @@ public extension RawSpan {
         }
         var difference = SIMD16<UInt8>.zero
         var offset = 0
-        while offset < count &- 16 {
-            difference |= load(fromByteOffset: offset, as: SIMD16<UInt8>.self) ^ other.load(fromByteOffset: offset, as: SIMD16<UInt8>.self)
-            offset += 16
+        let last = count &- 16
+        while offset < last {
+            // Unsafe: unchecked loads. Safe: `0 <= offset < count - 16`, and both spans have `count` bytes.
+            difference |= unsafe unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)
+                ^ other.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)
+            offset &+= 16
         }
-        difference |= load(fromByteOffset: count &- 16, as: SIMD16<UInt8>.self)
-            ^ other.load(fromByteOffset: count &- 16, as: SIMD16<UInt8>.self)
+        difference |= load(fromByteOffset: last, as: SIMD16<UInt8>.self) ^ other.load(fromByteOffset: last, as: SIMD16<UInt8>.self)
         let words = bitCast(difference, to: SIMD2<UInt64>.self)
         return words[0] | words[1] == 0
     }

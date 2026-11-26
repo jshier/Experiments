@@ -7,7 +7,7 @@ import Bytes
 /// of UTF-8 with no control characters, and every escape (`\"`, `\\`, `\/`, `\b`, `\f`, `\n`, `\r`, `\t`, and
 /// `\uXXXX`, surrogates only in pairs). Anything else is rejected: values of other types, repeated names, a trailing
 /// comma, bytes after the object.
-enum JSON {
+public enum JSON {
     /// The members of the object `bytes` holds, by name.
     ///
     /// - Parameter bytes: The JSON text: one object, and nothing after it but whitespace.
@@ -15,7 +15,7 @@ enum JSON {
     /// - Throws: ``BytesError/invalidValue`` for anything but an object of string members (another token, a
     ///   malformed escape, a lone surrogate, a control character or invalid UTF-8 in a string, a repeated name, bytes
     ///   after the object); ``BytesError/insufficientData`` if the text ends early.
-    static func stringMembers(_ bytes: RawSpan) throws(BytesError) -> [String: String] {
+    public static func stringMembers(_ bytes: RawSpan) throws(BytesError) -> [String: String] {
         var reader = AlignedBytesReader(bytes)
         var members: [String: String] = [:]
         try skipWhitespace(&reader)

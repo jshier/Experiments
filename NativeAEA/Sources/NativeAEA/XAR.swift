@@ -23,38 +23,38 @@ struct XARHeaderRecord {
 }
 
 /// A XAR archive's table of contents: what the readers here need of it.
-struct XARTableOfContents: Sendable {
+public struct XARTableOfContents: Sendable {
     /// The TOC checksum's place in the heap and algorithm (`sha1`, `sha256`, …).
-    var checksum: (offset: Int, size: Int, style: String)?
+    public var checksum: (offset: Int, size: Int, style: String)?
     /// The signature's place in the heap, its style (`RSA`), and its certificate chain (DER, leaf first).
-    var signature: (offset: Int, size: Int, style: String, certificates: [[UInt8]])?
+    public var signature: (offset: Int, size: Int, style: String, certificates: [[UInt8]])?
     /// The member files (at the TOC's top level).
-    var files: [XARFile] = []
+    public var files: [XARFile] = []
     /// When the archive was made (`creation-time`, UTC), in seconds since 1970: the time its certificates must be valid at.
-    var creationTime: Int64?
+    public var creationTime: Int64?
 }
 
 /// A member file of a XAR archive.
-struct XARFile: Sendable {
-    var name = ""
-    var type = ""
+public struct XARFile: Sendable {
+    public var name = ""
+    public var type = ""
     /// Its data in the heap: offset and stored length, its size once decoded, and how it's encoded
     /// (`application/octet-stream`, `application/x-gzip` for zlib, `application/x-bzip2`).
-    var offset = 0
-    var length = 0
-    var size = 0
-    var encoding = ""
+    public var offset = 0
+    public var length = 0
+    public var size = 0
+    public var encoding = ""
     /// Hex digests of the stored and decoded data, with their algorithms.
-    var archivedChecksum: (style: String, hex: String)?
-    var extractedChecksum: (style: String, hex: String)?
+    public var archivedChecksum: (style: String, hex: String)?
+    public var extractedChecksum: (style: String, hex: String)?
 }
 
-enum XAR {
+public enum XAR {
     static let fixedHeaderSize = 28
 
     /// The TOC from its XML: the elements this reader uses, by their paths. Strict about the XML it reads (balanced
     /// tags, known entities) and silent about elements it doesn't use.
-    static func parseTableOfContents(_ xml: [UInt8]) throws(AEAError) -> XARTableOfContents {
+    public static func parseTableOfContents(_ xml: [UInt8]) throws(AEAError) -> XARTableOfContents {
         var toc = XARTableOfContents()
         var file: XARFile?
         var checksum: (offset: Int, size: Int, style: String) = (0, 0, "")
@@ -125,7 +125,7 @@ enum XAR {
 
     /// Seconds since 1970 of a `creation-time` (`2026-10-16T17:24:05`, UTC), or `nil` for another form or a date
     /// that doesn't exist (February 31st). A leap second (`:60`) is accepted, as XAR's writer may produce one.
-    static func time(_ text: String) -> Int64? {
+    public static func time(_ text: String) -> Int64? {
         var string = text
         string.makeContiguousUTF8() // `utf8Span` needs native, contiguous UTF-8.
         var reader = AlignedBytesReader(string.utf8Span.span.bytes)
@@ -160,8 +160,8 @@ enum XAR {
 /// closes, and made into a `String` only while it's at most ``maximumPathByteCount`` bytes (longer ones are reported as
 /// `""`, which no reader matches): each event costs its own bytes and at most that much more. Built from the stack on
 /// every event, a 511-byte TOC 40,000 elements deep took 42.8 s (review 2026-11-23 §1.8).
-struct XMLScanner {
-    enum Event {
+public struct XMLScanner {
+    public enum Event {
         /// An element opened: its path, and its `style` attribute.
         case start(String, style: String?)
         /// An element's text (whitespace-only text between elements isn't reported), with its element's `style`.
@@ -181,7 +181,7 @@ struct XMLScanner {
     private var stack: [(nameStart: Int, style: String?)] = []
     private var pendingEnd = false
 
-    init(_ bytes: [UInt8]) {
+    public init(_ bytes: [UInt8]) {
         self.bytes = bytes
     }
 
@@ -200,7 +200,7 @@ struct XMLScanner {
         return .end(ended)
     }
 
-    mutating func next() throws(AEAError) -> Event? {
+    public mutating func next() throws(AEAError) -> Event? {
         if pendingEnd {
             pendingEnd = false
             return close()

@@ -22,15 +22,15 @@ import BytesCrypto
 // signature covers (with its own field zeroed), so they authenticate everything only together with it.
 
 /// A 32-byte key or MAC.
-typealias Key32 = InlineArray<32, UInt8>
+public typealias Key32 = InlineArray<32, UInt8>
 
 /// The keys for one MACed (and, on encrypted profiles, encrypted) piece: HKDF's 80 bytes split into the HMAC key,
 /// the AES-256 key, and the counter-mode IV. On profile 0 only the MAC key is used (the first 32 bytes of HKDF's
 /// output are the same whatever its length).
-struct DataKey: Sendable {
-    var mac: Key32
-    var cipher: Key32
-    var iv: InlineArray<16, UInt8>
+public struct DataKey: Sendable {
+    public var mac: Key32
+    public var cipher: Key32
+    public var iv: InlineArray<16, UInt8>
 
     /// Decrypts (or encrypts: the same) `bytes` in place with AES-256 in counter mode: CommonCrypto's 64-bit
     /// big-endian counter in the IV's last eight bytes.
@@ -57,11 +57,11 @@ struct DataKey: Sendable {
 
 /// An HKDF info string of the key schedule, held inline: an ASCII label (`"AEA_SK"`), optionally followed by a 32-bit
 /// little-endian index. Deriving a key per segment allocates nothing.
-struct KeyInfo {
+public struct KeyInfo {
     private var storage = InlineArray<16, UInt8>(repeating: 0)
     private var count = 0
 
-    init(_ label: StaticString, index: UInt32? = nil) {
+    public init(_ label: StaticString, index: UInt32? = nil) {
         precondition(label.utf8CodeUnitCount <= 12, "Key schedule labels are short")
         let bytes = unsafe UnsafeRawBufferPointer(start: label.utf8Start, count: label.utf8CodeUnitCount) // A static string's bytes: safe.
         for unsafe byte in unsafe bytes {
@@ -77,7 +77,7 @@ struct KeyInfo {
     }
 
     /// Calls `body` with the info's bytes.
-    func withBytes<R>(_ body: (RawSpan) -> R) -> R {
+    public func withBytes<R>(_ body: (RawSpan) -> R) -> R {
         body(storage.span.bytes.extracting(0..<count))
     }
 }
@@ -85,16 +85,16 @@ struct KeyInfo {
 /// HKDF-SHA256 from one input key with no salt, for deriving many keys from it (a cluster key's header key and its
 /// segments' keys): the extract step done once, and the HMAC keyed with its result made once, where
 /// `HKDF.expand` would key a new one per call.
-typealias KeyExpander = HKDF<SHA256>.Expander
+public typealias KeyExpander = HKDF<SHA256>.Expander
 
-extension HKDF.Expander where H == SHA256 {
+public extension HKDF.Expander where H == SHA256 {
     /// The expander for `key` with no salt.
     init(_ key: Key32) {
         self.init(salt: RawSpan(), inputKeyMaterial: key.span.bytes)
     }
 }
 
-enum AEAKeys {
+public enum AEAKeys {
     /// HKDF-SHA256, 32 bytes of output.
     static func derive(_ inputKeyMaterial: RawSpan, salt: RawSpan, info: RawSpan) -> Key32 {
         var pseudorandom = Key32(repeating: 0)
@@ -114,12 +114,12 @@ enum AEAKeys {
     }
 
     /// HKDF-SHA256 of `key` with no salt, 80 bytes: a MAC key, an AES key, and an IV.
-    static func deriveDataKey(_ key: Key32, _ info: KeyInfo) -> DataKey {
+    public static func deriveDataKey(_ key: Key32, _ info: KeyInfo) -> DataKey {
         expandDataKey(KeyExpander(key), info)
     }
 
     /// HKDF-SHA256's expand step from `expander`'s key, 80 bytes: a MAC key, an AES key, and an IV.
-    static func expandDataKey(_ expander: KeyExpander, _ info: KeyInfo) -> DataKey {
+    public static func expandDataKey(_ expander: KeyExpander, _ info: KeyInfo) -> DataKey {
         var output = InlineArray<80, UInt8>(repeating: 0)
         var outputSpan = output.mutableSpan
         var out = MutableRawSpan(mutating: &outputSpan)

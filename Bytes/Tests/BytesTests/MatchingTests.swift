@@ -77,18 +77,25 @@ import Testing
         #expect(ByteLanes(.zero).matching(0).nibbleMask.nonzeroBitCount == 16)
     }
 
-    /// Only the lanes that match count, whatever the other lanes hold: `matching(_:)` leaves arbitrary low bits
-    /// in lanes that don't match (0x70 leaves bit 3 set), which mustn't read as matches.
+    /// Only the lanes that match count, whatever the other lanes' low bits hold: matches built from high bits alone
+    /// (`nonASCII`, sign tricks) leave arbitrary low bits, which mustn't read as matches (an odd lane's bit 3, as 0x70
+    /// has, once did through the nibble mask). Built with `init(highBits:)` directly: `matching(_:)`'s lanes are all ones
+    /// or zeros, so they can't show it.
     @Test func nibbleMasksIgnoreLowBits() {
-        for filler in UInt8.min...UInt8.max where filler != 0 {
+        for low in UInt8.min...0x7F {
             for lane in [0, 1, 6, 7, 14, 15] {
-                var lanes = SIMD16<UInt8>(repeating: filler)
-                lanes[lane] = 0
-                let matches = ByteLanes(lanes).matching(0)
-                #expect(matches.nibbleMask == 1 << (4 * lane + 3), "filler \(filler), lane \(lane)")
+                var lanes = SIMD16<UInt8>(repeating: low)
+                lanes[lane] = 0x80 | low
+                let matches = ByteMatches(highBits: lanes)
+                #expect(matches.nibbleMask == 1 << (4 * lane + 3), "low bits \(low), lane \(lane)")
+                #expect(matches.bitmask == 1 << lane, "low bits \(low), lane \(lane)")
                 #expect(matches.firstIndex == lane)
+                // The 64-byte gather (NEON's pairwise adds, or four bitmasks) reads high bits only too.
+                let gathered = ByteBlock(.zero, .zero, .zero, .zero).mask { _ in matches }
+                #expect(gathered == UInt64(1) << UInt64(lane) &* 0x0001_0001_0001_0001, "low bits \(low), lane \(lane)")
             }
-            #expect(ByteLanes(SIMD16(repeating: filler)).matching(0).firstIndex == nil)
+            #expect(ByteMatches(highBits: SIMD16(repeating: low)).firstIndex == nil)
+            #expect(!ByteMatches(highBits: SIMD16(repeating: low)).any)
         }
     }
 

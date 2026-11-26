@@ -1,7 +1,7 @@
-@testable import Disk
 import BytesTesting
 import BytesTestSupport
 import Darwin
+import Disk
 import DiskTestSupport
 import Foundation
 import Synchronization

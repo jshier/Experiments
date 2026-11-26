@@ -3,7 +3,7 @@ import BytesTesting
 import BytesTestSupport
 import Compression
 import Foundation
-@_spi(Testing) import NativeZip
+import NativeZip
 import Testing
 
 // LZMA (zip method 14) decoding against liblzma's encoder, through `ZipDecoder.decodePayload` (whatever decodes

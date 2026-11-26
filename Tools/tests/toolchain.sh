@@ -2,8 +2,8 @@
 # Tools/toolchain in a fake repository and a fake HOME (its own registry and ~/Library/Developer/Toolchains): an
 # invalid registry stops it (2); exact names beat substrings and an alias link counts once; register checks --path
 # and option values before writing; a registered toolchain that isn't installed exits 2; install refuses `..` paths and
-# a wrong sha256 before extracting, and records a good one; `test` builds release with -enable-testing (both swift
-# build calls) and returns the tests' status. A fake `swift` and testing helper stand in for real builds.
+# a wrong sha256 before extracting, and records a good one; `test` builds release (both swift build calls with the
+# same flags, no -enable-testing) and returns the tests' status. A fake `swift` and testing helper stand in for real builds.
 tools="$(cd "$(dirname "$0")/.." && pwd)"
 work="$(mktemp -d "${TMPDIR:-/tmp}/check-toolchain.XXXXXX")" || exit 1
 trap 'rm -rf "$work"' EXIT
@@ -113,11 +113,10 @@ exit "${HELPER_STATUS:-0}"
 EOF
 chmod +x "$work/bin/swift" "$installed/A.xctoolchain/usr/libexec/swift/pm/swiftpm-testing-helper"
 check "test (release)" "$(PATH="$work/bin:$PATH" status a test "$work/pkg")" 0
-check "  both builds with -enable-testing" "$(cat "$work/swift.log")" \
-    "build -c release -Xswiftc -enable-testing --build-tests
-build -c release -Xswiftc -enable-testing --show-bin-path"
+check "  both builds release, no -enable-testing" "$(cat "$work/swift.log")" "build -c release --build-tests
+build -c release --show-bin-path"
 rm "$work/swift.log"
 check "test --debug" "$(PATH="$work/bin:$PATH" status a test --debug "$work/pkg")" 0
-check "  without -enable-testing" "$(cat "$work/swift.log")" "build -c debug --build-tests
+check "  both builds debug" "$(cat "$work/swift.log")" "build -c debug --build-tests
 build -c debug --show-bin-path"
 check "a failing test's status comes back" "$(HELPER_STATUS=5 PATH="$work/bin:$PATH" status a test "$work/pkg")" 5

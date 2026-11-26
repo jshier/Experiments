@@ -158,7 +158,7 @@ public struct X509Certificate: ~Escapable {
     public var isSelfIssued: Bool { layout.issuer.count == layout.subject.count && issuer.der.equals(subject.der) }
 }
 
-extension RawSpan {
+package extension RawSpan {
     /// Whether two spans hold the same bytes.
     func equals(_ other: RawSpan) -> Bool {
         guard byteCount == other.byteCount else { return false }

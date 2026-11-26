@@ -42,15 +42,15 @@ public enum HPKE {
     static var kdfIdentifier: UInt16 { 0x0001 }
 
     /// An encryption context's AEAD and nonces (RFC 9180, 5.2), shared by senders and recipients.
-    struct Context: Sendable {
+    package struct Context: Sendable {
         enum Cipher: Sendable {
             case aesGCM(AESGCM)
             case chaCha20Poly1305(ChaCha20Poly1305)
         }
 
         let cipher: Cipher
-        let baseNonce: InlineArray<12, UInt8>
-        let exporterSecret: InlineArray<32, UInt8>
+        package let baseNonce: InlineArray<12, UInt8>
+        package let exporterSecret: InlineArray<32, UInt8>
         var sequence: UInt64 = 0
 
         /// KeySchedule (RFC 9180, 5.1) in base mode, from the KEM's shared secret.
@@ -331,7 +331,7 @@ public enum HPKE {
     /// The sending side of an HPKE context: encapsulates a fresh key to the recipient, then seals messages. Not copyable:
     /// two copies would seal different messages with the same key and nonce, which breaks AES-GCM and ChaCha20-Poly1305.
     public struct Sender: ~Copyable, Sendable {
-        var context: Context
+        package var context: Context
         /// The AEAD the context uses.
         public let aead: AEAD
         /// enc: the ephemeral public key (65 bytes, uncompressed) the recipient needs to open the messages.
@@ -348,7 +348,7 @@ public enum HPKE {
         }
 
         /// SetupBaseS with a chosen ephemeral key: for known-answer tests only (an ephemeral key must never be reused).
-        init(recipientKey: P256.PublicKey, aead: AEAD, info: RawSpan, ephemeralKey: P256.PrivateKey) {
+        package init(recipientKey: P256.PublicKey, aead: AEAD, info: RawSpan, ephemeralKey: P256.PrivateKey) {
             let enc = ephemeralKey.publicKey.x963Representation
             let dh = ephemeralKey.sharedSecret(with: recipientKey)
             let secret = kemSharedSecret(dh: dh.span.bytes, encapsulatedKey: enc.span.bytes, recipientKey: recipientKey)

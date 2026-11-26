@@ -5,6 +5,14 @@ Each step is saved as a named baseline in `.benchmarkBaselines/` and can be re-c
 `../Tools/bench-table . --metric 'Time \(wall clock\)|Instructions|Malloc' <a> <b>`.
 The 2026-11-19 section below compares this machine's numbers with an M1 Max's (baseline `m1max`).
 
+## 2026-11-25: replacements wait on the standard library's `Continuation` (open item 6; no benchmark change)
+
+A replacement (an archive path planned again) waited for the earlier job on a `CheckedContinuation` in an array of
+tuples; it's now a `WaiterQueue` of noncopyable waiters and `wait(in:_:)`, and `written(_:)` takes every waiter for the
+tag with `removeAll(where:)` (no allocation when none waits, the usual case). New test: `replacesEachPathTwiceInOrder`
+(16 paths, three copies each; a lost wake-up hangs it, checked by breaking the wake). No row measures replacements; the
+path is rare (`waitUntilWritten` returns at once unless a writer holds the earlier copy).
+
 ## 2026-11-24, latest: the archive-coverage set, its tests, and a row (M1 Max, under load)
 
 Tests and benchmarks now run on generated sets only; the Xcode archives in `~/Scratch` are for opt-in timing and
@@ -729,7 +737,7 @@ Same archives as the first comparison: SDK headers (3,460 files → 7.4 MB), 188
 `ByteReader` replaced by `Bytes` for the central directory, EOCD/ZIP64 records, and local headers:
 fixed-size headers are read as sub-cursors (one bounds check per record instead of one per field),
 signatures are `Byte4` literals, and the EOCD search uses `lastByteOffset(of:)` (16-byte SIMD). The
-original parser is kept in `ZipArchive+ByteReaderParsing.swift`, behind `@_spi(Benchmarking)`, so the two
+original parser is kept in `ZipArchive+ByteReaderParsing.swift`, public (behind `@_spi(Benchmarking)` until 2026-11-25), so the two
 run side by side; the benchmark setup checks they produce identical entries and payload ranges for every
 fixture. Baselines: `pre-bytes` (fresh run of step4 code) and `bytes`.
 

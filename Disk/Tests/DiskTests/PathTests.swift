@@ -1,5 +1,5 @@
-@testable import Disk
 import Bytes
+import Disk
 import Testing
 
 @Suite(.diskLifetimes) struct PathTests {

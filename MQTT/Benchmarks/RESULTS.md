@@ -11,6 +11,14 @@ One core parses the same 1.25 MB again and again, from cache. All 32 cores each 
 (4 per core, 128 in all, 100–150 MB, beyond every cache) and report the machine's total throughput. Numbers
 are M3 Ultra unless a heading says otherwise; the 2026-11-19 section runs the same benchmarks on an M1 Max.
 
+## 2026-11-25: Bytes' `cmeq` matching and unchecked scan loops (baselines `scan-before` → `scan-after`, M1 Max)
+
+No MQTT change: Bytes' `containsByte` (the topic and string checks) now matches with one `cmeq` and loads unchecked in
+its main loop (`../../Bytes/Benchmarks/RESULTS.md`, 2026-11-25). Every Bytes row −2% to −5% instructions (parse
+PUBLISH with views 9,798 K → 9,478 K; encode 5,132 K → 4,874 K), zero mallocs where there were none, the conventional
+rows unchanged. Single-core times within ±4%. The 10-core rows ran 14–38% slower, the unchanged conventional ones
+included: the machine was busy during that run, so they say nothing about the change.
+
 ## 2026-11-23: `MQTTError.detail` as a `String`, tried and reverted (baselines `safe-bytes-before` → `safe-bytes-after`, `safe-bytes-control`, M1 Max)
 
 The unsafe-code survey listed `MQTTError`'s `==` and `hash(into:)` (`StaticString.withUTF8Buffer`, the package's last two

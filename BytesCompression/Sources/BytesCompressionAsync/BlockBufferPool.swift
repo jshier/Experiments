@@ -2,9 +2,9 @@ public import Bytes
 public import BytesAsync
 public import Synchronization
 
-// The decoding engine's waits (a free buffer, a block job, a decoded block) are BytesAsync's: `Mutex` state plus a
-// `Continuation` another task resumes, outside the lock, exactly once (`withContinuation`, `WaiterQueue`; the block
-// queue is its `AsyncQueue`). Memory made once (block buffers, read buffers, decoder scratch) is Bytes' `RawStorage`,
+// The decoding engine's waits (a free buffer, a block job, a decoded block) are BytesAsync's: a free buffer is an
+// index from its closable `AsyncIndexPool`, a block job comes through its `AsyncQueue`, and the consumer waits with
+// `wait(in:_:)` (`Mutex` state plus the standard library's noncopyable `Continuation`). Memory made once (block buffers, read buffers, decoder scratch) is Bytes' `RawStorage`,
 // whose `reuse`/`giveBack` keep only a floor of a large read buffer resident between uses. Every type is inlinable
 // with `@usableFromInline` state (BytesAsync's pattern), so its users' calls (one per file, in an extraction) compile
 // as they did when this was NativeAEA's `SegmentBufferPool`.
@@ -54,7 +54,62 @@ public struct BlockPoolSizing: Sendable, Equatable {
 ///
 /// Memory: `count * stride`, allocated once. The count bounds how far decoding runs ahead of the consumer: decoders
 /// suspend until a buffer is free.
+///
+/// A buffer is held by ``Buffer`` leases (each one reference, released when the lease is dropped) or, where a holder
+/// keeps it in a copyable value (a write job's contents), by its index (``Buffer/detach()``), with ``retain(_:)`` and
+/// ``release(_:)``.
 public final class BlockBufferPool: Sendable {
+    /// One reference to a buffer of the pool: dropped, it releases the reference (the last one returns the buffer to
+    /// the pool, or hands it to a task waiting for one).
+    ///
+    /// ```swift
+    /// guard let buffer = await pool.acquire() else { return }   // released however this scope ends
+    /// try decode(into: buffer)
+    /// slot.buffer = buffer.detach()                              // the slot holds the reference now, by index
+    /// ```
+    public struct Buffer: ~Copyable, Sendable {
+        /// The pool the buffer belongs to (kept alive by the lease).
+        public let pool: BlockBufferPool
+        /// The buffer's index; −1 once ``detach()`` gave the reference up.
+        @usableFromInline var _index: Int
+
+        /// Takes over one reference the caller holds to buffer `index`: the engine's, where a buffer comes out of the
+        /// pool (``BlockBufferPool/acquire()``) or out of a published slot to the consumer.
+        @inlinable
+        init(adopting index: Int, in pool: BlockBufferPool) {
+            self.pool = pool
+            _index = index
+        }
+
+        /// The buffer's index in its pool: for ``BlockBufferPool/bytes(_:at:count:)`` and its other index-taking
+        /// methods while the lease is held.
+        @inlinable
+        public var index: Int { _index }
+
+        /// Another reference to the same buffer.
+        @inlinable
+        public borrowing func share() -> Buffer {
+            pool.retain(_index)
+            return Buffer(adopting: _index, in: pool)
+        }
+
+        /// Gives the reference up as the buffer's index, for a holder that keeps it in a copyable value and releases it
+        /// with ``BlockBufferPool/release(_:)``.
+        @inlinable
+        public consuming func detach() -> Int {
+            let index = _index
+            // A sentinel, not `discard self`: the lease holds its pool strongly, and `discard` needs trivially destroyed
+            // stored properties.
+            _index = -1
+            return index
+        }
+
+        @inlinable
+        deinit {
+            if _index >= 0 { pool.release(_index) }
+        }
+    }
+
     /// Room before each block for the start of something that continues in it (``carry(_:from:at:to:)``): bytes at
     /// negative offsets, from `-carryCapacity`.
     public let carryCapacity: Int
@@ -72,27 +127,9 @@ public final class BlockBufferPool: Sendable {
     /// References per buffer: the consumer's while it reads the block, plus one per job using its bytes. One
     /// allocation for all of them.
     @usableFromInline let references: RelaxedCounters
-
-    @usableFromInline
-    struct State {
-        /// Free buffers, last freed on top.
-        @usableFromInline var free: [Int]
-        /// Tasks suspended in ``acquire()``: each released buffer goes to the longest waiting.
-        @usableFromInline var waiters: WaiterQueue<Continuation<Int?>>
-        /// No more buffers are handed out (``close()``); releases still return them.
-        @usableFromInline var closed = false
-        /// Buffers `active..<count` aren't handed out until ``activateAll()``.
-        @usableFromInline var active: Int
-
-        @inlinable
-        init(free: [Int], waiters: WaiterQueue<Continuation<Int?>>, active: Int) {
-            self.free = free
-            self.waiters = waiters
-            self.active = active
-        }
-    }
-
-    @usableFromInline let state: Mutex<State>
+    /// Which buffers are free: handed out last released first, to the longest waiting task when none is, closable, and
+    /// with buffers `active..<count` held back until ``activateAll()`` (BytesAsync's index pool).
+    @usableFromInline let handout: AsyncIndexPool
     /// Buffers in use at once, at most.
     public let peakInUse = Atomic<Int>(0)
     @usableFromInline let inUse = Atomic<Int>(0)
@@ -116,11 +153,8 @@ public final class BlockBufferPool: Sendable {
         stride = Self.stride(blockCapacity: blockCapacity, carryCapacity: carryCapacity)
         storage = RawStorage(byteCount: stride * count)
         references = RelaxedCounters(count: count)
-        let active = max(1, min(count, active ?? count))
-        var free = Array((0..<active).reversed())
-        free.reserveCapacity(count)
         // Everyone who can wait for a buffer holds none of the others: at most `count` waiters.
-        state = Mutex(State(free: free, waiters: WaiterQueue(capacity: count), active: active))
+        handout = AsyncIndexPool(count: count, active: max(1, min(count, active ?? count)), waiters: count)
     }
 
     /// Bytes from one buffer's start to the next's, for blocks of up to `blockCapacity` bytes: the carry region, the
@@ -132,7 +166,7 @@ public final class BlockBufferPool: Sendable {
 
     /// The bytes of the buffers handed out now (all of them once ``activateAll()`` has run).
     @inlinable
-    public var activeByteCount: Int { state.withLock { $0.active } * stride }
+    public var activeByteCount: Int { handout.activeCount * stride }
 
     /// How an engine's decoders and its consumer divide a pool, within `budget` bytes: the one place a pool's size is
     /// decided (``sized(blockCapacity:carryCapacity:decoders:extraBuffers:heldBuffers:consumerBuffers:heldUntilActivated:scratchCapacity:staged:budget:)``
@@ -234,21 +268,7 @@ public final class BlockBufferPool: Sendable {
     /// free list (recently freed buffers, whose pages are resident, stay first).
     @inlinable
     public func activateAll() {
-        let handed: [(Continuation<Int?>, Int)] = state.withLock { state in
-            guard state.active < count else { return [] }
-            var handed: [(Continuation<Int?>, Int)] = []
-            var added: [Int] = []
-            for index in state.active..<count {
-                // Waiters first (a closed pool has none: closing resumed them).
-                if let waiter = state.waiters.popFirst() { handed.append((waiter, index)) } else { added.append(index) }
-            }
-            state.free.insert(contentsOf: added.reversed(), at: 0)
-            state.active = count
-            return handed
-        }
-        for (waiter, index) in handed {
-            waiter.resume(returning: index)
-        }
+        handout.activateAll()
     }
 
     /// Buffers acquired and not yet released.
@@ -257,49 +277,30 @@ public final class BlockBufferPool: Sendable {
 
     /// Tasks waiting in ``acquire()`` (for tests).
     @inlinable
-    package var waiting: Int { state.withLock { $0.waiters.count } }
+    package var waiting: Int { handout.waiting }
 
     /// A free buffer now, with one reference: `nil` if there's none, or the pool is closed.
     @inlinable
-    package func tryAcquire() -> Int? {
-        let index: Int? = state.withLock { state in state.closed ? nil : state.free.popLast() }
-        return index.map(taken)
+    package func tryAcquire() -> Buffer? {
+        guard let index = handout.tryAcquire() else { return nil }
+        return taken(index)
     }
 
     /// Takes a free buffer with one reference, suspending the task until one is released if none is free.
     ///
     /// - Returns: `nil` once the pool is closed.
     @inlinable
-    package nonisolated(nonsending) func acquire() async -> Int? {
-        // `.some(nil)`: closed; `nil`: wait.
-        let now: Int?? = state.withLock { state in
-            if state.closed { return .some(nil) }
-            if let index = state.free.popLast() { return .some(index) }
-            return nil
-        }
-        let index: Int? = if let now {
-            now
-        } else {
-            await withContinuation { (continuation: Continuation<Int?>) in
-                // Checked again under the lock `release` holds while it decides where a buffer goes: no wakeup is lost.
-                let ready: Int?? = state.withLock { state in
-                    if state.closed { return .some(nil) }
-                    if let index = state.free.popLast() { return .some(index) }
-                    state.waiters.append(continuation)
-                    return nil
-                }
-                if let ready { continuation.resume(returning: ready) }
-            }
-        }
-        return index.map(taken)
+    package nonisolated(nonsending) func acquire() async -> Buffer? {
+        guard let index = await handout.acquire() else { return nil }
+        return taken(index)
     }
 
     @inlinable
-    func taken(_ index: Int) -> Int {
+    func taken(_ index: Int) -> Buffer {
         references.store(1, at: index)
         let now = inUse.add(1, ordering: .relaxed).newValue
         peakInUse.max(now, ordering: .relaxed)
-        return index
+        return Buffer(adopting: index, in: self)
     }
 
     /// Adds a reference to buffer `index`: one per job that points into it.
@@ -314,12 +315,7 @@ public final class BlockBufferPool: Sendable {
         // The last release publishes every holder's reads of the buffer to its next user: not relaxed.
         if references.withAtomic(at: index, { $0.subtract(1, ordering: .acquiringAndReleasing).newValue }) == 0 {
             inUse.subtract(1, ordering: .relaxed)
-            let waiter: Continuation<Int?>? = state.withLock { state in
-                if let waiter = state.waiters.popFirst() { return waiter }
-                state.free.append(index)
-                return nil
-            }
-            waiter?.resume(returning: index)
+            handout.release(index)
         }
     }
 
@@ -327,14 +323,7 @@ public final class BlockBufferPool: Sendable {
     /// to the pool when released.
     @inlinable
     func close() {
-        let waiters = state.withLock { state -> [Continuation<Int?>] in
-            guard !state.closed else { return [] }
-            state.closed = true
-            return state.waiters.removeAll()
-        }
-        for waiter in waiters {
-            waiter.resume(returning: nil)
-        }
+        handout.close()
     }
 
     /// Where `index`'s block bytes start (after the carry region): for decoders, which write disjoint regions of the

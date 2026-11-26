@@ -7,18 +7,18 @@ internal import Dispatch
 // `alert`), and a peer's KeyUpdate updates its keys.
 
 /// Record framing shared by the sealer and opener.
-enum TLSRecord {
+package enum TLSRecord {
     /// The header: type, legacy version 0x0303, length.
     static var headerSize: Int { 5 }
     /// The AEAD tag.
     static var tagSize: Int { 16 }
     /// The most plaintext per record: 2¹⁴.
-    static var maximumPlaintext: Int { 1 << 14 }
+    package static var maximumPlaintext: Int { 1 << 14 }
     /// The most a record's protected part may be: plaintext, content type, padding, tag (2¹⁴ + 256).
     static var maximumEncrypted: Int { maximumPlaintext &+ 256 }
 
     /// A record's size for `count` bytes of content and `padding` zeros: header, content, type, padding, tag.
-    static func size(content count: Int, padding: Int = 0) -> Int { headerSize &+ count &+ 1 &+ padding &+ tagSize }
+    package static func size(content count: Int, padding: Int = 0) -> Int { headerSize &+ count &+ 1 &+ padding &+ tagSize }
 
     /// The per-record nonce: the IV XOR the 64-bit sequence number, big-endian, in its last 8 bytes.
     static func nonce(_ iv: InlineArray<12, UInt8>, sequence: UInt64) -> InlineArray<12, UInt8> {
@@ -577,7 +577,7 @@ extension TLSRecordOpener: ResettableByteTransform {
 
 extension TLSRecordProtection {
     /// Sets the next record's sequence number: to replay records in tests and benchmarks.
-    mutating func reset(sequence: UInt64) { self.sequence = sequence }
+    package mutating func reset(sequence: UInt64) { self.sequence = sequence }
 
     /// Seals `count` full records of application data (`2¹⁴ − padding` bytes each) from `input` into `output` on up
     /// to `lanes` cores at once, with the sequence numbers they'd have one after another.

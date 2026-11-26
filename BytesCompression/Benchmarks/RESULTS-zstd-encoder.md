@@ -1,4 +1,6 @@
-# Zstandard encoding: `ZstdEncoder` against libzstd 1.5.7
+# Zstandard encoding: `ZstdEncoder` against libzstd 1.5.7 and 1.6.0
+
+Latest: "Against libzstd 1.6.0" under Results (2026-11-25).
 
 2026-11-23, M1 Max (8 performance and 2 efficiency cores), macOS 27.2, Xcode's Swift 6.4. Measured while other agents built and benchmarked (load average
 8–13): cycles and instructions are the numbers to trust, wall times are under load.
@@ -221,12 +223,68 @@ What to read next: libzstd 1.6.0's changes to `ZSTD_compressBlock_fast`/`doubleF
 `ZSTD_decompressSequences`, against ours (the port follows 1.5.7's source; its comments name the files). The decode fixtures
 stay the cached 1.5.7 frames (`ZstdFixtures.cacheKey`), so these rows keep comparing libzstd versions on the same input.
 
+### Against libzstd 1.6.0 (2026-11-25, open items 10, 11, 13a; M1 Max, idle)
+
+The harness (Method), 5 interleaved rounds, against Homebrew's libzstd 1.6.0; every frame checked byte for byte.
+Full table: `~/Scratch/zstd-1.6.noindex/all-final2.tsv` while it exists; the rows below are from it.
+
+| Rows | Cycles Δ (ours vs 1.6.0) | Instructions Δ |
+|---|---|---|
+| Large files, levels 1–2 (8 files) | −0.5% to −3.1% | +3.0 to +5.0% (x-ray L1 −1.3%) |
+| Large files, levels 3–4, window 19 | −0.0% to −1.4%; Main.css (385 KB) +0.5 to +0.9%, webster L4 +0.2% | +1.2 to +2.6% |
+| Streamed in 64 KB pieces | −6.5% to −13.8% (Main.css +0.6%) | −3.9 to −21.5% |
+| Varied bodies, 4–64 KB (a different body each call; 24 rows: 4 files × 3 sizes × 2 levels) | −2.0% to +0.7% (median about −0.6%) | +0.9 to +2.7% |
+| 1 KB bodies | −6.5% to −10.8% | −4.9 to −10.5% |
+| Random 1 MB (raw blocks) | −33.3% | −23.1% |
+| Decode, every row (large, streamed, 1–64 KB, random) | −1.8% to −23.1% | −20.7 to +7.4% |
+
+Before (the 1.6.0 row of the suite above): 2–9% behind in time on dickens, mozilla, and x-ray, +7.5–11% instructions.
+
+**Repeated bodies mislead.** The older `enc body` rows compress one 4–64 KB body over and over; there the branch
+predictor learns the input's match outcomes, and how well depends on each loop's branch layout. On them level 3 reads
+−5% to +9% (noisy between runs) at instructions within +3%: the difference is all discarded work. The same sizes with a
+different body each call (`enc bodies`: consecutive slices of the file, the same sequence for both sides) cost both
+encoders about 30% more cycles, and the gaps go: dickens 16 KB level 3 +10% repeated, +0.1% varied; Main.css 64 KB
++8% repeated, +0.7% varied (it has only 5 bodies to cycle). Judge bodies by the varied rows.
+
+How it got there (each step measured in the harness, frames unchanged):
+
+| Step | Change | Effect |
+|---|---|---|
+| 1 | Hash multipliers as stored values set in `init`, not literals: LLVM rematerialized each 64-bit constant (`mov` + 3 `movk`) per use in the loop | fast search loop 59 → 51 instructions a position |
+| 2 | Index-space positions (`base = source − indexBase`), libzstd's `base` | an add per candidate removed |
+| 3 | The near-end literal copy inline (16-byte chunks, then 8/4/2/1), not `memmove`: the call forced the loop's live values onto the stack | fast and dfast loops keep their state in registers |
+| 4 | Loaded bytes carried in locals (`value0` …): with no TBAA from Swift, every table store made LLVM reload them | one 8-byte load a position |
+| 5 | dfast's long candidate and its bytes fetched a position ahead; an invalid candidate coded as the complement of the position's bytes (`csinv`), so the test is one compare with no validity branch | dickens L3 from +3% to −1%; large windows ahead |
+| 6 | The short candidate read at the position, as libzstd does (fetched ahead too, it cost 1.5–2% instructions for no gain) | level 3–4 instructions +4.6% → +1.7% |
+| 7 | Blocks written straight into the caller's output when it has room for everything the block encoder reserves (item 10); a block without sequences reads its literals in place | random 1 MB −32%; 1 KB bodies −7 to −11% |
+| 8 | Raw blocks decoded with the copy and XXH64 fused (`XXHash64.copyAndUpdate`) | random decode 0% → −23% |
+| 9 | The histogram's 4 KB scratch cleared while it's summed, not `memset` first | small-block store misses down |
+| 10 | `ZstdHuffman.decodeWeights`' nested function a static one taking its state (item 11) | no closure context |
+
+Tried and not kept: workspace coloring (store misses unchanged), dropping the `ip+256` prefetch (neutral), a
+branch-free 8-byte backward catch-up (2–9% slower), libzstd's dfast shape (only indices ahead: 5–17% slower here at
+equal instructions), folding `rep1 > 0` into the repeat comparison (LLVM rebuilt the branch).
+
+Fixed on the way (both pre-existing; found by the change set's adversarial review, now tested):
+
+- **A frame after a `compressAll` that threw for lack of room was corrupt**: the next frame's index wasn't advanced on
+  the throw, so it matched against the failed frame's table entries (offsets ahead of the position). A `defer` advances
+  it; `ZstdEncoderTests.fillsTheOutputOrThrows` encodes after cuts at 0, half, and one byte short (it failed with the
+  old code: frames libzstd can't decode).
+- **Two tied Huffman symbols could swap code lengths** (frames 1–2 bytes off libzstd's on 2 of 6.15 M sweep frames):
+  libzstd's `RANK_POSITION_DISTINCT_COUNT_CUTOFF` is `158 + ZSTD_highbit32(158)` = 165, not the 166 its comment says,
+  so it quicksorts the bucket of symbols counted exactly 164 times, reordering them; the port started at 166.
+  `ZstdEncoderTests.breaksHuffmanTiesAsLibzstd` (the review input's literal counts, shuffled) failed before. 1.5.7 makes
+  the same frames as 1.6.0 there: the port was wrong against both.
+
 ### Targets
 
 - Ratio within 2% of libzstd: **identical frames** at levels 1–4 (0.0%), on 1.5.7 and 1.6.0.
-- Cycles within 15% at levels 1 and 3: **−14% to +5.4%** on every row (one call); parity within ±3% on most.
+- Cycles: **at or ahead of libzstd 1.6.0** on large files (two rows within +0.9%), streamed, 1 KB bodies, varied 4–64
+  KB bodies (within +0.7%), random input, and every decode row.
 - 0 mallocs after setup: the four gates pass.
-- Instructions remain **+7.5 to +11%** on large inputs (x-ray level 1: −14%): see "The gap that's left".
+- Instructions: +1.2 to +2.6% at levels 3–4, +3 to +5% at levels 1–2 (x-ray level 1 −1.3%): see "The gap that's left".
 
 ## How it got there (harness; cycles per byte, load 10–13)
 
@@ -249,10 +307,11 @@ Tried and not kept:
 
 ## The gap that's left
 
-Instructions are 7.5–11% above libzstd's on large inputs at the same cycles (±3%). The dfast search loop is 49
-instructions against libzstd's 45: a rematerialized 5-byte-hash prime (3) and two shift amounts reloaded from the
-stack per position (libzstd reloads one). The match-length tails are 3 compare-and-select steps where clang uses
-branches. The entropy stages are at parity or below (x-ray level 1, nearly all literals: −14% instructions).
+(Updated 2026-11-25, against 1.6.0.) The search loops are at parity: dfast 44 instructions a position against
+libzstd's 43. What remains is instructions outside them: +3–5% at levels 1–2, +1–2.6% at levels 3–4, in the match
+handling (per-match code and stores) and the entropy stage; cycles are at or below libzstd's anyway. Main.css whole
+(385 KB, compressed repeatedly) at levels 3–4 is +0.5–0.9%, likely the same predictor memorization as the repeated
+bodies.
 
 ## Not done
 
@@ -262,8 +321,8 @@ branches. The entropy stages are at parity or below (x-ray level 1, nearly all l
   (`selectMode`'s second branch: `ZSTD_selectEncodingType` for `strategy >= ZSTD_lazy`), untested by frames.
 - Dictionaries, long-distance matching, multithreading, `targetCBlockSize`, negative levels (the fast strategy with a
   target length runs, with literal compression off as libzstd does, but `init(level:)` stops at 1).
-- Writing blocks straight into the caller's buffer in `compressAll`: would save a copy of every block (all of the input
-  for incompressible data, the likely cause of the random row's gap) and 128 KB of memory.
+- ~~Writing blocks straight into the caller's buffer in `compressAll`~~: done 2026-11-25 (step 7 above). The staging
+  buffer stays, for outputs with less room than a block's reservations and for streaming.
 
 ## Tests
 

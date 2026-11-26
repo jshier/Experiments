@@ -55,7 +55,7 @@ let package = Package(
                 // APFS compression's encoders (LZBITMAP, LZFSE, LZVN, zlib) and decoders (rewriting a fork that
                 // didn't pay).
                 .product(name: "BytesCompression", package: "BytesCompression"),
-                // The waits: `Continuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`.
+                // The waits: `wait(in:_:)`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`.
                 .product(name: "BytesAsync", package: "Bytes"),
             ],
             swiftSettings: librarySettings

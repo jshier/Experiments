@@ -38,6 +38,11 @@ public struct AAHeaderRange: Sendable, Equatable {
     public var offset: Int
     public var count: Int
 
+    public init(offset: Int, count: Int) {
+        self.offset = offset
+        self.count = count
+    }
+
     /// Whether the range holds no bytes.
     public var isEmpty: Bool {
         count == 0
@@ -100,7 +105,7 @@ public enum AppleArchive {
     /// make it contiguous (BytesCompressionAsync's carry region, `BlockBufferPool.carry`): a header is at most 65,535
     /// bytes (its size is 16 bits), and so are a cpio entry's header, name, and link target here
     /// (``CpioWalker/maximumHeaderAndName``). Sources nothing walks (decryption to a file) need none.
-    static var headerCarryCapacity: Int { 65_536 }
+    public static var headerCarryCapacity: Int { 65_536 }
 
     /// Whether `bytes` start a plain Apple Archive stream (`AA01` or `YAA1`).
     static func startsAnArchive(_ bytes: RawSpan) -> Bool {

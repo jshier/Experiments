@@ -2,7 +2,7 @@ import BytesReferenceCodecs
 import BytesTesting
 import BytesTestSupport
 import Foundation
-@_spi(Benchmarking) import NativeZip
+import NativeZip
 import Testing
 
 /// Not a test: times NativeZip's DEFLATE decoding and zlib's on streams of different shapes, to see where each spends its time.

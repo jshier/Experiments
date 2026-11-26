@@ -15,9 +15,38 @@ baseline first. File and line references are as of this date.
 2. **Brotli positions past 2^32** (same section). Wrapping is harmless (every comparison is a wrapping difference).
    Shown by `BrotliEncoder.setStreamBase(_:)` tests and 4.5 GiB bulk streams, Brotli and gzip (ISIZE modulo 2^32).
 
+3–5, 16–17. **Block loads, `cmeq` matching, the pattern search, `ByteMatches`, a typed view** (2026-11-25,
+   `Bytes/Benchmarks/RESULTS.md`; plan and reviews in `Scan-Items-Plan-2026-11-25.md`). Scans and `byteBlock(at:)`
+   load unchecked under their bounds; `matching(_:)` is one `cmeq`; candidate blocks get an exact match for all 16
+   offsets at once (not a per-candidate walk, which lost when dense); `ByteMatches(_: SIMDMask)`; `RawSpan.chunks(of:)`
+   and `ByteBlock(_: InlineArray<64, UInt8>)`, used by SHA and the checksums. Departures: `matching(lessThan:/atLeast:)`
+   not added (they are `matching(in:)`); `WordReads`' unchecked loads stay in BytesCompression; GHASH keeps its checked
+   loads (the view made it worse).
+
+6, 22, 26. **The SDK's `Continuation`, scoped resources, buffer leases** (2026-11-25, `Bytes/Benchmarks/RESULTS.md`,
+   BytesCompression's, Disk's, NativeAEA's and NativeZip's RESULTS.md; plan, review, and what changed in
+   `Async-Leases-Plan-2026-11-25.md`). Every wait in BytesAsync and its clients is on macOS 27's noncopyable
+   `Continuation`, through `wait(in:_:)`; `WaiterQueue` and `AsyncQueue` rings wrap by compare; `withPermit`;
+   `AsyncIndexPool` closable (`acquire() -> Int?`); `BlockBufferPool.Buffer` leases, carried by a noncopyable
+   `DecodedBlock`. Departures: no index lease from `AsyncIndexPool` (Disk's large-file slots are shared by a count, not
+   held by one task); `perform(on:)` stays on `UnsafeContinuation` (an escaping Dispatch closure can't consume it);
+   the sinks keep buffer indexes they're lent. Clients' rows flat; contended BytesAsync rows within the scheduler's
+   noise (an A/B in one process). Two compiler bugs filed locally (`~/Scratch/swift-bugs/` 29, 30).
+
 Found on the way: Homebrew's libzstd 1.6.0 makes the same frames as 1.5.7 with 2–18% fewer instructions. Our encoder
 is now 2–9% behind it in time on dickens, mozilla, and x-ray (`Benchmarks/RESULTS-zstd-encoder.md`, "libzstd 1.6.0").
 That gap is a new item (13a below).
+
+10, 11, 13a. **zstd against libzstd 1.6.0** (2026-11-25, `BytesCompression/Benchmarks/RESULTS-zstd-encoder.md`,
+   "Against libzstd 1.6.0"). Blocks go straight into the caller's output when it has room for every reservation (10);
+   `decodeWeights` takes its state as arguments (11); the encoder is at or ahead of 1.6.0 in cycles on large files,
+   streams, 1 KB and varied 4–64 KB bodies, and random input, and the decoder on every row (13a): runtime hash
+   multipliers, index-space positions, carried loads, an inline literal copy, dfast's long candidate fetched a
+   position ahead with complement-coded validity, fused copy and XXH64 for raw blocks. Two pre-existing encoder bugs
+   fixed with tests: a frame after a `compressAll` that threw was corrupt; tied Huffman symbols could swap lengths
+   (libzstd's sort cutoff is 165, not the 166 its comment says). Left: instructions +1–5% outside the search loops;
+   repeated small bodies measure the branch predictor's memory (judge by varied bodies). Tests no longer use
+   `@testable` or `@_spi` anywhere; `-enable-testing` is gone from the docs and `Tools/toolchain test`.
 
 ## Performance: Bytes
 
@@ -41,13 +70,13 @@ That gap is a new item (13a below).
 
 ## Performance: BytesCompression
 
-10. **[M] The zstd one-shot encoder stages each block, then copies it out** (`ZstdEncoder.swift:242–274`).
-11. **[L] `ZstdHuffman.decodeWeights` is a nested function mutating a captured `var`** (`ZstdEntropy.swift:636–650`).
+10. ~~**[M] The zstd one-shot encoder stages each block, then copies it out**~~ (done, above).
+11. ~~**[L] `ZstdHuffman.decodeWeights` is a nested function mutating a captured `var`**~~ (done, above).
 12. **[M, costly] Brotli ratio.** One block type per category, NPOSTFIX/NDIRECT 0, LSB6 only; qualities 10–11 run as 9.
 13. **[L–M] Brotli decode of small inputs.** It was 31% behind Google at 1.6 KB; since then the arena is
     uninitialized, so measure again before working on it.
-13a. **[M] The zstd encoder against libzstd 1.6.0.** Read 1.6.0's changes to `ZSTD_compressBlock_fast` and
-    `doubleFast`, and to its Huffman encoder (x-ray level 1 −18%). The port follows 1.5.7.
+13a. ~~**[M] The zstd encoder against libzstd 1.6.0.**~~ (done, above; 1.6.0's source changed little on this path:
+    its gain was its compiler's).
 14. **[L, large] zstd encoder levels 5 and up; DEFLATE levels 10–12** (both clamped).
 15. **[L] `Decompressor.decompressAll(_:maximumSize:)` reserves `maximumSize` when the size is unknown**
     (`Decompressor.swift:451–455`).
@@ -130,19 +159,11 @@ That gap is a new item (13a below).
 - Flushed message streams.
 - Worst-case encoder inputs.
 - Hash rows at remainder sizes.
-- A BytesAsync stress test.
+- A BytesAsync stress test. (Done: `WaitingBulkTests.everyPrimitiveUnderLoad` and the `Async:` rows.)
 
 ## Next
 
-Items 3–5 with 16–17: the block loads and scans, `cmeq` matching, and mask-walked candidates, with `ByteMatches`
-full lanes and a typed block view. Their "before" baselines are saved, all named `scan-before`:
-
-- **Bytes:** the `Scan`, `Search`, `ASCII`, and `Hex` rows, optimized build.
-- **BytesCompression:** the SHA, HMAC, and AES-GCM rows.
-- **HTTPBytes:** the HTTP/1 head rows.
-- **MQTT:** its suite, for the topic checks.
-
-Measure the portable builds too (`Bytes/bench portable`, `portable-no-c`), since `ByteLanes` has a fallback.
-
-After those: 6 with 22 and 26 (BytesAsync on the SDK's `Continuation`, leases), 10–11 and 13a (zstd), then the API
-reshaping (18–21, 24–25, 27). Narrowing (29) goes last.
+Items 3–5 with 16–17 are done (above; baselines `scan-before*` → `scan-after*` in Bytes, BytesCompression,
+HTTPBytes/Benchmarks, and MQTT), and so are 6 with 22 and 26 (`async-before` → `async-after` in Bytes, Disk, and
+NativeAEA), and 10–11 with 13a (`zstd-before` → `zstd-after` in BytesCompression). Next: the API reshaping (18–21,
+24–25, 27). Narrowing (29) goes last.

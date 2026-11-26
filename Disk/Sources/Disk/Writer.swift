@@ -585,11 +585,11 @@ struct Writer<Source: ContentSource>: ~Copyable {
         if state.progress.failed { throw .invalidMetadata("an earlier piece of the file failed, \(state.pathRef.string)") }
         guard let policy = state.policy else {
             // Plain: each piece writes its own range, in any order.
-            await context.fileSystem.acquire()
-            defer { context.fileSystem.release() }
-            // Unsafe: `data` to `writeFully`. Safe: the piece's `job.count` bytes, held by the job (above), across
-            // the wait before this too; read during the call.
-            try unsafe FileIO.writeFully(state.descriptor, data, count: job.count, at: pieceStart, path: state.pathRef)
+            try await context.fileSystem.withPermit { () throws(DiskError) in
+                // Unsafe: `data` to `writeFully`. Safe: the piece's `job.count` bytes, held by the job (above), across
+                // the wait before this too; read during the call.
+                try unsafe FileIO.writeFully(state.descriptor, data, count: job.count, at: pieceStart, path: state.pathRef)
+            }
             return
         }
         var core = takeCore()
@@ -706,19 +706,19 @@ struct Writer<Source: ContentSource>: ~Copyable {
         var forkOffset = pieceForkStart
         let fileSystem = context.fileSystem
         if head > 0 {
-            await fileSystem.acquire()
-            defer { fileSystem.release() }
-            // Unsafe: the output's base to `setAttribute`. Safe: the head chunk's `head` bytes, written there above
-            // and not touched since (the slot is beyond them), in the core's storage; read during the call.
-            try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, out, count: head, position: forkOffset)
+            try await fileSystem.withPermit { () throws(DiskError) in
+                // Unsafe: the output's base to `setAttribute`. Safe: the head chunk's `head` bytes, written there above
+                // and not touched since (the slot is beyond them), in the core's storage; read during the call.
+                try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, out, count: head, position: forkOffset)
+            }
             forkOffset += head
         }
         if inPlace > 0 {
-            await fileSystem.acquire()
-            defer { fileSystem.release() }
-            // Unsafe: `data` to `setAttribute`. Safe: the `inPlace` compressed bytes moved to the piece's start above
-            // (`inPlace <= job.count`), still held by the job after the waits; read during the call.
-            try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, data, count: inPlace, position: forkOffset)
+            try await fileSystem.withPermit { () throws(DiskError) in
+                // Unsafe: `data` to `setAttribute`. Safe: the `inPlace` compressed bytes moved to the piece's start
+                // above (`inPlace <= job.count`), still held by the job after the waits; read during the call.
+                try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, data, count: inPlace, position: forkOffset)
+            }
             forkOffset += inPlace
         }
         // Chunks left (output caught up with input): batches into `output`, written as they're made.
@@ -735,11 +735,11 @@ struct Writer<Source: ContentSource>: ~Copyable {
                 batch += count
                 chunk += 1
             }
-            await fileSystem.acquire()
-            defer { fileSystem.release() }
-            // Unsafe: the output's base to `setAttribute`. Safe: the batch's `batch` bytes just written there, in
-            // the core's storage, which only this task uses; read during the call.
-            try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, out, count: batch, position: forkOffset)
+            try await fileSystem.withPermit { () throws(DiskError) in
+                // Unsafe: the output's base to `setAttribute`. Safe: the batch's `batch` bytes just written there, in
+                // the core's storage, which only this task uses; read during the call.
+                try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, out, count: batch, position: forkOffset)
+            }
             forkOffset += batch
         }
         // The table entries for this piece's chunks: sizes to offsets, plus the end for the last piece.
@@ -760,11 +760,11 @@ struct Writer<Source: ContentSource>: ~Copyable {
             entries += 1
         }
         if entries > 0 {
-            await fileSystem.acquire()
-            defer { fileSystem.release() }
-            // Unsafe: the table's base to `setAttribute`. Safe: its first `entries` entries, all stored above, in the
-            // core's storage; read during the call.
-            try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, core.table.base, count: entries * 4, position: firstChunk * 4)
+            try await fileSystem.withPermit { () throws(DiskError) in
+                // Unsafe: the table's base to `setAttribute`. Safe: its first `entries` entries, all stored above, in
+                // the core's storage; read during the call.
+                try unsafe core.setAttribute(state.descriptor, Decmpfs.resourceFork, core.table.base, count: entries * 4, position: firstChunk * 4)
+            }
         }
         written = forkOffset
     }

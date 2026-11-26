@@ -5,9 +5,9 @@ import BytesReferenceCodecs
 // `TestData`, for the archive-coverage row.
 import BytesTestSupport
 import Compression
-@_spi(Benchmarking) import Disk
+import Disk
 import Foundation
-@_spi(Benchmarking) import NativeZip
+import NativeZip
 import System
 import zlib
 

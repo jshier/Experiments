@@ -6,6 +6,27 @@ M1 Max (8 performance and 2 efficiency cores), macOS 27.2, Swift 6.4 (Xcode 27.3
 HTTP/3 traffic as HTTP/1 heads: 401 requests, 580 B average; 383 responses, 953 B average). References: picohttpparser
 (dd573d8) and llhttp (release 9.4.4), built -O3 with NDEBUG from `Tools/test-data fetch picohttpparser llhttp`.
 
+## 2026-11-25: Bytes' block loads and `cmeq` matching (baselines `scan-before` → `scan-after`)
+
+Nothing in HTTPBytes changed for speed: Bytes' `byteBlock(at:)` loads its four vectors unchecked under its one
+precondition (the checked loads kept a compare and a branch each in callers' loops), and its 16-byte scans load
+unchecked and match with one `cmeq` (`../Bytes/Benchmarks/RESULTS.md`, 2026-11-25). `HeadScanner`'s 64-byte
+`farStop` loop: 48 → 29 instructions a block. `HTTPCharacters.matches(_:)` is gone: its 16 callers take a comparison
+with Bytes' `ByteMatches(_:)`, and the two uppercase tests are `matching(in: 0x41...0x5A)` (the same machine code).
+
+| Row (HTTPBytes) | Instructions before | after | Time before (µs) | after |
+|---|---|---|---|---|
+| request heads, 401 requests, 232 KB | 586 K | 501 K (−15%) | 37 | 34 |
+| request heads, top-1k, 4.1 MB | 9,765 K | 8,413 K (−14%) | 741 | 728 |
+| response heads, 383 responses, 365 KB | 923 K | 815 K (−12%) | 54 | 52 |
+| response heads, top-1k, 4.1 MB | 7,807 K | 6,603 K (−15%) | 660 | 657 |
+| 1,000 × 20 fields of 128 B | 4,653 K | 3,809 K (−18%) | 261 | 272 |
+| 1,000 × 20 fields of 8 B | 2,535 K | 2,380 K (−6%) | 138 | 133 |
+| 1,000 tiny requests, 38 B | 394 K | 346 K (−12%) | 18 | 16 |
+
+Every head row −3% to −18% in instructions; times within the runs' drift (one run each), the long-field rows not
+faster for the instructions (the scan is a small part of a head's time, and branch-bound).
+
 ## 2026-11-24, E2: the dynamic table's ring on `MaskedTable`; docs (fix plan D9, D10; baselines `fix-E2-before` → `fix-E2-d9-http` → `fix-E2-after`)
 
 `Writeups/BytesCompression-Fix-Plan-2026-11-23.md` D9: Bytes' `MaskedTable` (Bytes/Benchmarks/RESULTS.md, "E2"), tried on

@@ -65,7 +65,7 @@ public struct EntryPath: ~Escapable {
     /// Most paths pass a vector screen: no NUL, no `/` or `.` first, no `/` last, and no `/` followed by `/` or `.`,
     /// tested 16 bytes at a time with `ByteLanes` (then no component is empty or starts with a dot, so none is `.` or
     /// `..`). A path that fails the screen (a dot file, a `.` component) is checked a component at a time.
-    static func isValid(_ bytes: RawSpan) -> Bool {
+    public static func isValid(_ bytes: RawSpan) -> Bool {
         let count = bytes.byteCount
         if count == 0 { return true }
         guard count <= maximumByteCount else { return false }
@@ -73,7 +73,7 @@ public struct EntryPath: ~Escapable {
     }
 
     /// The vector screen: `true` means valid; `false` means "check exactly". `bytes` isn't empty.
-    static func screen(_ bytes: RawSpan) -> Bool {
+    public static func screen(_ bytes: RawSpan) -> Bool {
         let count = bytes.byteCount
         let first = bytes.load(fromByteOffset: 0, as: UInt8.self)
         let last = bytes.load(fromByteOffset: count - 1, as: UInt8.self)
@@ -107,7 +107,7 @@ public struct EntryPath: ~Escapable {
     }
 
     /// The exact check, a component at a time.
-    static func exactCheck(_ bytes: RawSpan) -> Bool {
+    public static func exactCheck(_ bytes: RawSpan) -> Bool {
         let bytes = Span<UInt8>(viewing: bytes)
         let count = bytes.count
         var start = 0

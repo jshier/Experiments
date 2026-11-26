@@ -1,4 +1,4 @@
-@_spi(Testing) import Disk
+import Disk
 
 /// Disk's descriptor audit, for other packages' tests: a test's clients (NativeAEA's archives, NativeZip's
 /// extractions) must close every Disk descriptor they own explicitly.

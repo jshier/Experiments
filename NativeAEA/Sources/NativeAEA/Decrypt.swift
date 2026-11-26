@@ -50,15 +50,13 @@ public extension AEAArchive {
             do throws(AEAError) {
                 // The segments in order, `needed` first to last.
                 while let block = try await stream.nextBlock() {
-                    let buffer = block.buffer
-                    defer { pool.release(buffer) }
                     let segment = segments[block.index]
                     // The part of this segment inside the range.
                     let low = max(wanted.lowerBound, segment.rawOffset), high = min(wanted.upperBound, segment.rawOffset + segment.rawSize)
                     let start = MonotonicClock.now
-                    // Within its `rawSize` bytes, in a buffer this task holds until the `defer` above releases it, after
-                    // the write.
-                    let bytes = pool.bytes(buffer, at: low - segment.rawOffset, count: high - low)
+                    // Within its `rawSize` bytes, in the block's buffer, which its lease holds until the iteration
+                    // ends, after the write.
+                    let bytes = pool.bytes(block.buffer.index, at: low - segment.rawOffset, count: high - low)
                     do throws(DiskError) {
                         try output.write(bytes, at: low - wanted.lowerBound)
                     } catch {

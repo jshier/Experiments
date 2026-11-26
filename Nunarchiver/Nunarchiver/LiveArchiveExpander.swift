@@ -9,7 +9,7 @@ import Synchronization
 import System
 
 /// The expander the app runs: one ``ExtractionProgress`` per running expansion, polled by the UI.
-final class LiveArchiveExpander: ArchiveExpander {
+public final class LiveArchiveExpander: ArchiveExpander {
     /// The app's one expander: the features that start expansions (``Expansion``) and the one that polls them
     /// (``Archiver``) must reach the same registry of running expansions.
     static let shared = LiveArchiveExpander()
@@ -30,7 +30,9 @@ final class LiveArchiveExpander: ArchiveExpander {
     /// The App Nap opt-out held while anything expands, and how many expansions hold it.
     private let activity = Mutex<(holders: Int, token: any NSObjectProtocol?)>((0, nil))
 
-    func expand(_ archive: URL, id: UUID, credentials: ArchiveCredentials) async -> ExpansionOutcome {
+    public init() {}
+
+    public func expand(_ archive: URL, id: UUID, credentials: ArchiveCredentials) async -> ExpansionOutcome {
         let progress = ExtractionProgress()
         let started = ContinuousClock.now
         running.withLock { $0[id] = Running(name: archive.lastPathComponent, progress: progress, started: started) }
@@ -96,7 +98,7 @@ final class LiveArchiveExpander: ArchiveExpander {
         }
     }
 
-    func progress(of id: UUID) -> ExpansionProgress? {
+    public func progress(of id: UUID) -> ExpansionProgress? {
         guard let expansion = running.withLock({ $0[id] }) else { return nil }
         // Disk's reading: bytes and entries together, and a fraction that never goes back while the totals change under
         // a running extraction (an estimate of the bytes, then exact counts once the archive has been walked).
@@ -120,7 +122,7 @@ final class LiveArchiveExpander: ArchiveExpander {
 }
 
 /// Archive Utility's expansion, on Disk's staging directories.
-enum Expander {
+public enum Expander {
     /// Expands `archive` next to itself and returns what was published.
     ///
     /// 1. The archive is opened with what the user has entered (``CredentialRequest`` is thrown here, before anything
@@ -170,7 +172,7 @@ enum Expander {
     }
 
     /// The archive's name without its extension: `Archive.zip` → `Archive`.
-    static func folderName(for archive: FilePath) -> String {
+    public static func folderName(for archive: FilePath) -> String {
         guard let name = archive.lastComponent else { return "Archive" }
         let stem = name.stem
         return stem.isEmpty ? name.string : stem
@@ -178,7 +180,7 @@ enum Expander {
 }
 
 /// Errors the app makes, and messages for every error the expanders throw.
-enum ExpansionFailure: Error, CustomStringConvertible {
+public enum ExpansionFailure: Error, CustomStringConvertible {
     /// A system call on the archive file failed with this `errno`.
     case system(call: String, path: FilePath, code: Int32)
     /// Neither the file's first bytes nor its extension (the name given) is an archive's.
@@ -186,7 +188,7 @@ enum ExpansionFailure: Error, CustomStringConvertible {
     /// The archive is encrypted for something the app has no prompt for (described here).
     case unsupportedKey(String)
 
-    var description: String {
+    public var description: String {
         switch self {
         case let .system(call, path, code):
             "\(call) “\(path.lastComponent?.string ?? path.string)”: \(Errno(rawValue: code).description)"
@@ -208,7 +210,7 @@ enum ExpansionFailure: Error, CustomStringConvertible {
 
 /// Everything an expansion can end with, each as its package threw it: composed, not flattened, so the outcome (ask
 /// again, cancelled, failed) is decided by case, never by message.
-enum ExpansionError: Error, CustomStringConvertible {
+public enum ExpansionError: Error, CustomStringConvertible {
     /// The archive needs a password or key the user hasn't entered (or entered wrongly).
     case credential(CredentialRequest)
     /// The app's own: a format it doesn't recognize, a key it can't ask for, a call on the archive file.
@@ -232,7 +234,7 @@ enum ExpansionError: Error, CustomStringConvertible {
         }
     }
 
-    var description: String {
+    public var description: String {
         switch self {
         case let .credential(request): "the archive needs a \(request.kind)"
         case let .failure(failure): failure.description

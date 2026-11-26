@@ -71,6 +71,12 @@ public struct EntryFailure<SourceFailure: Error>: Error, CustomStringConvertible
     public var tag: Int
     public var error: EntryError<SourceFailure>
 
+    public init(path: String, tag: Int, error: EntryError<SourceFailure>) {
+        self.path = path
+        self.tag = tag
+        self.error = error
+    }
+
     public var description: String { "\(path): \(error)" }
 }
 
@@ -137,7 +143,7 @@ public enum ExtractionError<PlanFailure: Error, SourceFailure: Error>: Error {
     case plan(PlanFailure)
 
     /// An entry's failure (the one that stopped the extraction).
-    init(_ error: EntryError<SourceFailure>) {
+    public init(_ error: EntryError<SourceFailure>) {
         switch error {
         case let .disk(error): self = .disk(error)
         case let .source(error): self = .source(error)
@@ -505,11 +511,17 @@ final class LargeFile: @unchecked Sendable {
 
     /// Compressed pieces go into the fork in order: piece `next` writes at `forkOffset`. Pieces that come to their turn
     /// early (they compress in parallel first) wait here.
-    private struct Turn {
+    private struct Turn: ~Copyable {
         var next = 0
         var forkOffset = 0
         var failed = false
-        var waiters: WaiterQueue<(piece: Int, continuation: Continuation<Bool>)>
+        var waiters: WaiterQueue<Waiter>
+    }
+
+    /// A piece waiting for its turn.
+    private struct Waiter: ~Copyable {
+        var piece: Int
+        var continuation: Continuation<Bool, Never>
     }
 
     private let turn: Mutex<Turn>
@@ -544,36 +556,33 @@ final class LargeFile: @unchecked Sendable {
             return turn.next == piece ? .some(turn.forkOffset) : nil
         }
         if let now { return now }
-        let proceed = await withContinuation { (continuation: Continuation<Bool>) in
-            let ready: Bool? = turn.withLock { turn in
-                if turn.failed { return false }
-                if turn.next == piece { return true }
-                turn.waiters.append((piece, continuation))
-                return nil
-            }
-            if let ready { continuation.resume(returning: ready) }
+        let proceed = await wait(in: turn) { turn, continuation in
+            if turn.failed { return false }
+            if turn.next == piece { return true }
+            turn.waiters.append(Waiter(piece: piece, continuation: continuation.take()!))
+            return nil
         }
         return proceed ? turn.withLock { $0.forkOffset } : nil
     }
 
     /// Passes the turn to the next piece, with the fork's new end (`nil`: unchanged, after a failed write).
     func passTurn(forkOffset: Int?) {
-        let next: Continuation<Bool>? = turn.withLock { turn in
+        let next: Waiter? = turn.withLock { turn in
             if let forkOffset { turn.forkOffset = forkOffset }
             turn.next += 1
             let piece = turn.next
-            return turn.waiters.removeFirst { $0.piece == piece }?.continuation
+            return turn.waiters.removeFirst { $0.piece == piece }
         }
-        next?.resume(returning: true)
+        if let next { next.continuation.resume(returning: true) }
     }
 
     /// Marks the file failed: pieces waiting for their turn, and later ones, don't write.
     func failTurns() {
-        let waiting = turn.withLock { turn in
+        var waiting = turn.withLock { turn in
             turn.failed = true
             return turn.waiters.removeAll()
         }
-        for waiter in waiting {
+        while let waiter = waiting.popFirst() {
             waiter.continuation.resume(returning: false)
         }
     }

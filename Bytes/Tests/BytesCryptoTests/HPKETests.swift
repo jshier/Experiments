@@ -1,5 +1,5 @@
-@testable import BytesCrypto
 import Bytes
+import BytesCrypto
 import BytesTesting
 import BytesTestSupport
 import CryptoKit

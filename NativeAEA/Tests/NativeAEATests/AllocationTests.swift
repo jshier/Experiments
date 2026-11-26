@@ -1,5 +1,5 @@
-@testable import NativeAEA
 import BytesCrypto
+import NativeAEA
 import Synchronization
 import Testing
 

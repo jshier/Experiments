@@ -40,28 +40,25 @@ enum ArchiveWalker {
         var entry = AAEntryHeader()
         var blobsStart = 0
         var blobsEnd = 0
-        var previousBuffer = -1
+        // The previous chunk, held until the next one has its partial header (the lease releases its buffer).
+        var previous: DecodedBlock?
         var previousStart = 0 // The previous chunk's offset in the stream.
         var carry = 0 // Bytes of a partial header at the end of the previous chunk.
         var streamEnd = 0
         let maximumMetadataByteCount = sink.maximumMetadataByteCount
-        defer {
-            if previousBuffer >= 0 { pool.release(previousBuffer) }
-        }
         while let chunk = try await source.nextBlock() {
-            let buffer = chunk.buffer
+            let buffer = chunk.buffer.index, segment = chunk.index
             let start = chunk.rawOffset
             let end = start + chunk.rawSize
             streamEnd = end
-            if carry > 0 {
+            if carry > 0, let from = previous?.buffer.index {
                 // The partial header goes just before this chunk's bytes. `carry` is under the carry region's size
                 // (a header is at most 65,535 bytes), and the previous buffer is still held.
-                pool.carry(carry, from: previousBuffer, at: position - previousStart, to: buffer)
+                pool.carry(carry, from: from, at: position - previousStart, to: buffer)
                 carry = 0
             }
             previousStart = start
-            if previousBuffer >= 0 { pool.release(previousBuffer) }
-            previousBuffer = buffer
+            previous = consume chunk // Releases the one before.
 
             // Stream positions from `start - carry` to `end` are at `p - start` in the buffer.
             while true {
@@ -96,7 +93,7 @@ enum ArchiveWalker {
                     if low < high {
                         try await sink.data(
                             pool.bytes(buffer, at: low - start, count: high - low), offset: low - start, fileOffset: low - dataStart,
-                            buffer: buffer, segment: chunk.index
+                            buffer: buffer, segment: segment
                         )
                     }
                 }

@@ -17,67 +17,67 @@ internal import Bytes
 // MARK: - Moduli
 
 /// P-256's field prime, p = 2²⁵⁶ − 2²²⁴ + 2¹⁹² + 2⁹⁶ − 1.
-enum P256FieldModulus: MontgomeryModulus {
-    static var modulus: InlineArray<6, UInt64> {
+package enum P256FieldModulus: MontgomeryModulus {
+    package static var modulus: InlineArray<6, UInt64> {
         @inline(__always) get { [0xFFFF_FFFF_FFFF_FFFF, 0x0000_0000_FFFF_FFFF, 0, 0xFFFF_FFFF_0000_0001, 0, 0] }
     }
 
-    static var negativeInverse: UInt64 { @inline(__always) get { 1 } }
-    static var rSquared: InlineArray<6, UInt64> {
+    package static var negativeInverse: UInt64 { @inline(__always) get { 1 } }
+    package static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get { [0x0000_0000_0000_0003, 0xFFFF_FFFB_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFE, 0x0000_0004_FFFF_FFFD, 0, 0] }
     }
 
-    static var one: InlineArray<6, UInt64> {
+    package static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0x0000_0000_0000_0001, 0xFFFF_FFFF_0000_0000, 0xFFFF_FFFF_FFFF_FFFF, 0x0000_0000_FFFF_FFFE, 0, 0] }
     }
 
-    static var inversionExponent: InlineArray<6, UInt64> {
+    package static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get { [0xFFFF_FFFF_FFFF_FFFD, 0x0000_0000_FFFF_FFFF, 0, 0xFFFF_FFFF_0000_0001, 0, 0] }
     }
 }
 
 /// P-256's group order n.
-enum P256OrderModulus: MontgomeryModulus {
-    static var modulus: InlineArray<6, UInt64> {
+package enum P256OrderModulus: MontgomeryModulus {
+    package static var modulus: InlineArray<6, UInt64> {
         @inline(__always) get { [0xF3B9_CAC2_FC63_2551, 0xBCE6_FAAD_A717_9E84, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_0000_0000, 0, 0] }
     }
 
-    static var negativeInverse: UInt64 { @inline(__always) get { 0xCCD1_C8AA_EE00_BC4F } }
-    static var rSquared: InlineArray<6, UInt64> {
+    package static var negativeInverse: UInt64 { @inline(__always) get { 0xCCD1_C8AA_EE00_BC4F } }
+    package static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get { [0x8324_4C95_BE79_EEA2, 0x4699_799C_49BD_6FA6, 0x2845_B239_2B6B_EC59, 0x66E1_2D94_F3D9_5620, 0, 0] }
     }
 
-    static var one: InlineArray<6, UInt64> {
+    package static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0x0C46_353D_039C_DAAF, 0x4319_0552_58E8_617B, 0, 0x0000_0000_FFFF_FFFF, 0, 0] }
     }
 
-    static var inversionExponent: InlineArray<6, UInt64> {
+    package static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get { [0xF3B9_CAC2_FC63_254F, 0xBCE6_FAAD_A717_9E84, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_0000_0000, 0, 0] }
     }
 }
 
 /// P-384's field prime, p = 2³⁸⁴ − 2¹²⁸ − 2⁹⁶ + 2³² − 1.
-enum P384FieldModulus: MontgomeryModulus {
-    static var modulus: InlineArray<6, UInt64> {
+package enum P384FieldModulus: MontgomeryModulus {
+    package static var modulus: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0x0000_0000_FFFF_FFFF, 0xFFFF_FFFF_0000_0000, 0xFFFF_FFFF_FFFF_FFFE,
              0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF]
         }
     }
 
-    static var negativeInverse: UInt64 { @inline(__always) get { 0x0000_0001_0000_0001 } }
-    static var rSquared: InlineArray<6, UInt64> {
+    package static var negativeInverse: UInt64 { @inline(__always) get { 0x0000_0001_0000_0001 } }
+    package static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0xFFFF_FFFE_0000_0001, 0x0000_0002_0000_0000, 0xFFFF_FFFE_0000_0000,
              0x0000_0002_0000_0000, 0x0000_0000_0000_0001, 0]
         }
     }
 
-    static var one: InlineArray<6, UInt64> {
+    package static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0xFFFF_FFFF_0000_0001, 0x0000_0000_FFFF_FFFF, 0x0000_0000_0000_0001, 0, 0, 0] }
     }
 
-    static var inversionExponent: InlineArray<6, UInt64> {
+    package static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0x0000_0000_FFFF_FFFD, 0xFFFF_FFFF_0000_0000, 0xFFFF_FFFF_FFFF_FFFE,
              0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF]
@@ -86,27 +86,27 @@ enum P384FieldModulus: MontgomeryModulus {
 }
 
 /// P-384's group order n.
-enum P384OrderModulus: MontgomeryModulus {
-    static var modulus: InlineArray<6, UInt64> {
+package enum P384OrderModulus: MontgomeryModulus {
+    package static var modulus: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0xECEC_196A_CCC5_2973, 0x581A_0DB2_48B0_A77A, 0xC763_4D81_F437_2DDF,
              0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF]
         }
     }
 
-    static var negativeInverse: UInt64 { @inline(__always) get { 0x6ED4_6089_E88F_DC45 } }
-    static var rSquared: InlineArray<6, UInt64> {
+    package static var negativeInverse: UInt64 { @inline(__always) get { 0x6ED4_6089_E88F_DC45 } }
+    package static var rSquared: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0x2D31_9B24_19B4_09A9, 0xFF3D_81E5_DF1A_A419, 0xBC3E_483A_FCB8_2947,
              0xD40D_4917_4AAB_1CC5, 0x3FB0_5B7A_2826_6895, 0x0C84_EE01_2B39_BF21]
         }
     }
 
-    static var one: InlineArray<6, UInt64> {
+    package static var one: InlineArray<6, UInt64> {
         @inline(__always) get { [0x1313_E695_333A_D68D, 0xA7E5_F24D_B74F_5885, 0x389C_B27E_0BC8_D220, 0, 0, 0] }
     }
 
-    static var inversionExponent: InlineArray<6, UInt64> {
+    package static var inversionExponent: InlineArray<6, UInt64> {
         @inline(__always) get {
             [0xECEC_196A_CCC5_2971, 0x581A_0DB2_48B0_A77A, 0xC763_4D81_F437_2DDF,
              0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF, 0xFFFF_FFFF_FFFF_FFFF]
@@ -145,9 +145,9 @@ extension PrimeCurve {
 }
 
 /// P-256 (secp256r1, prime256v1).
-enum P256Curve: PrimeCurve {
-    typealias Field = Residue<4, P256FieldModulus>
-    typealias Scalar = Residue<4, P256OrderModulus>
+package enum P256Curve: PrimeCurve {
+    package typealias Field = Residue<4, P256FieldModulus>
+    package typealias Scalar = Residue<4, P256OrderModulus>
     typealias Hash = SHA256
 
     static var b: Field {
@@ -173,9 +173,9 @@ enum P256Curve: PrimeCurve {
 }
 
 /// P-384 (secp384r1).
-enum P384Curve: PrimeCurve {
-    typealias Field = Residue<6, P384FieldModulus>
-    typealias Scalar = Residue<6, P384OrderModulus>
+package enum P384Curve: PrimeCurve {
+    package typealias Field = Residue<6, P384FieldModulus>
+    package typealias Scalar = Residue<6, P384OrderModulus>
     typealias Hash = SHA384
 
     static var b: Field {

@@ -19,7 +19,7 @@ as it works; the few that own memory (``ByteBuffer``, ``Pipeline``) allocate onc
 | Stream bytes through stages (compress, encrypt) | ``ByteTransform``, ``Pipeline``, ``FusedPipeline`` (and `AsyncByteTransform` in `BytesAsync`) |
 | Share spans with other threads for one call | ``LentBytes``, ``LentMutableSpan``, ``LentMutableBytes`` |
 | Memory made once and shared by reference (worker scratch, pools, read buffers) | ``RawStorage`` |
-| Make tasks wait without blocking threads | `Continuation`, `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, `AsyncHandoff` in `BytesAsync` |
+| Make tasks wait without blocking threads | `wait(in:_:)` (on the standard library's `Continuation`), `WaiterQueue`, `AsyncLimiter`, `AsyncIndexPool`, `AsyncLatch`, `AsyncQueue`, `AsyncHandoff` in `BytesAsync` |
 | Test 16 bytes at once | ``ByteLanes``, ``ByteMatches`` |
 | Checksums | ``CRC32``, ``Adler32``, ``RunningChecksum`` |
 | Field types | ``Byte2`` through ``Byte16``, ``Bits`` (``Bit``, ``Crumb``, ``Nibble``, ``Byte``) |

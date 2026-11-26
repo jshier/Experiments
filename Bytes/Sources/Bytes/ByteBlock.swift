@@ -46,14 +46,22 @@ public struct ByteBlock: Sendable {
         self.lanes3 = ByteLanes(lanes3)
     }
 
-    /// The 64 bytes at `offset` in `bytes`. Each load is checked; under a caller's check that the 64 bytes are inside
-    /// `bytes`, the four checks fold away.
+    /// Wraps 64 bytes held by value: an element of `RawSpan.chunks(of:)`'s 64-byte chunks, or a block built on
+    /// the stack. Two 32-byte loads (`ldp`), no checks.
+    ///
+    /// ```swift
+    /// let blocks = bytes.chunks(of: InlineArray<64, UInt8>.self)
+    /// for index in blocks.indices {
+    ///     let lineEnds = ByteBlock(blocks[index]).mask { $0.matching(0x0A) }
+    ///     …
+    /// }
+    /// ```
+    ///
+    /// - Parameter bytes: The block's bytes, in order.
     @inlinable @inline(__always)
-    init(loading bytes: RawSpan, at offset: Int) {
-        self.init(bytes.load(fromByteOffset: offset, as: SIMD16<UInt8>.self),
-                  bytes.load(fromByteOffset: offset &+ 16, as: SIMD16<UInt8>.self),
-                  bytes.load(fromByteOffset: offset &+ 32, as: SIMD16<UInt8>.self),
-                  bytes.load(fromByteOffset: offset &+ 48, as: SIMD16<UInt8>.self))
+    public init(_ bytes: InlineArray<64, UInt8>) {
+        let vector = bitCast(bytes, to: SIMD64<UInt8>.self)
+        self.init(vector.lowHalf.lowHalf, vector.lowHalf.highHalf, vector.highHalf.lowHalf, vector.highHalf.highHalf)
     }
 
     /// The bytes that pass `test`, one bit each: byte i in bit i.
@@ -91,9 +99,14 @@ public extension RawSpan {
     /// - Precondition: `offset >= 0` and `offset + 64 <= byteCount`.
     @inlinable @inline(__always)
     func byteBlock(at offset: Int) -> ByteBlock {
-        // One range check for the block; the four loads' own checks fold into it.
+        // One range check for the block. (Four checked loads kept their own compares and branches in callers' loops,
+        // not folded into this one: HTTPBytes' long-field scan was 48 instructions a block against 29.)
         precondition(offset >= 0 && offset <= byteCount &- 64, "a 64-byte block past the span's end")
-        return ByteBlock(loading: self, at: offset)
+        // Unsafe: unchecked loads. Safe: the precondition puts bytes `offset` through `offset + 63` inside the span.
+        return unsafe ByteBlock(unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self),
+                                unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 16, as: SIMD16<UInt8>.self),
+                                unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 32, as: SIMD16<UInt8>.self),
+                                unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ 48, as: SIMD16<UInt8>.self))
     }
 
     /// The bytes from `offset` to the end, at most 64, followed by `padding` to fill the block: for a span's last,
@@ -147,6 +160,38 @@ public extension RawSpan {
                 to.storeBytes(of: load(fromByteOffset: byteCount &- 1, as: UInt8.self), toByteOffset: available &- 1, as: UInt8.self)
             }
         }
-        return ByteBlock(loading: padded.span.bytes, at: 0)
+        return ByteBlock(padded)
+    }
+
+    /// The span's whole `n`-byte chunks, as elements, leaving out the last `byteCount % n` bytes: a typed view for loops
+    /// over fixed-size blocks (a hash's 64-byte blocks, a checksum's 8-byte words), whose element reads need no checks
+    /// within an element and whose loop needs one bound for the whole view.
+    ///
+    /// ```swift
+    /// let blocks = message.chunks(of: InlineArray<64, UInt8>.self)
+    /// for index in blocks.indices {
+    ///     let block = ByteBlock(blocks[index])                       // four vectors
+    ///     …
+    /// }
+    /// let words = message.chunks(of: InlineArray<8, UInt8>.self)
+    /// for index in words.indices {
+    ///     let word = UInt64(littleEndian: bitCast(words[index], to: UInt64.self))
+    ///     …
+    /// }
+    /// ```
+    ///
+    /// Read an element by `bitCast` to the vector or integer of its size: through the element's own `span`, a read
+    /// put a stack copy (and a stack protector) in the loop. A 64-byte loop of four vector loads compiled to 9
+    /// instructions this way, against 31 with checked offset loads; setting the view up costs about 6, so for spans of a
+    /// few dozen bytes, offset loads can be cheaper.
+    ///
+    /// - Parameter type: The chunk type: `InlineArray<n, UInt8>.self`.
+    /// - Returns: The `byteCount / n` whole chunks, in order.
+    @inlinable @inline(__always)
+    @_lifetime(copy self)
+    func chunks<let n: Int>(of type: InlineArray<n, UInt8>.Type) -> Span<InlineArray<n, UInt8>> {
+        precondition(n > 0, "chunks of no bytes") // Folds: `n` is known where this is specialized.
+        // Byte arrays: any address is aligned for them, and the length is a whole number of them.
+        return Span(viewing: extracting(first: byteCount &- byteCount % n))
     }
 }

@@ -43,6 +43,31 @@ import Testing
         }
     }
 
+    /// Copying while hashing (a raw block's path) copies exactly the bytes and hashes them as `update` does, from
+    /// every partial-round state (0–31 bytes buffered first) and at every length around the 32-byte stripes.
+    @Test func copyingWhileHashingMatchesUpdate() {
+        var rng = SplitMix64(seed: 0xC0)
+        let bytes = (0..<400).map { _ in UInt8(truncatingIfNeeded: rng.next()) }
+        for head in 0..<32 {
+            for length in [0, 1, 7, 31, 32, 33, 63, 64, 65, 100, 255, 256, 257, 300] {
+                var expected = XXHash64()
+                expected.update(bytes.span.bytes.extracting(0..<head))
+                expected.update(bytes.span.bytes.extracting(head..<(head + length)))
+                var hasher = XXHash64()
+                hasher.update(bytes.span.bytes.extracting(0..<head))
+                var copy = [UInt8](repeating: 0xEE, count: length + 8)
+                bytes.withUnsafeBytes { source in
+                    copy.withUnsafeMutableBytes { destination in
+                        hasher.copyAndUpdate(from: source.baseAddress! + head, to: destination.baseAddress!, count: length)
+                    }
+                }
+                #expect(hasher.digest == expected.digest, "head \(head), length \(length)")
+                #expect(copy[..<length] == bytes[head..<(head + length)], "head \(head), length \(length)")
+                #expect(copy[length...].allSatisfy { $0 == 0xEE }, "wrote past \(length) bytes")
+            }
+        }
+    }
+
     /// Hashing a slice reads only the slice: the tail's loads end where the span does.
     @Test func hashesSlicesEndingInsideLargerBuffers() {
         var rng = SplitMix64(seed: 7)

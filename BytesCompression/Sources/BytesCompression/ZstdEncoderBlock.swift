@@ -254,15 +254,20 @@ struct ZstdBlockEncoder: ~Copyable {
         next.offset = previous.offset
         next.matchLength = previous.matchLength
 
-        // Literals.
+        // Literals. A block of literals alone (no sequences) stored as raw literals is its size plus headers, never
+        // smaller than the block stored raw: then that's the answer, without copying the literals out first (libzstd
+        // copies them, then rejects the block; the frame is the same).
+        let rawLiteralsAreFutile = sequenceCount == 0
         let literalSize: Int
         if compressesLiterals {
             let suspectUncompressible = sequenceCount == 0 || store.literalCount / sequenceCount >= 20
             literalSize = unsafe compressLiterals(
                 UnsafeRawPointer(store.literals), count: store.literalCount, into: output, capacity: capacity,
-                strategy: strategy, suspectUncompressible: suspectUncompressible
+                strategy: strategy, suspectUncompressible: suspectUncompressible, rawIsFutile: rawLiteralsAreFutile
             )
+            if literalSize < 0 { return 0 }
         } else {
+            if rawLiteralsAreFutile { return 0 }
             literalSize = unsafe Self.writeRawLiterals(UnsafeRawPointer(store.literals), count: store.literalCount, into: output)
         }
         var position = literalSize
@@ -333,14 +338,19 @@ struct ZstdBlockEncoder: ~Copyable {
 
     /// Writes the literals section of the `count` literals at `literals` (`ZSTD_compressLiterals`).
     ///
-    /// - Returns: The section's size.
+    /// - Parameter rawIsFutile: Whether raw literals would make the block larger than storing it raw: then -1 instead
+    ///   of writing them.
+    /// - Returns: The section's size, or -1 (see `rawIsFutile`).
     mutating func compressLiterals(
         _ literals: UnsafeRawPointer, count: Int, into output: UnsafeMutableRawPointer, capacity: Int, strategy: Int,
-        suspectUncompressible: Bool
+        suspectUncompressible: Bool, rawIsFutile: Bool = false
     ) -> Int {
         // Too few to try (`ZSTD_minLiteralsToCompress`).
         let minimum = previous.huffman.repeatMode == .valid ? 6 : 8 &<< min(9 &- strategy, 3)
-        if count < minimum { return unsafe Self.writeRawLiterals(literals, count: count, into: output) }
+        if count < minimum {
+            if rawIsFutile { return -1 }
+            return unsafe Self.writeRawLiterals(literals, count: count, into: output)
+        }
 
         let headerSize = 3 &+ (count >= 1024 ? 1 : 0) &+ (count >= 16 << 10 ? 1 : 0)
         var singleStream = count < 256
@@ -355,6 +365,7 @@ struct ZstdBlockEncoder: ~Copyable {
         )
         if size == 0 || size >= count &- Self.minimumGain(count) {
             next.huffman = previous.huffman
+            if rawIsFutile { return -1 }
             return unsafe Self.writeRawLiterals(literals, count: count, into: output)
         }
         if size == 1 {

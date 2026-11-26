@@ -1,3 +1,5 @@
+internal import Bytes
+
 /// The CRC-64 that `.xz` files use (CRC-64/XZ: ECMA-182's polynomial 0x42F0E1EBA9EA3693, reflected, initial and
 /// final value all ones), computed incrementally.
 ///
@@ -62,13 +64,13 @@ package struct CRC64: Hashable, Sendable {
 
     /// Updates the unconditioned register `crc` with `bytes`, eight at a time with the tables.
     private static func update(_ crc: UInt64, _ bytes: RawSpan, _ table: Span<UInt64>) -> UInt64 {
-        // Words (`WordReads.words`: byte arrays, so any address is aligned for them, read with `bitCast`) and bytes as
-        // elements, and table lookups: no checks once the table's size is known, as every index is a byte plus a multiple of
-        // 256 below 2048.
+        // Words (`RawSpan.chunks(of:)`: byte arrays, so any address is aligned for them, read with `bitCast`) and bytes
+        // as elements, and table lookups: no checks once the table's size is known, as every index is a byte plus a
+        // multiple of 256 below 2048.
         precondition(table.count == 2048)
         var crc = crc
         let count = bytes.byteCount
-        let words = WordReads.words(bytes)
+        let words = bytes.chunks(of: InlineArray<8, UInt8>.self)
         for index in words.indices {
             crc = update(crc, word: WordReads.value(words[index]), table)
         }

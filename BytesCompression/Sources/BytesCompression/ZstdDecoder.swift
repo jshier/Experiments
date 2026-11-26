@@ -28,13 +28,13 @@ public import Bytes
 /// Single-threaded, it decodes Silesia files 1.1–1.6x as fast as libzstd 1.5.7 on Apple silicon, one call
 /// or streamed (Benchmarks/RESULTS.md, 2026-11-18).
 @safe
-package struct ZstdDecoder: ~Copyable {
+public struct ZstdDecoder: ~Copyable {
     /// The default ``maximumWindowSize``: 128 MB, what `zstd --long` (window log 27) needs, and libzstd's
     /// default limit.
-    package static var defaultMaximumWindowSize: Int { 1 << 27 }
+    public static var defaultMaximumWindowSize: Int { 1 << 27 }
 
     /// The largest window ``decompress(_:into:)`` allocates. Frames needing more throw ``BytesError/limitExceeded``.
-    package let maximumWindowSize: Int
+    public let maximumWindowSize: Int
 
     private var blocks = ZstdBlockDecoder()
 
@@ -72,12 +72,12 @@ package struct ZstdDecoder: ~Copyable {
     /// Creates a decoder, allocating its tables and literal buffer.
     ///
     /// - Parameter maximumWindowSize: The largest window streaming decoding may allocate.
-    package init(maximumWindowSize: Int = ZstdDecoder.defaultMaximumWindowSize) {
+    public init(maximumWindowSize: Int = ZstdDecoder.defaultMaximumWindowSize) {
         self.maximumWindowSize = maximumWindowSize
     }
 
     /// Prepares to decode a new stream, discarding output not yet delivered (and any size hint). Keeps the allocations.
-    package mutating func reset() {
+    public mutating func reset() {
         sizeHint = nil
         stage = .frameHeader
         stashCount = 0
@@ -87,7 +87,7 @@ package struct ZstdDecoder: ~Copyable {
     }
 
     /// The window's size in bytes: what streaming has reserved (tests check a size hint bounds it).
-    package var windowCapacity: Int { window.byteCount }
+    public var windowCapacity: Int { window.byteCount }
 
     /// Prepares to decode a new stream (as ``reset()``) whose decoded size is at most `sizeHint`, if the container
     /// records it: no frame's window is larger than the hint, so a frame that doesn't state its content size (its
@@ -96,14 +96,14 @@ package struct ZstdDecoder: ~Copyable {
     /// than its hint can fail but never reads history the window no longer holds.
     ///
     /// - Parameter sizeHint: The most the stream decodes to, or `nil` (as ``reset()``).
-    package mutating func reset(sizeHint: Int?) {
+    public mutating func reset(sizeHint: Int?) {
         reset()
         self.sizeHint = sizeHint.map { max($0, 0) }
     }
 
     /// Whether the stream is at the end of a frame with all its output delivered: it may end here, or another
     /// frame may follow.
-    package var isFinished: Bool {
+    public var isFinished: Bool {
         guard case .frameHeader = stage else { return false }
         return hasFinishedFrame && stashCount == 0 && windowDelivered == windowEnd
     }
@@ -123,7 +123,7 @@ package struct ZstdDecoder: ~Copyable {
     /// - Throws: ``BytesError/insufficientData`` for a truncated stream; ``BytesError/insufficientCapacity`` if
     ///   the output doesn't fit; ``BytesError/invalidValue`` for corrupt data, trailing bytes that aren't a
     ///   frame, or a frame needing a dictionary; ``BytesError/mismatch`` for a wrong checksum or content size.
-    package mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
+    public mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
         reset()
         guard input.byteCount > 0 else { throw .insufficientData }
         return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
@@ -173,14 +173,23 @@ package struct ZstdDecoder: ~Copyable {
                 position &+= 3
                 let size = blockHeader &>> 3
                 let produced: Int
+                // Whether the block's bytes went into the checksum as they were copied.
+                var hashed = false
                 switch (blockHeader &>> 1) & 3 {
                 case 0: // Raw.
                     guard size <= blockSizeMaximum else { throw .invalidValue }
                     guard size <= count &- position else { throw .insufficientData }
                     guard size <= capacity &- end else { throw .insufficientCapacity }
                     input.extracting(position..<(position &+ size)).withUnsafeBytes { block in
-                        // Unsafe: a copy into the output, which has room for it (checked above).
-                        unsafe (output + end).copyMemory(from: block.baseAddress ?? UnsafeRawPointer(output), byteCount: size)
+                        // Unsafe: a copy into the output, which has room for it (checked above); with the checksum,
+                        // hashed in the same pass.
+                        let source = unsafe block.baseAddress ?? UnsafeRawPointer(output)
+                        if hasher != nil {
+                            unsafe hasher!.copyAndUpdate(from: source, to: output + end, count: size)
+                            hashed = true
+                        } else {
+                            unsafe (output + end).copyMemory(from: source, byteCount: size)
+                        }
                     }
                     position &+= size
                     produced = size
@@ -208,7 +217,7 @@ package struct ZstdDecoder: ~Copyable {
                 default:
                     throw .invalidValue
                 }
-                if hasher != nil {
+                if hasher != nil && !hashed {
                     unsafe hasher!.update(output + end, count: produced)
                 }
                 end &+= produced
@@ -244,7 +253,7 @@ package struct ZstdDecoder: ~Copyable {
     /// - Throws: ``BytesError/invalidValue`` for corrupt data, bytes that aren't a frame, or a frame needing a
     ///   dictionary; ``BytesError/mismatch`` for a wrong checksum or content size;
     ///   ``BytesError/limitExceeded`` for a frame whose window exceeds ``maximumWindowSize``.
-    package mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
+    public mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         guard input.byteCount > 0 else { return try unsafe step(nil, count: 0, into: &output) }
         return try input.withUnsafeBytes { buffer throws(BytesError) -> TransformProgress in
             // Unsafe: the base address of a nonempty buffer.
@@ -378,9 +387,16 @@ package struct ZstdDecoder: ~Copyable {
         // plus 32 bytes fits after `windowEnd` (ensured above).
         let base = unsafe window.base!
         let produced: Int
+        // Whether the block went into the checksum as it was copied (one pass over a raw block's bytes).
+        var hashed = false
         switch type {
         case 0:
-            unsafe (base + windowEnd).copyMemory(from: bytes, byteCount: size)
+            if frame.hasher != nil {
+                unsafe frame.hasher!.copyAndUpdate(from: bytes, to: base + windowEnd, count: size)
+                hashed = true
+            } else {
+                unsafe (base + windowEnd).copyMemory(from: bytes, byteCount: size)
+            }
             produced = size
         case 1:
             unsafe (base + windowEnd).initializeMemory(as: UInt8.self, repeating: bytes.load(as: UInt8.self), count: size)
@@ -395,7 +411,7 @@ package struct ZstdDecoder: ~Copyable {
                 throw .invalidValue // A block larger than the maximum.
             }
         }
-        if frame.hasher != nil {
+        if frame.hasher != nil && !hashed {
             unsafe frame.hasher!.update(base + windowEnd, count: produced)
         }
         frame.produced &+= UInt64(produced)
@@ -467,12 +483,12 @@ package struct ZstdDecoder: ~Copyable {
 }
 
 extension ZstdDecoder: ByteTransform {
-    package typealias Failure = BytesError
+    public typealias Failure = BytesError
 
     /// Decodes as ``decompress(_:into:)`` does. At `.finish`, input that ends inside a frame throws
     /// ``BytesError/insufficientData``; otherwise the end of a frame reads as ``TransformStatus/needsInput``,
     /// since another may follow.
-    package mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
+    public mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) throws(BytesError) -> TransformProgress {
         var progress = try decompress(input, into: &output)
         if flush == .finish {
             if progress.status == .needsInput && progress.consumed == input.byteCount {
@@ -491,7 +507,7 @@ extension ZstdDecoder: ResettableByteTransform {}
 // can take a decoder to another thread, as `ByteBuffer` can be.
 extension ZstdDecoder: @unchecked Sendable {}
 
-package extension ZstdDecoder {
+public extension ZstdDecoder {
     /// Decodes a whole stream into a new array: one or more frames, sized from their headers when they state
     /// their content size (up to 1 MiB: a header's claim is believed only as far as decoded bytes prove it), and
     /// grown as needed otherwise. For tests: no client decodes Zstandard into a new array.

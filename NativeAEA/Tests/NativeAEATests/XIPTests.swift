@@ -1,5 +1,3 @@
-@testable import NativeAEA
-
 // The test archives are made here: a cpio (odc) stream written below, in pbzx blocks (xz from libcompression, or
 // stored), in a XAR written below, as Xcode's `.xip`s are, signed with a test chain or not (this macOS's `xar` no
 // longer signs).
@@ -10,6 +8,7 @@ import CryptoKit
 import Disk
 import DiskTestSupport
 import Foundation
+import NativeAEA
 import System
 import Testing
 

@@ -22,10 +22,10 @@ public enum SegmentInput: String, Sendable, CaseIterable {
 
 /// The decoded chunks NativeAEA's walkers and writers read: an AEA archive's segments, or a `pbz` stream's blocks,
 /// each in a pool buffer, in order, failing with ``AEAError``.
-typealias ChunkSource = OrderedBlockSource<AEAError>
+public typealias ChunkSource = OrderedBlockSource<AEAError>
 
 /// An archive's segments, decoded in parallel and handed out in order.
-typealias SegmentStream = ParallelBlockDecoder<AEASegmentStage>
+public typealias SegmentStream = ParallelBlockDecoder<AEASegmentStage>
 
 extension AEAArchive {
     /// The archive's segments as a source (not yet running), decoded into a pool the engine sizes within the options'
@@ -59,8 +59,8 @@ extension AEAArchive {
 /// others into the read buffer) or takes it from the mapping; ``prepare(_:stored:into:)`` checks its MAC and decrypts
 /// it (in place where it was read; from the mapping into the output or the read buffer); the engine decodes it (or
 /// copies a stored one from the mapping); ``verify(_:raw:)`` checks its checksum.
-struct AEASegmentStage: IndexedBlockStage, BlockReadingStage {
-    typealias Failure = AEAError
+public struct AEASegmentStage: IndexedBlockStage, BlockReadingStage {
+    public typealias Failure = AEAError
 
     let archive: AEAArchive
     let verifyMACs: Bool
@@ -84,7 +84,7 @@ struct AEASegmentStage: IndexedBlockStage, BlockReadingStage {
         }
     }
 
-    func block(_ index: Int) -> BlockJob {
+    public func block(_ index: Int) -> BlockJob {
         let segment = archive.segments[index]
         return BlockJob(
             index: index, rawOffset: segment.rawOffset, rawSize: segment.rawSize, storedSize: segment.compressedSize,
@@ -93,12 +93,12 @@ struct AEASegmentStage: IndexedBlockStage, BlockReadingStage {
     }
 
     @unsafe
-    func read(at offset: Int, into destination: UnsafeMutableRawBufferPointer) throws(AEAError) {
+    public func read(at offset: Int, into destination: UnsafeMutableRawBufferPointer) throws(AEAError) {
         try unsafe AEAArchive.readFully(archive.file, at: offset, into: destination)
     }
 
     @unsafe
-    func storedBytes(of job: BlockJob) -> UnsafeRawBufferPointer? {
+    public func storedBytes(of job: BlockJob) -> UnsafeRawBufferPointer? {
         guard let mapping else { return nil }
         // Unsafe: a buffer into the mapping. Safe: within it (segment offsets are checked against the file's size when
         // the archive opens, and `buffer` checks again); the stage keeps the mapping while decoders run.
@@ -108,7 +108,7 @@ struct AEASegmentStage: IndexedBlockStage, BlockReadingStage {
     /// The segment's MAC over its stored bytes; then, for encrypted profiles, AES-CTR decryption into `destination`
     /// (in place when the engine read the segment there).
     @unsafe
-    func prepare(_ job: BlockJob, stored: UnsafeRawBufferPointer, into destination: UnsafeMutableRawBufferPointer) throws(AEAError) -> Bool {
+    public func prepare(_ job: BlockJob, stored: UnsafeRawBufferPointer, into destination: UnsafeMutableRawBufferPointer) throws(AEAError) -> Bool {
         if verifyMACs {
             try unsafe SegmentChecks.verifyMAC(archive, segment: job.index, stored: RawSpan(_unsafeBytes: stored)) // Valid for the call: safe.
         }
@@ -127,20 +127,20 @@ struct AEASegmentStage: IndexedBlockStage, BlockReadingStage {
         return true
     }
 
-    func verify(_ job: BlockJob, raw: RawSpan) throws(AEAError) {
+    public func verify(_ job: BlockJob, raw: RawSpan) throws(AEAError) {
         if verifyChecksums { try SegmentChecks.verifyChecksum(archive, segment: job.index, raw: raw) }
     }
 }
 
 /// A file read in `pbz` blocks or plain slices (an `.aar`, a `.xip`'s content): the engine's default reading, through
 /// Disk's `InputFile`.
-struct ArchiveFileStage: BlockReadingStage {
-    typealias Failure = AEAError
+public struct ArchiveFileStage: BlockReadingStage {
+    public typealias Failure = AEAError
 
     let file: InputFile
 
     @unsafe
-    func read(at offset: Int, into destination: UnsafeMutableRawBufferPointer) throws(AEAError) {
+    public func read(at offset: Int, into destination: UnsafeMutableRawBufferPointer) throws(AEAError) {
         try unsafe AEAArchive.readFully(file, at: offset, into: destination)
     }
 }

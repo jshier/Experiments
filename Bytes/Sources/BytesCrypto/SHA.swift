@@ -119,6 +119,22 @@ struct HashBuffer<let size: Int>: Sendable {
     }
 }
 
+/// The block functions' shared parts.
+enum SHA {
+    /// `blocks` as whole `n`-byte blocks: a typed view, whose loop has one bound and whose blocks are read by `bitCast`
+    /// with no checks within a block. (Four or eight checked loads a block kept a compare and a branch each: SHA-256's
+    /// loop was 126 instructions with 8 compares and 9 branches.)
+    ///
+    /// - Precondition: `blocks` is whole blocks, as `HashBuffer` always passes. A partial block trapped in a checked load
+    ///   before; a view would drop it silently.
+    @inline(__always)
+    @_lifetime(copy blocks)
+    static func wholeBlocks<let n: Int>(_ blocks: RawSpan, of type: InlineArray<n, UInt8>.Type) -> Span<InlineArray<n, UInt8>> {
+        precondition(blocks.byteCount % n == 0, "SHA blocks must be whole")
+        return blocks.chunks(of: type)
+    }
+}
+
 /// Writes `words` big-endian to the start of `digest`, `count` of them.
 @inlinable
 func writeBigEndian<let n: Int>(_ words: InlineArray<n, UInt32>, count: Int, into digest: inout MutableRawSpan) {
@@ -134,7 +150,7 @@ func writeBigEndian<let n: Int>(_ words: InlineArray<n, UInt32>, count: Int, int
 /// formats require them (WinZip AES, TOTP); HMAC doesn't depend on collision resistance.
 public struct SHA1: HashFunction {
     /// The state words H0…H4.
-    @usableFromInline var state: InlineArray<5, UInt32> = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0]
+    @usableFromInline package var state: InlineArray<5, UInt32> = [0x6745_2301, 0xEFCD_AB89, 0x98BA_DCFE, 0x1032_5476, 0xC3D2_E1F0]
     @usableFromInline var buffer = HashBuffer<64>()
 
     /// 64.
@@ -190,7 +206,7 @@ public struct SHA1: HashFunction {
 
     /// Compresses whole 64-byte blocks into `state`.
     @usableFromInline
-    static func compress(_ state: inout InlineArray<5, UInt32>, blocks: RawSpan) {
+    package static func compress(_ state: inout InlineArray<5, UInt32>, blocks: RawSpan) {
         #if HardwareCrypto && arch(arm64) && !Portable
         compressWithInstructions(&state, blocks: blocks)
         #else
@@ -207,14 +223,15 @@ public struct SHA1: HashFunction {
         var e = state[4]
         let k0 = SIMD4<UInt32>(repeating: 0x5A82_7999), k1 = SIMD4<UInt32>(repeating: 0x6ED9_EBA1)
         let k2 = SIMD4<UInt32>(repeating: 0x8F1B_BCDC), k3 = SIMD4<UInt32>(repeating: 0xCA62_C1D6)
-        var offset = 0
-        while offset < blocks.byteCount {
+        let chunks = SHA.wholeBlocks(blocks, of: InlineArray<64, UInt8>.self)
+        for index in chunks.indices {
             let (savedABCD, savedE) = (abcd, e)
             // The block's sixteen big-endian words, as four vectors.
-            var w0 = bytes_rev32(blocks.load(fromByteOffset: offset, as: SIMD16<UInt8>.self))
-            var w1 = bytes_rev32(blocks.load(fromByteOffset: offset &+ 16, as: SIMD16<UInt8>.self))
-            var w2 = bytes_rev32(blocks.load(fromByteOffset: offset &+ 32, as: SIMD16<UInt8>.self))
-            var w3 = bytes_rev32(blocks.load(fromByteOffset: offset &+ 48, as: SIMD16<UInt8>.self))
+            let block = ByteBlock(chunks[index])
+            var w0 = bytes_rev32(block.lanes0.vector)
+            var w1 = bytes_rev32(block.lanes1.vector)
+            var w2 = bytes_rev32(block.lanes2.vector)
+            var w3 = bytes_rev32(block.lanes3.vector)
             // 20 groups of four rounds; the function changes every 5. Written out: the compiler then keeps every
             // vector in a register and the constants hoisted.
             @inline(__always) func group(_ function: Int, _ k: SIMD4<UInt32>, _ w: SIMD4<UInt32>) {
@@ -240,7 +257,6 @@ public struct SHA1: HashFunction {
             group(1, k3, w0); schedule(); group(1, k3, w0)
             abcd &+= savedABCD
             e &+= savedE
-            offset &+= 64
         }
         (state[0], state[1], state[2], state[3], state[4]) = (abcd[0], abcd[1], abcd[2], abcd[3], e)
     }
@@ -248,13 +264,14 @@ public struct SHA1: HashFunction {
 
     /// The portable block function: eighty rounds on a sixteen-word circular schedule.
     @inline(never)
-    static func compressPortably(_ state: inout InlineArray<5, UInt32>, blocks: RawSpan) {
+    package static func compressPortably(_ state: inout InlineArray<5, UInt32>, blocks: RawSpan) {
         var (h0, h1, h2, h3, h4) = (state[0], state[1], state[2], state[3], state[4])
         var w = InlineArray<16, UInt32>(repeating: 0)
-        var offset = 0
-        while offset < blocks.byteCount {
+        let chunks = SHA.wholeBlocks(blocks, of: InlineArray<64, UInt8>.self)
+        for block in chunks.indices {
+            let words = bitCast(chunks[block], to: InlineArray<16, UInt32>.self)
             for index in 0..<16 {
-                w[index] = UInt32(bigEndian: blocks.load(fromByteOffset: offset &+ 4 &* index, as: UInt32.self))
+                w[index] = UInt32(bigEndian: words[index])
             }
             var (a, b, c, d, e) = (h0, h1, h2, h3, h4)
             for round in 0..<80 {
@@ -273,7 +290,6 @@ public struct SHA1: HashFunction {
                 (e, d, c, b, a) = (d, c, b.rotatedLeft(by: 30), a, temp)
             }
             h0 &+= a; h1 &+= b; h2 &+= c; h3 &+= d; h4 &+= e
-            offset &+= 64
         }
         (state[0], state[1], state[2], state[3], state[4]) = (h0, h1, h2, h3, h4)
     }
@@ -284,7 +300,7 @@ public struct SHA1: HashFunction {
 /// SHA-256 (FIPS 180-4): TLS 1.3's hash for its `…_SHA256` suites, and HKDF's.
 public struct SHA256: HashFunction {
     /// The state words H0…H7.
-    @usableFromInline var state: InlineArray<8, UInt32> = [
+    @usableFromInline package var state: InlineArray<8, UInt32> = [
         0x6A09_E667, 0xBB67_AE85, 0x3C6E_F372, 0xA54F_F53A, 0x510E_527F, 0x9B05_688C, 0x1F83_D9AB, 0x5BE0_CD19,
     ]
     @usableFromInline var buffer = HashBuffer<64>()
@@ -354,7 +370,7 @@ public struct SHA256: HashFunction {
 
     /// Compresses whole 64-byte blocks into `state`.
     @usableFromInline
-    static func compress(_ state: inout InlineArray<8, UInt32>, blocks: RawSpan) {
+    package static func compress(_ state: inout InlineArray<8, UInt32>, blocks: RawSpan) {
         #if HardwareCrypto && arch(arm64) && !Portable
         compressWithInstructions(&state, blocks: blocks)
         #else
@@ -378,13 +394,14 @@ public struct SHA256: HashFunction {
         let c4 = constants(4), c5 = constants(5), c6 = constants(6), c7 = constants(7)
         let c8 = constants(8), c9 = constants(9), c10 = constants(10), c11 = constants(11)
         let c12 = constants(12), c13 = constants(13), c14 = constants(14), c15 = constants(15)
-        var offset = 0
-        while offset < blocks.byteCount {
+        let chunks = SHA.wholeBlocks(blocks, of: InlineArray<64, UInt8>.self)
+        for index in chunks.indices {
             let (savedABCD, savedEFGH) = (abcd, efgh)
-            var w0 = bytes_rev32(blocks.load(fromByteOffset: offset, as: SIMD16<UInt8>.self))
-            var w1 = bytes_rev32(blocks.load(fromByteOffset: offset &+ 16, as: SIMD16<UInt8>.self))
-            var w2 = bytes_rev32(blocks.load(fromByteOffset: offset &+ 32, as: SIMD16<UInt8>.self))
-            var w3 = bytes_rev32(blocks.load(fromByteOffset: offset &+ 48, as: SIMD16<UInt8>.self))
+            let block = ByteBlock(chunks[index])
+            var w0 = bytes_rev32(block.lanes0.vector)
+            var w1 = bytes_rev32(block.lanes1.vector)
+            var w2 = bytes_rev32(block.lanes2.vector)
+            var w3 = bytes_rev32(block.lanes3.vector)
             // Four rounds with the next schedule words `w`, then (while the schedule continues) the next four words.
             @inline(__always) func quad(_ w: SIMD4<UInt32>, _ c: SIMD4<UInt32>) {
                 let wk = w &+ c
@@ -410,7 +427,6 @@ public struct SHA256: HashFunction {
             quad(w3, c15)
             abcd &+= savedABCD
             efgh &+= savedEFGH
-            offset &+= 64
         }
         (state[0], state[1], state[2], state[3]) = (abcd[0], abcd[1], abcd[2], abcd[3])
         (state[4], state[5], state[6], state[7]) = (efgh[0], efgh[1], efgh[2], efgh[3])
@@ -419,13 +435,14 @@ public struct SHA256: HashFunction {
 
     /// The portable block function: 64 rounds on a sixteen-word circular schedule.
     @inline(never)
-    static func compressPortably(_ state: inout InlineArray<8, UInt32>, blocks: RawSpan) {
+    package static func compressPortably(_ state: inout InlineArray<8, UInt32>, blocks: RawSpan) {
         let k = roundConstants
         var w = InlineArray<16, UInt32>(repeating: 0)
-        var offset = 0
-        while offset < blocks.byteCount {
+        let chunks = SHA.wholeBlocks(blocks, of: InlineArray<64, UInt8>.self)
+        for block in chunks.indices {
+            let words = bitCast(chunks[block], to: InlineArray<16, UInt32>.self)
             for index in 0..<16 {
-                w[index] = UInt32(bigEndian: blocks.load(fromByteOffset: offset &+ 4 &* index, as: UInt32.self))
+                w[index] = UInt32(bigEndian: words[index])
             }
             var (a, b, c, d) = (state[0], state[1], state[2], state[3])
             var (e, f, g, h) = (state[4], state[5], state[6], state[7])
@@ -447,7 +464,6 @@ public struct SHA256: HashFunction {
             }
             state[0] &+= a; state[1] &+= b; state[2] &+= c; state[3] &+= d
             state[4] &+= e; state[5] &+= f; state[6] &+= g; state[7] &+= h
-            offset &+= 64
         }
     }
 }
@@ -458,8 +474,8 @@ public struct SHA256: HashFunction {
 /// initial values and digest lengths. On Apple silicon the block function uses ARM's SHA-512 instructions, two rounds
 /// per `sha512h`/`sha512h2` pair; elsewhere, plain Swift.
 @usableFromInline
-struct SHA512Core: Sendable {
-    @usableFromInline var state: InlineArray<8, UInt64>
+package struct SHA512Core: Sendable {
+    @usableFromInline package var state: InlineArray<8, UInt64>
     @usableFromInline var buffer = HashBuffer<128>()
 
     @inlinable init(state: InlineArray<8, UInt64>) { self.state = state }
@@ -504,7 +520,7 @@ struct SHA512Core: Sendable {
 
     /// Compresses whole 128-byte blocks into `state`.
     @usableFromInline
-    static func compress(_ state: inout InlineArray<8, UInt64>, blocks: RawSpan) {
+    package static func compress(_ state: inout InlineArray<8, UInt64>, blocks: RawSpan) {
         #if HardwareCrypto && arch(arm64) && !Portable
         if hasInstructions {
             compressWithInstructions(&state, blocks: blocks)
@@ -529,13 +545,13 @@ struct SHA512Core: Sendable {
         // capture: captured, the vectors lived in memory behind 12 `swift_beginAccess` calls a block.
         var s = SHA512Pairs(ab: SIMD2(state[0], state[1]), cd: SIMD2(state[2], state[3]),
                             ef: SIMD2(state[4], state[5]), gh: SIMD2(state[6], state[7]))
-        var offset = 0
-        while blocks.byteCount &- offset >= 128 { // Whole blocks only (all the buffer passes): fewer checks.
+        let chunks = SHA.wholeBlocks(blocks, of: InlineArray<128, UInt8>.self)
+        for index in chunks.indices {
             let saved = s
             // The block's sixteen big-endian words, as eight pairs.
-            let start = offset
+            let vectors = bitCast(chunks[index], to: InlineArray<8, SIMD16<UInt8>>.self)
             @inline(__always) func pair(_ index: Int) -> SIMD2<UInt64> {
-                bytes_rev64_words(blocks.load(fromByteOffset: start &+ 16 &* index, as: SIMD16<UInt8>.self))
+                bytes_rev64_words(vectors[index])
             }
             var m = SHA512Window(w0: pair(0), w1: pair(1), w2: pair(2), w3: pair(3),
                                  w4: pair(4), w5: pair(5), w6: pair(6), w7: pair(7))
@@ -580,7 +596,6 @@ struct SHA512Core: Sendable {
             s.rounds(m.w0, 0x4CC5_D4BE_CB3E_42B6, 0x597F_299C_FC65_7E2A); m.shift()
             s.rounds(m.w0, 0x5FCB_6FAB_3AD6_FAEC, 0x6C44_198C_4A47_5817)
             s.ab &+= saved.ab; s.cd &+= saved.cd; s.ef &+= saved.ef; s.gh &+= saved.gh
-            offset &+= 128
         }
         (state[0], state[1], state[2], state[3]) = (s.ab[0], s.ab[1], s.cd[0], s.cd[1])
         (state[4], state[5], state[6], state[7]) = (s.ef[0], s.ef[1], s.gh[0], s.gh[1])
@@ -591,17 +606,17 @@ struct SHA512Core: Sendable {
     /// later one after the schedule's next sixteen, all in locals. (A rolled loop over the rounds with the schedule
     /// in an array and a `round >= 16` test in each was 4,600 instructions a block.)
     @inline(never)
-    static func compressPortably(_ state: inout InlineArray<8, UInt64>, blocks: RawSpan) {
+    package static func compressPortably(_ state: inout InlineArray<8, UInt64>, blocks: RawSpan) {
         // State and schedule in structs with mutating methods, not variables captured by nested functions (which
         // can leave them in memory behind dynamic exclusivity checks).
         var s = SHA512Words(a: state[0], b: state[1], c: state[2], d: state[3],
                             e: state[4], f: state[5], g: state[6], h: state[7])
-        var offset = 0
-        while blocks.byteCount &- offset >= 128 { // Whole blocks only (all the buffer passes): fewer checks.
+        let chunks = SHA.wholeBlocks(blocks, of: InlineArray<128, UInt8>.self)
+        for index in chunks.indices {
             let saved = s
-            let start = offset
+            let words = bitCast(chunks[index], to: InlineArray<16, UInt64>.self)
             @inline(__always) func word(_ index: Int) -> UInt64 {
-                UInt64(bigEndian: blocks.load(fromByteOffset: start &+ 8 &* index, as: UInt64.self))
+                UInt64(bigEndian: words[index])
             }
             var m = SHA512Schedule(
                 w0: word(0), w1: word(1), w2: word(2), w3: word(3), w4: word(4), w5: word(5), w6: word(6), w7: word(7),
@@ -617,7 +632,6 @@ struct SHA512Core: Sendable {
             }
             s.a &+= saved.a; s.b &+= saved.b; s.c &+= saved.c; s.d &+= saved.d
             s.e &+= saved.e; s.f &+= saved.f; s.g &+= saved.g; s.h &+= saved.h
-            offset &+= 128
         }
         (state[0], state[1], state[2], state[3]) = (s.a, s.b, s.c, s.d)
         (state[4], state[5], state[6], state[7]) = (s.e, s.f, s.g, s.h)
@@ -715,7 +729,7 @@ struct SHA512Window {
 
 /// SHA-512 (FIPS 180-4).
 public struct SHA512: HashFunction {
-    @usableFromInline var core = SHA512Core(state: [
+    @usableFromInline package var core = SHA512Core(state: [
         0x6A09_E667_F3BC_C908, 0xBB67_AE85_84CA_A73B, 0x3C6E_F372_FE94_F82B, 0xA54F_F53A_5F1D_36F1,
         0x510E_527F_ADE6_82D1, 0x9B05_688C_2B3E_6C1F, 0x1F83_D9AB_FB41_BD6B, 0x5BE0_CD19_137E_2179,
     ])

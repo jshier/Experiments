@@ -119,7 +119,6 @@ package final class SyscallFaults: Sendable {
 #endif
 
 /// The counts, for the benchmarks' custom metric.
-@_spi(Benchmarking)
 public enum SyscallCounter {
     /// Whether this build counts (the `SyscallCounting` trait).
     public static var isEnabled: Bool {

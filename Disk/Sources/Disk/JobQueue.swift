@@ -79,7 +79,7 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
         var pathCount: Int
     }
 
-    private struct State {
+    private struct State: ~Copyable {
         var head = 0
         var count = 0
         /// The path ring: bytes `tail..<head` (wrapping) are in use.
@@ -87,8 +87,8 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
         var pathTail = 0
         var pathUsed = 0
         var closed = false
-        var consumers: WaiterQueue<Continuation<Void>>
-        var producers: WaiterQueue<Continuation<Void>>
+        var consumers: WaiterQueue<Continuation<Void, Never>>
+        var producers: WaiterQueue<Continuation<Void, Never>>
 
         /// Whether no job is queued.
         var isEmpty: Bool {
@@ -149,14 +149,16 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
         return state.pathTail - state.pathHead > count ? state.pathHead : nil
     }
 
-    private enum Take {
-        case job(Job, Int, Continuation<Void>?)
+    /// What `pop` does, decided under the lock: noncopyable, as it carries a producer's continuation out.
+    private enum Take: ~Copyable {
+        case job(Job, Int, Continuation<Void, Never>?)
         case done
         case wait
     }
 
-    private enum Offer {
-        case added(Continuation<Void>?)
+    /// What `push` does, decided under the lock (the same).
+    private enum Offer: ~Copyable {
+        case added(Continuation<Void, Never>?)
         case full
         case closed
     }
@@ -195,13 +197,10 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
             case .full:
                 let start = MonotonicClock.now
                 // Suspend until a pop makes room (checked again under the lock: no lost wakeup), then retry.
-                await withContinuation { (continuation: Continuation<Void>) in
-                    let wait = state.withLock { state in
-                        if state.closed || (state.count < capacity && reservePath(pathCount, &state) != nil) { return false }
-                        state.producers.append(continuation)
-                        return true
-                    }
-                    if !wait { continuation.resume() }
+                await wait(in: state) { state, continuation in
+                    if state.closed || (state.count < capacity && reservePath(pathCount, &state) != nil) { return () }
+                    state.producers.append(continuation.take()!)
+                    return nil
                 }
                 pushWaitNanoseconds.add(MonotonicClock.nanoseconds(since: start), ordering: .relaxed)
                 pushWaits.add(1, ordering: .relaxed)
@@ -235,20 +234,17 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
                 }
                 return .job(job, count, state.producers.popFirst())
             }
-            switch take {
+            switch consume take {
             case let .job(job, count, producer):
                 producer?.resume()
                 return (job, count)
             case .done:
                 return nil
             case .wait:
-                await withContinuation { (continuation: Continuation<Void>) in
-                    let wait = state.withLock { state in
-                        if !state.isEmpty || state.closed { return false }
-                        state.consumers.append(continuation)
-                        return true
-                    }
-                    if !wait { continuation.resume() }
+                await wait(in: state) { state, continuation in
+                    if !state.isEmpty || state.closed { return () }
+                    state.consumers.append(continuation.take()!)
+                    return nil
                 }
             }
         }
@@ -256,16 +252,19 @@ final class JobQueue<Job: Sendable>: @unchecked Sendable {
 
     /// No more jobs: waiting consumers finish once the queue is empty, and waiting producers give up.
     func close() {
-        let (consumers, producers) = state.withLock { state -> ([Continuation<Void>], [Continuation<Void>]) in
-            guard !state.closed else { return ([], []) }
+        // Consumers and producers alike are resumed with nothing: one queue of both, out of the lock.
+        var waiting = state.withLock { state -> WaiterQueue<Continuation<Void, Never>> in
+            guard !state.closed else { return state.consumers.removeAll() } // Empty: closing resumed them.
             state.closed = true
-            return (state.consumers.removeAll(), state.producers.removeAll())
+            var all = state.consumers.removeAll()
+            var producers = state.producers.removeAll()
+            while let producer = producers.popFirst() {
+                all.append(producer)
+            }
+            return all
         }
-        for consumer in consumers {
-            consumer.resume()
-        }
-        for producer in producers {
-            producer.resume()
+        while let waiter = waiting.popFirst() {
+            waiter.resume()
         }
     }
 }

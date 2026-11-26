@@ -2,8 +2,10 @@ internal import Bytes
 
 // The encoders' and checksums' word reads from their input, in one place: the unchecked little-endian loads the LZ
 // encoders' match finders make (DEFLATE, Brotli, LZFSE, LZVN), each caller's invariants keeping the word inside its
-// buffer, and the checked element views the checksums read whole words through (XXH64, CRC-64). Every client compiles
-// to the same instructions as before (RESULTS.md, 2026-11-24, E2).
+// buffer, and a word's value from the element views the checksums read whole words through (XXH64, CRC-64; the views
+// themselves are Bytes' `RawSpan.chunks(of:)` since 2026-11-25). Every client compiles to the same instructions as
+// before (RESULTS.md, 2026-11-24, E2). The unchecked loads stay here, not in Bytes: their safety rests on each
+// encoder's invariants, and nothing outside the encoders needs them.
 //
 // (Brotli's encoder borrowed `DeflateCompressor.load64`, and each LZ encoder had its own copy of the 4-byte load:
 // review 2026-11-23, §3.) Zstandard's match finder keeps its own `ZstdMatchInput.load32`/`load64`: the same loads
@@ -53,25 +55,9 @@ enum WordReads {
 
     // MARK: Checked, as elements
 
-    /// The whole 8-byte words at the start of `bytes`, as elements: byte arrays, so any address is aligned for them,
-    /// read with ``value(_:)`` (`bitCast`: no checks within an element, and no stack copy: reading one through its
-    /// `span` put a stack protector in the function, 4 instructions a call).
-    @inline(__always)
-    @_lifetime(copy bytes)
-    static func words(_ bytes: RawSpan) -> Span<InlineArray<8, UInt8>> {
-        Span(viewing: bytes.extracting(first: bytes.byteCount & ~7))
-    }
-
-    /// The whole 32-byte stripes at the start of `bytes`, as elements: four words each, read by `bitCast` to
-    /// `SIMD4<UInt64>` where they're used. (Through a helper taking the element, the stripe was loaded into vector
-    /// registers and its lanes moved out: 3 more instructions a stripe in XXH64.)
-    @inline(__always)
-    @_lifetime(copy bytes)
-    static func stripes(_ bytes: RawSpan) -> Span<InlineArray<32, UInt8>> {
-        Span(viewing: bytes.extracting(first: bytes.byteCount & ~31))
-    }
-
-    /// A word's value, little-endian.
+    /// A word's value, little-endian: an element of `bytes.chunks(of: InlineArray<8, UInt8>.self)`, read by `bitCast`
+    /// (no checks within an element, and no stack copy: reading one through its `span` put a stack protector in the
+    /// function, 4 instructions a call).
     @inline(__always)
     static func value(_ word: InlineArray<8, UInt8>) -> UInt64 {
         UInt64(littleEndian: bitCast(word, to: UInt64.self))

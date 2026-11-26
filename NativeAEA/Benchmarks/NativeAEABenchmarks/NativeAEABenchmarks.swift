@@ -2,7 +2,7 @@ import Benchmark
 import BytesTestSupport
 import Disk
 import Foundation
-@_spi(Benchmarking) import NativeAEA
+import NativeAEA
 import System
 
 // How package-benchmark runs this executable: once to list the benchmarks, then once more for each benchmark it runs,

@@ -19,9 +19,8 @@ import Synchronization
 /// Counts descriptors closed by their owner's `deinit` instead of by an explicit close: each is a lifetime bug (a
 /// descriptor kept open past its last use, or a close path missed).
 ///
-/// SPI (`Testing`) rather than `package`: DiskTestSupport reads it, and Xcode's builds of the app's tests don't give a
-/// package's other targets its `package` symbols (`cannot find 'DescriptorAudit' in scope`, 2026-11-23).
-@_spi(Testing)
+/// Public rather than `package`: DiskTestSupport reads it, and Xcode's builds of the app's tests don't give a package's
+/// other targets its `package` symbols (`cannot find 'DescriptorAudit' in scope`, 2026-11-23).
 public enum DescriptorAudit {
     static let dropped = Atomic<Int>(0)
 

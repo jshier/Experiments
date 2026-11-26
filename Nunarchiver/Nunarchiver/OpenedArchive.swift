@@ -10,7 +10,7 @@ extension ArchiveKind {
     ///
     /// - Throws: ``ExpansionFailure/system(call:path:code:)`` if the file can't be read,
     ///   ``ExpansionFailure/unrecognizedFormat(_:)`` if neither its first bytes nor its extension says.
-    static func detect(_ archive: FilePath) throws(ExpansionError) -> ArchiveKind {
+    public static func detect(_ archive: FilePath) throws(ExpansionError) -> ArchiveKind {
         let kind: ArchiveKind?
         do throws(AEAError) {
             kind = try ArchiveKind(detecting: archive)

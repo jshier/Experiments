@@ -1,7 +1,7 @@
 import Bytes
 import BytesTestSupport
 import Foundation
-@_spi(Benchmarking) import NativeZip
+import NativeZip
 import zlib
 
 /// Deterministic benchmark archives, generated once and cached in a fixed temporary directory.

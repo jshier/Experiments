@@ -11,33 +11,33 @@ import Foundation
 /// An archive that needs a password or key reports ``ExpansionOutcome/needsCredential(_:)`` instead of expanding: the
 /// row becomes a prompt (``State/credentialRequest``), and submitting starts the expansion again with what was entered.
 /// A wrong one comes back as another request, marked as a retry. Cancelling the prompt ends the expansion as cancelled.
-@Feature struct Expansion {
-    struct State: Identifiable {
-        let id: UUID
-        let archive: URL
+@Feature public struct Expansion {
+    public struct State: Identifiable {
+        public let id: UUID
+        public let archive: URL
         /// The polled byte counter at the last ticks of the poll timer (see ``Throughput``).
-        var byteSamples: [Int] = []
+        public var byteSamples: [Int] = []
         /// What the archive needs before it can be expanded: the row shows a field for it.
-        var credentialRequest: CredentialRequest?
+        public var credentialRequest: CredentialRequest?
         /// The prompt's field.
-        var credentialText = ""
+        public var credentialText = ""
         /// What's been entered so far, given to every attempt.
-        var credentials = ArchiveCredentials()
-        var isCancelling = false
-        var progress = ExpansionProgress()
+        public var credentials = ArchiveCredentials()
+        public var isCancelling = false
+        public var progress = ExpansionProgress()
         /// Cancels the expansion, as the cancel button does: for the parent, when the app quits.
-        @Trigger var cancel
-        @StoreTaskID var expansion
+        @Trigger public var cancel
+        @StoreTaskID public var expansion
 
-        var name: String { archive.lastPathComponent }
+        public var name: String { archive.lastPathComponent }
 
         /// Bytes written to disk per second over the last ticks, once two readings exist.
-        var bytesPerSecond: Double? {
+        public var bytesPerSecond: Double? {
             Throughput.bytesPerSecond(samples: byteSamples, interval: Archiver.pollInterval)
         }
     }
 
-    enum Action {
+    public enum Action {
         /// The row's cancel button, or the prompt's.
         case cancelButtonTapped
         case credentialRequested(CredentialRequest)
@@ -47,7 +47,9 @@ import Foundation
 
     @FeatureEnvironment(\.archiveExpander) var archiveExpander
 
-    var body: some Feature {
+    public init() {}
+
+    public var body: some Feature {
         Update { state, action in
             switch action {
             case .cancelButtonTapped:
@@ -117,9 +119,24 @@ import Foundation
     }
 }
 
+public extension Expansion.State {
+    /// A row for `archive`, before anything has happened. (In an extension, so the memberwise initializer stays.)
+    init(id: UUID, archive: URL) {
+        self.init(id: id, archive: archive, byteSamples: [])
+    }
+}
+
+public extension Expansion.State.DebugSnapshot {
+    /// A new row's snapshot, for tests' expectations. (The snapshot macro gives the struct only its memberwise
+    /// initializer, which is internal.)
+    init(id: UUID, archive: URL) {
+        self.init(id: id, archive: archive, byteSamples: [])
+    }
+}
+
 // MARK: What the row shows
 
-extension Expansion.State {
+public extension Expansion.State {
     /// What's happening to the archive.
     var title: LocalizedStringResource {
         if isCancelling {

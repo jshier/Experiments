@@ -28,7 +28,7 @@ func collect<Source: OrderedBlockSource>(_ source: Source) async -> (blocks: [In
         try await source.prepare()
         while let block = try await source.nextBlock() {
             blocks.append(block.index)
-            source.pool.release(block.buffer)
+            _ = consume block // Its buffer back now, before the next wait.
         }
         return (blocks, nil)
     } catch {
@@ -84,7 +84,7 @@ func collect<Source: OrderedBlockSource>(_ source: Source) async -> (blocks: [In
                 if stop == .beforeAnyBlock { return .success(0) }
                 var taken = 0
                 while let block = try await blocks.nextBlock() {
-                    blocks.pool.release(block.buffer)
+                    _ = consume block
                     taken += 1
                     if stop == .afterOneBlock { return .success(taken) }
                     if stop == .withItsOwnError { return .failure(.consumer) }
@@ -105,6 +105,29 @@ func collect<Source: OrderedBlockSource>(_ source: Source) async -> (blocks: [In
             }
         }
         #expect(blocks.pools.count == 3)
+        #expect(blocks.pools.allSatisfy { $0.buffersInUse == 0 })
+    }
+
+    /// The smallest pools (one decoder, no extra buffers, upstream and downstream) decode a stream whose blocks span many
+    /// upstream blocks to the end, every buffer back after.
+    @Test(.timeLimit(.minutes(1))) func smallestPoolsFinish() async throws {
+        let stream = try Self.big.get()
+        let segments = BlockDecoderTests.segments(of: stream, size: 4_096, decoders: 1, extraBuffers: 0)
+        let blocks = ParallelBlockDecoder(pbz: .zlib, blockSize: Self.blockSize, upstream: segments, decoders: 1, extraBuffers: 0)
+        let outcome: Result<Int, TestFailure> = await withUpstream(segments, blocks) {
+            do throws(TestFailure) {
+                try await blocks.prepare()
+                var taken = 0
+                while let block = try await blocks.nextBlock() {
+                    _ = consume block
+                    taken += 1
+                }
+                return .success(taken)
+            } catch {
+                return .failure(error)
+            }
+        }
+        #expect(outcome == .success(6))
         #expect(blocks.pools.allSatisfy { $0.buffersInUse == 0 })
     }
 
@@ -129,7 +152,7 @@ func collect<Source: OrderedBlockSource>(_ source: Source) async -> (blocks: [In
             }
             do throws(TestFailure) {
                 guard let first = try await source.nextBlock() else { return .success(0) }
-                source.pool.release(first.buffer)
+                _ = consume first
                 let second = try await source.nextBlock()
                 return .success(second == nil ? 1 : 2)
             } catch {
@@ -149,7 +172,7 @@ func collect<Source: OrderedBlockSource>(_ source: Source) async -> (blocks: [In
             var taken = 0
             do throws(TestFailure) {
                 while let block = try await again.nextBlock() {
-                    again.pool.release(block.buffer)
+                    _ = consume block
                     taken += 1
                 }
             } catch {

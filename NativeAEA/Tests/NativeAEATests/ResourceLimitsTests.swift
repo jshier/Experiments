@@ -1,5 +1,3 @@
-@testable import NativeAEA
-
 // What an archive can make a reader spend, bounded (review 2026-11-23 §1.6–1.8 and its minor items; fix plan B1–B3,
 // B8): buffers within a byte budget, AEA segments at most 256 MiB, an entry's metadata blobs refused at the header past a
 // limit, XAR TOCs scanned in linear time however deep, and times whose nanoseconds aren't below a second refused.
@@ -9,6 +7,7 @@ import BytesTestSupport
 import Darwin
 import DiskTestSupport
 import Foundation
+import NativeAEA
 import System
 import Testing
 

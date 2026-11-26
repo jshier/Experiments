@@ -246,7 +246,7 @@ public struct HTTPFieldSectionValidator: Sendable {
     static func invalidNameByte(_ lanes: ByteLanes) -> ByteMatches {
         let v = lanes.vector
         let upper = v &- SIMD16(repeating: 0x41) .< SIMD16(repeating: 26)
-        return HTTPCharacters.matches((v .<= SIMD16(repeating: 0x20)) .| (v .>= SIMD16(repeating: 0x7F)) .| upper
+        return ByteMatches((v .<= SIMD16(repeating: 0x20)) .| (v .>= SIMD16(repeating: 0x7F)) .| upper
             .| (v .== SIMD16(repeating: 0x3A)))
     }
 }

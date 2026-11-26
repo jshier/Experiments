@@ -1377,8 +1377,8 @@ public extension BytesReader {
 public extension GenericBytesReader {
     /// The offset in ``span`` of the first occurrence of `pattern` in ``remainingBytes``, or `nil`.
     ///
-    /// Scans 16 positions at a time with SIMD, comparing the pattern's first and last bytes, and checks
-    /// the whole pattern only where both match.
+    /// Scans 16 positions at a time with SIMD, comparing the pattern's first and last bytes; in a block where
+    /// any position matches both, compares every byte of the pattern at all 16 positions at once.
     ///
     /// - Parameter pattern: The bytes to find.
     /// - Returns: The offset of the first match, or `nil` if there is none. The cursor doesn't move.
@@ -1393,9 +1393,12 @@ public extension GenericBytesReader {
         while offset &+ 15 <= last {
             let candidates = unsafe Load.candidates(in: span, at: offset, byteCount: T.byteCount, head: head, tail: tail)
             if unlikely(any(candidates)) {
-                for index in 0..<16 where candidates[index] {
-                    if unsafe Load.group(T.self, from: span, at: offset &+ index) == pattern { return offset &+ index }
-                }
+                // Every byte of the pattern compared at all 16 offsets at once, so the first set lane is the first
+                // match: a fixed cost a block with candidates, however many. (Testing the candidates a lane at a time
+                // was about 100 instructions a block; walking them as a mask, 9 a candidate in a serial chain, which
+                // ran twice as long as the lane tests when every offset was a candidate.)
+                let lanes = ByteMatches(unsafe Load.matches(of: pattern, in: span, at: offset)).nibbleMask
+                if lanes != 0 { return offset &+ lanes.trailingZeroBitCount &>> 2 }
             }
             offset &+= 16
         }
@@ -1423,9 +1426,9 @@ public extension GenericBytesReader {
             let offset = end &- 16
             let candidates = unsafe Load.candidates(in: span, at: offset, byteCount: T.byteCount, head: head, tail: tail)
             if unlikely(any(candidates)) {
-                for index in (0..<16).reversed() where candidates[index] {
-                    if unsafe Load.group(T.self, from: span, at: offset &+ index) == pattern { return offset &+ index }
-                }
+                // As in `firstByteOffset(of:)`, the last set lane: lane i is bit 4i + 3 of the nibble mask.
+                let lanes = ByteMatches(unsafe Load.matches(of: pattern, in: span, at: offset)).nibbleMask
+                if lanes != 0 { return offset &+ (63 &- lanes.leadingZeroBitCount) &>> 2 }
             }
             end = offset
         }
@@ -1478,6 +1481,25 @@ enum Load {
         let starts = unsafe span.unsafeLoadUnaligned(fromUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)
         let ends = unsafe span.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ byteCount &- 1, as: SIMD16<UInt8>.self)
         return (starts .== head) .& (ends .== tail)
+    }
+
+    /// Which of the 16 offsets from `offset` hold all of `pattern`: each of its bytes compared with the 16 bytes that
+    /// many on (one load and one comparison a byte, unrolled for the group's size). Reads the same bytes as
+    /// ``candidates(in:at:byteCount:head:tail:)``: `offset ..< offset + 15 + T.byteCount`.
+    ///
+    /// - Parameters:
+    ///   - pattern: The bytes to find.
+    ///   - span: The bytes to search.
+    ///   - offset: The first of the 16 starting offsets.
+    /// - Returns: A mask with a lane set for each offset where `pattern` starts.
+    @unsafe @inlinable @inline(__always)
+    static func matches<T: ByteGroup>(of pattern: T, in span: RawSpan, at offset: Int) -> SIMDMask<SIMD16<Int8>> {
+        var matches = SIMDMask<SIMD16<Int8>>(repeating: true)
+        for index in 0..<T.byteCount {
+            let bytes = unsafe span.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &+ index, as: SIMD16<UInt8>.self)
+            matches .&= bytes .== SIMD16(repeating: pattern[index])
+        }
+        return matches
     }
 
     /// Like ``group(_:from:at:)``, tuned for loops over consecutive groups. Three-byte groups load each

@@ -1,6 +1,6 @@
-@_spi(Testing) @testable import Disk
 import BytesTestSupport
 import Darwin
+import Disk
 import Foundation
 import System
 import Testing

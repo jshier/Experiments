@@ -10,27 +10,27 @@ import Darwin
 //
 // Hard links share `dev` and `ino`.
 
-enum Cpio {
+public enum Cpio {
     static let headerSize = 76
 
     /// One entry's header fields.
-    struct Header {
-        var dev = 0
-        var ino = 0
-        var mode = 0
-        var uid = 0
-        var gid = 0
-        var nlink = 0
-        var rdev = 0
-        var mtime = 0
-        var nameSize = 0
-        var fileSize = 0
+    public struct Header {
+        public var dev = 0
+        public var ino = 0
+        public var mode = 0
+        public var uid = 0
+        public var gid = 0
+        public var nlink = 0
+        public var rdev = 0
+        public var mtime = 0
+        public var nameSize = 0
+        public var fileSize = 0
     }
 
     /// Parses the 76 header bytes that start `bytes`.
     ///
     /// - Throws: ``AEAError/invalidArchive(_:)`` for another magic or a field that isn't octal.
-    static func parseHeader(_ bytes: RawSpan) throws(AEAError) -> Header {
+    public static func parseHeader(_ bytes: RawSpan) throws(AEAError) -> Header {
         // Exactly the header (a constant count lets the reader's checks fold).
         var reader = AlignedBytesReader(bytes.extracting(0..<headerSize))
         // The magic, "070707", as one comparison of 6 bytes.
@@ -64,7 +64,7 @@ enum Cpio {
     }
 
     /// The entry type for `mode`'s file type bits.
-    static func type(_ mode: Int) -> AAEntryType? {
+    public static func type(_ mode: Int) -> AAEntryType? {
         // Truncating: a mode is 16 bits (the header parser rejects wider ones), and no input may trap here.
         switch mode_t(truncatingIfNeeded: mode) & S_IFMT {
         case S_IFREG: .regularFile
@@ -98,26 +98,23 @@ enum CpioWalker {
         var inHeader = true
         var ended = false
         var dataStart = 0, dataEnd = 0 // The current file's contents in the stream.
-        var previousBuffer = -1
+        // The previous chunk, held until the next one has its partial header (the lease releases its buffer).
+        var previous: DecodedBlock?
         var previousStart = 0
         var carry = 0
         var streamEnd = 0
-        defer {
-            if previousBuffer >= 0 { pool.release(previousBuffer) }
-        }
         while let chunk = try await source.nextBlock() {
-            let buffer = chunk.buffer
+            let buffer = chunk.buffer.index, segment = chunk.index
             let start = chunk.rawOffset
             let end = start + chunk.rawSize
             streamEnd = end
-            if carry > 0 {
+            if carry > 0, let from = previous?.buffer.index {
                 // The partial header goes just before this chunk's bytes; the previous buffer is still held.
-                pool.carry(carry, from: previousBuffer, at: position - previousStart, to: buffer)
+                pool.carry(carry, from: from, at: position - previousStart, to: buffer)
                 carry = 0
             }
             previousStart = start
-            if previousBuffer >= 0 { pool.release(previousBuffer) }
-            previousBuffer = buffer
+            previous = consume chunk // Releases the one before.
             if ended { continue } // Padding after the trailer.
 
             // Stream positions from `start - carry` to `end` are at `p - start` in the buffer.
@@ -170,7 +167,7 @@ enum CpioWalker {
                 if position < stop {
                     try await sink.data(
                         pool.bytes(buffer, at: position - start, count: stop - position), offset: position - start,
-                        fileOffset: position - dataStart, buffer: buffer, segment: chunk.index
+                        fileOffset: position - dataStart, buffer: buffer, segment: segment
                     )
                 }
                 position = stop

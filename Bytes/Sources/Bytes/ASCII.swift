@@ -116,8 +116,9 @@ public extension ByteLanes {
         // `v - lower` is at most `upper - lower` exactly for the lanes in range (lanes below wrap high).
         let offset = vector &- SIMD16(repeating: range.lowerBound)
         let width = SIMD16(repeating: range.upperBound &- range.lowerBound)
-        // Two vectors compared: one instruction (`cmhs`). (`pointwiseMin` was a call.)
-        return ByteMatches(highBits: SIMD16(repeating: 0).replacing(with: 0xFF, where: offset .<= width))
+        // Two vectors compared: one instruction (`cmhs`). (`pointwiseMin` was a call.) A range from 0 folds to the
+        // comparison alone.
+        return ByteMatches(offset .<= width)
     }
 
     /// Tests which lanes equal an ASCII character.

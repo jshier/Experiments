@@ -18,7 +18,7 @@ enum SegmentDecoderKind: String, CaseIterable, CustomStringConvertible {
 /// Decodes single segments outside the extraction pipeline, for the benchmarks comparing decoders: BytesCompression's
 /// `Decompressor`, made once for the archive's compression (`DecompressionFormat(aeaSegment:)`, as NativeAEA's
 /// segment stage decodes), or Compression's scratch memory. Written against NativeAEA's public API only (`AEAArchive`,
-/// `AppleArchiveCompression`, and the `storedBytes(of:)` SPI).
+/// `AppleArchiveCompression`, and `storedBytes(of:)`).
 ///
 /// A class: the decoder's state is made once (in a benchmark's setup) and mutated by every decode.
 final class SegmentDecoder {

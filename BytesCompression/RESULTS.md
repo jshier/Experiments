@@ -8,6 +8,72 @@ Until 2026-11-23 this was the `BytesCompression` module of the Bytes package: it
 `RESULTS-lzraven.md`, `LZRAVEN-FORMAT.md`). The `CompressionBenchmarks` baselines saved in Bytes before the move are
 here too (`.benchmarkBaselines/CompressionBenchmarks/`), under their old names.
 
+## 2026-11-25, latest: zstd against libzstd 1.6.0 (open items 10, 11, 13a; baselines `zstd-before` → `zstd-after`)
+
+The encoder's search loops, block writes, and entropy stage, and the decoder's raw blocks, measured cycle for cycle
+against Homebrew's libzstd 1.6.0 in a scratch harness: what changed, why, and the full tables are in
+`Benchmarks/RESULTS-zstd-encoder.md` ("Against libzstd 1.6.0"). Frames are still libzstd's byte for byte (two
+pre-existing mismatches fixed: tied Huffman symbols, and a frame after a throwing `compressAll`). In the suite (`Zstd
+.*`, p50; the libzstd rows unchanged, so they're the control):
+
+| Benchmark | Bytes instructions before → after | libzstd | Bytes µs before → after | libzstd µs |
+|---|---:|---:|---:|---:|
+| L1 dickens (9.7 MB) | 354 M → 304 M (−14.1%) | 296 M | 25,000 → 23,000 | 24,000 |
+| L1 mozilla (48.8 MB) | 1,286 M → 1,121 M (−12.8%) | 1,083 M | 94,000 → 86,000 | 87,000 |
+| L1 x-ray (8.1 MB) | 130 M → 122 M (−6.2%) | 124 M | 12,000 → 11,000 | 12,000 |
+| L3 dickens | 379 M → 346 M (−8.7%) | 340 M | 47,000 → 45,000 | 46,000 |
+| L3 mozilla | 1,574 M → 1,413 M (−10.2%) | 1,387 M | 135,000 → 131,000 | 132,000 |
+| L3 x-ray | 512 M → 444 M (−13.3%) | 438 M | 43,000 → 39,000 | 40,000 |
+| L3 xml (5.1 MB) | 72 M → 66 M (−8.3%) | 65 M | 8,016 → 7,414 | 7,524 |
+| L3 body Main.js 4 KB | 192,000 → 171,000 (−10.9%) | 167,000 | 11 → 10 | 10 |
+| L3 body dickens 64 KB | 2,933,000 → 2,636,000 (−10.1%) | 2,591,000 | 254 → 250 | 257 |
+| L3 random (1.0 MB): raw blocks | 1,932,000 → 1,201,000 (−37.8%) | 1,560,000 | 137 → 82 | 122 |
+
+Every `Zstd encode` row's Bytes instructions fell 3–14% (random −38%). Decode rows' instructions are unchanged (within
+the suite's rounding) and their times within ±3%, but for random input's raw blocks: 97 → 75 µs (−22.7%; libzstd 96)
+at +4.4% instructions, the copy and XXH64 fused into one pass (`XXHash64.copyAndUpdate`). The suite's body rows repeat one body, which the branch
+predictor learns (see the zstd record): the harness's varied-body rows are the comparison to trust for 4–64 KB.
+
+Also in this change: tests import every module plainly (no `@testable`, no `@_spi`); what they need is `package`
+(`StrideTable`, `UninitializedBuffer`, `BrotliStream.makeCommandTable`, `brotliCommandTable`, `LZBitmapWorkspace`) or
+`public` (`ZstdEncoder`'s API, `ZstdDecoder`). Release tests no longer need `-enable-testing`.
+
+## 2026-11-25: buffer leases (open items 6 and 26; measured in NativeAEA, `async-before` → `async-after`)
+
+`BlockBufferPool` hands out `Buffer` leases (`~Copyable`: one reference each, released by the deinit; `share()` for
+another, `detach()` for a holder that keeps the index in a copyable value, such as a job's staging buffer), and its
+free list is BytesAsync's `AsyncIndexPool`. `DecodedBlock` is noncopyable and carries its lease; `peek()` hands out a
+reference of its own; the decoders release theirs on every way out by scope, and publish by `detach()`; the
+consumer's wait is `wait(in:_:)` on the standard library's `Continuation` (one consumer: a precondition). The engine's
+rows are NativeAEA's extraction and listing: instructions, mallocs, and resident peaks equal, times −2.7% to +1.1%
+(`NativeAEA/RESULTS.md`). Tests: `leasesReleaseTheirBuffers`, `peekingKeepsTheConsumersReference` (fails if `peek`
+adopts the slot's reference), `smallestPoolsFinish` (one decoder, no extra buffers).
+
+## 2026-11-25, later: SHA's blocks as a typed view (open items 3 and 17; baselines `scan-before` → `scan-after`)
+
+BytesCrypto's SHA block functions read whole blocks through Bytes' new `RawSpan.chunks(of:)` (a typed view, elements
+read by `bitCast`) instead of four or eight checked offset loads, each of which kept a compare and a branch. A
+precondition keeps the whole-blocks contract (a partial block trapped in a checked load before; a view would drop it).
+Loops: SHA-1 132 → 107 instructions a block, SHA-256 126 → 100, SHA-512 489 → 462 (no compares left). The portable
+block functions' word reads became vector byte swaps (`rev32`) with no checks. Bytes' record has the scans
+(`../Bytes/Benchmarks/RESULTS.md`, 2026-11-25).
+
+| Row (Bytes) | Instructions before | after | Time before (µs) | after |
+|---|---|---|---|---|
+| SHA-1 1 MB | 2,167 K | 1,756 K (−19%) | 453 | 453 |
+| SHA-256 1 MB | 2,067 K | 1,641 K (−21%) | 468 | 473 |
+| SHA-512 1 MB | 4,010 K | 3,789 K (−6%) | 713 | 736 |
+| SHA-256 64 B (x16384) | 7,295 K | 6,672 K (−9%) | 818 | 839 (re-run alone; 972 in the full run) |
+| HMAC-SHA256 1 MB | 2,068 K | 1,642 K (−21%) | 468 | 471 |
+| HKDF-SHA256 32 B (x1000) | 2,576 K | 2,425 K (−6%) | 264 | 263 |
+
+Times don't move: the hash instructions' latency bounds these loops, and the checks ran beside them. AES-GCM's rows are
+unchanged: GHASH's `absorbBatches` through a typed view of 128-byte batches lost its 9 compares, but LLVM moved
+Karatsuba's middle XOR into general registers (173 instructions against 171, 22 lane moves against 14), so it keeps
+its checked loads (a comment says why). XXH64 and CRC-64 read `chunks(of:)` now (`WordReads.words`/`stripes` removed):
+the same loops (16 and 27), and XXH64's tail of at most three words unrolled. LZBITMAP's encoder takes its equality
+masks with `ByteMatches(_:)`.
+
 ## 2026-11-25: Memory given back; positions past 2^32 (survey bugs 4 and 5; baselines `relmem-before` → `relmem-after`)
 
 From `Writeups/Bytes-Survey-2026-11-24.md`: a reused `Decompressor` never gave memory back (a 96 MiB zstd stream raised

@@ -216,9 +216,11 @@ The details and numbers are in `LESSONS.md`; these came up more than once.
 
 ## Tests
 
-- **Two sets**: `swift test` (debug) is the fast set; `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`
-  adds the bulk sweeps (`--filter BulkTests` for only those). Large inputs, corpora, and every size/capacity go in a
-  `@Suite(.bulk) struct XxxBulkTests` sharing a static helper with the fast test; the fast form keeps every edge case.
+- **Two sets**: `swift test` (debug) is the fast set; `BULK_TESTS=1 swift test -c release` adds the bulk sweeps
+  (`--filter BulkTests` for only those). Large inputs, corpora, and every size/capacity go in a `@Suite(.bulk) struct
+  XxxBulkTests` sharing a static helper with the fast test; the fast form keeps every edge case.
+- **Tests import modules plainly**: no `@testable`, no `@_spi`, no `-enable-testing`. What a test needs is `package`
+  (or `public`, by the access rule above).
 - **Small groups first, the whole suite last**: `swift build --build-tests`, then `swift test --skip-build --filter
   'Suite/'` (several `--filter`s work) plus clients' suites; the full set once at the end.
 - **Shared helpers are Bytes' support products**, not copies: `BytesTestSupport` (`SplitMix64`, `SampleBytes`,

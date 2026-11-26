@@ -502,7 +502,8 @@ public struct Planner<Source: ContentSource>: ~Copyable {
             }
             token = EntryToken(deferred: deferredIndex, path: hardLinked ? stored : -1)
         }
-        let index = await context.freeLargeFiles.acquire()
+        // `nil` only from a closed pool, and this one is never closed.
+        guard let index = await context.freeLargeFiles.acquire() else { preconditionFailure("the large-file slots were closed") }
         let state = context.largeFiles.make(index)
         // Unsafe: copies the path and its NUL from the path buffer into the slot's path storage. Safe: `count + 1`
         // bytes, at most `PATH_MAX`, which `setPath` wrote (nothing has changed them since); the slot's storage is

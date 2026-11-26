@@ -8,14 +8,17 @@ before working in it.
 Where to look:
 
 - Vectorization, SIMD, NEON, shuffles, tables: "Vectorization on ARM64", "API design and code generation",
-  "Apple's formats, curves…", "A second machine", "Masked tables, word loads, and narrowing".
+  "Apple's formats, curves…", "A second machine", "Masked tables, word loads, and narrowing", "Block loads, `cmeq`, and
+  dense candidates".
 - Inlining, allocations, codegen traps, typed throws: "Allocations, concurrency, and codegen", "Compression and
   crypto", "The 2026-11-18 pass", "Every zip method in Swift", "Making decoders…".
 - Compression codecs: "Compression and crypto", "Apple Encrypted Archives and the LZMA decoder", "Xcode's `.xip`…",
   "Every zip method in Swift", "Zstandard encoding", "One-shot reuse and gzip members", "The fix plan", "Small inputs
-  and making coders".
+  and making coders", "Matching libzstd 1.6.0's encoder cycle for cycle".
+- Measuring: branch predictors memorizing repeated inputs, profilers naming inlined code: "Matching libzstd 1.6.0's
+  encoder…".
 - Concurrency and parallel work: "Allocations, concurrency, and codegen", "Threads to structured concurrency", "Bytes
-  cleanup", "One codec layer", "The fix plan".
+  cleanup", "One codec layer", "The fix plan", "Noncopyable continuations and buffer leases".
 - File systems, extraction, Apple's archive tools, Archive Utility: "Apple Encrypted Archives…", "Xcode's `.xip`…",
   "The Disk package and the Nunarchiver app", "Matching Archive Utility", "The survey's bugs", "The archive-coverage
   set".
@@ -407,8 +410,8 @@ NativeAEA/RESULTS.md, Bytes' and BytesCompression's `Benchmarks/RESULTS-*.md`.
 - **Typed throws**: `do { } catch` around a typed-throws call boxes the error (`swift_allocError`) unless written
   `do throws(E)`.
 - **C references in SwiftPM build at `-Os` without `NDEBUG`**: their asserts stay in (lzfse's cost 18%): set
-  `cSettings: [.define("NDEBUG")]` before comparing. Release tests with `@testable` need `-Xswiftc -enable-testing`;
-  elliptic-curve code in debug is hundreds of times slower.
+  `cSettings: [.define("NDEBUG")]` before comparing. Elliptic-curve code in debug is hundreds of times slower.
+  (Release tests with `@testable` needed `-Xswiftc -enable-testing`; since 2026-11-25 no test uses `@testable`.)
 - **`Darwin.membership` is an explicit submodule** (`mbr_identifier_to_uuid` for ACL qualifiers): `import
   Darwin.membership`, no shim needed.
 - **`aa archive` hangs on a FIFO in the tree** (it opens it to read). `pbz` blocks have no checksums: damage to a
@@ -1139,3 +1142,138 @@ BytesCompression/RESULTS.md ("Memory given back"); probes in `~/Scratch/release-
   names the failing frame when package-benchmark only says "error code [5]". Pin what the comparison needs (identical
   frames, checked per setup), not a version: 1.6.0 made the same frames with 2–18% fewer instructions, which is worth
   knowing rather than refusing to measure. Keep the reference's *inputs* fixed (cached frames) so its versions compare.
+
+## Block loads, `cmeq`, and dense candidates (2026-11-25)
+
+Numbers: `Bytes/Benchmarks/RESULTS.md` (2026-11-25), BytesCompression's and HTTPBytes' RESULTS.md the same day; plan
+and reviews in `Writeups/Scan-Items-Plan-2026-11-25.md`.
+
+- **Checked offset loads don't fold into an enclosing check.** `byteBlock(at:)`'s precondition covered all 64 bytes, and
+  comments said the four `load(fromByteOffset: o + 16k)` checks folded into it; in a loop each kept a compare and a
+  branch (HTTPBytes' `farStop` 48 instructions a block, 29 unchecked). Count the loop before believing a "folds" comment.
+  The same in the 16-byte scans (19 → 7) and SHA (8 compares and 9 branches a block).
+- **Two ways out, chosen by length.** Unchecked loads under the loop's own bound (with an `unsafe` comment), or a typed
+  view, `Span<InlineArray<n, UInt8>>(viewing:)` (now `RawSpan.chunks(of:)`) read by `bitCast`: as tight in the loop,
+  no `unsafe`, but about 6 instructions to set up (the `extracting` clamp, a nil-base select, the stride check). Views
+  for whole-block loops (hashes, checksums), unchecked loads for scans whose spans are often a few dozen bytes.
+- **With unchecked loads, use `&+=`.** `offset += 16` was there to tell the optimizer the offset stays non-negative
+  for the checked loads; with unchecked ones it only leaves an overflow check (9 instructions against 7).
+- **Comparing with a splat is one `cmeq`**, so `ByteLanes.matching(_:)` needs no SWAR: `v .== SIMD16(repeating: b)` is
+  two vectors. Its lanes are all ones, so the high-bit spread before `shrn` or the NEON gather disappears; and LLVM merges
+  tests one bit apart (`== 0x2B | == 0x23` → `and #0xF7` and one `cmeq`). A test that once caught low-bit garbage
+  through `matching(0)` (the 0x70 bug) stops testing anything once matching is clean: build its input with
+  `init(highBits:)`.
+- **Don't walk dense candidates one at a time; compute the answer for the block.** The pattern search tested each
+  candidate lane (about 100 instructions a candidate block). Walking them as a mask (9 a candidate) looked better on
+  paper and ran 2–3x slower when every offset was a candidate: a serial chain against the old fully unrolled lane
+  tests. Comparing every pattern byte at all 16 offsets (n shifted loads, `cmeq`, AND) in a block that has candidates
+  gives the first or last match directly: −78% instructions, 5.5x faster dense; 18x faster at a quarter density
+  (branch-bound before); candidate-free blocks untouched. Benchmark rows without candidates can't show this: add dense
+  ones before changing the code, so they have a "before".
+- **Removing checks can make a loop worse.** GHASH's 128-byte batches through a typed view lost 9 compares, but LLVM
+  moved Karatsuba's middle XOR into general registers (171 → 173 instructions, 14 → 22 lane moves). Count after every
+  such change; keep what's better.
+- **Fewer instructions needn't mean faster** where a latency bounds the loop: SHA's 19–21% fewer instructions left its
+  1 MB time flat (the `sha256h` chain), and one run's +19% on 64-byte messages was noise (re-run alone: +2.6%).
+- **Swift Testing's `#expect` can't decompose a method call on a non-escapable span** (`#expect(span.bytesEqual(o))`:
+  "requires that 'RawSpan' conform to 'Escapable'"): put the result in a local first. Comparisons (`== nil`) are fine.
+
+## Noncopyable continuations and buffer leases (2026-11-25)
+
+BytesAsync on the standard library's `Continuation`, `withPermit`, a closable `AsyncIndexPool`, and
+`BlockBufferPool.Buffer` leases. Plan, review, and what changed: `Writeups/Async-Leases-Plan-2026-11-25.md`; numbers:
+`Bytes/Benchmarks/RESULTS.md`, Disk's and NativeAEA's RESULTS.md (2026-11-25).
+
+- **macOS 27's `Continuation<Success, Failure>` is noncopyable**: `resume` consumes it, and one dropped unresumed traps
+  ("deinitialized without being resumed"). A lost path is now a crash where it was a hang, and a double resume doesn't
+  compile; it's unconditionally `Sendable`, and allocates nothing (no checked/unsafe split for debug and release).
+- **A closure can't consume a parameter it captures**, so the continuation can't go into a `Mutex.withLock` closure as
+  it is: `var held = Optional(consume c)` outside, `held.take()` inside. Written once, as `wait(in:_:)` (decide under
+  the lock: keep the continuation or answer now; the helper traps with a message if a path does neither, or both).
+- **Noncopyable shapes that work**: `withLock` returning a noncopyable value; a noncopyable enum switched on directly
+  (`switch state.withLock { … }`, or `switch consume x`); optional stored properties moved out with `take()`; a ring of
+  `UniqueArray<Element?>`. **Ones that don't**: tuples and arrays of noncopyable values (structs and `WaiterQueue`
+  instead); `Optional.map` on one (`if let`); `discard self` in a type with a class reference (a sentinel value the
+  deinit checks instead: `Buffer.detach()` sets −1).
+- **Noncopyable lifetimes are lexical**: a lease's deinit runs at the end of its scope, not after its last use, even at
+  `-O` (the review's probe): `pool.bytes(block.buffer.index, …)` then a write, in a `while let block` body, is safe.
+- **Assigning across an `await` keeps the old value until the call returns**: `block = try await source.nextBlock()`
+  holds the previous lease while it waits. Set `block = nil` first where a pool is small; moving it into what keeps it
+  (`previous = consume chunk`) before the next wait is fine.
+- **A closure returning a noncopyable value in `compactMap` compiles to a discard**, with only an "unused result"
+  warning: two tests dropped every lease they meant to collect. Treat that warning as an error near noncopyable values.
+- **Swift Testing**: `#expect`/`#require` can't decompose a call on a noncopyable value either: locals first.
+  `.timeLimit` can't end a test whose task waits on a continuation nobody resumes (cancellation doesn't reach it): a
+  lost-wakeup break hangs until `gtimeout` kills it (kill the `swiftpm-testing-helper` left behind).
+- **Other compilers' region checks need `Sendable` on what leaves a lock.** Xcode's compiler accepted a `WaiterQueue` or
+  an enum of continuations returned from `withLock`; SocketStream's PR toolchain warned ("cannot be returned"). A
+  conditional `Sendable` on `WaiterQueue`, and `Sendable` on the enums and structs that carry continuations out, cleared
+  both: build BytesAsync's clients with every toolchain that uses it.
+- **Compiler bugs** (`~/Scratch/swift-bugs/`, ready to file): `holder?.token.use()` on an optional noncopyable `let` is
+  "consumed more than once", or "copy of noncopyable typed value" when the payload is generic (29; unwrap with `if let`);
+  IRGen overflows its stack on a `Continuation<Element, Never>??` in generic code at `-Onone` (30; a noncopyable enum
+  instead of the double optional).
+- **Contended async rows measure the scheduler.** Baselines from two runs put the 8-task index pool at +64% (2.06 →
+  3.38 ms, instructions +6%); an A/B in one process (old design, new, and the old logic on the new continuation,
+  alternated 35 times) put the medians within 9–19% with overlapping spreads, the new continuation sometimes slower and
+  sometimes faster. Judge such rows by instructions, mallocs, and the clients' rows (Disk, NativeAEA: flat), and compare
+  times only within one process. `withPermit`'s body crosses modules as a partial apply (one `swift_task_alloc` a
+  permit, no `swift_allocObject`): fine around a syscall, not in a hot loop.
+- **Don't run several packages' suites at once when tests have time limits**: NativeAEA's budget-0 extraction (2.4 s
+  alone, 34 s in its own full suite) passed 60 s while Disk's, BytesCompression's and NativeZip's suites ran beside it.
+
+## Matching libzstd 1.6.0's encoder cycle for cycle (2026-11-25)
+
+The zstd encoder against libzstd 1.6.0, levels 1–4 (open items 10, 11, 13a). Numbers and steps:
+`BytesCompression/Benchmarks/RESULTS-zstd-encoder.md` ("Against libzstd 1.6.0").
+
+- **libzstd 1.6.0's gain isn't in its source** for this path: `zstd_fast.c`/`zstd_double_fast.c` changed 4 lines each
+  (asserts), the Huffman encoder only a BMI2 dispatch; 1.6.0's histograms gained SVE2 (not on M1). Homebrew's bottle is
+  built by a newer clang (minimum OS 27.0): its 2–18% fewer instructions are the compiler's.
+- **LLVM rematerializes 64-bit constants inside loops** (`mov` + 3 `movk` per use: the hash primes) rather than keep
+  them in a register. Loading them from a stored property (a runtime value, set in `init`) put them in registers for
+  the loop: fast's search 59 → 51 instructions a position. Look for `movk` runs in `Tools/loops`' output.
+- **Swift emits no TBAA**: after a store into a `UInt32` table, LLVM reloads every byte value it loaded before it from
+  the input (it may alias). Carry the loaded value (`value0`, the next position's candidates) in locals instead of
+  re-reading `base + position`.
+- **A call in the loop (`memmove` for literals) costs the registers around it**: values live across it spill to the
+  stack, every position, even when the call is rare. An inline copy (16-byte chunks, then 8/4/2/1) kept them in
+  registers; the last literals, copied once a block, keep `memcpy` (an inline copy was 8% of random input's profile).
+- **Branch mispredictions bound dfast** (dickens level 3: about 40% of cycles discarded, 70% of the mispredictions the
+  match tests themselves). Fetching the next position's long and short candidates a position ahead, and coding an
+  invalid candidate as the complement of the position's bytes (`csinv`, no flag), made each test one compare with
+  nothing to branch on before it. LLVM split a separate `valid` flag back into `cset`/`tbnz` branches.
+- **Index-space positions** (`base = source − indexBase`, as libzstd's `base`) turn table entries into addresses with
+  one add: no conversion per candidate.
+- **Writing blocks straight into the caller's output needs room for every check the block encoder makes before it
+  writes**, not just the block stored raw: the entropy stage reserves 3 table descriptions (240 bytes) and stored 31–211-
+  byte blocks raw when given less, where libzstd compressed them (707 bulk-test failures; caught only by the bulk
+  sweep, now by a fast test at every size 24–300 into `maximumCompressedSize`).
+- **A block with no sequences gains nothing from raw literals**: skip copying them and read them in place.
+- **Fusing a copy with the hash that reads the same bytes** (XXH64 over raw blocks while copying): random decode −23%.
+- **`defer` for state that must advance however a function exits**: `compressAll` advanced its next frame's index
+  after the loop, so a `throw` for a full output left the next frame starting at the same index, matching against the
+  failed frame's positions (offsets pointing ahead: corrupt frames).
+- **Comments in reference sources can be wrong about constants**: libzstd's `RANK_POSITION_DISTINCT_COUNT_CUTOFF` is
+  `158 + ZSTD_highbit32(158)` = 165, though its comment says 166. The port followed the comment, so the bucket of
+  symbols counted exactly 164 times wasn't quicksorted as libzstd's is, and two tied symbols swapped code lengths:
+  frames 1–2 bytes off on 2 of 6.15 M sweep frames. Evaluate macros (compile them and print) instead of reading them.
+  Found by decoding both frames' Huffman weights with libzstd's `HUF_readStats` and comparing libzstd's `HUF_sort`
+  order (static functions reached by `#include "huf_compress.c"` in a probe) with ours.
+- **Compressing one input over and over lets the branch predictor learn it**: M1's predictor memorizes a 4–64 KB
+  input's match outcomes across repeated calls, and how well depends on the loop's branch layout, not its work.
+  Repeated bodies showed us 7–16% behind libzstd at level 3 with instructions at parity (all of it "discarded" work);
+  a different body each call (slices of the same file, the same sequence for both) cost both sides 30% more cycles
+  and put us at −2.3 to +0.7%. Measure codecs on varied inputs (the harness's `enc bodies` rows), and suspect
+  memorization when a small repeated input's mispredictions don't match a larger one's.
+- **Pipeline what misses, not what hits**: fetching dfast's long candidate a position ahead pays for itself (its table
+  misses on large inputs); fetching the short one ahead too cost 1.5–2% instructions for nothing. The libzstd shape
+  (only indices ahead) was 5–17% slower in our build at equal instructions.
+- **Profilers name inlined code after its origin**: `Tools/profile` (inlined frames from the dSYM) and LLDB
+  breakpoints by name (inlined locations too) reported "protocol witness for `Equatable.==` in `Int`",
+  `IndexingIterator.next`, and `Strideable.advanced` in the entropy stage: integer compares and loop steps inlined
+  from the standard library, not calls. `Tools/calls` (static call sites) settles it.
+- **Tried and not kept**: workspace coloring and zeroing the histogram on read (no change in store misses; the latter
+  kept for simplicity), dropping dfast's `ip+256` prefetch (neutral), a branch-free 8-byte backward catch-up (2–9%
+  slower: the byte loop's branch predicts), folding `rep1 > 0` into the repeat test with a select (LLVM rebuilt the
+  branch; libzstd's clang unswitches its loop on `offset_1 == 0` instead).

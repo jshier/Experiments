@@ -1,6 +1,6 @@
 import Benchmark
 import BytesTestSupport
-@_spi(Benchmarking) import Disk
+import Disk
 import Foundation
 import System
 

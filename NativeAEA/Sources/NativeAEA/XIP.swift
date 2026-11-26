@@ -70,11 +70,11 @@ public final class XIPArchive: Sendable {
     public let contentSize: Int
     /// The archive file, open for reading (Disk's `InputFile`).
     let file: InputFile
-    let contentStart: Int
+    public let contentStart: Int
     /// SHA-1 of the content stream as stored, from the TOC, if it gives one.
-    let contentChecksum: [UInt8]?
+    public let contentChecksum: [UInt8]?
     let toc: XARTableOfContents
-    let heapStart: Int
+    public let heapStart: Int
     /// The compressed TOC (what its checksum and signature cover).
     let tocCompressed: [UInt8]
 

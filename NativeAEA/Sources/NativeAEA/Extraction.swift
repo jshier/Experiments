@@ -98,7 +98,7 @@ public struct AEAExtractionOptions: Sendable {
     }
 
     /// Writers that may hold a decoded buffer through a job: what the buffer pool adds for them.
-    var heldBuffers: Int { max(1, disk.writers) }
+    public var heldBuffers: Int { max(1, disk.writers) }
 
     /// Disk's settings for the destination: Apple's extractors' (`aa extract`, `xip --expand`).
     func destination(quarantine: Quarantine?, quarantinesDestination: Bool) -> DestinationOptions {
@@ -156,7 +156,7 @@ public extension AEAArchive {
 }
 
 /// The archive format a decoded stream holds.
-enum StreamFormat {
+public enum StreamFormat: Sendable {
     /// Apple Archive (`AA01`/`YAA1` entries): `.aea` and `.aar`.
     case appleArchive
     /// cpio (odc): a `.xip`'s content.
@@ -173,14 +173,14 @@ extension StreamFormat {
     }
 }
 
-enum Extractor {
+public enum Extractor {
     /// The destination for the `FilePath` forms: `path` made if needed and opened with the options' policies, and the
     /// archive's quarantine when ``AEAExtractionOptions/copiesQuarantine`` asks.
     ///
     /// - Parameters:
     ///   - archivePath: The archive file, whose quarantine attribute is copied.
     ///   - quarantinesDestination: Whether the destination directory gets it too.
-    static func open(_ path: FilePath, options: AEAExtractionOptions, archivePath: FilePath, quarantinesDestination: Bool) throws(AEAError) -> Destination {
+    public static func open(_ path: FilePath, options: AEAExtractionOptions, archivePath: FilePath, quarantinesDestination: Bool) throws(AEAError) -> Destination {
         let quarantine = options.copiesQuarantine ? Quarantine(copyingFrom: archivePath) : nil
         do throws(DiskError) {
             return try Destination(path, options: options.destination(quarantine: quarantine, quarantinesDestination: quarantinesDestination))
@@ -209,7 +209,7 @@ enum Extractor {
     ///   - target: The destination, opened with ``AEAExtractionOptions``' policies (``open(_:options:archivePath:quarantinesDestination:)``
     ///     or ``reopen(_:options:)``), owned by this call: closed as soon as Disk's extraction returns.
     ///   - expectedBytes: The estimate of the files' bytes the progress (`options.disk.progress`) starts with.
-    nonisolated(nonsending) static func extract(
+    public nonisolated(nonsending) static func extract(
         _ source: some ChunkSource, format: StreamFormat = .appleArchive, into target: Destination, options: AEAExtractionOptions,
         expectedBytes: Int = 0
     ) async throws(AEAError) -> AEAStatistics {
@@ -295,11 +295,11 @@ enum Extractor {
 /// A whole file is one range; a small file across a segment boundary is two, written as two `FileOutput.write`s
 /// (Disk gathers them in the writer's staging buffer); a large file is a piece per segment (Disk's `PieceSource`),
 /// compressed in place over its own consumed bytes, which no one else reads.
-struct SegmentContents: PieceSource {
+public struct SegmentContents: PieceSource, Sendable {
     let pool: BlockBufferPool
 
     /// One or two ranges of buffers: offsets from each buffer's segment base.
-    struct Contents: Sendable {
+    public struct Contents: Sendable {
         var buffer = -1
         var offset = 0
         var count = 0
@@ -308,7 +308,7 @@ struct SegmentContents: PieceSource {
         var secondCount = 0
     }
 
-    func write(_ contents: Contents, to output: inout FileOutput) async throws(EntryError<Never>) {
+    public func write(_ contents: Contents, to output: inout FileOutput) async throws(EntryError<Never>) {
         do throws(DiskError) {
             if contents.buffer >= 0 {
                 // The job's reference keeps the buffer's bytes until `release`, after the write.
@@ -323,17 +323,17 @@ struct SegmentContents: PieceSource {
         }
     }
 
-    func release(_ contents: Contents) {
+    public func release(_ contents: Contents) {
         if contents.buffer >= 0 { pool.release(contents.buffer) }
         if contents.secondBuffer >= 0 { pool.release(contents.secondBuffer) }
     }
 
-    func retain(_ contents: Contents) {
+    public func retain(_ contents: Contents) {
         // Pieces only: one range.
         pool.retain(contents.buffer)
     }
 
-    func withPiece<R>(_ contents: Contents, _ body: (inout MutableRawSpan) throws(DiskError) -> R) throws(DiskError) -> R {
+    public func withPiece<R>(_ contents: Contents, _ body: (inout MutableRawSpan) throws(DiskError) -> R) throws(DiskError) -> R {
         // A piece's range of its buffer, held by the job until its last release, and read by no one else (the walker
         // reads only past it, and the buffer's next user gets it after the release).
         try pool.withMutableBytes(contents.buffer, at: contents.offset, count: contents.count, body)
@@ -345,7 +345,7 @@ struct SegmentContents: PieceSource {
 /// Plans the walked entries for Disk: directories, links, and special files from their headers; files as their data
 /// arrives (whole, in two ranges, or in pieces); hard links to the first name; blobs (extended attributes, ACLs) added
 /// to their entry once it ends.
-struct ExtractionSink: ArchiveSink, ~Copyable {
+public struct ExtractionSink: ArchiveSink, ~Copyable {
     private var planner: Planner<SegmentContents>
     let pool: BlockBufferPool
     private let mode: DiskCompressionMode
@@ -420,7 +420,7 @@ struct ExtractionSink: ArchiveSink, ~Copyable {
     /// arrives (Disk's bridges: a chunk spans at most 8 pieces, as pieces under a seventh of a chunk store the file
     /// plain). One for blocks of 64 KiB or more; four for `aea`'s smallest segments (16 KiB), where a pool of three
     /// (one decoder, one writer, no extra buffers) waited forever for a decoder's buffer.
-    static func walkBuffers(held: Int, blockCapacity: Int) -> Int {
+    public static func walkBuffers(held: Int, blockCapacity: Int) -> Int {
         guard held > 0, blockCapacity * 7 >= 65_536 else { return 1 }
         // Pieces a chunk can span when it doesn't start at a piece's start, less the one that ends it (not yet read).
         return min(8, (65_535 + blockCapacity - 1) / blockCapacity + 1) - 1

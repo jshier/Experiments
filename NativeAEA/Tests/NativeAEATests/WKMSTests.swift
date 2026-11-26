@@ -1,7 +1,7 @@
-@testable import NativeAEA
 import BytesCrypto
 import BytesTestSupport
 import Foundation
+import NativeAEA
 import System
 import Testing
 

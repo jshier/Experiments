@@ -396,7 +396,7 @@ Tool honor it), and never on PATH (the shell profile doesn't add them).
 - **Using one:** NAME is a registry name, a package directory (its `.swift-toolchain`), or an installed
   toolchain's name, bundle id, or alias. Exact matches win over substrings, and a link such as `swift-latest` counts
   as the toolchain it points to; a registered toolchain that isn't installed exits 2. `Tools/toolchain NAME test`
-  builds release with `-enable-testing` (for `@testable` imports).
+  builds release (`--debug` for debug); tests import modules plainly, so no `-enable-testing`.
   ```sh
   eval "$(Tools/toolchain SocketStream env)"     # TOOLCHAINS, TOOLCHAIN, TOOLCHAIN_RUNTIME
   Tools/toolchain SocketStream -- swift run --package-path SocketStream -c release socket-stream
@@ -530,8 +530,7 @@ Script gotchas met on this machine:
 
 ## Tests
 
-- **Two sets.** `swift test` (debug) runs the fast set; `BULK_TESTS=1 swift test -c release -Xswiftc -enable-testing`
-  adds the bulk sweeps (`--filter BulkTests` for only those). Default runs (2026-11-23, M1 Max, idle, `--skip-build`,
+- **Two sets.** `swift test` (debug) runs the fast set; `BULK_TESTS=1 swift test -c release` adds the bulk sweeps (`--filter BulkTests` for only those). Default runs (2026-11-23, M1 Max, idle, `--skip-build`,
   wall): Bytes 81 s (its 302 compression tests 64 s), NativeAEA 33 s, Disk 18 s, HTTPBytes 16 s, NativeZipArchive 11 s,
   MQTT 4 s. Alone, the slowest compression suites take 4–9 s each in debug (ParallelInflate, ParallelInflateSegment,
   OneShotReuse, ParallelDeflate, the LZ parity suites).

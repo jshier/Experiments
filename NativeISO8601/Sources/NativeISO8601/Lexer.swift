@@ -16,7 +16,7 @@
 /// The lexer is `~Escapable`, so it can't outlive the bytes it reads, and `~Copyable`, because it's a
 /// one-shot cursor: ``lex()`` consumes it. It reads a `RawSpan` so that every input (`Span<UInt8>`,
 /// `UTF8Span`, `Data.bytes`, `RawSpan`) reaches it without conversion.
-struct Lexer: ~Copyable, ~Escapable {
+public struct Lexer: ~Copyable, ~Escapable {
     private let bytes: RawSpan
     private var position = 0
 
@@ -26,7 +26,7 @@ struct Lexer: ~Copyable, ~Escapable {
     }
 
     @_lifetime(copy bytes)
-    init(_ bytes: Span<UInt8>) {
+    public init(_ bytes: Span<UInt8>) {
         self.bytes = bytes.bytes
     }
 
@@ -39,6 +39,13 @@ struct Lexer: ~Copyable, ~Escapable {
             if lexBasicDateTime(into: &raw) { return try finishFastPath(raw) }
         }
         return try lexGeneral()
+    }
+
+    /// ``lex(allowingFastPath:)`` for callers outside the module (tests). A separate function because `lex` is
+    /// `@inline(always)`, which on a public (or package) function implies `@inlinable`, exposing the private lexing it
+    /// calls; this one isn't inlined into its callers.
+    public consuming func lexOutOfLine(allowingFastPath: Bool = true) throws(ISO8601ParseError) -> RawComponents {
+        try lex(allowingFastPath: allowingFastPath)
     }
 
     /// After a fast path took `YYYY-MM-DDThh:mm:ss` or `YYYYMMDDThhmmss`, only a fraction and an

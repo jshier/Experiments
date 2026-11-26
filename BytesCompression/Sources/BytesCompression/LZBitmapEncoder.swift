@@ -412,7 +412,7 @@ enum LZBitmapEncoding {
             let block = unsafe UnsafeRawPointer(nibbles + read).loadUnaligned(as: SIMD16<UInt8>.self)
             let next = unsafe UnsafeRawPointer(nibbles + (read &+ 1)).loadUnaligned(as: SIMD16<UInt8>.self)
             unsafe UnsafeMutableRawPointer(runs + written).storeBytes(of: block, as: SIMD16<UInt8>.self)
-            let equal = ByteMatches(highBits: (block .== next).lanes(as: SIMD16<UInt8>.self)).nibbleMask
+            let equal = ByteMatches(block .== next).nibbleMask
             let starts = equal & equal &>> 4 & equal &>> 8
             let step = (starts | 1 &<< 55).trailingZeroBitCount &>> 2 &+ 1
             read &+= step
@@ -425,7 +425,7 @@ enum LZBitmapEncoding {
                 repeat {
                     let previous = unsafe UnsafeRawPointer(nibbles + (read &- 1)).loadUnaligned(as: SIMD16<UInt8>.self)
                     let current = unsafe UnsafeRawPointer(nibbles + read).loadUnaligned(as: SIMD16<UInt8>.self)
-                    let same = ByteMatches(highBits: (previous .== current).lanes(as: SIMD16<UInt8>.self)).nibbleMask
+                    let same = ByteMatches(previous .== current).nibbleMask
                     length = (~same & 0x8888_8888_8888_8888 | 1 &<< 63).trailingZeroBitCount &>> 2
                     unsafe runs[written] = UInt8(truncatingIfNeeded: length)
                     written &+= 1

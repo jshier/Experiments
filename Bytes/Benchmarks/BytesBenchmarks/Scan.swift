@@ -55,6 +55,29 @@ let markerHaystack = Lazy {
     return bytes
 }
 
+/// The pattern the candidate-dense haystacks hide: its first and last bytes are their filler, so offsets match those
+/// and fail on the middle two.
+let candidateMarker: Byte4 = [0x41, 0x43, 0x43, 0x41]
+
+/// 64 KB in which every offset is a candidate for ``candidateMarker`` (all its first and last byte), the marker last.
+let allCandidates = Lazy {
+    var bytes = [UInt8](repeating: 0x41, count: 64 << 10)
+    bytes.replaceSubrange((bytes.count - 4)..., with: [0x41, 0x43, 0x43, 0x41])
+    return bytes
+}
+
+/// 64 KB of random `A`s and `B`s, a quarter of offsets a candidate for ``candidateMarker`` (an `A` with an `A` three
+/// bytes on), the marker last.
+let quarterCandidates = Lazy {
+    var bytes = randomBuffer(byteCount: 64 << 10).map { 0x41 &+ ($0 & 1) }
+    bytes.replaceSubrange((bytes.count - 4)..., with: [0x41, 0x43, 0x43, 0x41])
+    return bytes
+}
+
+/// ``allCandidates`` and ``quarterCandidates`` reversed: the marker first, for the backward search.
+let allCandidatesReversed = Lazy { Array(allCandidates.value.reversed()) }
+let quarterCandidatesReversed = Lazy { Array(quarterCandidates.value.reversed()) }
+
 // The workloads, `@inline(never)` so each is one function to read with Tools/loops.
 
 @inline(never)
@@ -141,6 +164,16 @@ func findMarkerByLoad(_ bytes: RawSpan) -> Int? {
     return nil
 }
 
+@inline(never)
+func findCandidateMarker(_ bytes: RawSpan) -> Int? {
+    bytes.firstByteOffset(of: candidateMarker)
+}
+
+@inline(never)
+func findCandidateMarkerBackwards(_ bytes: RawSpan) -> Int? {
+    BytesReader(bytes).lastByteOffset(of: candidateMarker)
+}
+
 /// `body` 16 times, keeping each result.
 @inline(__always)
 func repeated<R>(_ body: () -> R) -> R {
@@ -185,5 +218,22 @@ func registerScanBenchmarks() {
     }
     register("Scan: 4-byte marker in 64 KB (x16), RawSpan.load per offset", markerHaystack, check: { $1 == markerEnd }) { bytes in
         repeated { findMarkerByLoad(bytes.span.bytes) }
+    }
+    // Candidate-dense searches: the rows above have no candidates, so they never reach the per-candidate work.
+    register("Scan: 4-byte marker, every offset a candidate, 64 KB (x16), firstByteOffset(of:)", allCandidates,
+             check: { $1 == markerEnd }) { bytes in
+        repeated { findCandidateMarker(bytes.span.bytes) }
+    }
+    register("Scan: 4-byte marker, a quarter of offsets candidates, 64 KB (x16), firstByteOffset(of:)", quarterCandidates,
+             check: { $1 == markerEnd }) { bytes in
+        repeated { findCandidateMarker(bytes.span.bytes) }
+    }
+    register("Scan: 4-byte marker, every offset a candidate, 64 KB (x16), lastByteOffset(of:)", allCandidatesReversed,
+             check: { $1 == 0 }) { bytes in
+        repeated { findCandidateMarkerBackwards(bytes.span.bytes) }
+    }
+    register("Scan: 4-byte marker, a quarter of offsets candidates, 64 KB (x16), lastByteOffset(of:)", quarterCandidatesReversed,
+             check: { $1 == 0 }) { bytes in
+        repeated { findCandidateMarkerBackwards(bytes.span.bytes) }
     }
 }

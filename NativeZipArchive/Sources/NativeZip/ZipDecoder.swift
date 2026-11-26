@@ -66,7 +66,6 @@ public struct ZipDecoder: ~Copyable {
     /// - Throws: ``ZipError/unsupportedMethod(_:_:)`` for a method (or LZMA properties) that can't be read;
     ///   ``ZipError/decoding(_:_:)`` for invalid or truncated data; ``ZipError/sizeMismatch(_:expected:actual:)`` for
     ///   output that isn't `uncompressedSize` bytes; whatever `chunk` throws.
-    @_spi(Testing)
     public mutating func decodePayload(
         _ payload: RawSpan, method: UInt16, uncompressedSize: UInt64, hasEndMarker: Bool = false,
         _ chunk: (RawSpan) throws(ZipError) -> Void
@@ -386,7 +385,6 @@ typealias ChunkHandoff = AsyncHandoff<ZipDecoder.Chunk>
 // MARK: - Benchmarking hooks
 
 /// NativeZip's DEFLATE decoding on its own, exposed only so benchmarks and tests can time and check it.
-@_spi(Benchmarking)
 public enum DeflateBackends {
     /// Inflates a raw-DEFLATE `payload` with `decoder`, without verifying a size or CRC-32.
     ///

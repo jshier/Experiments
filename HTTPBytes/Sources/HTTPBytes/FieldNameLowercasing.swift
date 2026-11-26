@@ -38,7 +38,7 @@ package struct FieldNameLowercasing: ~Copyable, Sendable {
     /// Lanes that are ASCII uppercase letters.
     @inlinable @inline(__always)
     package static func uppercaseLetters(_ lanes: ByteLanes) -> ByteMatches {
-        HTTPCharacters.matches(lanes.vector &- SIMD16(repeating: 0x41) .< SIMD16(repeating: 26))
+        lanes.matching(in: 0x41...0x5A)
     }
 
     /// `name`'s bytes with ASCII letters lowercased, at the returned address (`name.byteCount` bytes), valid until this

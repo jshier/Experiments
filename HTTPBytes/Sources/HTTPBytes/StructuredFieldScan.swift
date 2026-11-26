@@ -53,14 +53,14 @@ enum StructuredFieldScan {
     /// Lanes outside printable ASCII.
     @inlinable @inline(__always)
     static func nonPrintable(_ lanes: ByteLanes) -> ByteMatches {
-        HTTPCharacters.matches(outsidePrintable(lanes.vector))
+        ByteMatches(outsidePrintable(lanes.vector))
     }
 
     /// Lanes that end a String's run of plain bytes: `"`, `\`, and bytes outside printable ASCII.
     @inlinable @inline(__always)
     static func stringStop(_ lanes: ByteLanes) -> ByteMatches {
         let vector = lanes.vector
-        return HTTPCharacters.matches(outsidePrintable(vector) .| (vector .== SIMD16(repeating: 0x22))
+        return ByteMatches(outsidePrintable(vector) .| (vector .== SIMD16(repeating: 0x22))
             .| (vector .== SIMD16(repeating: 0x5C)))
     }
 
@@ -68,7 +68,7 @@ enum StructuredFieldScan {
     @inlinable @inline(__always)
     static func displayStop(_ lanes: ByteLanes) -> ByteMatches {
         let vector = lanes.vector
-        return HTTPCharacters.matches(outsidePrintable(vector) .| (vector .== SIMD16(repeating: 0x22))
+        return ByteMatches(outsidePrintable(vector) .| (vector .== SIMD16(repeating: 0x22))
             .| (vector .== SIMD16(repeating: 0x25)))
     }
 
@@ -82,7 +82,7 @@ enum StructuredFieldScan {
         let rows = SIMD16<UInt8>(0, 0, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0, 0, 0, 0, 0, 0, 0, 0)
         let column = ByteLanes(lanes.vector & SIMD16(repeating: 0x0F)).lookup(in: columns)
         let row = ByteLanes(lanes.vector &>> SIMD16(repeating: 4)).lookup(in: rows)
-        return HTTPCharacters.matches((column & row) .== SIMD16(repeating: 0))
+        return ByteMatches((column & row) .== SIMD16(repeating: 0))
     }
 
     /// Lanes that aren't Base64 characters (`=` included: padding ends the characters).
@@ -92,7 +92,7 @@ enum StructuredFieldScan {
         let letter = ((vector | SIMD16(repeating: 0x20)) &- SIMD16(repeating: 0x61)) .< SIMD16(repeating: 26)
         let digit = (vector &- SIMD16(repeating: 0x30)) .< SIMD16(repeating: 10)
         let symbol = (vector .== SIMD16(repeating: 0x2B)) .| (vector .== SIMD16(repeating: 0x2F))
-        return HTTPCharacters.matches(.!(letter .| digit .| symbol))
+        return ByteMatches(.!(letter .| digit .| symbol))
     }
 
     // MARK: Small classes

@@ -169,6 +169,27 @@ private let largeFixtures = [
         }
     }
 
+    /// Sixteen paths, each three times in a row: every copy waits for the one before it to be written (the writers take
+    /// adjacent copies together), and the last is kept. A lost wake-up hangs it.
+    @Test(.timeLimit(.minutes(1))) func replacesEachPathTwiceInOrder() async throws {
+        let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
+        defer { temporary.remove() }
+        var entries: [HostileSizeTests.Entry] = []
+        for path in 0..<16 {
+            for copy in 0..<3 {
+                entries.append(HostileSizeTests.Entry(name: "file\(path).txt", data: Array("path \(path), copy \(copy)\n".utf8)))
+            }
+        }
+        let archive = try ZipArchive(url: HostileSizeTests.archive(entries, in: temporary.url))
+        let directory = temporary.url.appending(path: "out")
+        var options = ZipExtractionOptions()
+        options.overwrite = .always
+        try await archive.extract(to: FilePath(directory.path), options: options)
+        for path in 0..<16 {
+            #expect(try contents(directory.appending(path: "file\(path).txt")) == "path \(path), copy 2\n")
+        }
+    }
+
     @Test func extractsSeveralArchivesTogether() async throws {
         let temporary = try TemporaryDirectory(prefix: "NativeZipTests")
         defer { temporary.remove() }

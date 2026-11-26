@@ -1,6 +1,6 @@
-@testable import Disk
 import Bytes
 import BytesTestSupport
+import Disk
 import Foundation
 import System
 import Testing

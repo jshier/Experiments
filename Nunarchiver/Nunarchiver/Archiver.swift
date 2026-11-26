@@ -12,20 +12,26 @@ import Foundation
 ///   sample for the row's throughput (``Throughput``: bytes written to disk per second, over the last 2 s of ticks).
 /// - An archive that needs a password or key shows the window at once: its row is the prompt.
 /// - A finished expansion is revealed in the Finder if the setting is on; a failed one queues an alert naming it.
-@Feature struct Archiver {
-    struct State {
-        var alerts: [FailureAlert] = []
-        var expansions: [Expansion.State] = []
-        var isProgressWindowVisible = false
+@Feature public struct Archiver {
+    public struct State {
+        public var alerts: [FailureAlert] = []
+        public var expansions: [Expansion.State] = []
+        public var isProgressWindowVisible = false
+
+        public init(alerts: [FailureAlert] = [], expansions: [Expansion.State] = [], isProgressWindowVisible: Bool = false) {
+            self.alerts = alerts
+            self.expansions = expansions
+            self.isProgressWindowVisible = isProgressWindowVisible
+        }
 
         /// A row is asking for a password or key: its window needs the keyboard.
-        var isAwaitingCredential: Bool { expansions.contains { $0.credentialRequest != nil } }
+        public var isAwaitingCredential: Bool { expansions.contains { $0.credentialRequest != nil } }
 
         /// Nothing running and nothing to report: the app may quit.
-        var isIdle: Bool { expansions.isEmpty && alerts.isEmpty }
+        public var isIdle: Bool { expansions.isEmpty && alerts.isEmpty }
     }
 
-    enum Action {
+    public enum Action {
         case alertDismissed
         case archivesOpened([URL])
         case expansions(Expansion.State.ID, Expansion.Action)
@@ -35,16 +41,18 @@ import Foundation
     }
 
     /// How long expansion runs before the window appears.
-    static let windowDelay = Duration.milliseconds(500)
+    public static let windowDelay = Duration.milliseconds(500)
     /// How often the window reads progress.
-    static let pollInterval = Duration.milliseconds(250)
+    public static let pollInterval = Duration.milliseconds(250)
 
     @FeatureEnvironment(\.archiveExpander) var archiveExpander
     @FeatureEnvironment(\.continuousClock) var clock
     @FeatureEnvironment(\.uuid) var uuid
     @FeatureEnvironment(\.workspace) var workspace
 
-    var body: some Feature {
+    public init() {}
+
+    public var body: some Feature {
         Update { state, action in
             switch action {
             case .alertDismissed:
@@ -140,12 +148,18 @@ import Foundation
 }
 
 /// An expansion that failed, reported in an alert naming the archive.
-struct FailureAlert: Equatable, Identifiable {
-    let id: UUID
-    let archive: URL
-    let message: String
+public struct FailureAlert: Equatable, Identifiable, Sendable {
+    public let id: UUID
+    public let archive: URL
+    public let message: String
 
-    var title: LocalizedStringResource {
+    public init(id: UUID, archive: URL, message: String) {
+        self.id = id
+        self.archive = archive
+        self.message = message
+    }
+
+    public var title: LocalizedStringResource {
         LocalizedStringResource(
             "Unable to expand “\(archive.lastPathComponent)”.",
             comment: "Title of the alert for an archive that couldn't be expanded. The variable is the archive's file name."

@@ -8,12 +8,12 @@ import System
 
 /// A `pbz` stream inside an AEA archive's segments, decoded from them (BytesCompressionAsync's engine, its blocks
 /// copied out of the segments into staging).
-typealias PBZInSegments = ParallelBlockDecoder<UpstreamBlocks<AEAError>>
+public typealias PBZInSegments = ParallelBlockDecoder<UpstreamBlocks<AEAError>>
 
 /// A file read in `pbz` blocks or plain slices: an `.aar`, a `.xip`'s content.
-typealias FileBlocks = ParallelBlockDecoder<ArchiveFileStage>
+public typealias FileBlocks = ParallelBlockDecoder<ArchiveFileStage>
 
-extension AEAArchive {
+public extension AEAArchive {
     /// The archive's decoded contents as a chunk source (not yet running): its segments when they hold a plain Apple
     /// Archive stream, or a ``PBZInSegments`` decoding the `pbz` stream they hold, decided once the first segment is
     /// decoded (``AEAPayload``).
@@ -42,19 +42,19 @@ extension AEAArchive {
 ///
 /// (Decoding it on the caller's task before starting the decoders cost every `.aea` operation one segment's decoding
 /// time, about 0.15 s on Xcode's: 5% of listing it.)
-final class AEAPayload: OrderedBlockSource {
-    typealias Failure = AEAError
+public final class AEAPayload: OrderedBlockSource {
+    public typealias Failure = AEAError
 
-    let segments: SegmentStream
+    public let segments: SegmentStream
     private let options: AEAReadOptions
     private let held: Int
 
-    private struct State {
+    private struct State: ~Copyable {
         var decided = false
         /// The block stream, if the segments hold a `pbz` stream.
         var blocks: PBZInSegments?
         /// ``run()`` waiting for the decision.
-        var runner: Continuation<PBZInSegments?>?
+        var runner: Continuation<PBZInSegments?, Never>?
     }
 
     private let state = Mutex(State())
@@ -69,13 +69,13 @@ final class AEAPayload: OrderedBlockSource {
     private var current: any ChunkSource { state.withLock { $0.blocks } ?? segments }
 
     /// The block stream, if ``prepare()`` found a `pbz` stream.
-    var blocks: PBZInSegments? { state.withLock { $0.blocks } }
+    public var blocks: PBZInSegments? { state.withLock { $0.blocks } }
 
-    var pool: BlockBufferPool { current.pool }
-    var pools: [BlockBufferPool] { current.pools }
-    var counters: BlockDecodingCounters { current.counters }
+    public var pool: BlockBufferPool { current.pool }
+    public var pools: [BlockBufferPool] { current.pools }
+    public var counters: BlockDecodingCounters { current.counters }
 
-    nonisolated(nonsending) func run() async {
+    public nonisolated(nonsending) func run() async {
         await withDiscardingTaskGroup { group in
             group.addTask { await self.segments.run() }
             if let blocks = await decision() { await blocks.run() }
@@ -84,29 +84,26 @@ final class AEAPayload: OrderedBlockSource {
 
     /// Suspends until ``prepare()`` decides (or the source is stopped first: `nil`).
     private nonisolated(nonsending) func decision() async -> PBZInSegments? {
-        await withContinuation { (continuation: Continuation<PBZInSegments?>) in
-            let decided: PBZInSegments?? = state.withLock { state in
-                if state.decided { return .some(state.blocks) }
-                state.runner = continuation
-                return nil
-            }
-            if let decided { continuation.resume(returning: decided) }
+        await wait(in: state) { state, continuation in
+            if state.decided { return .some(state.blocks) }
+            precondition(state.runner == nil, "AEAPayload: one task runs it")
+            state.runner = continuation.take()
+            return nil
         }
     }
 
     /// Records the decision, unless the source was stopped first, and lets ``run()`` go on.
     private func decide(_ blocks: PBZInSegments?) {
-        let runner: Continuation<PBZInSegments?>? = state.withLock { state in
+        let runner = state.withLock { state -> Continuation<PBZInSegments?, Never>? in
             guard !state.decided else { return nil }
             state.decided = true
             state.blocks = blocks
-            defer { state.runner = nil }
-            return state.runner
+            return state.runner.take()
         }
-        runner?.resume(returning: blocks)
+        if let runner { runner.resume(returning: blocks) }
     }
 
-    nonisolated(nonsending) func prepare() async throws(AEAError) {
+    public nonisolated(nonsending) func prepare() async throws(AEAError) {
         if state.withLock({ $0.decided }) { return }
         let blocks: PBZInSegments?
         do throws(AEAError) {
@@ -127,7 +124,7 @@ final class AEAPayload: OrderedBlockSource {
         guard let first = try await segments.peek() else { return nil }
         let pool = segments.pool
         // The first chunk's first bytes, published and held until the consumer takes it.
-        let head = pool.bytes(first.buffer, at: 0, count: min(first.rawSize, PBZ.headerSize))
+        let head = pool.bytes(first.buffer.index, at: 0, count: min(first.rawSize, PBZ.headerSize))
         let header: (compression: AppleArchiveCompression, blockSize: Int)?
         do throws(PBZError) {
             header = try PBZ.header(head)
@@ -144,17 +141,17 @@ final class AEAPayload: OrderedBlockSource {
         )
     }
 
-    nonisolated(nonsending) func nextBlock() async throws(AEAError) -> DecodedBlock? {
+    public nonisolated(nonsending) func nextBlock() async throws(AEAError) -> DecodedBlock? {
         try await current.nextBlock()
     }
 
-    func stop(_ failure: AEAError?) {
+    public func stop(_ failure: AEAError?) {
         // Undecided: ``run()`` stops waiting, starting no block stream.
         decide(nil)
         if let blocks { blocks.stop(failure) } else { segments.stop(failure) } // A block stream stops its upstream too.
     }
 
-    func releaseUnconsumed() {
+    public func releaseUnconsumed() {
         if let blocks { blocks.releaseUnconsumed() } else { segments.releaseUnconsumed() } // Same.
     }
 }
@@ -208,7 +205,7 @@ public final class AppleArchiveFile: Sendable {
     }
 
     /// The decoded contents as a chunk source (not yet running).
-    func source(_ options: AEAReadOptions, heldBeyondDecoding held: Int) -> FileBlocks {
+    public func source(_ options: AEAReadOptions, heldBeyondDecoding held: Int) -> FileBlocks {
         let stage = ArchiveFileStage(file: file)
         let walk = ExtractionSink.walkBuffers(held: held, blockCapacity: blockSize)
         // The walker reads the blocks: they carry its headers.

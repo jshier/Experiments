@@ -13,18 +13,22 @@ public import Synchronization
 // Everything is inlinable, with `@usableFromInline` state, so a client's `ParallelBlockDecoder<ItsStage>` is
 // specialized in the client's module: no generic dispatch per block.
 
-/// One decoded block of a stream, in a pool buffer the consumer releases.
-public struct DecodedBlock: Sendable {
+/// One decoded block of a stream, holding its pool buffer: dropping the block releases the buffer.
+///
+/// Release a block before waiting for another one (a consumer holds the buffers its sizing's `consumerBuffers` count):
+/// `block = try await source.nextBlock()` keeps the old block until the call returns, so set `block = nil` first, or
+/// move it into what keeps it (`previous = consume block`) before the next wait.
+public struct DecodedBlock: ~Copyable, Sendable {
     /// The block's place in the stream: 0, 1, 2, … (an indexed source's own indices).
     public var index: Int
-    /// The pool buffer holding it.
-    public var buffer: Int
+    /// The pool buffer holding it: its ``BlockBufferPool/Buffer/index`` for the pool's byte accessors.
+    public var buffer: BlockBufferPool.Buffer
     /// Where its bytes are in the decoded stream, and how many.
     public var rawOffset: Int
     public var rawSize: Int
 
     @inlinable
-    public init(index: Int, buffer: Int, rawOffset: Int, rawSize: Int) {
+    public init(index: Int, buffer: consuming BlockBufferPool.Buffer, rawOffset: Int, rawSize: Int) {
         self.index = index
         self.buffer = buffer
         self.rawOffset = rawOffset
@@ -425,7 +429,7 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
     }
 
     @usableFromInline
-    struct State {
+    struct State: ~Copyable {
         /// Decoded blocks, block `i` at `i % slots.count`. Every block between the consumer's and a published one holds
         /// a buffer (decoders take a buffer, then a block, in order), so at most `pool.count` are published at once and
         /// none overwrites another.
@@ -439,13 +443,14 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
         /// `Int.min` once stopped.
         @usableFromInline var limit = Int.max
         /// The consumer, suspended until block `waitingFor` is published (or the end is known, or a failure).
-        @usableFromInline var consumer: Continuation<Void>?
+        @usableFromInline var consumer: Continuation<Void, Never>?
         @usableFromInline var waitingFor = -1
 
         @inlinable
         init(slots: [Slot], endIndex: Int?) {
             self.slots = slots
             self.endIndex = endIndex
+            consumer = nil
         }
     }
 
@@ -653,7 +658,8 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
     }
 
     /// The consumer's next block once it's decoded, without taking it (``nextBlock()`` still returns it): for looking at
-    /// the stream's first bytes while the decoders run.
+    /// the stream's first bytes while the decoders run. Its buffer is a reference of its own (the slot keeps the one
+    /// ``nextBlock()`` hands over), released when the peeked block is dropped.
     ///
     /// - Returns: `nil` past the last block.
     @inlinable
@@ -667,53 +673,70 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
         let start = MonotonicClock.now
         defer { counters.wait.add(MonotonicClock.nanoseconds(since: start), ordering: .relaxed) }
         while true {
-            switch state.withLock({ Self.take(index, taking: taking, &$0) }) {
-            case let .some(.success(block)):
+            switch state.withLock({ take(index, taking: taking, &$0) }) {
+            case let .taken(block):
                 return block
-            case let .some(.failure(error)):
+            case .end:
+                return nil
+            case let .failed(error):
                 throw error
-            case nil:
-                await withContinuation { (continuation: Continuation<Void>) in
+            case .wait:
+                await wait(in: state) { state, continuation in
                     // Checked again under the lock publishing, failing, and stopping take: no wakeup is lost.
-                    let ready = state.withLock { state in
-                        if index >= state.limit || (state.endIndex.map { index >= $0 } ?? false) || state.slots[index % state.slots.count].index == index {
-                            return true
-                        }
-                        state.consumer = continuation
-                        state.waitingFor = index
-                        return false
+                    if index >= state.limit || (state.endIndex.map { index >= $0 } ?? false) || state.slots[index % state.slots.count].index == index {
+                        return ()
                     }
-                    if ready { continuation.resume() }
+                    precondition(state.consumer == nil, "ParallelBlockDecoder: one task consumes it")
+                    state.consumer = continuation.take()
+                    state.waitingFor = index
+                    return nil
                 }
             }
         }
     }
 
-    /// Block `index` if it's published (`nil` past the last), the failure if it's at or past a failing block (or the
-    /// source is stopped), or `nil` to wait.
+    /// What the consumer finds for a block, under the lock.
+    @usableFromInline
+    enum Take: ~Copyable {
+        /// The block, published.
+        case taken(DecodedBlock)
+        /// Past the last block.
+        case end
+        /// At or past a failing block, or stopped.
+        case failed(Failure)
+        /// Not published yet.
+        case wait
+    }
+
+    /// Block `index` if it's published, the end, the failure if it's at or past a failing block (or the source is
+    /// stopped), or a wait. Taking it hands the slot's reference to the block; looking at it (`taking` false) gives the
+    /// block a reference of its own, so the slot's is still there for the consumer.
     @inlinable
-    static func take(_ index: Int, taking: Bool, _ state: inout State) -> Result<DecodedBlock?, Failure>? {
+    func take(_ index: Int, taking: Bool, _ state: inout State) -> Take {
         // Set together with `limit` (below `Int.max`, a failure is stored).
-        if index >= state.limit, let failure = state.failure { return .failure(failure) }
-        if let endIndex = state.endIndex, index >= endIndex { return .success(nil) }
+        if index >= state.limit, let failure = state.failure { return .failed(failure) }
+        if let endIndex = state.endIndex, index >= endIndex { return .end }
         let position = index % state.slots.count
         let slot = state.slots[position]
-        guard slot.index == index else { return nil }
-        if taking { state.slots[position].index = -1 }
-        return .success(DecodedBlock(index: index, buffer: slot.buffer, rawOffset: slot.rawOffset, rawSize: slot.rawSize))
+        guard slot.index == index else { return .wait }
+        if taking {
+            state.slots[position].index = -1
+        } else {
+            pool.retain(slot.buffer)
+        }
+        return .taken(DecodedBlock(index: index, buffer: .init(adopting: slot.buffer, in: pool), rawOffset: slot.rawOffset, rawSize: slot.rawSize))
     }
 
     @inlinable
     public func stop(_ failure: Failure?) {
-        let consumer: Continuation<Void>? = state.withLock { state in
+        let consumer: Continuation<Void, Never>? = state.withLock { state in
             if state.limit != .min {
                 state.limit = .min
                 limit.store(.min, ordering: .relaxed)
                 // A block's failure already stored stays: it's what a consumer still asking gets.
                 if state.failure == nil { state.failure = failure ?? Failure(.cancelled) }
             }
-            defer { state.consumer = nil }
-            return state.consumer
+            return state.consumer.take()
         }
         consumer?.resume()
         // The producer waiting for room or a staging buffer, and decoders waiting for a buffer or a job, end.
@@ -730,14 +753,15 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
     /// lower block fails too (its failure then replaces this one) or the source is stopped first.
     @inlinable
     func fail(_ failure: Failure, at index: Int) {
-        let (lowered, consumer): (Bool, Continuation<Void>?) = state.withLock { state in
-            guard index < state.limit else { return (false, nil) }
+        var lowered = false
+        let consumer: Continuation<Void, Never>? = state.withLock { state in
+            guard index < state.limit else { return nil }
+            lowered = true
             state.limit = index
             limit.store(index, ordering: .relaxed)
             state.failure = failure
-            guard state.consumer != nil, state.waitingFor >= index else { return (true, nil) }
-            defer { state.consumer = nil }
-            return (true, state.consumer)
+            guard state.consumer != nil, state.waitingFor >= index else { return nil }
+            return state.consumer.take()
         }
         guard lowered else { return }
         consumer?.resume()
@@ -769,11 +793,10 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
 
     @inlinable
     func finishProducing(_ count: Int) {
-        let consumer: Continuation<Void>? = state.withLock { state in
+        let consumer: Continuation<Void, Never>? = state.withLock { state in
             state.endIndex = count
             guard state.waitingFor >= count else { return nil }
-            defer { state.consumer = nil }
-            return state.consumer
+            return state.consumer.take()
         }
         consumer?.resume()
         jobs?.close()
@@ -844,20 +867,15 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
             } catch {
                 throw Failure(.framing(error))
             }
+            // Released however this iteration ends, unless the job takes it.
             guard let buffer = await staging.acquire() else { return } // Stopped.
-            let copied: Int
-            do throws(Failure) {
-                copied = try await unsafe reader.read(into: staging.blockBase(buffer), count: stored) // `stored` ≤ the buffer's capacity.
-            } catch {
-                staging.release(buffer)
-                throw error
-            }
-            guard copied == stored else {
-                staging.release(buffer)
-                throw Failure(.framing(.blockCutShort(block: index)))
-            }
-            guard await jobs.push(BlockJob(index: index, rawOffset: rawOffset, rawSize: raw, storedSize: stored, fileOffset: -1, staging: buffer)) else {
-                staging.release(buffer)
+            // `stored` ≤ the buffer's capacity.
+            let copied = try await unsafe reader.read(into: staging.blockBase(buffer.index), count: stored)
+            guard copied == stored else { throw Failure(.framing(.blockCutShort(block: index))) }
+            // The job holds the staging buffer by index (jobs are copyable), until a decoder releases it.
+            let held = buffer.detach()
+            guard await jobs.push(BlockJob(index: index, rawOffset: rawOffset, rawSize: raw, storedSize: stored, fileOffset: -1, staging: held)) else {
+                staging.release(held)
                 return
             }
             rawOffset += raw
@@ -873,25 +891,19 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
         // An indexed stream's end and its stage's description of each block (`nil`: blocks come from the producer).
         let indexed: (end: Int, describe: DescribeBlock)? = if case let .indexed(range, describe) = source { (range.upperBound, describe) } else { nil }
         while !Task.isCancelled {
+            // This decoder's until it's published; released on every other way out.
             guard let buffer = await pool.acquire() else { return }
             // No yield between blocks: yielding (after every block, or after resuming the consumer), with or without
             // decoders at a lower priority than the consumer, measured no different (NativeAEA/ARCHITECTURE.md §9).
             let job: BlockJob
             if let indexed {
                 // Past a failing block (or stopped): not needed, and neither is any later one (claims go in order).
-                guard let index = nextIndex.claim(below: indexed.end), index < limit.load(ordering: .relaxed) else {
-                    pool.release(buffer)
-                    return
-                }
+                guard let index = nextIndex.claim(below: indexed.end), index < limit.load(ordering: .relaxed) else { return }
                 job = indexed.describe(stage, index)
             } else {
-                guard let jobs, let next = await jobs.pop() else {
-                    pool.release(buffer)
-                    return
-                }
+                guard let jobs, let next = await jobs.pop() else { return }
                 // The same (the queue holds jobs in order).
                 guard next.index < limit.load(ordering: .relaxed) else {
-                    pool.release(buffer)
                     releaseStaging(next)
                     return
                 }
@@ -899,20 +911,20 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
             }
             let started = MonotonicClock.now
             do throws(Failure) {
-                try decode(job, into: buffer, context: &context)
+                try decode(job, into: buffer.index, context: &context)
             } catch {
-                pool.release(buffer)
                 releaseStaging(job)
                 fail(error, at: job.index)
                 return
             }
             releaseStaging(job)
             counters.busy.add(MonotonicClock.nanoseconds(since: started), ordering: .relaxed)
-            let consumer: Continuation<Void>? = state.withLock { state in
-                state.slots[job.index % state.slots.count] = Slot(index: job.index, buffer: buffer, rawOffset: job.rawOffset, rawSize: job.rawSize)
+            // Published: the slot holds the reference, by index, until the consumer takes it.
+            let held = buffer.detach()
+            let consumer: Continuation<Void, Never>? = state.withLock { state in
+                state.slots[job.index % state.slots.count] = Slot(index: job.index, buffer: held, rawOffset: job.rawOffset, rawSize: job.rawSize)
                 guard state.waitingFor == job.index else { return nil }
-                defer { state.consumer = nil }
-                return state.consumer
+                return state.consumer.take()
             }
             consumer?.resume()
         }
@@ -980,6 +992,7 @@ extension ParallelBlockDecoder where Stage: BlockReadingStage {
 @usableFromInline
 struct UpstreamReader<Failure: BlockDecodingFailure>: ~Copyable {
     @usableFromInline let source: any OrderedBlockSource<Failure>
+    /// The block being read: its buffer is held while it's here.
     @usableFromInline var block: DecodedBlock?
     @usableFromInline var offset = 0
     /// Whether the first block was taken: before it, `block == nil` means "not yet"; after, the stream's end.
@@ -988,16 +1001,20 @@ struct UpstreamReader<Failure: BlockDecodingFailure>: ~Copyable {
     @inlinable
     init(source: any OrderedBlockSource<Failure>) {
         self.source = source
+        block = nil
     }
 
-    /// The current block, taking the first if none was taken yet.
+    /// The current block's buffer and size (taking the first block if none was taken yet), or `nil` at the end.
     @inlinable
-    nonisolated(nonsending) mutating func current() async throws(Failure) -> DecodedBlock? {
+    nonisolated(nonsending) mutating func current() async throws(Failure) -> (buffer: Int, rawSize: Int)? {
         if !started {
             started = true
             block = try await source.nextBlock()
         }
-        return block
+        switch block {
+        case let .some(block): return (block.buffer.index, block.rawSize)
+        case .none: return nil
+        }
     }
 
     /// Copies up to `count` bytes to `destination`; fewer only at the stream's end.
@@ -1008,7 +1025,7 @@ struct UpstreamReader<Failure: BlockDecodingFailure>: ~Copyable {
             guard let current = try await current() else { break }
             let available = current.rawSize - offset
             if available == 0 {
-                try await advance(past: current)
+                try await advance()
                 continue
             }
             let take = min(available, count - done)
@@ -1028,16 +1045,18 @@ struct UpstreamReader<Failure: BlockDecodingFailure>: ~Copyable {
             let take = min(current.rawSize - offset, left)
             offset += take
             left -= take
-            if offset == current.rawSize { try await advance(past: current) }
+            if offset == current.rawSize { try await advance() }
         }
     }
 
-    /// Releases `current` and takes the next block. `block` is cleared first, so if taking the next one throws, the
-    /// released buffer isn't released again (by ``release()``) while another decoder may already be using it.
+    /// Releases the current block, then takes the next. Released first, explicitly: `block = try await …` alone would
+    /// hold the old block until the call returns, a buffer more than the consumer's share of the pool while it waits
+    /// (the decoders get it back only after the next block arrives). Not a deadlock with the smallest pools (one decoder,
+    /// no extra buffers: a decoder takes a buffer before it takes its block, so the next block is already being decoded
+    /// when the reader waits; `smallestPoolsFinish` finishes either way), but the buffer is free sooner.
     @inlinable
-    nonisolated(nonsending) mutating func advance(past current: DecodedBlock) async throws(Failure) {
+    nonisolated(nonsending) mutating func advance() async throws(Failure) {
         block = nil
-        source.pool.release(current.buffer)
         offset = 0
         block = try await source.nextBlock()
     }
@@ -1045,7 +1064,6 @@ struct UpstreamReader<Failure: BlockDecodingFailure>: ~Copyable {
     /// Releases the block still held.
     @inlinable
     mutating func release() {
-        if let block { source.pool.release(block.buffer) }
         block = nil
     }
 }

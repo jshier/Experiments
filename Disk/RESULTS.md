@@ -13,6 +13,17 @@ swift package --traits SyscallCounting --scratch-path .build-syscalls --disable-
 Tools/bench-table Disk --metric 'wall|Disk syscalls|Malloc' syscalls disk-1
 ```
 
+## 2026-11-25: waits on the standard library's `Continuation` (baselines `async-before` → `async-after`, M1 Max)
+
+Open items 6 and 22 (`Writeups/Async-Leases-Plan-2026-11-25.md`): the write queue, the large files' turns, and every
+BytesAsync primitive Disk uses now wait on macOS 27's noncopyable `Continuation` through `wait(in:_:)`; the writer's
+five file-system sections are `fileSystem.withPermit { … }` (`finishLargeFile`'s, which moves the writer's core out of
+`self` and back, stays an acquire and a release); `freeLargeFiles.acquire()` returns `Int?` (never closed here: a precondition). The
+`Small files`, `Queue`, `Workers`, `Compressed: 2,000 x 1-64 KB: plain`, and `One file: 32 KB` rows: mallocs equal
+(±2 on 81–362), instructions equal at the table's precision (the 1-writer row's 20 G → 21 G is its rounding), times
+within the file-system rows' usual spread (−5% to +11%; context switches likewise). No allocation, `swift_beginAccess`,
+or `_consumeAndCreateNew` in `JobQueue.push`/`pop`/`close` or the turns (`Tools/calls`).
+
 ## 2026-11-23, stage 3: progress totals saturate
 
 `ExtractionProgress.addExpected(entries:bytes:)` added with checked `+`: the totals are the archives' claims, and two ZIP

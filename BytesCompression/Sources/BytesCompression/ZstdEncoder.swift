@@ -27,7 +27,7 @@ public struct ZstdEncoder: ~Copyable {
     /// Compression parameters, as libzstd's (`ZSTD_c_windowLog`, `ZSTD_c_hashLog`, …).
     public struct Parameters: Hashable, Sendable {
         /// How matches are found.
-        package enum Strategy: Int, Hashable, Sendable, CaseIterable {
+        public enum Strategy: Int, Hashable, Sendable, CaseIterable {
             /// One hash table, positions skipped faster the longer no match is found (libzstd's `ZSTD_fast`).
             case fast = 1
             /// A hash table of 8-byte sequences and one of short ones (`ZSTD_dfast`).
@@ -35,20 +35,20 @@ public struct ZstdEncoder: ~Copyable {
         }
 
         /// How matches are found.
-        package var strategy: Strategy
+        public var strategy: Strategy
         /// The window's log2: how far back matches reach, and what a decoder must keep. 10 through 27.
-        package var windowLog: Int
+        public var windowLog: Int
         /// The (long) hash table's log2: 6 through 28.
-        package var hashLog: Int
+        public var hashLog: Int
         /// The double-fast strategy's short hash table's log2: 6 through 28 (unused by ``Strategy/fast``).
-        package var chainLog: Int
+        public var chainLog: Int
         /// The bytes hashed to find a match: 4 through 7 (matches are at least 4 bytes).
-        package var minimumMatchLength: Int
+        public var minimumMatchLength: Int
         /// The fast strategy's step: positions skipped between searches beyond the first (0 for none).
-        package var targetLength: Int
+        public var targetLength: Int
 
         /// Parameters set one by one.
-        package init(strategy: Strategy, windowLog: Int, hashLog: Int, chainLog: Int, minimumMatchLength: Int, targetLength: Int = 0) {
+        public init(strategy: Strategy, windowLog: Int, hashLog: Int, chainLog: Int, minimumMatchLength: Int, targetLength: Int = 0) {
             precondition((10...27).contains(windowLog), "windowLog must be 10 through 27")
             precondition((6...28).contains(hashLog) && (6...28).contains(chainLog), "hashLog and chainLog must be 6 through 28")
             precondition((4...7).contains(minimumMatchLength), "minimumMatchLength must be 4 through 7")
@@ -67,7 +67,7 @@ public struct ZstdEncoder: ~Copyable {
         ///   - level: 1 through ``maximumLevel``, or 0 for libzstd's default, 3 (others are clamped to that range).
         ///   - windowLog: The window's log2, if not the level's: smaller for less memory, or for HTTP
         ///     (``httpWindowLog``).
-        package init(level: Int, windowLog: Int? = nil) {
+        public init(level: Int, windowLog: Int? = nil) {
             // 0 is libzstd's default level, 3 (it ran as 1).
             switch min(max(level == 0 ? 3 : level, 1), Self.maximumLevel) {
             case 1: self.init(strategy: .fast, windowLog: 19, hashLog: 14, chainLog: 13, minimumMatchLength: 7)
@@ -83,7 +83,7 @@ public struct ZstdEncoder: ~Copyable {
 
         /// The highest level: libzstd's 4.
         @inlinable
-        package static var maximumLevel: Int { 4 }
+        public static var maximumLevel: Int { 4 }
 
         /// A window for HTTP's `zstd` content coding: 512 KB (log 19).
         ///
@@ -96,7 +96,7 @@ public struct ZstdEncoder: ~Copyable {
         public static var httpWindowLog: Int { 19 }
 
         /// The window's size in bytes.
-        package var windowSize: Int { 1 << windowLog }
+        public var windowSize: Int { 1 << windowLog }
 
         /// The parameters libzstd uses for content of a known size (`ZSTD_adjustCParams_internal`): the window no
         /// larger than the content, the tables no larger than the window needs.
@@ -114,11 +114,16 @@ public struct ZstdEncoder: ~Copyable {
     }
 
     /// The parameters.
-    package let parameters: Parameters
+    public let parameters: Parameters
     /// Whether frames end with a checksum of their content (the low 32 bits of its XXH64).
     let includesChecksum: Bool
 
     private var blocks: ZstdBlockEncoder
+
+    /// The match finder's hash multipliers (``ZstdMatchInput/shortMultiplier``): stored, so the match finders get
+    /// them as values rather than constants LLVM rebuilds at every use.
+    private let shortMultiplier: UInt64
+    private let longMultiplier: UInt64
 
     /// The index of the next byte the encoder will see: indices keep growing across frames, so old table entries
     /// are recognizably old.
@@ -164,14 +169,16 @@ public struct ZstdEncoder: ~Copyable {
     ///   - level: libzstd's level: 1 through ``Parameters/maximumLevel``.
     ///   - windowLog: The window's log2, if not the level's (``Parameters/httpWindowLog`` for HTTP).
     ///   - checksum: Whether frames end with a content checksum.
-    package init(level: Int = 3, windowLog: Int? = nil, checksum: Bool = false) {
+    public init(level: Int = 3, windowLog: Int? = nil, checksum: Bool = false) {
         self.init(parameters: Parameters(level: level, windowLog: windowLog), checksum: checksum)
     }
 
     /// Creates an encoder with `parameters`, allocating its tables.
-    package init(parameters: Parameters, checksum: Bool = false) {
+    public init(parameters: Parameters, checksum: Bool = false) {
         self.parameters = parameters
         includesChecksum = checksum
+        shortMultiplier = ZstdMatchInput.multiplier(forLength: parameters.minimumMatchLength)
+        longMultiplier = ZstdMatchInput.multiplier(forLength: 8)
         let blockSizeMaximum = min(Zstd.blockSizeMaximum, parameters.windowSize)
         blocks = ZstdBlockEncoder(
             hashLog: parameters.hashLog, chainLog: parameters.strategy == .doubleFast ? parameters.chainLog : nil,
@@ -181,7 +188,7 @@ public struct ZstdEncoder: ~Copyable {
 
     /// The bytes the encoder has allocated: its tables and buffers, and the streaming window once a stream has
     /// needed it (at most the window plus a block).
-    package var memoryUsage: Int { blocks.layout.size &+ window.byteCount }
+    public var memoryUsage: Int { blocks.layout.size &+ window.byteCount }
 
     /// The streaming window's largest size: the window and a block.
     private var windowCapacity: Int { parameters.windowSize &+ min(Zstd.blockSizeMaximum, parameters.windowSize) }
@@ -189,7 +196,7 @@ public struct ZstdEncoder: ~Copyable {
     /// An upper bound on the size of a frame ``compressAll(_:into:)`` makes of `byteCount` bytes (libzstd's
     /// `ZSTD_compressBound`): headers, block headers, and a checksum included.
     @inlinable
-    package static func maximumCompressedSize(forByteCount byteCount: Int) -> Int {
+    public static func maximumCompressedSize(forByteCount byteCount: Int) -> Int {
         let margin = byteCount < 128 << 10 ? ((128 << 10) &- byteCount) &>> 11 : 0
         return byteCount &+ (byteCount &>> 8) &+ margin
     }
@@ -204,7 +211,7 @@ public struct ZstdEncoder: ~Copyable {
     ///
     /// - Parameter contentSize: The bytes the frame will hold; ``compress(_:into:flush:)`` throws
     ///   ``BytesError/mismatch`` at the end if it held another number. `nil` for unknown.
-    package mutating func reset(contentSize: Int?) {
+    public mutating func reset(contentSize: Int?) {
         frame = FrameState()
         stagedStart = 0
         stagedEnd = 0
@@ -226,7 +233,7 @@ public struct ZstdEncoder: ~Copyable {
     ///   - input: All the data.
     ///   - output: Where to append the frame.
     /// - Throws: ``BytesError/insufficientCapacity`` if the frame doesn't fit (`output` then holds part of it).
-    package mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
+    public mutating func compressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) {
         reset(contentSize: nil)
         let count = input.byteCount
         startFrame(contentSize: count)
@@ -238,12 +245,24 @@ public struct ZstdEncoder: ~Copyable {
                 let source = buffer.baseAddress!
                 var position = 0
                 var base = nextIndex
+                // Past this frame's indices however it ends: a frame cut short by a full output left its positions in
+                // the tables, and the next frame, starting at the same index, took them for its own (offsets pointing
+                // ahead, reads past its input).
+                defer { nextIndex = base &+ count }
                 while position < count {
-                    unsafe compressBlock(source, indexBase: &base, position: position, end: count, finishing: true)
+                    // Each block straight into the output when it has room for everything the block encoder reserves
+                    // (libzstd writes into the caller's buffer too); otherwise staged, then delivered.
+                    output.withFreeCapacity { free, written in
+                        free.withUnsafeMutableBytes { room in
+                            written = unsafe compressBlock(
+                                source, indexBase: &base, position: position, end: count, finishing: true,
+                                into: room.baseAddress, capacity: room.count
+                            )
+                        }
+                    }
                     position &+= blockAdvance
                     try deliverAll(into: &output)
                 }
-                nextIndex = base &+ count
             }
         }
         finishFrame()
@@ -255,7 +274,7 @@ public struct ZstdEncoder: ~Copyable {
 
     /// Moves the next frame's indices to start at `index`: for tests of the correction that keeps them below 3.5 GB,
     /// which would otherwise need gigabytes of input. Call before a frame starts.
-    package mutating func setNextIndex(_ index: Int) {
+    public mutating func setNextIndex(_ index: Int) {
         nextIndex = index
     }
 
@@ -468,14 +487,20 @@ public struct ZstdEncoder: ~Copyable {
 
     // MARK: - Blocks
 
-    /// Compresses the next block of `position..<end` in `source` (whose first byte has index `indexBase`) and stages
-    /// it; ``blockAdvance`` says how many bytes it took (`ZSTD_compress_frameChunk`'s loop body, then
-    /// `ZSTD_compressBlock_internal`).
+    /// Compresses the next block of `position..<end` in `source` (whose first byte has index `indexBase`) into
+    /// `destination`, or stages it; ``blockAdvance`` says how many bytes it took (`ZSTD_compress_frameChunk`'s loop
+    /// body, then `ZSTD_compressBlock_internal`).
     ///
-    /// - Parameter finishing: Whether `end` is the frame's end: the block that reaches it is the last.
+    /// - Parameters:
+    ///   - finishing: Whether `end` is the frame's end: the block that reaches it is the last.
+    ///   - destination: Where to write the block if `capacity` holds it stored raw, with the bit writers' 8 bytes of
+    ///     slack; else (or `nil`) it's staged.
+    /// - Returns: The bytes written at `destination` (0 when staged).
+    @discardableResult
     private mutating func compressBlock(
-        _ source: UnsafeRawPointer, indexBase: inout Int, position: Int, end: Int, finishing: Bool
-    ) {
+        _ source: UnsafeRawPointer, indexBase: inout Int, position: Int, end: Int, finishing: Bool,
+        into destination: UnsafeMutableRawPointer? = nil, capacity destinationCapacity: Int = 0
+    ) -> Int {
         let frameParameters = frame.parameters!
         let strategy = frameParameters.strategy.rawValue
         let blockSizeMaximum = frameBlockSizeMaximum
@@ -488,8 +513,17 @@ public struct ZstdEncoder: ~Copyable {
         let blockEnd = position &+ size
         correctIndices(&indexBase, blockEnd: blockEnd)
 
-        let staging = unsafe blocks.stagingPointer
-        let headerPosition = stagedEnd
+        // The block goes to the destination when it holds every room `entropyCompress` reserves before writing (so its
+        // decisions are those the staging buffer's room gives, and the frame is the same): the header (3), raw
+        // literals (`size` and a 3-byte header), the sequences' count (4) and modes (1), three table descriptions'
+        // worst case (`descriptionBound`, 80 each), and a bit writer's 9. Otherwise to the staging buffer, after what's
+        // staged. (With only the raw form's room, a 33-byte block was stored raw where libzstd compresses it.)
+        let room = 3 &+ size &+ 3 &+ 4 &+ 1 &+ 3 &* ZstdFSEEncoding.descriptionBound &+ 9
+        // Unsafe: a comparison of the optional pointer with `nil`.
+        let direct = unsafe destination != nil && destinationCapacity >= room
+        // Unsafe: the destination's free room (`destinationCapacity` bytes, the caller's), or the staging buffer.
+        let staging = unsafe direct ? destination.unsafelyUnwrapped : blocks.stagingPointer
+        let headerPosition = direct ? 0 : stagedEnd
         let contentPosition = headerPosition &+ 3
         var compressedSize = 0
         // Blocks under 7 bytes aren't worth compressing (`ZSTD_buildSeqStore`).
@@ -499,7 +533,7 @@ public struct ZstdEncoder: ~Copyable {
             let prefixStart = max(frameStart, blockEnd &- windowSize, 0)
             let input = unsafe ZstdMatchInput(
                 source: source, indexBase: indexBase, start: position, end: blockEnd, prefixStart: prefixStart,
-                frameStart: frameStart, windowSize: windowSize
+                frameStart: frameStart, windowSize: windowSize, shortMultiplier: shortMultiplier, longMultiplier: longMultiplier
             )
             var store = blocks.sequenceStore()
             blocks.next.repeats = blocks.previous.repeats
@@ -507,9 +541,19 @@ public struct ZstdEncoder: ~Copyable {
             let lastLiterals = findMatches(input, parameters: frameParameters, store: &store, repeats: &repeats)
             blocks.next.repeats.0 = repeats.0
             blocks.next.repeats.1 = repeats.1
-            store.copyLiterals(input, anchor: blockEnd &- lastLiterals, count: lastLiterals, wildLimit: -1)
-            // The content's room: the staging buffer less what's before it and a checksum after.
-            let capacity = blocks.layout.stagingCapacity &- contentPosition &- 4
+            if store.isEmpty {
+                // No sequences: the literals are the block's bytes, read where they are (an incompressible block's
+                // 128 KB copied once less).
+                // Unsafe: a pointer to the block's bytes as the literals, only read (by the entropy coders, within
+                // `lastLiterals`, the block's size).
+                store = unsafe ZstdSequenceStore(sequences: store.sequences, literals: UnsafeMutableRawPointer(mutating: source + position))
+                store.literalCount = lastLiterals
+            } else {
+                store.copyLastLiterals(input, anchor: input.end &- lastLiterals, count: lastLiterals)
+            }
+            // The content's room: the destination's less the header (as libzstd's, the caller's buffer's), or the
+            // staging buffer's less what's before it and a checksum after.
+            let capacity = direct ? destinationCapacity &- 3 : blocks.layout.stagingCapacity &- contentPosition &- 4
             compressedSize = unsafe blocks.entropyCompress(
                 store, blockSize: size, into: staging + contentPosition, capacity: capacity, strategy: strategy,
                 compressesLiterals: frameParameters.strategy != .fast || frameParameters.targetLength == 0
@@ -538,11 +582,13 @@ public struct ZstdEncoder: ~Copyable {
         }
         unsafe staging.storeBytes(of: UInt16(truncatingIfNeeded: header).littleEndian, toByteOffset: headerPosition, as: UInt16.self)
         unsafe staging.storeBytes(of: UInt8(truncatingIfNeeded: header &>> 16), toByteOffset: headerPosition &+ 2, as: UInt8.self)
-        stagedEnd = contentPosition &+ compressedSize
         frame.savings &+= size &- (compressedSize &+ 3)
         frame.isFirstBlock = false
         if isLast { frame.lastBlockWritten = true }
         blockAdvance = size
+        if direct { return contentPosition &+ compressedSize }
+        stagedEnd = contentPosition &+ compressedSize
+        return 0
     }
 
     /// Runs the strategy's match finder, its copy for the hash length.

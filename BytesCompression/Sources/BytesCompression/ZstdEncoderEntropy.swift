@@ -616,9 +616,10 @@ enum ZstdHistogram {
         }
         // Checked accesses that fold: 8-byte words as elements (byte arrays, so any address is aligned for them; read
         // with `bitCast`, which keeps them in registers), four 256-entry tables in `scratch` (1,024 entries) at byte
-        // values, and 256 counts.
+        // values, and 256 counts. `scratch` is all zeros on entry and left so: the totals below clear each entry as
+        // they read it, in place of a 4 KB `memset` before (whose `dc zva` stores missed L1 on every small block:
+        // 13x libzstd's store misses on 4 KB bodies).
         precondition(scratch.count == 1024 && counts.count >= 256)
-        scratch.update(repeating: 0)
         let words = Span<InlineArray<8, UInt8>>(viewing: source.bytes.extracting(first: source.count & ~15))
         for index in words.indices {
             let word = bitCast(words[index], to: UInt64.self)
@@ -638,6 +639,10 @@ enum ZstdHistogram {
         var maximum = 0
         for symbol in 0..<256 {
             let total = scratch[symbol] &+ scratch[256 &+ symbol] &+ scratch[512 &+ symbol] &+ scratch[768 &+ symbol]
+            scratch[symbol] = 0
+            scratch[256 &+ symbol] = 0
+            scratch[512 &+ symbol] = 0
+            scratch[768 &+ symbol] = 0
             counts[symbol] = total
             if total != 0 { maximum = symbol }
             largest = max(largest, total)
@@ -686,14 +691,19 @@ enum ZstdHuffmanEncoding {
         (node & 0x0000_FFFF_FFFF_FFFF) | UInt64(truncatingIfNeeded: parent) &<< 48
     }
 
-    /// `HUF_getIndex`: the sort bucket of a count, exact below 166, by power of two above.
+    /// `HUF_getIndex`: the sort bucket of a count, exact below 165, by power of two from it.
+    /// (`RANK_POSITION_DISTINCT_COUNT_CUTOFF` is `158 + ZSTD_highbit32(158)`: 165, though its comment says 166.)
     @inline(__always)
     static func bucket(_ count: UInt32) -> Int {
-        count < 166 ? Int(count) : ZstdFSEEncoding.highBit(Int(count)) &+ 158
+        count < 165 ? Int(count) : ZstdFSEEncoding.highBit(Int(count)) &+ 158
     }
 
     /// Sorts the symbols `0...maximumSymbol` by decreasing count into `nodes` (index 0 is the first node), as
-    /// `HUF_sort` does: buckets, each of the large ones sorted by quicksort.
+    /// `HUF_sort` does: buckets, each from the cutoff's sorted by quicksort. The sorted buckets start at the
+    /// cutoff's position, which holds bucket 164 (positions are one above their bucket): so the symbols counted
+    /// exactly 164 times are quicksorted too, which reorders them (they tie). Starting at 166 kept them in symbol
+    /// order, and on literals with several 164s, two of them took each other's code length: frames 1–2 bytes off
+    /// libzstd's.
     static func sort(
         _ nodes: UnsafeMutablePointer<UInt64>, counts: UnsafePointer<UInt32>, maximumSymbol: Int,
         rankPositions: UnsafeMutablePointer<UInt16>
@@ -717,7 +727,7 @@ enum ZstdHuffmanEncoding {
             unsafe rankPositions[slot] &+= 1
             unsafe nodes[position] = UInt64(count) | UInt64(symbol) &<< 32
         }
-        for rank in 166..<191 {
+        for rank in 165..<191 {
             let start = Int(unsafe rankPositions[rank &* 2])
             let size = Int(unsafe rankPositions[rank &* 2 &+ 1]) &- start
             if size > 1 { unsafe quickSort(nodes + start, 0, size &- 1) }

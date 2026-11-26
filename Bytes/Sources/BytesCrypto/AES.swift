@@ -96,7 +96,7 @@ public struct AES: Sendable {
     /// The portable cipher: SubBytes by field arithmetic on all lanes, ShiftRows as a constant shuffle,
     /// MixColumns with doublings and lane rotations.
     @usableFromInline
-    func encryptPortably(_ block: SIMD16<UInt8>) -> SIMD16<UInt8> {
+    package func encryptPortably(_ block: SIMD16<UInt8>) -> SIMD16<UInt8> {
         var state = block ^ roundKeys[0]
         for round in 1...rounds {
             state = AES.substitute(state)

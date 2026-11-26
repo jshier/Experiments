@@ -117,17 +117,19 @@ public extension AEAArchive {
 
 /// Files counted by on-disk compression type (`AFT`: small numbers) in a fixed table, made into
 /// ``AEAStatistics/filesByDiskCompression`` at the end: no hashing per file.
-struct DiskCompressionCounts {
+public struct DiskCompressionCounts: Sendable {
     private var small = InlineArray<16, Int>(repeating: 0)
     private var others: [UInt32: Int] = [:]
 
+    public init() {}
+
     @inline(__always)
-    mutating func count(_ type: UInt32?) {
+    public mutating func count(_ type: UInt32?) {
         let type = type ?? 0
         if type < 16 { small[Int(type)] += 1 } else { others[type, default: 0] += 1 }
     }
 
-    func add(to counts: inout [UInt32: Int]) {
+    public func add(to counts: inout [UInt32: Int]) {
         for type in 0..<16 where small[type] > 0 {
             counts[UInt32(type), default: 0] += small[type]
         }
@@ -137,10 +139,10 @@ struct DiskCompressionCounts {
     }
 }
 
-enum Lister {
+public enum Lister {
     /// Walks the stream `source` decodes (not yet running), calling `body` with each entry (`nil`: only verifying, no
     /// entries made).
-    nonisolated(nonsending) static func list(
+    public nonisolated(nonsending) static func list(
         _ source: some ChunkSource, format: StreamFormat = .appleArchive, _ body: ((AAEntry) -> Void)?
     ) async throws(AEAError) -> AEAStatistics {
         let started = MonotonicClock.now

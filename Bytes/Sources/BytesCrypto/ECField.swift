@@ -9,7 +9,7 @@
 
 /// The constants of a Montgomery modulus m: everything is little-endian 64-bit limbs, six of them, of which a
 /// 4-limb modulus uses the first four.
-protocol MontgomeryModulus: Sendable {
+package protocol MontgomeryModulus: Sendable {
     /// m.
     static var modulus: InlineArray<6, UInt64> { get }
     /// −m⁻¹ mod 2⁶⁴: the multiplier that makes each reduction step's low limb vanish.
@@ -52,7 +52,7 @@ func zeroMask(_ value: UInt64) -> UInt64 {
 
 /// What point arithmetic needs of a field (and ECDSA of the scalars): one protocol so that the curve code can be
 /// generic, while every call is specialized to a `Residue` of known size.
-protocol ModularArithmetic: Sendable {
+package protocol ModularArithmetic: Sendable {
     /// The size of a canonical big-endian encoding: 32 or 48.
     static var byteCount: Int { get }
     static var zero: Self { get }
@@ -96,7 +96,7 @@ protocol ModularArithmetic: Sendable {
 }
 
 /// An integer mod `M.modulus` in Montgomery form, `limbs` 64-bit limbs.
-struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
+package struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     /// aR mod m, least significant limb first, always fully reduced (below m).
     var words: InlineArray<limbs, UInt64>
 
@@ -121,11 +121,11 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         words = Self.constant(value)
     }
 
-    static var byteCount: Int { @inline(__always) get { limbs &* 8 } }
+    package static var byteCount: Int { @inline(__always) get { limbs &* 8 } }
 
-    static var zero: Self { @inline(__always) get { Self(montgomeryWords: .init(repeating: 0)) } }
+    package static var zero: Self { @inline(__always) get { Self(montgomeryWords: .init(repeating: 0)) } }
 
-    static var one: Self { @inline(__always) get { Self(montgomery: M.one) } }
+    package static var one: Self { @inline(__always) get { Self(montgomery: M.one) } }
 
     /// t + top·R − m if that isn't negative, else t: the final step of each operation, for t + top·R < 2m.
     @inline(__always)
@@ -145,7 +145,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     }
 
     @inline(__always)
-    static func +(a: Self, b: Self) -> Self {
+    package static func +(a: Self, b: Self) -> Self {
         var sum = InlineArray<limbs, UInt64>(repeating: 0)
         var carry: UInt64 = 0
         for index in 0..<limbs {
@@ -155,7 +155,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     }
 
     @inline(__always)
-    static func -(a: Self, b: Self) -> Self {
+    package static func -(a: Self, b: Self) -> Self {
         var difference = InlineArray<limbs, UInt64>(repeating: 0)
         var borrow: UInt64 = 0
         for index in 0..<limbs {
@@ -170,9 +170,9 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         return Self(montgomeryWords: difference)
     }
 
-    var doubled: Self { @inline(__always) get { self + self } }
+    package var doubled: Self { @inline(__always) get { self + self } }
 
-    var negated: Self { @inline(__always) get { Self.zero - self } }
+    package var negated: Self { @inline(__always) get { Self.zero - self } }
 
     /// Montgomery's product abR⁻¹ mod m, interleaving the multiplication with the reduction (CIOS): after
     /// each row, a multiple of m clears the lowest limb, which is dropped.
@@ -221,7 +221,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     }
 
     @inline(__always)
-    static func *(a: Self, b: Self) -> Self {
+    package static func *(a: Self, b: Self) -> Self {
         Self(montgomeryWords: montgomeryProduct(a.words, b.words))
     }
 
@@ -286,13 +286,13 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
 
     /// self · self. The dedicated square saved P-384 3–4% of its instructions and cost P-256 3–5%, even with its
     /// reduction written out (Benchmarks/RESULTS-ecc.md): only 6-limb moduli use it.
-    var squared: Self {
+    package var squared: Self {
         @inline(__always) get {
             limbs > 4 ? Self(montgomeryWords: Self.montgomerySquare(words)) : self * self
         }
     }
 
-    var zeroMask: UInt64 {
+    package var zeroMask: UInt64 {
         @inline(__always) get {
             var bits: UInt64 = 0
             for index in 0..<limbs {
@@ -303,7 +303,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     }
 
     @inline(__always)
-    func equalMask(_ other: Self) -> UInt64 {
+    package func equalMask(_ other: Self) -> UInt64 {
         var bits: UInt64 = 0
         for index in 0..<limbs {
             bits |= words[index] ^ other.words[index]
@@ -312,7 +312,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
     }
 
     @inline(__always)
-    static func select(_ a: Self, _ b: Self, mask: UInt64) -> Self {
+    package static func select(_ a: Self, _ b: Self, mask: UInt64) -> Self {
         var words = InlineArray<limbs, UInt64>(repeating: 0)
         for index in 0..<limbs {
             words[index] = (a.words[index] & ~mask) | (b.words[index] & mask)
@@ -320,7 +320,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         return Self(montgomeryWords: words)
     }
 
-    func power(_ exponent: InlineArray<6, UInt64>) -> Self {
+    package func power(_ exponent: InlineArray<6, UInt64>) -> Self {
         // A fixed 4-bit window: self⁰…self¹⁵, then four squarings and one multiplication per nibble.
         var table = InlineArray<16, Self>(repeating: .one)
         table[1] = self
@@ -344,12 +344,12 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         return result
     }
 
-    var inverted: Self { power(M.inversionExponent) }
+    package var inverted: Self { power(M.inversionExponent) }
 
     /// self⁻¹ (0 for 0) by the binary extended Euclidean algorithm. Variable-time, its branches following the
     /// value's bits: for public values only (ECDSA verification's s). A few hundred shifts and subtractions in place
     /// of Fermat's few hundred multiplications.
-    var invertedVariableTime: Self {
+    package var invertedVariableTime: Self {
         var u = canonical
         guard BytesCrypto.zeroMask(u.orAll) == 0 else { return .zero }
         var v = Self.constant(M.modulus)
@@ -397,7 +397,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         return result
     }
 
-    init?(bigEndian bytes: RawSpan) {
+    package init?(bigEndian bytes: RawSpan) {
         guard bytes.byteCount == limbs &* 8 else { return nil }
         var value = InlineArray<6, UInt64>(repeating: 0)
         for index in 0..<limbs {
@@ -406,7 +406,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         self.init(canonicalWords: value)
     }
 
-    init?(canonicalWords canonical: InlineArray<6, UInt64>) {
+    package init?(canonicalWords canonical: InlineArray<6, UInt64>) {
         var high: UInt64 = 0
         for index in limbs..<6 {
             high |= canonical[index]
@@ -421,7 +421,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         words = Self.montgomeryProduct(value, Self.constant(M.rSquared))
     }
 
-    init(reducingBigEndian bytes: RawSpan) {
+    package init(reducingBigEndian bytes: RawSpan) {
         precondition(bytes.byteCount == limbs &* 8, "A scalar is \(limbs &* 8) bytes")
         var value = InlineArray<limbs, UInt64>(repeating: 0)
         for index in 0..<limbs {
@@ -439,7 +439,7 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         }
     }
 
-    var canonicalWords: InlineArray<6, UInt64> {
+    package var canonicalWords: InlineArray<6, UInt64> {
         let value = canonical
         var words = InlineArray<6, UInt64>(repeating: 0)
         for index in 0..<limbs {
@@ -448,9 +448,9 @@ struct Residue<let limbs: Int, M: MontgomeryModulus>: ModularArithmetic {
         return words
     }
 
-    var isOdd: Bool { canonical[0] & 1 == 1 }
+    package var isOdd: Bool { canonical[0] & 1 == 1 }
 
-    func write(bigEndianTo output: inout MutableRawSpan, at offset: Int) {
+    package func write(bigEndianTo output: inout MutableRawSpan, at offset: Int) {
         let value = canonical
         for index in 0..<limbs {
             output.storeBytes(of: value[index].bigEndian, toByteOffset: offset &+ (limbs &- 1 &- index) &* 8, as: UInt64.self)

@@ -15,11 +15,11 @@ internal import CBytesCrypto
 /// An element of GCM's field as a 128-bit integer: a block's bytes read big-endian (byte 0 most significant), so
 /// the coefficient of xⁱ is bit 127 − i.
 @usableFromInline
-struct FieldElement: Sendable, Equatable {
+package struct FieldElement: Sendable, Equatable {
     @usableFromInline var low: UInt64
     @usableFromInline var high: UInt64
 
-    @inlinable init(low: UInt64, high: UInt64) {
+    @inlinable package init(low: UInt64, high: UInt64) {
         self.low = low
         self.high = high
     }
@@ -34,7 +34,7 @@ struct FieldElement: Sendable, Equatable {
     static var zero: FieldElement { FieldElement(low: 0, high: 0) }
 
     /// The bit-serial product (SP 800-38D, algorithm 1): constant-time, by masks.
-    static func multiplyPortably(_ x: FieldElement, _ y: FieldElement) -> FieldElement {
+    package static func multiplyPortably(_ x: FieldElement, _ y: FieldElement) -> FieldElement {
         var z = FieldElement.zero
         var v = y
         for index in 0..<128 {
@@ -242,7 +242,7 @@ public struct AESGCM: Sendable {
         AESGCM.multiply(x, y)
     }
 
-    static func multiply(_ x: FieldElement, _ y: FieldElement) -> FieldElement {
+    package static func multiply(_ x: FieldElement, _ y: FieldElement) -> FieldElement {
         #if HardwareCrypto && arch(arm64) && !Portable
         let a = SIMD2(x.low, x.high), b = SIMD2(y.low, y.high)
         let product = reduceInVectors(
@@ -267,7 +267,7 @@ public struct AESGCM: Sendable {
     /// high halves of x₀ × c; folding twice, swapping halves between: T = L × c, M = swap(L) ⊕ T, U = M × c, and
     /// the result is H ⊕ swap(M) ⊕ U.
     @inline(__always)
-    static func reduceInVectors(low: SIMD2<UInt64>, middle: SIMD2<UInt64>, high: SIMD2<UInt64>) -> SIMD2<UInt64> {
+    package static func reduceInVectors(low: SIMD2<UInt64>, middle: SIMD2<UInt64>, high: SIMD2<UInt64>) -> SIMD2<UInt64> {
         let middle = middle ^ low ^ high
         // The 256-bit product as two halves: L = (x₀, x₁), H = (x₂, x₃).
         var l = low ^ SIMD2(0, middle[0])
@@ -288,7 +288,7 @@ public struct AESGCM: Sendable {
     /// The product of two bit-reflected elements is the reflected product shifted right by one, so it's shifted
     /// left by one first; then the reflected reduction modulo x¹²⁸ + x⁷ + x² + x + 1, in shifts and XORs.
     @inline(__always)
-    static func reduce(low: SIMD2<UInt64>, middle: SIMD2<UInt64>, high: SIMD2<UInt64>) -> SIMD2<UInt64> {
+    package static func reduce(low: SIMD2<UInt64>, middle: SIMD2<UInt64>, high: SIMD2<UInt64>) -> SIMD2<UInt64> {
         let middle = middle ^ low ^ high
         var x0 = low[0], x1 = low[1] ^ middle[0], x2 = high[0] ^ middle[1], x3 = high[1]
         x3 = x3 &<< 1 | x2 &>> 63
@@ -489,6 +489,9 @@ public struct AESGCM: Sendable {
         guard bytes.byteCount >= 128 else { return 0 }
         let p = powers, s = powerSums
         var y = SIMD2(hash.low, hash.high)
+        // Checked loads, kept: they cost 9 compares and 9 branches in this 171-instruction loop, but read through a typed
+        // view of 128-byte batches (`RawSpan.chunks(of:)`, no checks) LLVM moved Karatsuba's middle XOR into general
+        // registers: 173 instructions, 22 lane moves against 14 (2026-11-25).
         while bytes.byteCount &- offset >= 128 {
             var low = SIMD2<UInt64>.zero, middle = SIMD2<UInt64>.zero, high = SIMD2<UInt64>.zero
             @inline(__always) func accumulate(_ x: SIMD2<UInt64>, _ power: Int) {

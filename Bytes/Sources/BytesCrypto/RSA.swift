@@ -66,7 +66,7 @@ public enum RSA {
 
         /// Hashes `message` into the start of `digest`.
         @inline(__always)
-        func hash(_ message: RawSpan, into digest: inout InlineArray<64, UInt8>) {
+        package func hash(_ message: RawSpan, into digest: inout InlineArray<64, UInt8>) {
             var span = digest.mutableSpan
             var output = MutableRawSpan(mutating: &span)
             switch self {
@@ -123,7 +123,7 @@ public enum RSA {
         /// −n⁻¹ mod 2⁶⁴.
         let negativeInverse: UInt64
         /// The limbs the arithmetic runs on: 16, 24, 32, 48, or 64.
-        let limbCount: Int
+        package let limbCount: Int
         /// e.
         public let publicExponent: UInt64
         /// The modulus' size in bits (its highest set bit's position plus one): 2048 for a 2048-bit key.
@@ -351,7 +351,7 @@ public enum RSA {
 // MARK: - Arithmetic
 
 /// Helpers on the 64-limb form keys store.
-enum RSALimbs {
+package enum RSALimbs {
     /// The value of big-endian `bytes` (at most `8 × n` of them), least significant limb first: the keys' 64-limb
     /// form, or ``RSAModulus``' `limbs`.
     @inline(__always)
@@ -385,7 +385,7 @@ enum RSALimbs {
     }
 
     /// −n₀⁻¹ mod 2⁶⁴ for odd n₀, by Newton's iteration: n₀ is its own inverse mod 8, and each step doubles the bits.
-    static func negativeInverse(_ n0: UInt64) -> UInt64 {
+    package static func negativeInverse(_ n0: UInt64) -> UInt64 {
         var inverse = n0
         for _ in 0..<5 {
             inverse = inverse &* (2 &- n0 &* inverse)

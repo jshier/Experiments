@@ -1,8 +1,8 @@
-@testable import NativeAEA
 import Bytes
 import BytesCrypto
 import BytesTestSupport
 import Foundation
+import NativeAEA
 
 // Security only checks BytesCrypto's verdict on a chain.
 import Security

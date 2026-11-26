@@ -100,7 +100,7 @@ public struct AEARootHeader: Sendable, Equatable {
     /// The largest segment `aea` writes, and this reader reads.
     static var maximumSegmentSize: Int { 256 << 20 }
 
-    init(parsing bytes: RawSpan) throws(AEAError) {
+    public init(parsing bytes: RawSpan) throws(AEAError) {
         let record: RootHeaderRecord
         do {
             var reader = AlignedBytesReader(bytes)

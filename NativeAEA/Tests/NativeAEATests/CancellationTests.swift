@@ -1,8 +1,8 @@
-@testable import NativeAEA
 import BytesAsync
 import BytesCompressionAsync
 import BytesTestSupport
 import Foundation
+import NativeAEA
 import Synchronization
 import System
 import Testing

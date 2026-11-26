@@ -149,7 +149,7 @@ public struct StoragePolicy: Sendable, Hashable {
 
     /// Whether a fork of `forkCount` bytes is worth it for `rawCount` bytes.
     @inline(__always)
-    func pays(_ forkCount: Int, _ rawCount: Int) -> Bool {
+    public func pays(_ forkCount: Int, _ rawCount: Int) -> Bool {
         switch rule {
         case let .bytes(percent): forkCount * 100 < rawCount * percent
         case let .blocks(numerator, denominator): (forkCount + 4095) / 4096 * denominator <= (rawCount + 4095) / 4096 * numerator

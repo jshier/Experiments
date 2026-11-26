@@ -147,7 +147,7 @@ enum LZBitmapFormat {
 /// nibbles unpacked one per byte, each group's nibble, bitmap, and period, and copies of its period and bitmap
 /// areas. Allocated once per decoder.
 @safe @usableFromInline // Exported for clients' destroys, as `LZMAWorkspace`.
-struct LZBitmapWorkspace: ~Copyable {
+package struct LZBitmapWorkspace: ~Copyable {
     static var maximumGroups: Int { LZBitmapFormat.maximumChunkSize / 8 }
     /// 256 × 16 bytes, one load per group: lane `i` of bitmap `b`'s shuffle is the literal's index (0–7) where
     /// bit `i` is set, and 8 + `i` (the history byte) where it's clear; byte 8 is the bitmap's literal count
@@ -193,7 +193,7 @@ struct LZBitmapWorkspace: ~Copyable {
     }
 
     /// The 256 bitmaps' shuffles (``shufflesOffset``): computed once, on first use.
-    static let shuffles: [UInt8] = {
+    package static let shuffles: [UInt8] = {
         var shuffles = [UInt8](repeating: 0, count: 256 &* 16)
         for bitmap in 0..<256 {
             var literal = 0

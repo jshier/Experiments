@@ -157,7 +157,7 @@ public struct HPACKEncoder: ~Copyable {
     /// Lanes that are ASCII uppercase letters.
     @inlinable @inline(__always)
     static func uppercaseLetters(_ lanes: ByteLanes) -> ByteMatches {
-        HTTPCharacters.matches(lanes.vector &- SIMD16(repeating: 0x41) .< SIMD16(repeating: 26))
+        lanes.matching(in: 0x41...0x5A)
     }
 
     /// Encodes a field whose name (one HTTPBytes doesn't know) has uppercase letters: lowercased into the scratch

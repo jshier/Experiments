@@ -14,7 +14,7 @@ import Testing
             let block = bytes.span.bytes.byteBlock(at: 0)
             let colons = block.mask { $0.matching(0x3A) }
             let controls = block.mask { lanes in
-                ByteMatches(highBits: SIMD16(repeating: 0).replacing(with: 0xFF, where: lanes.vector .< SIMD16(repeating: 0x20)))
+                ByteMatches(lanes.vector .< SIMD16(repeating: 0x20))
             }
             var expectedColons: UInt64 = 0, expectedControls: UInt64 = 0
             for (index, byte) in bytes.enumerated() {

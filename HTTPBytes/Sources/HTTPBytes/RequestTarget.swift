@@ -38,7 +38,7 @@ public enum HTTPRequestTarget {
         let rows = SIMD16<UInt8>(0, 0, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0, 0, 0, 0, 0, 0, 0, 0)
         let column = ByteLanes(lanes.vector & SIMD16(repeating: 0x0F)).lookup(in: columns)
         let row = ByteLanes(lanes.vector &>> SIMD16(repeating: 4)).lookup(in: rows)
-        return HTTPCharacters.matches((column & row) .== SIMD16(repeating: 0))
+        return ByteMatches((column & row) .== SIMD16(repeating: 0))
     }
 
     /// Checks `target` for `method` (when known; otherwise its form decides), returning its form.

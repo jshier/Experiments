@@ -80,7 +80,8 @@ Beyond the types below, `Bytes` extends the standard library (DocC can't link th
 `copyBytes(within:toByteOffset:)` on `MutableRawSpan` and `MutableSpan<UInt8>`; `hasPrefix`, `hasSuffix`,
 `bytesEqual`, `containsByte(where:)`, `firstByteOffset(where:)`, `firstByteOffset(of:from:)`, `commonPrefixLength(at:and:from:maxLength:)`,
 and its unchecked form `unsafeCommonPrefixLength` on `RawSpan`; `byteBlock(at:)` and `byteBlock(at:padding:)` on `RawSpan`
-(see ``ByteBlock``); `UTF8Span(validating:excluding:)`; and bit
+(see ``ByteBlock``); `chunks(of:)` on `RawSpan`, its whole fixed-size chunks as a typed view (`InlineArray<n, UInt8>`
+elements, which ``ByteBlock/init(_:)`` takes for 64); `UTF8Span(validating:excluding:)`; and bit
 helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bits(from:upTo:)`,
 `bits(from:count:)`, `keepingLowBits(_:)`, `lowBitMask(_:)`, `signedBits(_:as:)`, and `matches(_:mask:)`.
 

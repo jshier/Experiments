@@ -1,6 +1,6 @@
 /// The output of the lexical phase: every numeric field exactly as written, plus which forms were
 /// used. Nothing here has been range-checked; ``resolve()`` does that.
-struct RawComponents: Hashable {
+public struct RawComponents: Hashable {
     enum DateForm: UInt8 {
         /// `YYYY-MM-DD` / `YYYYMMDD`: `month` and `day` are month and day-of-month.
         case calendarDate

@@ -7,6 +7,27 @@ and `aea-2` (both decoders, the synthetic archive and Xcode's: `NATIVEAEA_ARCHIV
 synthetic archive is `Tools/test-data fetch nativeaea-synthetic`. The 2026-11-19 section compares these numbers with an
 M1 Max's (baseline `m1max`).
 
+## 2026-11-25: buffer leases and the standard library's `Continuation` (baselines `async-before` → `async-after`, M1 Max)
+
+Open items 6 and 26 (`Writeups/Async-Leases-Plan-2026-11-25.md`): a `DecodedBlock` is noncopyable and holds its buffer
+as a `BlockBufferPool.Buffer` lease, released when the block is dropped. The walkers keep the previous chunk as
+`previous: DecodedBlock?` (`previous = consume chunk` releases the one before, as the index's explicit release did);
+`decrypt` lets each block's lease end with its iteration; `prepare`'s peek holds a reference of its own; the runner's
+wait for the decision is `wait(in:_:)` (one runner, a precondition). The extraction sink still retains the buffers it
+keeps by index (lent by the walkers, released by the writers). The synthetic rows:
+
+| Row | Instructions | Mallocs | Time (p50) |
+|---|---|---|---|
+| Extract: synthetic: none | 301 G → 301 G | 368 → 365 | 4.53 → 4.46 s (−1.5%) |
+| Extract: synthetic: archived | 409 G → 409 G | 434 → 435 | 5.99 → 5.91 s (−1.5%) |
+| Extract: synthetic: archived: progress | 409 G → 409 G | 434 → 435 | 5.98 → 5.82 s (−2.7%) |
+| Extract: synthetic: lzfse | 538 G → 538 G | 442 → 443 | 6.80 → 6.79 s (−0.2%) |
+| List (decode, verify, parse): synthetic: bytes | 270 G → 270 G | 31 K → 31 K | 3.61 → 3.65 s (+1.1%) |
+
+Resident peaks equal. Tests: all 89; the cancellation wrapper needed no change. The budget-0 extractions in
+`ResourceLimitsTests` take 2.4 s alone and 34 s in the full suite; run beside three other packages' suites they exceeded
+their 60 s limit once (they passed on the re-run, and alone).
+
 ## 2026-11-24, last: the archive-coverage set, tests by manifest, and the Xcode conformance check (M1 Max)
 
 **The rule now** (AGENTS.md): tests and default benchmark rows run on generated `TestData` sets; Xcode's archives in

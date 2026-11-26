@@ -54,7 +54,7 @@ enum FieldGrammar {
     @inlinable @inline(__always)
     static func quotedTextStop(_ lanes: ByteLanes) -> ByteMatches {
         let vector = lanes.vector
-        return HTTPCharacters.matches(((vector .< SIMD16(repeating: 0x20)) .& (vector .!= SIMD16(repeating: 0x09)))
+        return ByteMatches(((vector .< SIMD16(repeating: 0x20)) .& (vector .!= SIMD16(repeating: 0x09)))
             .| (vector .== SIMD16(repeating: 0x7F)) .| (vector .== SIMD16(repeating: 0x22)) .| (vector .== SIMD16(repeating: 0x5C)))
     }
 

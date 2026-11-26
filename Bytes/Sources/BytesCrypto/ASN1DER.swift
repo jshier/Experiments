@@ -138,7 +138,7 @@ public extension GenericBytesReader where Mode == ByteAligned {
     }
 }
 
-extension RawSpan {
+package extension RawSpan {
     /// The byte at `offset`, bounds-checked.
     @inlinable @inline(__always)
     func byteOffsetLoad(_ offset: Int) -> UInt8 {

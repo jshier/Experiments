@@ -244,7 +244,7 @@ public enum PEM {
     /// Strict Base64 (RFC 4648, 4, the standard alphabet) with whitespace ignored: padding only at the end and only
     /// as much as the last group needs, and the padding bits zero. BytesBase64's decoder; every way the text can be
     /// wrong is ``BytesError/invalidValue`` here, as PEM's errors say.
-    static func decodeBase64(_ text: RawSpan) throws(BytesError) -> [UInt8] {
+    package static func decodeBase64(_ text: RawSpan) throws(BytesError) -> [UInt8] {
         do throws(LocatedBytesError) {
             return try Base64.decodedBytes(ignoringWhitespaceIn: text)
         } catch {

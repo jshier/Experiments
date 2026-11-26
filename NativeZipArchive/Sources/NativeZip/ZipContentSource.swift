@@ -1,3 +1,4 @@
+internal import BytesAsync
 import Disk
 import Synchronization
 
@@ -287,10 +288,16 @@ final class SourceState: Sendable {
 
     // MARK: Replacements
 
+    /// A replacement waiting for the job with `tag` to be written.
+    struct Waiter: ~Copyable {
+        let tag: Int
+        let continuation: Continuation<Void, Never>
+    }
+
     /// Which plan tags have been written (released by the writers), and who waits for one.
     struct Completion: ~Copyable {
         var written: [UInt64] = []
-        var waiters: [(tag: Int, continuation: CheckedContinuation<Void, Never>)] = []
+        var waiters = WaiterQueue<Waiter>(capacity: 1)
 
         func isWritten(_ tag: Int) -> Bool {
             let word = tag >> 6
@@ -310,30 +317,25 @@ final class SourceState: Sendable {
 
     /// A writer is done with a job (written, failed, or skipped): wakes a replacement waiting for it.
     func written(_ tag: Int) {
-        let woken = completion.withLock { state -> [CheckedContinuation<Void, Never>] in
+        // Every waiter for this tag (no allocation when none waits), resumed out of the lock.
+        var woken = completion.withLock { state -> WaiterQueue<Waiter> in
             state.reserve(tag + 1)
             state.written[tag >> 6] |= 1 << UInt64(tag & 63)
-            guard !state.waiters.isEmpty else { return [] }
-            let woken = state.waiters.filter { $0.tag == tag }.map(\.continuation)
-            if !woken.isEmpty { state.waiters.removeAll { $0.tag == tag } }
-            return woken
+            return state.waiters.removeAll { $0.tag == tag }
         }
-        for continuation in woken {
-            continuation.resume()
+        while let waiter = woken.popFirst() {
+            waiter.continuation.resume()
         }
     }
 
     /// Waits until the job with `tag` has been written. It was queued before the caller's job, so a writer has it or
-    /// will take it before this one: the wait ends. Rare (one archive path planned twice); a checked continuation.
+    /// will take it before this one: the wait ends. Rare (one archive path planned twice).
     nonisolated(nonsending) func waitUntilWritten(_ tag: Int) async {
         if completion.withLock({ $0.isWritten(tag) }) { return }
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            let now = completion.withLock { state -> Bool in
-                if state.isWritten(tag) { return true }
-                state.waiters.append((tag, continuation))
-                return false
-            }
-            if now { continuation.resume() }
+        await wait(in: completion) { state, continuation in
+            if state.isWritten(tag) { return () }
+            state.waiters.append(Waiter(tag: tag, continuation: continuation.take()!))
+            return nil
         }
     }
 }

@@ -19,6 +19,77 @@ Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module h
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
 
+## 2026-11-25: BytesAsync on the standard library's `Continuation` (M1 Max; baselines `async-before` → `async-after`)
+
+Open items 6 and 22 (`Writeups/Open-Items-2026-11-25.md`; plan, review, and what changed in
+`Writeups/Async-Leases-Plan-2026-11-25.md`): every wait on macOS 27's noncopyable `Continuation` through one helper,
+`wait(in:_:)`; `WaiterQueue` a noncopyable ring wrapped by a compare (no `%`), with `removeAll(where:)`;
+`AsyncLimiter.withPermit`; `AsyncIndexPool.acquire()` returning `nil` once `close()`d. New rows (`Async.swift`),
+added before the change; the second `async-after` run (the first ran beside a reviewer's stress probes):
+
+| Row | Instructions | Time (p50) |
+|---|---|---|
+| limiter, uncontended (x10,000; 1 malloc both) | 692 K → 690 K (−0.3%) | 168 → 166 µs |
+| limiter, 8 tasks x 1,250 through 2 permits | 34 M → 34 M | 2.08 → 2.53 ms (+22%) |
+| limiter, 32 tasks x 300 through 1 permit, 2 waiters reserved | 44 M → 41 M (−6.8%) | 2.62 → 2.52 ms (−4.1%) |
+| index pool, 8 tasks x 1,250 over 2 indexes | 34 M → 36 M (+5.9%) | 2.06 → 3.38 ms (+64%) |
+| handoff, 10,000 elements | 46 M → 49 M (+6.5%) | 2.64 → 2.83 ms (+7.2%) |
+| queue, 100,000 elements to 4 consumers | 90 M → 88 M (−2.2%) | 8.56 → 7.92 ms (−7.5%) |
+
+The contended rows' times are the scheduler's, not the code's: an A/B in one process
+(`~/Scratch/async-leases-ab.noindex`: the old design, the new `AsyncIndexPool`, and the old logic on the new
+continuation, alternated, 35 runs each) put the medians 9–19% apart with overlapping spreads (old 2.2–3.1 ms, new
+2.5–3.7, old logic on the new continuation 2.5–3.3), and two baselines from different runs said 64%. No allocation in
+any wait path (`Tools/calls`); the clients' rows are flat: Disk (`Disk/RESULTS.md`) and NativeAEA's extraction and
+listing (`NativeAEA/RESULTS.md`).
+
+## 2026-11-25: Block loads, `cmeq` matching, exact-match search, typed chunks (M1 Max; baselines `scan-before*` → `scan-after*`)
+
+Open items 3–5 and 16–17 (`Writeups/Open-Items-2026-11-25.md`; plan, review, and what changed in
+`Writeups/Scan-Items-Plan-2026-11-25.md`). Baselines: `scan-before` → `scan-after` (optimized; the search rows'
+final design is `scan-after-exact`), `scan-before-dense` (four rows added first, below), `scan-before-portable` →
+`scan-after-portable` (search rows: `scan-after-portable-exact`), `scan-before-portable-no-c` →
+`scan-after-portable-no-c`. Instructions are the measure; times are from separate runs (5–10% drift). **`scan-after`'s
+and `scan-after-portable`'s `firstByteOffset(of:)`/`lastByteOffset(of:)` rows measured the dropped mask walk** (+7% and
++16% on the candidate-free rows, 11–12 M on the dense ones): compare those rows with `-exact`.
+
+- **The 16-byte scans** load unchecked in their main loop (`0 <= offset < count - 16`), with `&+=`, and match with one
+  `cmeq` (`ByteLanes.matching(_:)` was SWAR, three dependent instructions). The checked offset loads didn't fold, as the
+  comments said they did: each kept a compare and a branch. Loops: `containsByte` (two bytes) 19 → 7 instructions per
+  16 bytes, `firstByteOffset(where:)` 16 → 9, `bytesEqual` 12 → 7. LLVM merges tests one bit apart: `matching(0x2B) |
+  matching(0x23)` is one `and` and one `cmeq`.
+- **`byteBlock(at:)`** loads its four vectors unchecked under its one precondition: HTTPBytes' 64-byte `farStop` loop 48
+  → 29 (its own record has the heads).
+- **`firstByteOffset(of:)`/`lastByteOffset(of:)`**: a block with candidates (first and last byte match) now compares
+  every pattern byte at all 16 offsets (`Load.matches`: n shifted loads and `cmeq`s, ANDed; LLVM reuses the candidate
+  test's two) and takes the first or last set lane. Before, each candidate block tested its lanes one by one (about
+  100 instructions). The plan's first design, walking the candidates as a mask (9 instructions a candidate), was
+  measured and dropped: in a serial chain it ran 2–3x the old time when every offset was a candidate. For 9- and 11-byte
+  groups the deeper AND tree loses track of the lanes being full, and LLVM spreads them again (`shl #7`, `cmlt #0`): 2
+  instructions a candidate block (BytesCrypto's PEM search), left as it is.
+- **`RawSpan.chunks(of: InlineArray<n, UInt8>.self)`**, a typed view of whole chunks, and **`ByteBlock(_:
+  InlineArray<64, UInt8>)`**: loops over fixed-size blocks with one bound. SHA-1/256/512 use them (in
+  BytesCompression's record); BytesCompression's `WordReads.words`/`stripes` became `chunks(of:)` (XXH64 and CRC-64:
+  the same loops). Not for short scans: the view costs about 6 instructions to set up.
+- **`ByteMatches(_: SIMDMask<SIMD16<Int8>>)`**: a comparison's lanes as they are, replacing HTTPBytes'
+  `HTTPCharacters.matches` (16 sites) and `replacing(with:where:)` conversions; `matching(in:)` uses it.
+
+| Row (x16 unless noted) | Instructions before | after | Time before (µs) | after |
+|---|---|---|---|---|
+| wildcards in 1,000 × 64 B, `containsByte` | 1,267 K | 647 K (−49%) | 59 | 30 |
+| first NUL in 64 KB, `firstByteOffset(where:)` | 854 K | 592 K (−31%) | 41 | 24 |
+| 1,000 × 64 B equal, `bytesEqual` | 978 K | 722 K (−26%) | 44 | 43 |
+| 4-byte marker, every offset a candidate, first | 7,148 K | 1,576 K (−78%) | 348 | 63 |
+| 4-byte marker, every offset a candidate, last | 7,016 K | 1,445 K (−79%) | 352 | 63 |
+| 4-byte marker, a quarter candidates, first | 3,967 K | 1,556 K (−61%) | 1,595 | 82 |
+| 4-byte marker, a quarter candidates, last | 3,834 K | 1,425 K (−63%) | 1,438 | 81 |
+| 4-byte marker in 64 KB (no candidates), first | 921 K | 921 K | 37 | 36 |
+| Search 64 KB backwards (no candidates), last | 51 K | 51 K | 2.63 | 2.59 |
+
+The portable builds show the same instruction changes (the scans are Swift SIMD in every build); `ASCII` and `Hex` rows
+are unchanged in all three. The quarter-candidates rows were branch-bound before (one mispredicted lane test after
+another): 18–19x faster for 2.5x fewer instructions.
+
 ## 2026-11-24: The loops re-check
 
 An adversarial review of the Tools found that `Tools/loops` took any backward branch to an earlier label as a loop's

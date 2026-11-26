@@ -30,7 +30,7 @@ let package = Package(
             name: "NativeAEA",
             dependencies: [
                 .product(name: "Bytes", package: "Bytes"),
-                // The pipeline's waits: `Continuation`, `WaiterQueue` (AEAPayload's decision), and Disk's.
+                // The pipeline's waits: `wait(in:_:)` (AEAPayload's decision), and Disk's.
                 .product(name: "BytesAsync", package: "Bytes"),
                 // The codecs, chosen by `DecompressionFormat(aeaSegment:)`/`(pbzBlock:)`, and `pbz` framing (`PBZ`).
                 .product(name: "BytesCompression", package: "BytesCompression"),

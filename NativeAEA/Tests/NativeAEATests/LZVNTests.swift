@@ -1,5 +1,3 @@
-@testable import NativeAEA
-
 // Apple's AppleArchive framework only makes the test archives (`aea encrypt -a` and `aa archive -a` don't offer LZVN,
 // but the library takes libcompression's LZVN constant, 0x900).
 import AppleArchive
@@ -7,6 +5,7 @@ import BytesTestSupport
 import CryptoKit
 import DiskTestSupport
 import Foundation
+import NativeAEA
 import System
 import Testing
 

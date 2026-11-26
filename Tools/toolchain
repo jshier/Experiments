@@ -37,7 +37,7 @@
 #              Tool), TOOLCHAIN (its path), TOOLCHAIN_RUNTIME (its usr/lib/swift/macosx)
 #   --         run COMMAND in that environment. With --runtime, COMMAND also gets
 #              DYLD_LIBRARY_PATH=TOOLCHAIN_RUNTIME: only for running built programs that don't embed it.
-#   test       build PACKAGE_DIR's tests (release with -enable-testing, for @testable imports, unless --debug;
+#   test       build PACKAGE_DIR's tests (release, unless --debug; tests import modules plainly, no @testable;
 #              default: NAME if it's a package, else the current directory) and run them against the
 #              toolchain's runtime through its swiftpm-testing-helper. `swift test` can't: it replaces
 #              DYLD_LIBRARY_PATH for the test process, which then loads the OS runtime. TESTING_ARGS default to
@@ -304,10 +304,8 @@ case "$command" in
         helper="$TOOLCHAIN/usr/libexec/swift/pm/swiftpm-testing-helper"
         [[ -x "$helper" ]] || die "$TOOLCHAIN has no swiftpm-testing-helper"
         cd "$package" || die "can't enter $package"
-        # Release builds need -enable-testing for @testable imports (Bytes', BytesCompression's tests); the bin path
-        # query gets the same flags, or it names another build's directory.
+        # The bin path query gets the build's flags, or it names another build's directory.
         flags=(-c "$configuration")
-        [[ "$configuration" == release ]] && flags+=(-Xswiftc -enable-testing)
         note "building tests ($configuration) with ${TOOLCHAINS}…"
         swift build "${flags[@]}" --build-tests > /dev/null 2> >(grep -E 'error:' >&2) || fail "build failed"
         bin="$(swift build "${flags[@]}" --show-bin-path)" || fail "swift build --show-bin-path failed"

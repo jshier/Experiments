@@ -18,14 +18,14 @@ import Synchronization
 public final class ExtractionProgress: Sendable {
     /// One counter pair per worker: two `Atomic<Int>`s padded to 128 bytes (Apple silicon's cache line), so workers
     /// don't share lines.
-    final class Slot: Sendable {
+    public final class Slot: Sendable {
         let entries = Atomic<Int>(0)
         let bytes = Atomic<Int>(0)
         // Padding: 14 words, so two slots' counters never share a line.
         private let padding: (Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int, Int) = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
 
         @inline(__always)
-        func add(entries count: Int, bytes byteCount: Int) {
+        public func add(entries count: Int, bytes byteCount: Int) {
             if count != 0 { entries.add(count, ordering: .relaxed) }
             if byteCount != 0 { bytes.add(byteCount, ordering: .relaxed) }
         }
@@ -147,7 +147,7 @@ public final class ExtractionProgress: Sendable {
 
     /// Worker `index`'s slot.
     @inline(__always)
-    func slot(_ index: Int) -> Slot { slots[index & 63] }
+    public func slot(_ index: Int) -> Slot { slots[index & 63] }
 }
 
 /// Defaults derived from the machine.

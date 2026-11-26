@@ -145,7 +145,7 @@ let package = Package(
         ),
         .testTarget(
             name: "BytesAsyncTests",
-            dependencies: ["Bytes", "BytesAsync"],
+            dependencies: ["Bytes", "BytesAsync", "BytesTesting"],
             swiftSettings: strictSettings + portableSwiftSettings
         ),
         // `Data` with spans (standard library ones only), apart so `Bytes` needn't depend on Foundation.
@@ -194,6 +194,7 @@ let package = Package(
             name: "BytesBenchmarks",
             dependencies: [
                 "Bytes",
+                "BytesAsync",
                 "BytesTestSupport",
                 .product(name: "Benchmark", package: "benchmark"),
             ],

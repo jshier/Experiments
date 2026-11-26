@@ -1,9 +1,9 @@
-@testable import NativeAEA
 import BytesTesting
 import BytesTestSupport
 import Disk
 import DiskTestSupport
 import Foundation
+import NativeAEA
 import System
 import Testing
 

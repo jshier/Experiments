@@ -618,6 +618,17 @@ enum ZstdHuffman {
         return (count &+ 1, tableLog, size &+ 1)
     }
 
+    /// One weight from `state`'s entry, moving the state on: its arguments passed, not captured (a nested function
+    /// capturing the reader made it a box).
+    @unsafe @inline(__always)
+    private static func decodeWeight(_ state: inout Int, _ bits: inout ZstdReverseBits, _ table: UnsafeMutablePointer<UInt32>) -> UInt8 {
+        // Unsafe: a table load. Safe: states stay below the table's `1 << tableLog` entries by construction.
+        let entry = unsafe table[state]
+        let low = bits.read(Int(entry &>> 24))
+        state = Int(entry & 0xFFFF) &+ low
+        return UInt8(truncatingIfNeeded: entry &>> 16)
+    }
+
     /// Decodes FSE-coded weights (accuracy log at most 6, two interleaved states) into `scratch.weights`, as
     /// libzstd's `FSE_decompress_wksp`, which stops when the bitstream overflows.
     ///
@@ -640,38 +651,29 @@ enum ZstdHuffman {
         _ = bits.reloadStatus()
         guard bits.reloadStatus() != .overflow else { throw .invalidValue }
         let weights = unsafe scratch.weights
-
-        @inline(__always)
-        func decode(_ state: inout Int) -> UInt8 {
-            let entry = unsafe table[state]
-            let low = bits.read(Int(entry &>> 24))
-            state = Int(entry & 0xFFFF) &+ low
-            return UInt8(truncatingIfNeeded: entry &>> 16)
-        }
-
         let capacity = 255
         var produced = 0
         while bits.reloadStatus() == .unfinished, produced < capacity &- 3 {
-            unsafe weights[produced] = decode(&state1)
-            unsafe weights[produced &+ 1] = decode(&state2)
-            unsafe weights[produced &+ 2] = decode(&state1)
-            unsafe weights[produced &+ 3] = decode(&state2)
+            unsafe weights[produced] = unsafe decodeWeight(&state1, &bits, table)
+            unsafe weights[produced &+ 1] = unsafe decodeWeight(&state2, &bits, table)
+            unsafe weights[produced &+ 2] = unsafe decodeWeight(&state1, &bits, table)
+            unsafe weights[produced &+ 3] = unsafe decodeWeight(&state2, &bits, table)
             produced &+= 4
         }
         while true {
             guard produced <= capacity &- 2 else { throw .invalidValue }
-            unsafe weights[produced] = decode(&state1)
+            unsafe weights[produced] = unsafe decodeWeight(&state1, &bits, table)
             produced &+= 1
             if bits.reloadStatus() == .overflow {
-                unsafe weights[produced] = decode(&state2)
+                unsafe weights[produced] = unsafe decodeWeight(&state2, &bits, table)
                 produced &+= 1
                 break
             }
             guard produced <= capacity &- 2 else { throw .invalidValue }
-            unsafe weights[produced] = decode(&state2)
+            unsafe weights[produced] = unsafe decodeWeight(&state2, &bits, table)
             produced &+= 1
             if bits.reloadStatus() == .overflow {
-                unsafe weights[produced] = decode(&state1)
+                unsafe weights[produced] = unsafe decodeWeight(&state1, &bits, table)
                 produced &+= 1
                 break
             }

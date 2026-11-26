@@ -260,7 +260,7 @@ added to as a client learns them (`addExpected`: NativeZip's extractor, an archi
 ## 7. Counting calls
 
 Every file system call goes through `Sys` (`Syscalls.swift`). With the `SyscallCounting` trait each wrapper adds one to
-an atomic per kind; without it (the default) the wrappers are the calls. `SyscallCounter` (SPI) reads them; the
+an atomic per kind; without it (the default) the wrappers are the calls. `SyscallCounter` reads them; the
 benchmarks report the total as `Disk syscalls` beside package-benchmark's process-wide `.syscalls` (which on macOS
 counts every thread's Unix and Mach calls: waits, the allocator, the runtime).
 

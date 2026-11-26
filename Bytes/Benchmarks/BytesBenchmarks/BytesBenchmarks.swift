@@ -56,6 +56,7 @@ let benchmarks: @Sendable () -> Void = {
     registerScanBenchmarks()
     registerTypedCursorBenchmarks()
     registerCoreAdditionsBenchmarks()
+    registerAsyncBenchmarks()
 
     // MARK: Field parsing: a 2,000-entry zip central directory (~170 KB)
 

@@ -361,7 +361,7 @@ struct BrotliBlocks {
 
 /// A Brotli stream's state, tables, and context maps, decoding into whatever buffer it's given.
 @safe
-struct BrotliStream: ~Copyable {
+package struct BrotliStream: ~Copyable {
     private var codes = BrotliPrefixCodes()
     /// Each literal, command, and distance tree's offset in the codes' arena.
     private var literalTrees: UniqueArray<Int32>
@@ -463,7 +463,7 @@ struct BrotliStream: ~Copyable {
     private let commandTable: UniqueArray<UInt64>
 
     /// The command table's derivation, which tests check the literal against.
-    static func makeCommandTable() -> [UInt64] {
+    package static func makeCommandTable() -> [UInt64] {
         var table = [UInt64](repeating: 0, count: 704)
         var span = table.mutableSpan
         for symbol in 0..<704 {

@@ -143,6 +143,109 @@ struct ZstdEncoderTests {
         }
     }
 
+    /// Blocks written straight into the output take the frame libzstd makes, also when that output has only
+    /// `maximumCompressedSize` of room: small inputs, whose bound leaves little beyond the content. (With only the
+    /// raw form's room, the encoder's worst-case reservations stored 31–211-byte blocks raw where libzstd compressed.)
+    @Test(arguments: [1, 3])
+    func smallInputsIntoTheirBound(_ level: Int) {
+        let text = ZstdEncoderSamples.all.first { $0.name == "mixed" }!.bytes
+        let parameters = ZstdEncoder.Parameters(level: level)
+        var encoder = ZstdEncoder(parameters: parameters)
+        for size in 24...300 {
+            let data = Array(text.prefix(size))
+            #expect(zstdEncodeAll(data, encoder: &encoder) == zstdReferenceEncode(data, parameters: parameters, checksum: false), "level \(level), \(size) bytes")
+        }
+    }
+
+    /// Literals whose Huffman tree splits the symbols counted exactly 164 times between two code lengths: libzstd
+    /// quicksorts that count's bucket too (its cutoff is 165, not the 166 its comment states), which reorders the
+    /// ties, and the frame shows which of them got the longer codes. (Sorting from 166 swapped two symbols' lengths:
+    /// 1–2 bytes off libzstd's frames.) The counts are those of a review's input; shuffled, they make no matches.
+    @Test(arguments: [1, 3])
+    func breaksHuffmanTiesAsLibzstd(_ level: Int) {
+        let counts: [Int] = [
+            685, 749, 735, 713, 726, 717, 693, 761, 727, 693, 741, 704, 693, 689, 736, 711,
+            737, 717, 671, 742, 704, 754, 667, 682, 715, 687, 667, 699, 755, 724, 168, 155,
+            157, 146, 152, 158, 148, 175, 164, 138, 150, 167, 164, 150, 141, 155, 162, 150,
+            162, 147, 168, 163, 129, 146, 154, 164, 142, 152, 154, 143, 162, 166, 160, 165,
+            145, 154, 151, 128, 176, 156, 150, 140, 153, 141, 150, 144, 153, 128, 167, 151,
+            138, 150, 163, 149, 170, 163, 161, 148, 179, 155, 163, 154, 148, 145, 190, 144,
+            157, 144, 161, 164, 155, 155, 146, 165, 150, 142, 165, 134, 181, 163, 177, 157,
+            145, 155, 160, 165, 146, 154, 150, 156, 148, 155, 172, 158, 168, 144, 149, 147,
+            158, 147, 170, 158, 144, 149, 132, 150, 164, 158, 192, 163, 153, 157, 133, 153,
+            142, 161, 179, 139, 146, 156, 164, 160, 145, 152, 187, 181, 151, 148, 168, 127,
+            144, 142, 164, 152, 160, 165, 156, 156, 159, 175, 137, 137, 168, 136, 151, 154,
+            160, 178, 163, 181, 164, 178, 168, 149, 164, 153, 159, 159, 144, 150, 134, 143,
+            131, 154, 154, 179, 154, 169, 152, 154, 176, 151, 160, 167, 164, 142, 147, 157,
+            148, 156, 161, 162, 177, 152, 154, 153, 143, 159, 144, 154, 161, 157, 139, 154,
+            165, 135, 138, 136, 176, 152, 134, 150, 159, 130, 161, 162, 123, 140, 162, 145,
+            145, 162, 169, 127, 150, 172, 136, 145, 165, 149, 161, 144, 143, 158, 163, 157,
+        ]
+        var data = counts.enumerated().flatMap { symbol, count in [UInt8](repeating: UInt8(symbol), count: count) }
+        var rng = SplitMix64(seed: 164)
+        for index in data.indices.reversed() {
+            data.swapAt(index, Int(rng.next() % UInt64(index + 1)))
+        }
+        let parameters = ZstdEncoder.Parameters(level: level)
+        var encoder = ZstdEncoder(parameters: parameters)
+        let frame = zstdEncodeAll(data, encoder: &encoder)
+        let reference = zstdReferenceEncode(data, parameters: parameters, checksum: false)
+        let difference = firstDifference(frame, reference)
+        #expect(difference == nil, "level \(level): differs at \(difference ?? -1) (\(frame.count) against \(reference.count) bytes)")
+    }
+
+    /// `compressAll` into exactly the frame's size, or a little more, after bytes already in the output, makes
+    /// libzstd's frame after those bytes (blocks written in place or staged, by the room left); a byte less throws.
+    /// Then a frame after a `compressAll` that ran out of room is libzstd's too: the cut-short frame's positions,
+    /// left in the tables, are behind the next frame's. (The next frame used to start at the same index and match
+    /// against them: offsets pointing ahead.)
+    @Test(arguments: [1, 3])
+    func fillsTheOutputOrThrows(_ level: Int) {
+        let parameters = ZstdEncoder.Parameters(level: level)
+        var encoder = ZstdEncoder(parameters: parameters)
+        let prefix: [UInt8] = [1, 2, 3, 4, 5]
+        for name in ["text 262 144", "random then zeros", "mixed"] {
+            let data = ZstdEncoderSamples.all.first { $0.name == name }!.bytes
+            let reference = zstdReferenceEncode(data, parameters: parameters, checksum: false)
+            for extra in [-1, 0, 1, 7, 300, 140_000] {
+                let result = Self.compressAll(data, after: prefix, room: reference.count + extra, encoder: &encoder)
+                if extra < 0 {
+                    #expect(result == nil, "level \(level), \(name), room \(extra): no error")
+                } else {
+                    #expect(result == prefix + reference, "level \(level), \(name), room \(extra)")
+                }
+            }
+            for room in [0, reference.count / 2, reference.count - 1] {
+                #expect(Self.compressAll(data, after: [], room: room, encoder: &encoder) == nil, "\(name), room \(room)")
+                for next in [name, "mixed"] {
+                    let nextData = ZstdEncoderSamples.all.first { $0.name == next }!.bytes
+                    let frame = zstdEncodeAll(nextData, encoder: &encoder)
+                    let difference = firstDifference(frame, zstdReferenceEncode(nextData, parameters: parameters, checksum: false))
+                    #expect(difference == nil, "level \(level), \(next) after \(name) cut at \(room): differs at \(difference ?? -1)")
+                    expectZstdDecodes(frame, to: nextData, "\(next) after \(name) cut at \(room)")
+                }
+            }
+        }
+    }
+
+    /// `compressAll` of `data` into an output holding `prefix`, with `room` bytes free after it: the output, or `nil`
+    /// when it threw `insufficientCapacity`.
+    static func compressAll(_ data: [UInt8], after prefix: [UInt8], room: Int, encoder: inout ZstdEncoder) -> [UInt8]? {
+        var output = [UInt8](repeating: 0, count: prefix.count + room)
+        var produced = 0
+        do throws(BytesError) {
+            try output.withOutputRawSpan { span throws(BytesError) in
+                span.append(copying: prefix.span)
+                try encoder.compressAll(data.span.bytes, into: &span)
+                produced = span.byteCount
+            }
+        } catch {
+            #expect(error == .insufficientCapacity)
+            return nil
+        }
+        return Array(output[..<produced])
+    }
+
     /// A whole body given to `compress` with `.finish`, or streamed in pieces after `reset(contentSize:)`, makes the
     /// same frame as `compressAll`: same parameters, same blocks, through the streaming window (which slides when the
     /// content is larger than it).

@@ -1,7 +1,7 @@
-@testable import NativeAEA
 import BytesTestSupport
 import DiskTestSupport
 import Foundation
+import NativeAEA
 import System
 import Testing
 
@@ -10,8 +10,7 @@ import Testing
 /// --expand` for the `.xip`. Opt-in and local: set `NATIVEAEA_CONFORMANCE=1`, and build release (a debug build decodes
 /// Xcode's 10 GB of xz tens of times slower: a debug run hadn't finished the `.xip` after 15 minutes).
 ///
-///     NATIVEAEA_CONFORMANCE=1 swift test --package-path NativeAEA -c release -Xswiftc -enable-testing \
-///         --filter XcodeConformanceTests/
+///     NATIVEAEA_CONFORMANCE=1 swift test --package-path NativeAEA -c release --filter XcodeConformanceTests/
 ///
 /// The two trees never exist at once: the reference tree is extracted once, reduced to a manifest cached in
 /// `TestData/local-xcode-reference/` (named for the archive and its size; delete it to make it again), and removed;

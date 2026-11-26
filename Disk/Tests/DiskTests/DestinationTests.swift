@@ -1,8 +1,8 @@
-@testable import Disk
 import BytesAsync
 import BytesTesting
 import BytesTestSupport
 import Darwin
+import Disk
 import DiskTestSupport
 import Foundation
 import System

@@ -90,7 +90,7 @@ public final class Destination: Sendable {
     /// The destination's descriptor, until ``close()``.
     let rootSlot: DescriptorSlot
     /// The destination's descriptor (-1 after ``close()``: calls then fail with `EBADF`).
-    var root: Int32 { rootSlot.descriptor }
+    public var root: Int32 { rootSlot.descriptor }
     /// Where it is (as given).
     public let path: FilePath
     public let options: DestinationOptions

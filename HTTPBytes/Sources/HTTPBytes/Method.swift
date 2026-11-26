@@ -93,7 +93,7 @@ public enum HTTPCharacters {
         let rows = SIMD16<UInt8>(0, 0, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0, 0, 0, 0, 0, 0, 0, 0)
         let column = ByteLanes(lanes.vector & SIMD16(repeating: 0x0F)).lookup(in: columns)
         let row = ByteLanes(lanes.vector &>> SIMD16(repeating: 4)).lookup(in: rows)
-        return matches((column & row) .== SIMD16(repeating: 0))
+        return ByteMatches((column & row) .== SIMD16(repeating: 0))
     }
 
     /// Lanes that end a field value or can't be in one (RFC 9110 §5.5): controls other than horizontal tab (CR and LF
@@ -102,7 +102,7 @@ public enum HTTPCharacters {
     public static func fieldValueStop(_ lanes: ByteLanes) -> ByteMatches {
         let vector = lanes.vector
         let control = (vector .< SIMD16(repeating: 0x20)) .& (vector .!= SIMD16(repeating: 0x09))
-        return matches(control .| (vector .== SIMD16(repeating: 0x7F)))
+        return ByteMatches(control .| (vector .== SIMD16(repeating: 0x7F)))
     }
 
     /// Lanes that are controls (horizontal tab included) or DEL: ``fieldValueStop`` and tabs, in two comparisons and an
@@ -112,7 +112,7 @@ public enum HTTPCharacters {
     @inlinable @inline(__always)
     public static func controlOrDelete(_ lanes: ByteLanes) -> ByteMatches {
         let vector = lanes.vector
-        return matches((vector .< SIMD16(repeating: 0x20)) .| (vector .== SIMD16(repeating: 0x7F)))
+        return ByteMatches((vector .< SIMD16(repeating: 0x20)) .| (vector .== SIMD16(repeating: 0x7F)))
     }
 
     /// Lanes that end a request target or can't be in one: controls, space, DEL, and bytes above 0x7F (a URI is ASCII,
@@ -121,12 +121,6 @@ public enum HTTPCharacters {
     @inlinable @inline(__always)
     public static func targetStop(_ lanes: ByteLanes) -> ByteMatches {
         let vector = lanes.vector
-        return matches((vector .<= SIMD16(repeating: 0x20)) .| (vector .>= SIMD16(repeating: 0x7F)))
-    }
-
-    /// A comparison's lanes as matches.
-    @inlinable @inline(__always)
-    public static func matches(_ mask: SIMDMask<SIMD16<Int8>>) -> ByteMatches {
-        ByteMatches(highBits: SIMD16<UInt8>(repeating: 0).replacing(with: 0xFF, where: mask))
+        return ByteMatches((vector .<= SIMD16(repeating: 0x20)) .| (vector .>= SIMD16(repeating: 0x7F)))
     }
 }

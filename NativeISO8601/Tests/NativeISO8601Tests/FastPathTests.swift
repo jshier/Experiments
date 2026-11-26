@@ -1,10 +1,10 @@
-@testable import NativeISO8601
+import NativeISO8601
 import Testing
 
 @Suite("SWAR fast path")
 struct FastPathTests {
     private func lex(_ bytes: [UInt8], fastPath: Bool) -> Result<RawComponents, ISO8601ParseError> {
-        Result { () throws(ISO8601ParseError) in try Lexer(bytes.span).lex(allowingFastPath: fastPath) }
+        Result { () throws(ISO8601ParseError) in try Lexer(bytes.span).lexOutOfLine(allowingFastPath: fastPath) }
     }
 
     @Test("Agrees with the general path for every byte value at every position", arguments: [

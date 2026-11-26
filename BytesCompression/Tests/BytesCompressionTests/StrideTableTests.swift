@@ -1,4 +1,4 @@
-@testable import BytesCompression
+import BytesCompression
 import Testing
 
 /// The codecs' table storage: `StrideTable` (whole SIMD groups at a 64-byte boundary, filled and cleared a group at a

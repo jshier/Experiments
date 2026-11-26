@@ -1,9 +1,9 @@
-@testable import Nunarchiver
 import Clocks
 import ComposableArchitecture
 import ComposableArchitectureTestSupport
 import Disk
 import Foundation
+import Nunarchiver
 import Synchronization
 import Testing
 

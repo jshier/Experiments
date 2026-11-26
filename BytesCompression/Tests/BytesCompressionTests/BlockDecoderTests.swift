@@ -150,8 +150,8 @@ func drain<Source: OrderedBlockSource>(_ source: Source) async throws(Source.Fai
                 #expect(block.rawOffset == joined.count)
                 #expect(block.index == expected)
                 expected += 1
-                joined.append(copying: source.pool.bytes(block.buffer, at: 0, count: block.rawSize))
-                source.pool.release(block.buffer)
+                joined.append(copying: source.pool.bytes(block.buffer.index, at: 0, count: block.rawSize))
+                _ = consume block // Its buffer back now, before the next wait.
             }
             return .success(joined)
         } catch {
@@ -465,7 +465,7 @@ func drain<Source: OrderedBlockSource>(_ source: Source) async throws(Source.Fai
                 do throws(TestFailure) {
                     var taken = 0
                     while let block = try await source.nextBlock() {
-                        source.pool.release(block.buffer)
+                        _ = consume block
                         taken += 1
                         if taken == 3 { withUnsafeCurrentTask { $0?.cancel() } }
                     }
@@ -485,14 +485,19 @@ func drain<Source: OrderedBlockSource>(_ source: Source) async throws(Source.Fai
     /// first, then to the free list behind the buffers already used. (Moved from NativeAEA with the pool.)
     @Test func poolActivatesTheRestLater() async {
         let pool = BlockBufferPool(count: 6, blockCapacity: 1_024, active: 3)
-        #expect((0..<3).compactMap { _ in pool.tryAcquire() } == [0, 1, 2])
-        #expect(pool.tryAcquire() == nil)
+        // Indexes, the leases given up (`detach`): released below by index.
+        let first = (0..<3).compactMap { _ in Self.index(pool.tryAcquire()) }
+        #expect(first == [0, 1, 2])
+        let none = Self.index(pool.tryAcquire())
+        #expect(none == nil)
         pool.release(1)
-        #expect(pool.tryAcquire() == 1) // Recirculated: 3–5 untouched.
+        let recirculated = Self.index(pool.tryAcquire())
+        #expect(recirculated == 1) // Recirculated: 3–5 untouched.
         pool.release(1)
-        #expect(pool.tryAcquire() == 1)
+        let again = Self.index(pool.tryAcquire())
+        #expect(again == 1)
         // A task waiting for a buffer gets the first activated one.
-        async let waited = pool.acquire()
+        async let waited = Self.index(pool.acquire())
         while pool.waiting == 0 {
             await Task.yield()
         }
@@ -500,8 +505,10 @@ func drain<Source: OrderedBlockSource>(_ source: Source) async throws(Source.Fai
         #expect(await waited == 3)
         pool.release(2)
         // The buffer just freed first, then the activated ones.
-        #expect((0..<3).compactMap { _ in pool.tryAcquire() } == [2, 4, 5])
-        #expect(pool.tryAcquire() == nil)
+        let later = (0..<3).compactMap { _ in Self.index(pool.tryAcquire()) }
+        #expect(later == [2, 4, 5])
+        let exhausted = Self.index(pool.tryAcquire())
+        #expect(exhausted == nil)
         for index in 0..<6 {
             pool.release(index)
         }
@@ -509,25 +516,90 @@ func drain<Source: OrderedBlockSource>(_ source: Source) async throws(Source.Fai
         #expect(pool.peakInUse.load(ordering: .relaxed) == 6)
     }
 
+    /// A lease's index, the lease given up: `nil` for none.
+    static func index(_ buffer: consuming BlockBufferPool.Buffer?) -> Int? {
+        switch consume buffer {
+        case let .some(buffer): buffer.detach()
+        case .none: nil
+        }
+    }
+
+    /// Peeking gives the block a reference of its own: dropping the peeked block doesn't release the one the consumer
+    /// takes next, so the bytes it reads are still the block's (a second release would hand the buffer to a decoder,
+    /// which overwrites it), and every buffer comes back.
+    @Test(.timeLimit(.minutes(1))) func peekingKeepsTheConsumersReference() async throws {
+        let (stage, text) = try Self.indexedStream(blockSize: 4_096)
+        let source = ParallelBlockDecoder(
+            stage: stage, blocks: 0..<stage.blocks.count, format: .deflate(.zlib), blockCapacity: 4_096, decoders: 2, extraBuffers: 0,
+            scratchCapacity: 4_160
+        )
+        let pool = source.pool
+        let result: Result<[UInt8], TestFailure> = await source.withDecoding { _ in
+            do throws(TestFailure) {
+                var joined: [UInt8] = []
+                while true {
+                    let peeked = try await source.peek()
+                    guard let peeked else { break }
+                    let peekedIndex = peeked.index
+                    _ = consume peeked
+                    // Decoders run meanwhile: a buffer released twice would be decoded into now.
+                    await Task.yield()
+                    guard let block = try await source.nextBlock() else { break }
+                    #expect(block.index == peekedIndex)
+                    joined.append(copying: pool.bytes(block.buffer.index, at: 0, count: block.rawSize))
+                    _ = consume block
+                }
+                return .success(joined)
+            } catch {
+                return .failure(error)
+            }
+        }
+        #expect(try result.get() == text)
+        #expect(source.pool.buffersInUse == 0)
+    }
+
+    /// A dropped lease returns its buffer; a shared one, after both are dropped; a detached one, when its index is
+    /// released.
+    @Test func leasesReleaseTheirBuffers() throws {
+        let pool = BlockBufferPool(count: 2, blockCapacity: 1_024)
+        do {
+            guard let lease = pool.tryAcquire() else {
+                Issue.record("no free buffer")
+                return
+            }
+            #expect(pool.buffersInUse == 1)
+            let shared = lease.share()
+            _ = consume lease
+            #expect(pool.buffersInUse == 1) // The shared reference still holds it.
+            _ = consume shared
+        }
+        #expect(pool.buffersInUse == 0)
+        let detached = Self.index(pool.tryAcquire())
+        let index = try #require(detached)
+        #expect(pool.buffersInUse == 1)
+        pool.release(index)
+        #expect(pool.buffersInUse == 0)
+    }
+
     /// Pools are sized in one place: a buffer per decoder, the extra ones, the ones held beyond decoding (or, until
     /// activated, what's held then), and one more.
     @Test func poolsAreSizedFromCounts() {
         let plain = BlockBufferPool.sized(blockCapacity: 1_024, decoders: 4, extraBuffers: 8)
         #expect(plain.count == 13)
-        #expect((0..<14).compactMap { _ in plain.tryAcquire() }.count == 13)
+        #expect((0..<14).compactMap { _ in Self.index(plain.tryAcquire()) }.count == 13)
         // An AEA payload's: 4 writers' references beyond decoding, but only the `pbz` producer's one until activated.
         let deferred = BlockBufferPool.sized(blockCapacity: 1_024, decoders: 4, extraBuffers: 8, heldBuffers: 4, heldUntilActivated: 1)
         #expect(deferred.count == 17)
-        #expect((0..<17).compactMap { _ in deferred.tryAcquire() }.count == 14)
+        #expect((0..<17).compactMap { _ in Self.index(deferred.tryAcquire()) }.count == 14)
         deferred.activateAll()
-        #expect((0..<17).compactMap { _ in deferred.tryAcquire() }.count == 3)
+        #expect((0..<17).compactMap { _ in Self.index(deferred.tryAcquire()) }.count == 3)
         // A consumer that keeps earlier blocks while it waits (an extraction's walk in small AEA segments): its buffers
         // count too, and are deferred with the held ones.
         let walking = BlockBufferPool.sized(
             blockCapacity: 1_024, decoders: 4, extraBuffers: 8, heldBuffers: 4, consumerBuffers: 4, heldUntilActivated: 1
         )
         #expect(walking.count == 20 && walking.heldBuffers == 4)
-        #expect((0..<20).compactMap { _ in walking.tryAcquire() }.count == 14)
+        #expect((0..<20).compactMap { _ in Self.index(walking.tryAcquire()) }.count == 14)
         // No decoders or negative counts still leave a decoder's buffer and the one more.
         #expect(BlockBufferPool.sized(blockCapacity: 1_024, decoders: 0, extraBuffers: -3, heldBuffers: -1).count == 2)
     }
@@ -602,7 +674,8 @@ func drain<Source: OrderedBlockSource>(_ source: Source) async throws(Source.Fai
         // The pool made from a sizing has its buffers and records its held ones; a deferred tail stays deferred.
         let pool = BlockBufferPool(sizing: segments, blockCapacity: 1_024, heldUntilActivated: 1)
         #expect(pool.count == segments.bufferCount && pool.heldBuffers == 5)
-        #expect((0..<pool.count).compactMap { _ in pool.tryAcquire() }.count == segments.decoders + segments.extraBuffers + 2)
+        let handedOut = (0..<pool.count).compactMap { _ in Self.index(pool.tryAcquire()) }
+        #expect(handedOut.count == segments.decoders + segments.extraBuffers + 2)
     }
 
     /// An engine given a budget runs the decoders its pool was sized for, and still decodes everything: a `pbz` file and
@@ -649,7 +722,8 @@ func drain<Source: OrderedBlockSource>(_ source: Source) async throws(Source.Fai
         #expect(sizing.carryCapacity == 100 && sizing.byteCount == 2 * 32_768)
         let pool = BlockBufferPool(sizing: sizing, blockCapacity: 20_000)
         #expect(pool.carryCapacity == 100)
-        let first = try #require(pool.tryAcquire()), second = try #require(pool.tryAcquire())
+        let leased = (Self.index(pool.tryAcquire()), Self.index(pool.tryAcquire()))
+        let first = try #require(leased.0), second = try #require(leased.1)
         pool.withMutableBytes(first, at: 20_000 - 100, count: 100) { span in
             for i in 0..<100 {
                 span.storeBytes(of: UInt8(i), toByteOffset: i, as: UInt8.self)

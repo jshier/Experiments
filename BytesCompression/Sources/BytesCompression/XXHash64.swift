@@ -67,11 +67,13 @@ package struct XXHash64: Sendable {
         return finish(hash &+ UInt64(truncatingIfNeeded: count), bytes.extracting(droppingFirst: count & ~31))
     }
 
-    /// The whole 32-byte stripes at the start of `bytes`, as elements (`WordReads.stripes(_:)`).
+    /// The whole 32-byte stripes at the start of `bytes`, as elements: four words each, read by `bitCast` to
+    /// `SIMD4<UInt64>` where they're used. (Through a helper taking the element, the stripe was loaded into vector
+    /// registers and its lanes moved out: 3 more instructions a stripe.)
     @inline(__always)
     @_lifetime(copy bytes)
     static func stripes(_ bytes: RawSpan) -> Span<InlineArray<32, UInt8>> {
-        WordReads.stripes(bytes)
+        bytes.chunks(of: InlineArray<32, UInt8>.self)
     }
 
     /// The four lanes' rounds over `stripes`.
@@ -104,7 +106,7 @@ package struct XXHash64: Sendable {
         // Words and bytes as elements, as the stripes are.
         var hash = hash
         let count = bytes.byteCount
-        let words = WordReads.words(bytes)
+        let words = bytes.chunks(of: InlineArray<8, UInt8>.self)
         for index in words.indices {
             hash ^= round(0, WordReads.value(words[index]))
             hash = hash.rotatedLeft(by: 27) &* prime1 &+ prime4
@@ -181,6 +183,47 @@ package struct XXHash64: Sendable {
         guard count > 0 else { return }
         // Unsafe: a span over the caller's bytes, used only during the call.
         update(unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(start: start, count: count)))
+    }
+
+    /// Copies the `count` bytes at `source` to `destination` and adds them to the hash, in one pass: a raw block's
+    /// bytes read once (copied, then read back for the hash, they cost a second pass: random input decoded no faster
+    /// than libzstd's).
+    @unsafe
+    package mutating func copyAndUpdate(from source: UnsafeRawPointer, to destination: UnsafeMutableRawPointer, count: Int) {
+        // Unsafe: reads below `count` at `source`, writes below `count` at `destination` (the caller's bounds).
+        var done = 0
+        if bufferedCount > 0 {
+            // The head that completes the partial round.
+            done = min(32 &- bufferedCount, count)
+            unsafe destination.copyMemory(from: source, byteCount: done)
+            unsafe update(source, count: done)
+        }
+        let stripes = (count &- done) & ~31
+        if stripes > 0 {
+            var v1 = lane1, v2 = lane2, v3 = lane3, v4 = lane4
+            var offset = done
+            let end = done &+ stripes
+            while offset < end {
+                let words = unsafe (source + offset).loadUnaligned(as: SIMD4<UInt64>.self)
+                unsafe (destination + offset).storeBytes(of: words, as: SIMD4<UInt64>.self)
+                v1 = Self.round(v1, UInt64(littleEndian: words[0]))
+                v2 = Self.round(v2, UInt64(littleEndian: words[1]))
+                v3 = Self.round(v3, UInt64(littleEndian: words[2]))
+                v4 = Self.round(v4, UInt64(littleEndian: words[3]))
+                offset &+= 32
+            }
+            lane1 = v1
+            lane2 = v2
+            lane3 = v3
+            lane4 = v4
+            length &+= UInt64(truncatingIfNeeded: stripes)
+        }
+        let rest = count &- done &- stripes
+        if rest > 0 {
+            let start = done &+ stripes
+            unsafe (destination + start).copyMemory(from: source + start, byteCount: rest)
+            unsafe update(source + start, count: rest)
+        }
     }
 
     /// The hash of everything added so far. Adding more afterwards continues the same hash.

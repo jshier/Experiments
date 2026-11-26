@@ -66,8 +66,8 @@ public struct AEASigner: Sendable {
     public var isTrusted: Bool
 }
 
-enum AEASignature {
-    static let certificateChainKey = "com.apple.ias.signature.certificate-chain"
+public enum AEASignature {
+    public static let certificateChainKey = "com.apple.ias.signature.certificate-chain"
 
     /// SHA-256 of Apple Root CA - G3's DER (as macOS's system roots hold it), the root Xcode's chain ends at.
     static let appleRootCAG3: [UInt8] = [
@@ -149,9 +149,9 @@ enum AEASignature {
 ///
 /// With Apple's root (no `anchors` given), the leaf must also be issued by the policy's Apple CA (for `.aea`, "Apple
 /// Platform Signing …", Xcode's issuer), not just anything under the root.
-enum CertificateChain {
+public enum CertificateChain {
     /// What an Apple chain must be, beyond RFC 5280's checks: its root, the CA that issues its leaves, and its keys.
-    struct Policy {
+    public struct Policy: Sendable {
         /// SHA-256 of the root's DER (as macOS's system roots hold it), and its name for errors.
         var root: [UInt8]
         var rootName: String
@@ -163,7 +163,7 @@ enum CertificateChain {
         var leafUsage: ASN1ObjectIdentifier?
 
         /// Apple Encrypted Archives: P-256 leaves from Apple's platform signing CA, under Apple Root CA - G3.
-        static let archive = Policy(
+        public static let archive = Policy(
             root: AEASignature.appleRootCAG3, rootName: "Apple Root CA - G3", issuer: "Apple Platform Signing ",
             issuerName: "Apple's platform signing CA", keyAlgorithm: .ecPublicKey, leafUsage: nil
         )
@@ -195,7 +195,7 @@ enum CertificateChain {
         }
     }
 
-    static func verify(_ chain: [[UInt8]], anchors: [[UInt8]]?, at date: Date, policy: Policy = .archive) throws(AEAError) {
+    public static func verify(_ chain: [[UInt8]], anchors: [[UInt8]]?, at date: Date, policy: Policy = .archive) throws(AEAError) {
         let now = Int64(date.timeIntervalSince1970)
         for (index, der) in chain.enumerated() {
             let certificate = try parse(der.span.bytes, "certificate \(index)")

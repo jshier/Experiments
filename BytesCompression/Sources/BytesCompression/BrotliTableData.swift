@@ -115,7 +115,7 @@ let brotliContextLookup: [UInt8] = [
 /// bits (32-39), copy extra bits (40-47), and bit 48 for an implicit distance (cells 0 and 1). Generated from
 /// `Brotli`'s length and cell tables (`BrotliStream.makeCommandTable()` is the derivation, and a test checks this
 /// against it): a literal, so no decoder computes it (it was most of making one); each copies it.
-let brotliCommandTable: [UInt64] = [
+package let brotliCommandTable: [UInt64] = [
     0x0001_0000_0002_0000, 0x0001_0000_0003_0000, 0x0001_0000_0004_0000, 0x0001_0000_0005_0000,
     0x0001_0000_0006_0000, 0x0001_0000_0007_0000, 0x0001_0000_0008_0000, 0x0001_0000_0009_0000,
     0x0001_0000_0002_0001, 0x0001_0000_0003_0001, 0x0001_0000_0004_0001, 0x0001_0000_0005_0001,
