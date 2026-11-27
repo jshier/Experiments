@@ -97,7 +97,7 @@ public enum BPList {
         case let (0x5, count): // ASCII
             let count = try readCount(&reader, count)
             // Validated, where the example repairs invalid UTF-8: the same for ASCII.
-            return try .string(String(copying: reader.readUTF8(byteCount: count)))
+            return try .string(String(copying: reader.read(utf8ByteCount: count)))
         case let (0x6, count): // UTF-16, big-endian
             let count = try readCount(&reader, count)
             let (byteCount, overflow) = count.multipliedReportingOverflow(by: 2)

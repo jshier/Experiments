@@ -40,9 +40,6 @@ public enum HTTPContentCoding: Sendable, Hashable {
         }
     }
 
-    /// RFC 9659 §3: a zstd content coding's window is at most 8 MB, so a decoder may refuse larger ones.
-    @inlinable static var zstdWindowLimit: Int { 8 << 20 }
-
     /// The format the coding's streams decode as, where the coding alone decides it: the one mapping from content
     /// codings to BytesCompression's `DecompressionFormat`. gzip is DEFLATE in gzip's container, br Brotli, zstd
     /// Zstandard with RFC 9659's 8 MB window. `nil` for identity (nothing to decode), and for deflate, which is zlib or
@@ -52,7 +49,8 @@ public enum HTTPContentCoding: Sendable, Hashable {
         switch self {
         case .gzip: .deflate(.gzip)
         case .brotli: .brotli
-        case .zstd: .zstd(maximumWindowSize: Self.zstdWindowLimit)
+        // RFC 9659 §3: a zstd content coding's window is at most 8 MB; larger ones are refused.
+        case .zstd: .zstdForHTTP
         case .deflate, .identity: nil
         }
     }
@@ -61,7 +59,8 @@ public enum HTTPContentCoding: Sendable, Hashable {
 /// Why a body couldn't be decoded or encoded.
 @frozen
 public enum HTTPPayloadError: Error, Sendable, Hashable {
-    /// `Content-Encoding` names a coding this module doesn't decode (a server answers 415).
+    /// `Content-Encoding` names a coding this module doesn't decode (a server answers 415), or the coded bytes use a
+    /// part of the coding its decoder doesn't do (a zstd frame needing a dictionary).
     case unsupportedCoding
     /// More than two codings applied in turn.
     case tooManyCodings
@@ -147,6 +146,8 @@ struct ContentDecodingStage: ~Copyable {
             // that drains the output round forever.
             case .limitExceeded: throw .tooLarge
             case .insufficientCapacity: throw .outOfRoom
+            // Valid data in the coding, using what no decoder here does (a zstd dictionary, a zlib preset dictionary).
+            case .unsupported: throw .unsupportedCoding
             default: throw .malformed
             }
         }
@@ -178,12 +179,9 @@ public struct HTTPContentDecoder: ~Copyable {
     @usableFromInline var last: ContentDecodingStage
     @usableFromInline var first: ContentDecodingStage?
     /// For two codings: the outer coding's output, waiting for the inner coding's decoder (64 KiB, made once).
-    @usableFromInline var middle: RawStorage?
-    @usableFromInline var middleStart = 0
-    @usableFromInline var middleCount = 0
+    @usableFromInline var middle: ByteBuffer?
     /// Input a codec left unconsumed at the end of a piece, kept for the next piece (made the first time it's needed).
-    @usableFromInline var carry: RawStorage?
-    @usableFromInline var carryCount = 0
+    @usableFromInline var carry: ByteBuffer?
     /// The carry buffer's size: twice the most unconsumed input any codec here needs before it can make progress
     /// (`DecompressionFormat.maximumUnitByteCount`), so a unit it holds back and the bytes that complete it fit. That's
     /// Brotli's 451 bytes (a command tree's prefix code: a meta-block's header is read a code at a time); DEFLATE's is 289
@@ -239,13 +237,12 @@ public struct HTTPContentDecoder: ~Copyable {
     /// buffers made for earlier bodies.
     public mutating func reset(applied coding: HTTPContentCoding, then: HTTPContentCoding? = nil) throws(HTTPPayloadError) {
         decodedByteCount = 0
-        carryCount = 0
-        middleStart = 0
-        middleCount = 0
+        carry?.removeAll()
+        middle?.removeAll()
         if let then {
             try last.reset(coding)
             if first == nil { first = try ContentDecodingStage(then) } else { try first!.reset(then) }
-            if middle == nil { middle = RawStorage(byteCount: Self.middleCapacity, alignment: RawStorage.small) }
+            if middle == nil { middle = ByteBuffer(capacity: Self.middleCapacity) }
         } else {
             first = nil
             try last.reset(coding)
@@ -259,7 +256,7 @@ public struct HTTPContentDecoder: ~Copyable {
         if let then {
             first = try ContentDecodingStage(then)
             last = try ContentDecodingStage(coding)
-            middle = RawStorage(byteCount: Self.middleCapacity, alignment: RawStorage.small)
+            middle = ByteBuffer(capacity: Self.middleCapacity)
         } else {
             first = nil
             last = try ContentDecodingStage(coding)
@@ -280,7 +277,7 @@ public struct HTTPContentDecoder: ~Copyable {
     ///   coded stream has ended.
     public mutating func decode(_ input: RawSpan, into output: inout OutputRawSpan) throws(HTTPPayloadError) -> TransformProgress {
         let before = output.byteCount
-        let progress = carryCount == 0 ? try decodeDirect(input, into: &output) : try decodeCarried(input, into: &output)
+        let progress = carriedByteCount == 0 ? try decodeDirect(input, into: &output) : try decodeCarried(input, into: &output)
         decodedByteCount &+= output.byteCount &- before
         guard decodedByteCount <= maximumDecodedByteCount else { throw .tooLarge }
         return progress
@@ -292,7 +289,9 @@ public struct HTTPContentDecoder: ~Copyable {
     /// more. The common case, a piece decoded to its end, copies nothing.
     @usableFromInline
     mutating func decodeDirect(_ input: RawSpan, into output: inout OutputRawSpan) throws(HTTPPayloadError) -> TransformProgress {
-        var progress = first == nil ? try last.decode(input, into: &output) : try decodeStacked(input, into: &output)
+        var progress = first == nil
+            ? try last.decode(input, into: &output)
+            : try Self.decodeStacked(input, into: &output, last: &last, first: &first!, middle: &middle!)
         if progress.status == .needsInput, progress.consumed < input.byteCount {
             try stash(input.extracting(droppingFirst: progress.consumed))
             progress.consumed = input.byteCount
@@ -303,82 +302,78 @@ public struct HTTPContentDecoder: ~Copyable {
     /// Decodes from the carried bytes, topped up from `input` (as much as fits). Reports the bytes of `input` it took.
     @usableFromInline
     mutating func decodeCarried(_ input: RawSpan, into output: inout OutputRawSpan) throws(HTTPPayloadError) -> TransformProgress {
-        let storage = carry!
-        let take = Swift.min(input.byteCount, Self.carryCapacity &- carryCount)
-        // Unsafe: copies into and reads from the carry buffer. Safe: `storage` owns `carryCapacity` bytes, held by a local
-        // reference through this call; `carryCount + take` is at most that; the span over them ends with this function.
-        if take > 0 {
-            input.extracting(0..<take).withUnsafeBytes { bytes in
-                unsafe storage.pointer(carryCount).copyMemory(from: bytes.baseAddress!, byteCount: bytes.count)
-            }
+        let take = Swift.min(input.byteCount, Self.carryCapacity &- carriedByteCount)
+        carry!.append(copying: input.extracting(0..<take))
+        let progress: TransformProgress
+        // A `~Copyable` optional: borrowed with `switch` (`carry!` would consume it). The stages and the middle buffer
+        // are other stored properties, so they can change while the carry buffer is borrowed.
+        switch carry {
+        case let .some(buffer):
+            progress = first == nil
+                ? try last.decode(buffer.unread, into: &output)
+                : try Self.decodeStacked(buffer.unread, into: &output, last: &last, first: &first!, middle: &middle!)
+        case .none: preconditionFailure("Carried bytes have a carry buffer")
         }
-        carryCount &+= take
-        let carried = unsafe RawSpan(_unsafeStart: storage.base, byteCount: carryCount)
-        let progress = first == nil ? try last.decode(carried, into: &output) : try decodeStacked(carried, into: &output)
-        let left = carryCount &- progress.consumed
-        if left > 0, progress.consumed > 0 {
-            // Unsafe: moves the unconsumed bytes to the buffer's front (overlapping, memmove semantics). Safe: within it.
-            unsafe storage.base.copyMemory(from: storage.pointer(progress.consumed), byteCount: left)
-        }
-        carryCount = left
-        if carryCount == Self.carryCapacity, progress.consumed == 0, progress.produced == 0, progress.status == .needsInput {
+        carry!.consume(progress.consumed)
+        let left = carriedByteCount
+        if left == Self.carryCapacity, progress.consumed == 0, progress.produced == 0, progress.status == .needsInput {
             // The codec wants more than the carry buffer holds without having used any of it: not a stream it can decode.
             throw .malformed
         }
         return TransformProgress(consumed: take, produced: progress.produced,
-                                 status: progress.status == .finished || carryCount == 0 ? progress.status : progress.status == .needsOutput ? .needsOutput : .needsInput)
+                                 status: progress.status == .finished || left == 0 ? progress.status : progress.status == .needsOutput ? .needsOutput : .needsInput)
+    }
+
+    /// The bytes waiting in the carry buffer: 0 when there's none.
+    @usableFromInline var carriedByteCount: Int {
+        switch carry {
+        case let .some(buffer): buffer.unreadByteCount
+        case .none: 0
+        }
     }
 
     @usableFromInline
     mutating func stash(_ rest: RawSpan) throws(HTTPPayloadError) {
         guard rest.byteCount <= Self.carryCapacity else { throw .malformed }
-        if carry == nil { carry = RawStorage(byteCount: Self.carryCapacity, alignment: RawStorage.small) }
-        let storage = carry!
-        // Unsafe: copies into the carry buffer. Safe: `rest` fits (checked), and the buffer outlives the copy.
-        rest.withUnsafeBytes { bytes in unsafe storage.base.copyMemory(from: bytes.baseAddress!, byteCount: bytes.count) }
-        carryCount = rest.byteCount
+        if carry == nil { carry = ByteBuffer(capacity: Self.carryCapacity) }
+        carry!.removeAll()
+        carry!.append(copying: rest)
     }
 
-    mutating func decodeStacked(_ input: RawSpan, into output: inout OutputRawSpan) throws(HTTPPayloadError) -> TransformProgress {
+    /// Decodes two codings: `first` (the outer, applied last) from `input` into `middle`, and `last` from `middle` into
+    /// `output`. Static, taking the stages and the buffer `inout`: a `mutating` method would hold all of `self` while
+    /// a caller's span over the carry buffer, another of its properties, is alive.
+    static func decodeStacked(
+        _ input: RawSpan, into output: inout OutputRawSpan, last: inout ContentDecodingStage, first: inout ContentDecodingStage,
+        middle: inout ByteBuffer
+    ) throws(HTTPPayloadError) -> TransformProgress {
         var consumed = 0
         let produced0 = output.byteCount
-        let storage = middle!
-        // Unsafe: the middle buffer's memory as raw buffers. Safe: `storage` owns `middleCapacity` bytes and outlives
-        // this call (a local reference holds it); the output span and the views below stay within those bytes and end
-        // with this function.
-        let region = unsafe UnsafeMutableRawBufferPointer(start: storage.base, count: Self.middleCapacity)
         var stalled = false
         while true {
             // Refill the middle buffer from the input when the inner decoder has used it up, or has stalled on a partial
             // unit at its end: what's left moves to the front, and more is appended after it.
-            if middleStart == middleCount || stalled, consumed < input.byteCount, !(first?.finished ?? true) {
-                let leftover = middleCount &- middleStart
-                if middleStart > 0, leftover > 0 {
-                    // Unsafe: an overlapping move within the buffer (memmove semantics). Safe: both ranges are inside it.
-                    unsafe region.baseAddress!.copyMemory(from: region.baseAddress! + middleStart, byteCount: leftover)
+            if middle.isEmpty || stalled, consumed < input.byteCount, !first.finished {
+                middle.compact()
+                guard !middle.isFull else { throw .malformed }
+                let rest = input.extracting(droppingFirst: consumed)
+                let stageProgress = try middle.fill { (buffer: inout OutputRawSpan) throws(HTTPPayloadError) in
+                    try first.decode(rest, into: &buffer)
                 }
-                middleStart = 0
-                middleCount = leftover
-                guard middleCount < Self.middleCapacity else { throw .malformed }
-                let free = unsafe UnsafeMutableRawBufferPointer(rebasing: region[middleCount...])
-                var buffer = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
-                let stageProgress = try first!.decode(input.extracting(droppingFirst: consumed), into: &buffer)
-                middleCount &+= unsafe buffer.finalize(for: free)
                 consumed &+= stageProgress.consumed
                 if stalled, stageProgress.consumed == 0, stageProgress.produced == 0 {
                     // Neither stage can go on with what it has: more input is needed.
                     return TransformProgress(consumed: consumed, produced: output.byteCount &- produced0, status: .needsInput)
                 }
             }
-            let pending = unsafe RawSpan(_unsafeBytes: UnsafeRawBufferPointer(rebasing: region[middleStart..<middleCount]))
-            let innerProgress = try last.decode(pending, into: &output)
-            middleStart &+= innerProgress.consumed
+            let innerProgress = try last.decode(middle.unread, into: &output)
+            middle.consume(innerProgress.consumed)
             if innerProgress.status == .finished || innerProgress.status == .needsOutput || output.freeCapacity == 0 {
                 return TransformProgress(consumed: consumed, produced: output.byteCount &- produced0, status: innerProgress.status)
             }
             stalled = innerProgress.consumed == 0 && innerProgress.produced == 0
-            let inputDone = consumed == input.byteCount || (first?.finished ?? true)
-            if inputDone, middleStart == middleCount || stalled {
+            let inputDone = consumed == input.byteCount || first.finished
+            if inputDone, middle.isEmpty || stalled {
                 return TransformProgress(consumed: consumed, produced: output.byteCount &- produced0, status: .needsInput)
             }
         }
@@ -418,7 +413,7 @@ public struct HTTPContentEncoder: ~Copyable {
             case .deflate: try compressor.reset(for: .deflate(.zlib, level: level ?? 6))
             case .brotli: try compressor.reset(for: .brotli(quality: level ?? 5))
             case .identity: break
-            case .zstd: try compressor.reset(for: .zstd(level: level ?? 3, windowLog: ZstdEncoder.Parameters.httpWindowLog))
+            case .zstd: try compressor.reset(for: .zstdForHTTP(level: level ?? 3))
             }
         } catch {
             throw .unsupportedCoding

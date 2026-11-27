@@ -1,3 +1,5 @@
+public import Bytes
+
 // Field-value grammar shared by every version (RFC 9110 §5.6): lists, tokens, numbers.
 
 /// Comma-separated lists in field values (RFC 9110 §5.6.1): elements with optional whitespace around them; empty
@@ -45,7 +47,7 @@ public enum HTTPToken {
     /// folded (the overload taking two spans folds both).
     @inlinable
     public static func equalsIgnoringCase(_ bytes: RawSpan, _ token: StaticString) -> Bool {
-        let expected = immortalSpan(token)
+        let expected = token.bytes
         assert((0..<expected.byteCount).allSatisfy { expected.load(fromByteOffset: $0, as: UInt8.self) &- 0x41 >= 26 },
                "a lowercase literal")
         guard bytes.byteCount == expected.byteCount else { return false }

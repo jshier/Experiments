@@ -7,33 +7,76 @@ public enum BitOrder: Hashable, Sendable {
 }
 
 /// An error from Bytes and the modules built on it: reading with a ``BytesReader``, writing with a
-/// ``BytesWriter``, decoding and encoding with the codecs (malformed or truncated data, too little output
-/// room), and parallel work that was cancelled. A read that throws doesn't consume anything.
+/// ``BytesWriter``, decoding and encoding with the codecs (malformed, truncated, or unsupported data, a failed check, too
+/// little output room). A read that throws doesn't consume anything. Work that stops when its task is cancelled throws
+/// ``CancellableError`` around it.
+///
+/// It carries no payload: it's every codec's typed-throws error, one byte wherever it's passed. Where a reader's
+/// failures need a position, ``GenericBytesReader/located(_:)`` adds one (``LocatedBytesError``).
 public enum BytesError: Error, Hashable, Sendable {
-    /// Fewer bits remain than the read needs, or a seek went past the end.
+    /// Fewer bits remain than the read needs, or a seek went past the end. For a codec, the data is truncated: the
+    /// input ended inside a stream (at `.finish`, or a whole buffer that stops short).
     case insufficientData
-    /// An `expect` found a different value.
+    /// A value disagrees with the one expected: an `expect` read another, or a size or count differs from the one the
+    /// caller or the container states (a decoder's `decodedSize`, a frame's content size, an index's record of its
+    /// blocks). A stored check value that fails is ``checksumMismatch``.
     case mismatch
+    /// A check value stored with the data doesn't match it: a CRC, Adler-32, or content checksum (gzip, zlib, bzip2,
+    /// xz, Zstandard). The data is corrupt, or was changed.
+    case checksumMismatch
+    /// The data is valid, but uses something this implementation doesn't do: a Zstandard dictionary, a zlib preset
+    /// dictionary, an xz filter other than LZMA2, a field or flag the format reserves for future use. Or the call asks
+    /// a format for something it doesn't do (streaming a format that works on whole buffers only). Corrupt data is
+    /// ``invalidValue``.
+    case unsupported
     /// ``GenericBytesReader/read(_:count:)`` was asked to view memory that isn't aligned for its element type.
     case misaligned
     /// A ``BytesWriter``, or a codec's output buffer, has less room left than the write needs: more room would let
     /// it go on.
     case insufficientCapacity
     /// A limit the caller set was reached: a decoder's most output (`maximumSize`), window (Zstandard's
-    /// `maximumWindowSize`), or dictionary (LZMA's `maximumDictionarySize`), or a parallel decoder's memory budget, in
-    /// `BytesCompression`. The data may be valid, but it needs more than the caller allows; unlike
-    /// ``insufficientCapacity``, more room in the output wouldn't help.
+    /// `maximumWindowSize`, or the 2 GiB a decoder can address), or dictionary (LZMA's `maximumDictionarySize`), or a
+    /// parallel decoder's memory budget, in `BytesCompression`. The data may be valid, but it needs more than the caller
+    /// allows; unlike ``insufficientCapacity``, more room in the output wouldn't help.
     case limitExceeded
     /// A field's value isn't valid for the type it's read as: an undefined enum case, malformed UTF-8, a
     /// LEB128 integer longer than allowed, a negative seek offset, or a length too large for its prefix when
-    /// writing.
+    /// writing. For a codec, the data is corrupt: something its format rules out. Also a call that isn't valid in the
+    /// object's state (coding before a format is chosen) or a parameter out of range.
     case invalidValue
     /// ``GenericBytesReader/expectEnd()`` found unread bytes in a section that should have been fully consumed.
     case trailingData
-    /// The calling task was cancelled: an async parallel codec (in `BytesAsync`) stopped handing out chunks or
-    /// segments and returned early. The output is incomplete; what was written stays written. Synchronous calls
-    /// never throw it.
+}
+
+/// A failure, or a stop because the task was cancelled: what work that can be cancelled throws, keeping its own error
+/// typed. The parallel codecs' `async` entry points (`BytesCompressionAsync`) throw `CancellableError<BytesError>`.
+///
+/// ```swift
+/// do throws(CancellableError<BytesError>) {
+///     let consumed = try await decoder.decompressAll(input, into: &output, on: queue)
+/// } catch .cancelled {
+///     // Stopped early: the output is incomplete.
+/// } catch let .failed(error) {
+///     // The data, or the output's room: as the synchronous call.
+/// }
+/// ```
+public enum CancellableError<Failure: Error>: Error {
+    /// The task was cancelled and the work stopped early. The output is incomplete; what was written stays written.
     case cancelled
+    /// The work failed, as it would have without cancellation.
+    case failed(Failure)
+}
+
+extension CancellableError: Equatable where Failure: Equatable {}
+extension CancellableError: Hashable where Failure: Hashable {}
+
+extension CancellableError: CustomStringConvertible {
+    public var description: String {
+        switch self {
+        case .cancelled: "cancelled"
+        case let .failed(error): "\(error)"
+        }
+    }
 }
 
 /// A ``BytesError`` with the byte offset of the read that threw it, from ``GenericBytesReader/located(_:)``.
@@ -463,7 +506,8 @@ public extension BytesReader {
     @_lifetime(self: copy self)
     mutating func skip(bitCount: Int) throws(BytesError) {
         _assumeInvariant()
-        guard likely(bitCount >= 0 && remainingBitCount >= bitCount) else { throw Self._countError(bitCount) }
+        // One unsigned compare: a negative count wraps above any remaining count (never negative).
+        guard likely(UInt(bitPattern: bitCount) <= UInt(bitPattern: remainingBitCount)) else { throw Self._countError(bitCount) }
         _advance(bitCount: bitCount)
     }
 }
@@ -818,7 +862,7 @@ public extension BytesReader {
     /// - Precondition: `bitCount` is 0 through 64.
     @inlinable @inline(__always)
     func peek(bitCount: Int) throws(BytesError) -> UInt64 {
-        precondition(bitCount >= 0 && bitCount <= 64, "Bit count must be 0 through 64")
+        precondition(UInt(bitPattern: bitCount) <= 64, "Bit count must be 0 through 64") // One compare: negatives wrap.
         _assumeInvariant()
         guard likely(remainingBitCount >= bitCount) else { throw .insufficientData }
         guard bitCount > 0 else { return 0 }
@@ -1778,6 +1822,44 @@ public extension String {
             var writer = unsafe AlignedBytesWriter(MutableRawSpan(_unsafeBytes: UnsafeMutableRawBufferPointer(buffer)))
             body(&writer)
             return writer.byteCount
+        }
+    }
+
+    /// A string of the UTF-8 in `bytes`, repairing what isn't valid (each ill-formed sequence becomes U+FFFD), as
+    /// the standard library's `String(decoding:as:)` does for a collection of bytes, which a span isn't. For names and
+    /// messages read from data; `UTF8Span(validating:)` then `String(copying:)` rejects invalid UTF-8 instead.
+    ///
+    /// ```swift
+    /// let name = String(decoding: try reader.read(byteCount: length), as: UTF8.self)
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - bytes: The UTF-8.
+    ///   - encoding: `UTF8.self`.
+    @inlinable
+    init(decoding bytes: RawSpan, as encoding: UTF8.Type) {
+        // Unsafe: the span's memory as a buffer pointer. Safe: only read, inside the closure, by the standard library's
+        // decoding initializer, which copies it.
+        self = bytes.withUnsafeBytes { buffer in unsafe String(decoding: buffer, as: UTF8.self) }
+    }
+}
+
+public extension StaticString {
+    /// The literal's UTF-8 as a span that lives forever: constant data in the binary, never moved or freed. For
+    /// comparing read bytes with a literal (`method.bytesEqual(("GET" as StaticString).bytes)`), with no `String`, or a
+    /// table of names kept as one literal.
+    ///
+    /// - Precondition: The literal is stored as UTF-8 (every string literal is; a `StaticString` made from a single
+    ///   `Unicode.Scalar` isn't).
+    @inlinable @inline(__always)
+    var bytes: RawSpan {
+        @_lifetime(immortal)
+        get {
+            // Unsafe (the next two): a span over a raw pointer, its lifetime overridden to immortal. Safe: a literal's
+            // bytes are constant data in the binary, `utf8CodeUnitCount` of them at an address that never changes and
+            // is never freed (`utf8Start` checks the literal is stored as UTF-8).
+            let buffer = unsafe UnsafeRawBufferPointer(start: utf8Start, count: utf8CodeUnitCount)
+            return unsafe _overrideLifetime(RawSpan(_unsafeBytes: buffer), borrowing: ())
         }
     }
 }

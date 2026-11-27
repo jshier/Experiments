@@ -511,13 +511,15 @@ struct ZstdDecoderTests {
         let raw = ZstdFrames.blockHeader(type: 0, size: 4, last: true) + content
         let cases: [(String, [UInt8], BytesError)] = [
             ("not a frame", [0x28, 0xB5, 0x2F, 0xFE, 0, 0, 0, 0], .invalidValue),
-            ("reserved bit", [0x28, 0xB5, 0x2F, 0xFD, 0x08, 0x58] + raw, .invalidValue),
-            ("dictionary", ZstdFrames.header(contentSize: nil, fieldSize: 0, singleSegment: false, dictionaryID: 5, dictionaryIDSize: 1) + raw, .invalidValue),
+            // Valid frames this decoder can't read: a later version's feature, a dictionary; a window past 2^31 is over
+            // its limit.
+            ("reserved bit", [0x28, 0xB5, 0x2F, 0xFD, 0x08, 0x58] + raw, .unsupported),
+            ("dictionary", ZstdFrames.header(contentSize: nil, fieldSize: 0, singleSegment: false, dictionaryID: 5, dictionaryIDSize: 1) + raw, .unsupported),
             ("reserved block type", ZstdFrames.header(contentSize: nil, fieldSize: 0, singleSegment: false) + ZstdFrames.blockHeader(type: 3, size: 4, last: true) + content, .invalidValue),
             ("block over the window", ZstdFrames.header(contentSize: 4, fieldSize: 1, singleSegment: true) + ZstdFrames.blockHeader(type: 1, size: 5, last: true) + [0], .invalidValue),
             ("wrong content size", ZstdFrames.header(contentSize: 300, fieldSize: 2, singleSegment: false) + raw, .mismatch),
-            ("wrong checksum", ZstdFrames.header(contentSize: nil, fieldSize: 0, singleSegment: false, checksum: true) + raw + [0, 0, 0, 0], .mismatch),
-            ("window log 42", [0x28, 0xB5, 0x2F, 0xFD, 0x00, 0xF8] + raw, .invalidValue),
+            ("wrong checksum", ZstdFrames.header(contentSize: nil, fieldSize: 0, singleSegment: false, checksum: true) + raw + [0, 0, 0, 0], .checksumMismatch),
+            ("window log 42", [0x28, 0xB5, 0x2F, 0xFD, 0x00, 0xF8] + raw, .limitExceeded),
             ("trailing garbage", ZstdFrames.header(contentSize: nil, fieldSize: 0, singleSegment: false) + raw + [0x28, 0xB5, 0x2F, 0x00, 0, 0], .invalidValue),
             ("truncated", ZstdFrames.header(contentSize: nil, fieldSize: 0, singleSegment: false) + raw.dropLast(), .insufficientData),
             ("empty", [], .insufficientData),

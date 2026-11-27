@@ -101,6 +101,7 @@ helpers on `FixedWidthInteger`: `[bit:]`, `[bits:]`, `[Bits<N>.self, at:]`, `bit
 - ``LittleEndianBytesWriter``
 - ``BytesError``
 - ``LocatedBytesError``
+- ``CancellableError``
 - ``GenericBytesReader/located(_:)``
 - ``GenericBytesReader/atomically(_:)``
 

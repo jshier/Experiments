@@ -16,7 +16,7 @@ import Testing
         #expect(throws: BytesError.invalidValue) { _ = try reader.read(byteCount: blockLength - headerLength) }
         #expect(throws: BytesError.invalidValue) { _ = try reader.readSection(byteCount: -1) }
         #expect(throws: BytesError.invalidValue) { try reader.skip(byteCount: -4) }
-        #expect(throws: BytesError.invalidValue) { _ = try reader.readUTF8(byteCount: -1) }
+        #expect(throws: BytesError.invalidValue) { _ = try reader.read(utf8ByteCount: -1) }
         #expect(throws: BytesError.invalidValue) { _ = try reader.read(UInt32.self, count: -1) }
         #expect(throws: BytesError.insufficientData) { _ = try reader.read(byteCount: 39) }
         #expect(reader.byteOffset == 2)

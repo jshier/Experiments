@@ -68,8 +68,9 @@ package struct BZip2Decoder: ~Copyable {
     /// - Returns: The number of input bytes decoded, through the last stream's end marker.
     /// - Throws: ``BytesError/insufficientData`` if the input ends early; ``BytesError/insufficientCapacity``
     ///   if the output doesn't fit (or has room for fewer than `decodedSize` bytes); ``BytesError/mismatch`` if
-    ///   the stream decodes to a size other than `decodedSize`; ``BytesError/invalidValue`` for a missing
-    ///   header, corrupt data, a CRC that doesn't match, or a negative `decodedSize`.
+    ///   the stream decodes to a size other than `decodedSize`; ``BytesError/checksumMismatch`` for a CRC that
+    ///   doesn't match; ``BytesError/invalidValue`` for a missing header, corrupt data, or a negative
+    ///   `decodedSize`.
     package mutating func decompressAll(
         _ input: RawSpan, into output: inout OutputRawSpan, decodedSize: Int? = nil
     ) throws(BytesError) -> Int {
@@ -161,7 +162,7 @@ enum BZip2Stream {
             if magic == endMagic {
                 let stored = UInt32(truncatingIfNeeded: bits.read(32))
                 guard !bits.isOverrun else { throw .insufficientData }
-                guard stored == combinedCRC else { throw .invalidValue }
+                guard stored == combinedCRC else { throw .checksumMismatch }
                 return ((bits.bitPosition &+ 7) &>> 3, produced)
             }
             guard magic == blockMagic else { throw bits.failure }
@@ -189,7 +190,7 @@ enum BZip2Stream {
             let blockStart = produced
             produced = try unsafe expandRuns(UnsafePointer(block), count: length, output: output, at: produced, capacity: capacity, overrun: overrun)
             let crc = unsafe BZip2CRC.checksum(output + blockStart, count: produced &- blockStart)
-            guard crc == storedCRC else { throw .invalidValue }
+            guard crc == storedCRC else { throw .checksumMismatch }
             combinedCRC = (combinedCRC &<< 1 | combinedCRC &>> 31) ^ crc
         }
     }

@@ -1,3 +1,4 @@
+internal import Bytes
 public import HTTPBytes
 public import HTTPTypes
 
@@ -68,14 +69,7 @@ extension HTTPFields {
         }
     }
 
-    static func bytes(_ span: RawSpan) -> [UInt8] {
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(span.byteCount)
-        for offset in 0..<span.byteCount {
-            bytes.append(span.load(fromByteOffset: offset, as: UInt8.self))
-        }
-        return bytes
-    }
+    static func bytes(_ span: RawSpan) -> [UInt8] { [UInt8](copying: span) }
 
-    static func string(_ span: RawSpan) -> String { String(decoding: bytes(span), as: UTF8.self) }
+    static func string(_ span: RawSpan) -> String { String(decoding: span, as: UTF8.self) }
 }

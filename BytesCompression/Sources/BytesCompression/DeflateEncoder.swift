@@ -43,6 +43,15 @@ public struct DeflateEncoder: ~Copyable {
     private var checksum: UInt32
     private var length: UInt32 = 0
 
+    /// A gzip header other than the default 10 bytes (``init(gzipHeader:level:)``), and its bytes for the current
+    /// stream: built at the stream's start into storage made once, and delivered ahead of the staged output (it has
+    /// no size limit the staging buffer could take).
+    private var gzipHeader: GzipHeader?
+    private var headerBytes: [UInt8] = []
+    /// The header's bytes not yet delivered (its last ones): a counter, so the checks every delivery makes are one
+    /// compare with no load of the array.
+    private var headerRemaining = 0
+
     static var historySize: Int { Deflate.windowSize }
     static var windowCapacity: Int { historySize + (256 << 10) }
     /// Input kept back from compression until more arrives: a longest match, and 8 bytes for loads.
@@ -53,19 +62,37 @@ public struct DeflateEncoder: ~Copyable {
     ///
     /// - Parameters:
     ///   - format: The container to write.
-    ///   - level: The compression level: 0 (stored) through 9; higher levels map to 9.
+    ///   - level: The compression level: 0 (stored) through 9; higher levels run as 9. Negative levels trap (zlib's
+    ///     -1, its default, is 6 here: a level that silently stored the data would surprise); `Compressor` throws for
+    ///     them instead.
     public init(format: DeflateFormat = .raw, level: Int = 6) {
+        precondition(level >= 0, "DEFLATE levels are 0 through 9")
         self.format = format
-        self.level = min(max(level, 0), 9)
+        self.level = min(level, 9)
         compressor = DeflateCompressor(level: self.level)
         window = StagingBuffer(count: Self.windowCapacity)
         checksum = format.initialChecksum
     }
 
-    /// Prepares to encode a new stream at `level` (as the initializer clamps it), keeping the allocations: `Compressor`'s
+    /// Creates a gzip encoder that writes `gzipHeader` at each stream's start: a file name, comment, time, OS, extra
+    /// field, or header CRC (the extra flags are the level's, as with the default header).
+    ///
+    /// - Parameters:
+    ///   - gzipHeader: The header for every stream (member) it encodes.
+    ///   - level: As ``init(format:level:)``'s.
+    public init(gzipHeader: GzipHeader, level: Int = 6) {
+        self.init(format: .gzip, level: level)
+        if !gzipHeader.isDefault {
+            self.gzipHeader = gzipHeader
+            headerBytes.reserveCapacity(gzipHeader.encodedByteCount)
+        }
+    }
+
+    /// Prepares to encode a new stream at `level` (as the initializer takes it), keeping the allocations: `Compressor`'s
     /// reset between levels of one container. Tables the level reads that the earlier ones didn't are allocated now.
     mutating func reset(level: Int) {
-        self.level = min(max(level, 0), 9)
+        precondition(level >= 0, "DEFLATE levels are 0 through 9")
+        self.level = min(level, 9)
         compressor.reset(level: self.level)
         resetStream()
     }
@@ -86,10 +113,22 @@ public struct DeflateEncoder: ~Copyable {
         flushed = false
         checksum = format.initialChecksum
         length = 0
+        // Nothing of a custom header pending: `writeHeader` builds the next stream's (a store, not a `removeAll`: this
+        // runs for every stream, and the default header never touches the bytes).
+        headerRemaining = 0
+    }
+
+    /// An upper bound on the compressed size of `byteCount` bytes for this encoder's streams: the static bound, plus a
+    /// gzip header's size beyond the default 10 bytes.
+    ///
+    /// - Parameter byteCount: The input's size.
+    public func maximumCompressedSize(forByteCount byteCount: Int) -> Int {
+        Self.maximumCompressedSize(forByteCount: byteCount, format: format) &+ ((gzipHeader?.encodedByteCount ?? 10) &- 10)
     }
 
     /// An upper bound on the compressed size of `byteCount` bytes, header and trailer included, for one
-    /// ``compressAll(_:into:)`` call.
+    /// ``compressAll(_:into:)`` call (with the default gzip header: see ``maximumCompressedSize(forByteCount:)`` for an
+    /// encoder's own).
     ///
     /// - Parameters:
     ///   - byteCount: The input's size.
@@ -133,7 +172,7 @@ public struct DeflateEncoder: ~Copyable {
     /// Delivers all staged output, or throws if it doesn't fit.
     private mutating func deliverAll(into output: inout OutputRawSpan) throws(BytesError) {
         _ = deliver(into: &output)
-        guard compressor.stagedBytes.byteCount == 0 else { throw .insufficientCapacity }
+        guard compressor.stagedBytes.byteCount == 0, headerRemaining == 0 else { throw .insufficientCapacity }
     }
 
     // MARK: - Streaming
@@ -161,7 +200,7 @@ public struct DeflateEncoder: ~Copyable {
         var produced = 0
         while true {
             produced &+= deliver(into: &output)
-            if compressor.stagedBytes.byteCount > 0 {
+            if compressor.stagedBytes.byteCount > 0 || headerRemaining > 0 {
                 return TransformProgress(consumed: consumed, produced: produced, status: .needsOutput)
             }
             if isFinished {
@@ -232,12 +271,30 @@ public struct DeflateEncoder: ~Copyable {
         compressor.base &-= start
     }
 
-    /// Copies staged output into `output`, as much as fits.
+    /// Copies a custom gzip header not yet delivered, then staged output, into `output`, as much as fits. Inlined (the
+    /// header's part is out of line): as a call, it cost about 65 instructions a stream on 64-byte streams.
+    @inline(__always)
     private mutating func deliver(into output: inout OutputRawSpan) -> Int {
+        var delivered = 0
+        if headerRemaining > 0 {
+            // A custom header, at the stream's start: before anything staged.
+            delivered = deliverHeader(into: &output)
+            guard headerRemaining == 0 else { return delivered }
+        }
         let count = min(compressor.stagedBytes.byteCount, output.freeCapacity)
-        guard count > 0 else { return 0 }
+        guard count > 0 else { return delivered }
         output.append(copying: compressor.stagedBytes.extracting(0..<count))
         compressor.consumeStaged(count)
+        return delivered &+ count
+    }
+
+    /// Copies as much of a custom gzip header's remaining bytes as fits: out of line, as rare as the header.
+    @inline(never)
+    private mutating func deliverHeader(into output: inout OutputRawSpan) -> Int {
+        let start = headerBytes.count &- headerRemaining
+        let count = min(headerRemaining, output.freeCapacity)
+        output.append(copying: headerBytes.span.bytes.extracting(start..<(start &+ count)))
+        headerRemaining &-= count
         return count
     }
 
@@ -248,10 +305,22 @@ public struct DeflateEncoder: ~Copyable {
         length &+= UInt32(truncatingIfNeeded: bytes.byteCount)
     }
 
+    @inline(__always)
     private mutating func writeHeader() {
         headerWritten = true
+        if gzipHeader != nil {
+            writeGzipHeader()
+            return
+        }
         let header = format.header(level: level)
         if header.byteCount > 0 { compressor.stage(header.bytes.span.bytes.extracting(0..<header.byteCount)) }
+    }
+
+    /// Builds a custom gzip header's bytes for the stream: out of line, so the default header's path stays as it was.
+    @inline(never)
+    private mutating func writeGzipHeader() {
+        gzipHeader!.encode(into: &headerBytes, extraFlags: DeflateFormat.gzipExtraFlags(level: level))
+        headerRemaining = headerBytes.count
     }
 
     private mutating func writeTrailer() {

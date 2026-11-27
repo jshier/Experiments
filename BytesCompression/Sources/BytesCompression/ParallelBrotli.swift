@@ -13,7 +13,7 @@ package import Bytes
 /// distances of its own.
 ///
 /// The synchronous and async forms schedule chunks as ``ParallelDeflateEncoder``'s do (`ChunkScheduler`), and
-/// the async forms stop as its do when their task is cancelled (``BytesError/cancelled``).
+/// the async forms stop as its do when their task is cancelled (`CancellableError.cancelled`).
 /// Lanes and output slots are allocated once, at initialization.
 @safe
 package struct ParallelBrotliEncoder: ~Copyable {
@@ -38,8 +38,8 @@ package struct ParallelBrotliEncoder: ~Copyable {
     /// Creates an encoder.
     ///
     /// - Parameters:
-    ///   - quality: 1 through 9 (clamped).
-    ///   - windowBits: 10 through 24 (clamped).
+    ///   - quality: 1 through 9; 0 runs as 1, higher as 9, negative ones trap (as ``BrotliEncoder``'s).
+    ///   - windowBits: 10 through 24; others trap.
     ///   - chunkSize: The most bytes of input per chunk, 32 KB through ``maximumChunkSize`` (clamped).
     ///   - historySize: The most bytes before each chunk to insert into its lane's table: more finds more
     ///     matches across the boundary, at the cost of inserting them. At most the window. At quality 5 on
@@ -47,8 +47,11 @@ package struct ParallelBrotliEncoder: ~Copyable {
     ///     full speed; 1 MB within 0.35% and 0.5%, 15–40% slower.
     ///   - lanes: How many chunks to compress at once, at least 1.
     package init(quality: Int = 5, windowBits: Int = 22, chunkSize: Int = 256 << 10, historySize: Int = 256 << 10, lanes: Int) {
+        precondition(quality >= 0, "Brotli qualities are 0 through 11")
+        precondition((10...24).contains(windowBits), "Brotli windows are 10 through 24 bits")
         self.quality = min(max(quality, 1), 9)
-        self.windowBits = min(max(windowBits, 10), 24)
+        self.windowBits = windowBits
+        // Chunk sizes, history, and lanes are tuning, not the format's: clamped to what works.
         self.chunkSize = min(max(chunkSize, 32 << 10), Self.maximumChunkSize)
         self.historySize = min(max(historySize, 0), (1 << self.windowBits) &- 16)
         let quality = self.quality
@@ -114,10 +117,10 @@ package struct ParallelBrotliEncoder: ~Copyable {
 
     /// Ends a call once its workers are done (the delivered bytes already counted in the output).
     ///
-    /// - Throws: ``BytesError/cancelled`` if the batch was stopped before the end,
-    ///   ``BytesError/insufficientCapacity`` if the output ran out of room.
+    /// - Throws: ``BytesError/insufficientCapacity`` if the output ran out of room.
+    /// - Precondition: The batch wasn't stopped (`delivery.cancelled`: the caller throws its cancellation first).
     package static func end(_ delivery: ChunkDelivery) throws(BytesError) {
-        guard !delivery.cancelled else { throw .cancelled }
+        precondition(!delivery.cancelled, "Ending a stopped batch")
         guard !delivery.failed else { throw .insufficientCapacity }
     }
 

@@ -398,7 +398,7 @@ extension HTTPDate {
             }
         }
         // The full day name must be the date's.
-        let name = immortalSpan(longDayName(weekday(days: daysAndTime(seconds &- (second == 60 ? 1 : 0)).days)))
+        let name = longDayName(weekday(days: daysAndTime(seconds &- (second == 60 ? 1 : 0)).days)).bytes
         guard name.byteCount == nameLength else { return nil }
         for index in 0..<nameLength where name.load(fromByteOffset: index, as: UInt8.self) != byte(index) {
             return nil

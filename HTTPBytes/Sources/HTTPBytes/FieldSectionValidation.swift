@@ -196,7 +196,7 @@ public struct HTTPFieldSectionValidator: Sendable {
                 guard allowsExtendedConnect else { throw .invalidPseudoHeader }
             case .pseudoMethod:
                 guard value.byteCount > 0 else { throw .invalidPseudoHeaderValue }
-                pseudoHeaders.isConnect = value.byteCount == 7 && value.bytesEqual(immortalSpan("CONNECT"))
+                pseudoHeaders.isConnect = value.byteCount == 7 && value.bytesEqual(("CONNECT" as StaticString).bytes)
             case .pseudoPath:
                 emptyPath = value.byteCount == 0
             case .pseudoScheme:

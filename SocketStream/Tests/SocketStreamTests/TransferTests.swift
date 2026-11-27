@@ -26,9 +26,10 @@ import Testing
     }
 
     static let protections: [Protection] = [
-        Protection(compression: .deflate), Protection(compression: .brotli), Protection(encrypted: true),
-        Protection(encrypted: true, sealingLanes: 4),
+        Protection(compression: .deflate), Protection(compression: .brotli), Protection(compression: .zstd),
+        Protection(encrypted: true), Protection(encrypted: true, sealingLanes: 4),
         Protection(compression: .deflate, encrypted: true), Protection(compression: .brotli, encrypted: true),
+        Protection(compression: .zstd, encrypted: true),
     ]
 
     /// Compressed, encrypted, or both: every packet still arrives, in order, checked.

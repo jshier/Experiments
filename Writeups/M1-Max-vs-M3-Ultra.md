@@ -139,7 +139,7 @@ about 122 against 127 ns. One core reads 61 against 80 GB/s from DRAM and stores
 | (Found by the lane probe) | The current decoder rejects its speculation on Silesia's mozilla at level 1 for 4, 8, 12, 13, 15, and 16 lanes and decodes it sequentially: 75.7 ms at 8 lanes against 10.3 at 10 (the old decoder: 11.2 at 8). No other corpus file or level does. Cause not investigated. |
 | Software prefetch for the CRC-32 fold | No gain (at most 2%; a distance of 8 KB lost 10–49%). The fold already runs at the memory rate (57–62 GB/s). |
 | Two-stream CRC, buffer alignment | No change. |
-| AES kernels | **Candidate, not tried.** AES-128-CTR (12 GB/s) is at the bound of its eight 3-cycle round chains; the units take almost 4 fused rounds a cycle, so 12 blocks in flight could reach about 1.5x. (The first write-up said "about 90% of the `aese` bound, nothing to find": the 2.7-a-cycle reading.) |
+| AES kernels | **Done 2026-11-27 for CTR** (12 blocks: AES-128 −18% to 15.1 GB/s, AES-256 −25%; the other vector µops bind before 1.5x; GCM's stitched loop is vector-throughput-bound and unchanged: `Bytes/Benchmarks/RESULTS.md`). Before: AES-128-CTR (12 GB/s) is at the bound of its eight 3-cycle round chains; the units take almost 4 fused rounds a cycle, so 12 blocks in flight could reach about 1.5x. (The first write-up said "about 90% of the `aese` bound, nothing to find": the 2.7-a-cycle reading.) |
 | `eor3`, PMULL folding | Already used. |
 | Short back-reference copies; stores; Base64's `tbl`/`tbx` window | Candidates, not tried: see `Bytes/Benchmarks/RESULTS.md`. |
 

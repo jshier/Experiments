@@ -154,7 +154,7 @@ public enum PCAPNG {
             case 7: try .euiAddress(value.read(UInt64.self))
             case 8: try .interfaceSpeed(value.read(UInt64.self))
             case 9: try .timestampResolution(ExampleTimestampResolution(_resolutionByte: value.read(UInt8.self)))
-            case 10: try .timeZone(String(copying: value.readUTF8(byteCount: 4)))
+            case 10: try .timeZone(String(copying: value.read(utf8ByteCount: 4)))
             case 11: .filter([UInt8](copying: value.readRemainingBytes()))
             case 12: try .os(text(&value))
             case 13: try .fcsLength(Int(value.read(UInt8.self)))
@@ -267,7 +267,7 @@ public enum PCAPNG {
     /// text).
     @inline(__always)
     static func text<Mode: ByteOrderedCursorMode>(_ value: inout GenericBytesReader<Mode>) throws(BytesError) -> String {
-        try String(copying: value.readUTF8(byteCount: value.remainingByteCount))
+        try String(copying: value.read(utf8ByteCount: value.remainingByteCount))
     }
 }
 

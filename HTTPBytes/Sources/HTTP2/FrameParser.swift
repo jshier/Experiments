@@ -1,5 +1,4 @@
 public import Bytes
-public import HTTPBytes
 
 /// A frame, as parsed: its fields as values and its payload as views of the bytes (RFC 9113 §6, RFC 9218 §7.1).
 /// Padding is removed (and checked); the flow-controlled length of DATA (padding included, §6.1) is reported.
@@ -91,7 +90,7 @@ public enum HTTP2ConnectionPreface {
     /// they're a prefix of it so far.
     @inlinable
     public static func matches(_ bytes: RawSpan) -> Bool? {
-        let preface = immortalSpan(Self.bytes)
+        let preface = Self.bytes.bytes
         let count = Swift.min(bytes.byteCount, 24)
         guard bytes.extracting(0..<count).bytesEqual(preface.extracting(0..<count)) else { return false }
         return count == 24 ? true : nil

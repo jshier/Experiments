@@ -265,16 +265,17 @@ func physicalFootprint() -> Int {
                 Self.decodeAll(stream, format: format, decodedSize: data.count, capacity: data.count - 1, with: &decompressor).map(\.consumed)
                     == .failure(.insufficientCapacity), "\(format)"
             )
-            // Streaming a format that decodes only whole buffers; history for one that keeps its own window.
+            // Streaming a format that decodes only whole buffers; history for one that keeps its own window: things the
+            // format doesn't do.
             try decompressor.reset(for: format)
             var output = [UInt8](repeating: 0, count: 64)
             if !format.isStreamable {
-                #expect(throws: BytesError.invalidValue, "\(format)") {
+                #expect(throws: BytesError.unsupported, "\(format)") {
                     _ = try output.withOutputRawSpan { span throws(BytesError) in try decompressor.decompress(stream.span.bytes, into: &span) }
                 }
             }
             if format.historySize == nil {
-                #expect(throws: BytesError.invalidValue, "\(format)") {
+                #expect(throws: BytesError.unsupported, "\(format)") {
                     var span = output.mutableSpan
                     var raw = MutableRawSpan(mutating: &span)
                     _ = try decompressor.decompress(stream.span.bytes, into: &raw, historyCount: 0)
@@ -353,8 +354,8 @@ func physicalFootprint() -> Int {
             #expect(headerAfter == (container == .gzip), "\(container)")
         }
         var deflate64 = DeflateDecoder(variant: .deflate64)
-        #expect(throws: BytesError.invalidValue) { try deflate64.reset(format: .zlib) }
-        #expect(throws: BytesError.invalidValue) { try deflate64.reset(format: .gzip) }
+        #expect(throws: BytesError.unsupported) { try deflate64.reset(format: .zlib) }
+        #expect(throws: BytesError.unsupported) { try deflate64.reset(format: .gzip) }
         try deflate64.reset(format: .raw)
         let variant = deflate64.variant, format = deflate64.format
         #expect(variant == .deflate64 && format == .raw)

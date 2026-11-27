@@ -301,7 +301,7 @@ struct LZMADecoderTests {
             let indexAndFooter = compressed.count - 12 - 12 // The index is 12 bytes here: one record.
             var corrupt = compressed
             corrupt[indexAndFooter - checkSize] ^= 0x40
-            let expected: Result<[UInt8], BytesError> = check == LZMA_CHECK_SHA256 ? .success(data) : .failure(.mismatch)
+            let expected: Result<[UInt8], BytesError> = check == LZMA_CHECK_SHA256 ? .success(data) : .failure(.checksumMismatch)
             #expect(xzDecode(corrupt, capacity: data.count) == expected, "corrupt check \(check)")
         }
     }
@@ -375,12 +375,13 @@ struct LZMADecoderTests {
         }
     }
 
+    /// Valid files with filters before LZMA2 (BCJ, delta): `unsupported`, not corrupt.
     @Test func rejectsOtherFilters() {
         let data = Array(lzmaSamples().first { $0.name == "records" }!.bytes.prefix(10_000))
         for filter in [LZMAFilterID.x86, LZMAFilterID.delta] {
             let compressed = xzCompress(data, options: lzmaOptions(preset: 6), filtersBefore: [filter])
             #expect(xzReferenceDecompress(compressed, capacity: data.count) == data)
-            #expect(xzDecode(compressed, capacity: data.count) == .failure(.invalidValue), "filter \(filter)")
+            #expect(xzDecode(compressed, capacity: data.count) == .failure(.unsupported), "filter \(filter)")
         }
     }
 
@@ -396,10 +397,17 @@ struct LZMADecoderTests {
         ]
         var wrongFlags = good
         wrongFlags[7] = 0x01 // CRC-32 instead of CRC-64: the header's CRC no longer matches.
-        cases.append(("header CRC", wrongFlags, .mismatch))
-        var reserved = good
-        reserved[6] = 0x80
-        cases.append(("reserved flags", reserved, .invalidValue))
+        cases.append(("header CRC", wrongFlags, .checksumMismatch))
+        // Reserved flags and a reserved check type, with the header's CRC made right: a later version's file.
+        for (byte, value) in [(6, UInt8(0x80)), (7, UInt8(0x02))] {
+            var reserved = good
+            reserved[byte] = value
+            let crc = CRC32.checksum(reserved.span.bytes.extracting(6..<8))
+            for index in 0..<4 {
+                reserved[8 + index] = UInt8(truncatingIfNeeded: crc >> (8 * index))
+            }
+            cases.append(("reserved \(byte == 6 ? "flags" : "check type")", reserved, .unsupported))
+        }
         for (name, file, error) in cases {
             #expect(xzDecode(file, capacity: 1000) == .failure(error), "\(name)")
         }

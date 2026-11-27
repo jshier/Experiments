@@ -605,9 +605,13 @@ extension Base64 {
     }
 
     /// Each character's value, or 0xFF if it isn't in the alphabet: the character's offset in the window,
-    /// looked up in its first 64 bytes (`tbx`, 0xFF past them), then its last 16 (`tbx` again, keeping the
-    /// first lookup past them). Characters below the window wrap to 176 and up, and 0x80 and up land past
-    /// it, so both keep the 0xFF.
+    /// looked up in its first 64 bytes, then its last 16 (`tbx`, keeping the first lookup past them).
+    /// Characters below the window wrap to 176 and up, and 0x80 and up land past it, so both get 0xFF.
+    ///
+    /// The window holds the values complemented (0 for characters not in the alphabet), so the first lookup is
+    /// a plain `tbl`, whose lanes past the table are 0, and one `mvn` restores them: on the M1 Max a 4-register
+    /// `tbx` is four vector slots and a `tbl` three, and the `tbx` needed a vector of 0xFF made each time (5
+    /// slots against 4 per 16 characters).
     ///
     /// - Parameters:
     ///   - characters: 16 characters.
@@ -616,8 +620,8 @@ extension Base64 {
     @inlinable @inline(__always)
     static func values(of characters: SIMD16<UInt8>, _ table: Alphabet.DecodingWindow) -> SIMD16<UInt8> {
         let index = characters &- table.base
-        let low = ByteLanes(index).lookup(in: table.low, keepingOutOfRange: SIMD16(repeating: 0xFF))
-        return ByteLanes(index &- SIMD16(repeating: 64)).lookup(in: table.high, keepingOutOfRange: low)
+        let low = ByteLanes(index).lookup(in: table.low)
+        return ~ByteLanes(index &- SIMD16(repeating: 64)).lookup(in: table.high, keepingOutOfRange: low)
     }
 
     /// 64 characters moved down by `count` (0 through 63), with "A"s (the value 0) after: four 64-byte
@@ -729,8 +733,12 @@ extension Base64.Alphabet {
         /// The window's first character, in every lane.
         @usableFromInline var base: SIMD16<UInt8>
 
+        /// A window of complemented values (0 for characters not in the alphabet): see `values(of:_:)`.
         @inlinable
-        init(low: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>), high: SIMD16<UInt8>, base: SIMD16<UInt8>) {
+        init(
+            complemented low: (SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>, SIMD16<UInt8>), high: SIMD16<UInt8>,
+            base: SIMD16<UInt8>
+        ) {
             self.low = low
             self.high = high
             self.base = base
@@ -746,22 +754,23 @@ extension Base64.Alphabet {
         // call (a 128-byte table stored, two characters set, five vectors loaded back). Compared by their
         // characters, not with `== .standard`, which would check the static's initialization each time.
         if character62 == 0x2B, character63 == 0x2F { // "+", "/": characters 43–122
+            // The values complemented: "+" is 62, so its byte is 0xC1; characters not in the alphabet are 0.
             return DecodingWindow(
-                low: ((0x3E_FF_FF_FF_3F_34_35_36_37_38_39_3A_3B_3C_3D_FF as Byte16).vector, // "+" … "9", ":"
-                      (0xFF_FF_FF_FF_FF_FF_00_01_02_03_04_05_06_07_08_09 as Byte16).vector, // ";" … "@", "A"–"J"
-                      (0x0A_0B_0C_0D_0E_0F_10_11_12_13_14_15_16_17_18_19 as Byte16).vector, // "K"–"Z"
-                      (0xFF_FF_FF_FF_FF_FF_1A_1B_1C_1D_1E_1F_20_21_22_23 as Byte16).vector), // "[" … "`", "a"–"j"
-                high: (0x24_25_26_27_28_29_2A_2B_2C_2D_2E_2F_30_31_32_33 as Byte16).vector, // "k"–"z"
+                complemented: ((0xC1_00_00_00_C0_CB_CA_C9_C8_C7_C6_C5_C4_C3_C2_00 as Byte16).vector, // "+" … "9", ":"
+                               (0x00_00_00_00_00_00_FF_FE_FD_FC_FB_FA_F9_F8_F7_F6 as Byte16).vector, // ";" … "@", "A"–"J"
+                               (0xF5_F4_F3_F2_F1_F0_EF_EE_ED_EC_EB_EA_E9_E8_E7_E6 as Byte16).vector, // "K"–"Z"
+                               (0x00_00_00_00_00_00_E5_E4_E3_E2_E1_E0_DF_DE_DD_DC as Byte16).vector), // "[" … "`", "a"–"j"
+                high: (0xDB_DA_D9_D8_D7_D6_D5_D4_D3_D2_D1_D0_CF_CE_CD_CC as Byte16).vector, // "k"–"z"
                 base: SIMD16(repeating: 0x2B)
             )
         }
         if character62 == 0x2D, character63 == 0x5F { // "-", "_": characters 45–124
             return DecodingWindow(
-                low: ((0x3E_FF_FF_34_35_36_37_38_39_3A_3B_3C_3D_FF_FF_FF as Byte16).vector, // "-" … "9", ":" … "<"
-                      (0xFF_FF_FF_FF_00_01_02_03_04_05_06_07_08_09_0A_0B as Byte16).vector, // "=" … "@", "A"–"L"
-                      (0x0C_0D_0E_0F_10_11_12_13_14_15_16_17_18_19_FF_FF as Byte16).vector, // "M"–"Z", "[", "\"
-                      (0xFF_FF_3F_FF_1A_1B_1C_1D_1E_1F_20_21_22_23_24_25 as Byte16).vector), // "]" … "`", "a"–"l"
-                high: (0x26_27_28_29_2A_2B_2C_2D_2E_2F_30_31_32_33_FF_FF as Byte16).vector, // "m"–"z", "{", "|"
+                complemented: ((0xC1_00_00_CB_CA_C9_C8_C7_C6_C5_C4_C3_C2_00_00_00 as Byte16).vector, // "-" … "9", ":" … "<"
+                               (0x00_00_00_00_FF_FE_FD_FC_FB_FA_F9_F8_F7_F6_F5_F4 as Byte16).vector, // "=" … "@", "A"–"L"
+                               (0xF3_F2_F1_F0_EF_EE_ED_EC_EB_EA_E9_E8_E7_E6_00_00 as Byte16).vector, // "M"–"Z", "[", "\"
+                               (0x00_00_C0_00_E5_E4_E3_E2_E1_E0_DF_DE_DD_DC_DB_DA as Byte16).vector), // "]" … "`", "a"–"l"
+                high: (0xD9_D8_D7_D6_D5_D4_D3_D2_D1_D0_CF_CE_CD_CC_00_00 as Byte16).vector, // "m"–"z", "{", "|"
                 base: SIMD16(repeating: 0x2D)
             )
         }
@@ -778,7 +787,7 @@ extension Base64.Alphabet {
         // Can't throw: `base` is 43 through 48, so the 80 bytes from it are within the table's 128.
         var reader = try! AlignedBytesReader(table.span.bytes, atByteOffset: Int(base))
         let vectors = try! reader.load(InlineArray<5, SIMD16<UInt8>>.self)
-        return DecodingWindow(low: (vectors[0], vectors[1], vectors[2], vectors[3]), high: vectors[4],
+        return DecodingWindow(complemented: (~vectors[0], ~vectors[1], ~vectors[2], ~vectors[3]), high: ~vectors[4],
                               base: SIMD16(repeating: base))
     }
 

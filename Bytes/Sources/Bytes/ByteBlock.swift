@@ -175,7 +175,7 @@ public extension RawSpan {
     /// }
     /// let words = message.chunks(of: InlineArray<8, UInt8>.self)
     /// for index in words.indices {
-    ///     let word = UInt64(littleEndian: bitCast(words[index], to: UInt64.self))
+    ///     let word = UInt64(littleEndianBytes: words[index])
     ///     …
     /// }
     /// ```
@@ -193,5 +193,38 @@ public extension RawSpan {
         precondition(n > 0, "chunks of no bytes") // Folds: `n` is known where this is specialized.
         // Byte arrays: any address is aligned for them, and the length is a whole number of them.
         return Span(viewing: extracting(first: byteCount &- byteCount % n))
+    }
+}
+
+// Words from `chunks(of:)`'s elements, by `bitCast`: no checks, and no stack copy (reading an element through its
+// `span` put one in the loop, and a stack protector in the function, about 4–10 instructions a call).
+
+public extension UInt64 {
+    /// The 8 bytes as an integer, the first byte the least significant: an element of
+    /// `RawSpan.chunks(of: InlineArray<8, UInt8>.self)`.
+    @inlinable @inline(__always)
+    init(littleEndianBytes bytes: InlineArray<8, UInt8>) {
+        self.init(littleEndian: bitCast(bytes, to: UInt64.self))
+    }
+
+    /// The 8 bytes as an integer, the first byte the most significant.
+    @inlinable @inline(__always)
+    init(bigEndianBytes bytes: InlineArray<8, UInt8>) {
+        self.init(bigEndian: bitCast(bytes, to: UInt64.self))
+    }
+}
+
+public extension UInt32 {
+    /// The 4 bytes as an integer, the first byte the least significant: an element of
+    /// `RawSpan.chunks(of: InlineArray<4, UInt8>.self)`.
+    @inlinable @inline(__always)
+    init(littleEndianBytes bytes: InlineArray<4, UInt8>) {
+        self.init(littleEndian: bitCast(bytes, to: UInt32.self))
+    }
+
+    /// The 4 bytes as an integer, the first byte the most significant.
+    @inlinable @inline(__always)
+    init(bigEndianBytes bytes: InlineArray<4, UInt8>) {
+        self.init(bigEndian: bitCast(bytes, to: UInt32.self))
     }
 }

@@ -64,12 +64,15 @@ public struct ZstdEncoder: ~Copyable {
         /// libzstd's parameters for `level` (its table for inputs over 256 KB), optionally with a smaller window.
         ///
         /// - Parameters:
-        ///   - level: 1 through ``maximumLevel``, or 0 for libzstd's default, 3 (others are clamped to that range).
+        ///   - level: 1 through ``maximumLevel``, or 0 for libzstd's default, 3; higher levels run as
+        ///     ``maximumLevel``. Negative levels (libzstd's fast ones, which this encoder doesn't have) trap;
+        ///     `Compressor` throws ``BytesError/unsupported`` for them instead.
         ///   - windowLog: The window's log2, if not the level's: smaller for less memory, or for HTTP
-        ///     (``httpWindowLog``).
+        ///     (``httpWindowLog``). 10 through 27; others trap.
         public init(level: Int, windowLog: Int? = nil) {
+            precondition(level >= 0, "Negative Zstandard levels (libzstd's fast ones) aren't supported")
             // 0 is libzstd's default level, 3 (it ran as 1).
-            switch min(max(level == 0 ? 3 : level, 1), Self.maximumLevel) {
+            switch min(level == 0 ? 3 : level, Self.maximumLevel) {
             case 1: self.init(strategy: .fast, windowLog: 19, hashLog: 14, chainLog: 13, minimumMatchLength: 7)
             case 2: self.init(strategy: .fast, windowLog: 20, hashLog: 16, chainLog: 15, minimumMatchLength: 6)
             case 3: self.init(strategy: .doubleFast, windowLog: 21, hashLog: 17, chainLog: 16, minimumMatchLength: 5)

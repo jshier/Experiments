@@ -558,7 +558,9 @@ package struct BrotliStream: ~Copyable {
                         windowBits = 17 &+ n
                     } else {
                         let m = Int(bits.read(bitCount: 3))
-                        guard m != 1 else { throw .invalidValue } // Large windows aren't RFC 7932.
+                        // Large windows: RFC 7932 calls the pattern invalid, but Google's large-window extension
+                        // defines it, so the stream may be valid: `unsupported`, not corrupt.
+                        guard m != 1 else { throw .unsupported }
                         windowBits = m == 0 ? 17 : 8 &+ m
                     }
                 }

@@ -142,7 +142,7 @@ struct ReferenceStream {
         try section.skip(byteCount: 2)
         try section.expectEnd()
         var text = try reader.read(sectionPrefixedBy: LEB128.self, maxByteCount: 4)
-        #expect(try String(copying: text.readUTF8(byteCount: 2)) == "hi")
+        #expect(try String(copying: text.read(utf8ByteCount: 2)) == "hi")
         #expect(try String(copying: reader.read(utf8PrefixedBy: Byte2.self, .bigEndian)) == "é")
 
         // Incomplete or invalid: nothing consumed, not even the length.
@@ -1458,6 +1458,36 @@ struct WideByte5: ByteGroup {
                     let untouched = buffer.dropFirst(expected.count + BytesWriter.copyOverrun)
                     #expect(untouched.allSatisfy { $0 == 0xEE }, "distance \(distance) count \(count) room \(room)")
                     if room < BytesWriter.copyOverrun { #expect(buffer[expected.count...].allSatisfy { $0 == 0xEE }) } // Exact without room.
+                }
+            }
+        }
+    }
+
+    /// Distances 1–15 with room to overrun (`copyShortMatch`: one load before the cursor, two `tbl`s, stores at a
+    /// stride of `16 − 16 % d`), from prefixes of `d` to 17 bytes (under 16, the exact path), at every count 0–100
+    /// and 258, 300 (each stride boundary): the same bytes as a byte-at-a-time copy, nothing touched past
+    /// `copyOverrun`.
+    @Test func shortDistanceOverrunCopiesEveryCount() throws {
+        for distance in 1...15 {
+            for prefixLength in distance...17 {
+                let prefix = (0..<prefixLength).map { UInt8(truncatingIfNeeded: $0 &* 53 &+ 7) }
+                for count in Array(0...100) + [258, 300] {
+                    var expected = prefix
+                    for _ in 0..<count {
+                        expected.append(expected[expected.count - distance])
+                    }
+                    for room in [32, 80] {
+                        var buffer = [UInt8](repeating: 0xEE, count: prefix.count + count + room)
+                        var span = buffer.mutableSpan
+                        var writer = BytesWriter(&span)
+                        try writer.write(prefix.span)
+                        try writer.copy(fromDistance: distance, count: count, allowingOverrun: true)
+                        _ = consume writer
+                        _ = consume span
+                        let label = "distance \(distance) prefix \(prefixLength) count \(count) room \(room)"
+                        #expect(Array(buffer[..<expected.count]) == expected, "\(label)")
+                        #expect(buffer.dropFirst(expected.count + BytesWriter.copyOverrun).allSatisfy { $0 == 0xEE }, "\(label)")
+                    }
                 }
             }
         }

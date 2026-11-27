@@ -122,8 +122,8 @@ public struct FileOutput: ~Copyable {
                 // The whole file at once, in place.
                 // Unsafe (both lines): the span's memory as a pointer to `writeWhole`, across the write's waits. Safe:
                 // the span is borrowed for this call, so its `count` bytes stay put until `writeWhole` returns.
-                try await unsafe bytes.withUnsafeBytesAsync { buffer throws(DiskError) in
-                    try await unsafe writeWhole(buffer.baseAddress, count: count)
+                try await unsafe bytes.withLentBytesAsync { lent throws(DiskError) in
+                    try await unsafe writeWhole(lent.buffer.baseAddress, count: count)
                 }
                 bytesWritten = count
                 mode = .done
@@ -162,8 +162,8 @@ public struct FileOutput: ~Copyable {
         }
         // Unsafe (both lines): the span's memory as a pointer to `stream`, across its waits. Safe: the span is borrowed
         // for this call, so its `count` bytes stay put until `stream` returns.
-        try await unsafe bytes.withUnsafeBytesAsync { buffer throws(DiskError) in
-            try await unsafe stream(buffer.baseAddress, count: count)
+        try await unsafe bytes.withLentBytesAsync { lent throws(DiskError) in
+            try await unsafe stream(lent.buffer.baseAddress, count: count)
         }
         progress?.add(entries: 0, bytes: count)
         bytesWritten += count
@@ -433,21 +433,6 @@ public struct FileOutput: ~Copyable {
             result = .plain
         }
         file.take()?.close()
-    }
-}
-
-extension RawSpan {
-    /// `withUnsafeBytes` for an async body: the span's bytes stay valid while it runs (the span is borrowed for the call).
-    ///
-    /// BytesAsync's `withLentBytes` is the same thing, but a call to it with a closure that names its error type is
-    /// ambiguous with Bytes' synchronous `withLentBytes` (Swift 6.4: AGENTS.md, "a sync method and an `async` overload
-    /// of one name"), so the writers keep this one.
-    @inline(__always)
-    func withUnsafeBytesAsync<R, E: Error>(_ body: (UnsafeRawBufferPointer) async throws(E) -> R) async throws(E) -> R {
-        // Unsafe (the next two): the buffer escapes `withUnsafeBytes`' closure, and goes to `body`. Safe: it's the
-        // span's own memory, used only during `body`, while the span (borrowed for this call) keeps it alive.
-        let buffer = withUnsafeBytes { unsafe $0 }
-        return try await unsafe body(buffer)
     }
 }
 

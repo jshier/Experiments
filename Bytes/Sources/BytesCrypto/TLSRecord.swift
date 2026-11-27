@@ -377,7 +377,7 @@ extension TLSRecordSealer: ResettableByteTransform {
                         continue
                     }
                     let take = min(available, plaintext.freeCapacity &- padding)
-                    plaintext.fill { $0.append(copying: input.extracting(consumed..<(consumed &+ take))) }
+                    plaintext.append(copying: input.extracting(consumed..<(consumed &+ take)))
                     consumed &+= take
                     if plaintext.unreadByteCount &+ padding >= TLSRecord.maximumPlaintext {
                         try sealBuffered()

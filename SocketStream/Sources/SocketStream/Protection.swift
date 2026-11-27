@@ -13,6 +13,29 @@ public enum StreamCompression: String, Sendable, CaseIterable {
     case deflate
     /// Brotli at quality 1 with a 256 KB window, flushed after each batch.
     case brotli
+    /// Zstandard at level 1 with a 256 KB window, flushed after each batch.
+    case zstd
+
+    /// The sender's format: BytesCompression's `Compressor` encodes it. `nil` for ``none``.
+    public var compressionFormat: CompressionFormat? {
+        switch self {
+        case .none: nil
+        case .deflate: .deflate(.raw, level: 1)
+        case .brotli: .brotli(quality: 1, windowBits: 18)
+        case .zstd: .zstd(level: 1, windowLog: 18)
+        }
+    }
+
+    /// The receiver's format: BytesCompression's `Decompressor` decodes it. `nil` for ``none``.
+    public var decompressionFormat: DecompressionFormat? {
+        switch self {
+        case .none: nil
+        case .deflate: .deflate(.raw)
+        case .brotli: .brotli
+        // The sender's window, so a stream needing more is refused before anything is allocated.
+        case .zstd: .zstd(maximumWindowSize: 1 << 18)
+        }
+    }
 }
 
 /// The AEAD protecting TLS records: the cipher suite's.
@@ -126,17 +149,13 @@ extension Transfer {
                 workload, to: address,
                 through: parallelDeflate(protection.compressionLanes).then(protection.sealer(keys), bufferCapacity: workload.batchSize &+ (64 << 10))
             )
-        case (.deflate, false):
-            try await sendProtected(workload, to: address, through: DeflateEncoder(format: .raw, level: 1))
-        case (.deflate, true):
+        // Sequential compression: BytesCompression's `Compressor`, one stage for every format (its one `switch` per
+        // call measured equal to naming each encoder: 34 M instructions for 10,000 packets with DEFLATE either way).
+        case let (compression, false):
+            try await sendProtected(workload, to: address, through: Compressor(for: compression.compressionFormat!))
+        case let (compression, true):
             try await sendProtected(
-                workload, to: address, through: DeflateEncoder(format: .raw, level: 1).then(protection.sealer(keys))
-            )
-        case (.brotli, false):
-            try await sendProtected(workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18))
-        case (.brotli, true):
-            try await sendProtected(
-                workload, to: address, through: BrotliEncoder(quality: 1, windowBits: 18).then(protection.sealer(keys))
+                workload, to: address, through: Compressor(for: compression.compressionFormat!).then(protection.sealer(keys))
             )
         }
     }
@@ -148,16 +167,12 @@ extension Transfer {
         switch (protection.compression, protection.encrypted) {
         case (.none, _):
             try await receiveProtected(workload, on: connection, through: TLSRecordOpener(keys: keys))
-        case (.deflate, false):
-            try await receiveProtected(workload, on: connection, through: DeflateDecoder(format: .raw))
-        case (.deflate, true):
+        case let (compression, false):
+            try await receiveProtected(workload, on: connection, through: Decompressor(for: compression.decompressionFormat!))
+        case let (compression, true):
             try await receiveProtected(
-                workload, on: connection, through: TLSRecordOpener(keys: keys).then(DeflateDecoder(format: .raw))
+                workload, on: connection, through: TLSRecordOpener(keys: keys).then(Decompressor(for: compression.decompressionFormat!))
             )
-        case (.brotli, false):
-            try await receiveProtected(workload, on: connection, through: BrotliDecoder())
-        case (.brotli, true):
-            try await receiveProtected(workload, on: connection, through: TLSRecordOpener(keys: keys).then(BrotliDecoder()))
         }
     }
 

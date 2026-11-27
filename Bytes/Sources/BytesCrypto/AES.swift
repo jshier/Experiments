@@ -293,7 +293,8 @@ public struct AES: Sendable {
             offset &+= 1
         }
         #if HardwareCrypto && arch(arm64) && !Portable
-        // Unsafe: the same buffers, 128 bytes at a time while that many remain.
+        // Unsafe: the same buffers, 192 bytes at a time while that many remain, then 128.
+        offset = unsafe counterModeBatches12(source, target, count: count, counter: &counter, from: offset)
         offset = unsafe counterModeBatches(source, target, count: count, counter: &counter, from: offset)
         #endif
         while count &- offset >= 16 {
@@ -316,6 +317,164 @@ public struct AES: Sendable {
     }
 
     #if HardwareCrypto && arch(arm64) && !Portable
+    /// Counter mode 12 blocks at a time from `start`, while 192 bytes remain; returns where it stopped (the 8-block
+    /// kernel and single blocks finish).
+    ///
+    /// Twelve chains, not eight: a fused `aese`/`aesmc` round has 3 cycles of latency and the M1 Max issues 4 a cycle,
+    /// so eight chains left the units waiting (AES-128 at about 33 cycles per 128 bytes, its chains' bound). Each key
+    /// size and counter layout gets its own straight-line loop (the body inlined with constants): the last two keys
+    /// are then the real registers (selecting them cost two register copies, and 12 states and 15 keys leave few), and
+    /// the counter stays in registers across batches.
+    @unsafe @inline(never)
+    func counterModeBatches12(
+        _ input: UnsafeRawPointer, _ output: UnsafeMutableRawPointer, count: Int, counter: inout Counter, from start: Int
+    ) -> Int {
+        guard count &- start >= 192 else { return start }
+        // Unsafe (each call): the caller's buffers, as `batches12` says.
+        switch (rounds, counter.layout) {
+        case (10, .littleEndian128): return unsafe batches12(input, output, count, &counter, start, rounds: 10, layout: .littleEndian128)
+        case (10, .bigEndian64): return unsafe batches12(input, output, count, &counter, start, rounds: 10, layout: .bigEndian64)
+        case (10, .bigEndian32): return unsafe batches12(input, output, count, &counter, start, rounds: 10, layout: .bigEndian32)
+        case (12, .littleEndian128): return unsafe batches12(input, output, count, &counter, start, rounds: 12, layout: .littleEndian128)
+        case (12, .bigEndian64): return unsafe batches12(input, output, count, &counter, start, rounds: 12, layout: .bigEndian64)
+        case (12, .bigEndian32): return unsafe batches12(input, output, count, &counter, start, rounds: 12, layout: .bigEndian32)
+        case (_, .littleEndian128): return unsafe batches12(input, output, count, &counter, start, rounds: 14, layout: .littleEndian128)
+        case (_, .bigEndian64): return unsafe batches12(input, output, count, &counter, start, rounds: 14, layout: .bigEndian64)
+        case (_, .bigEndian32): return unsafe batches12(input, output, count, &counter, start, rounds: 14, layout: .bigEndian32)
+        }
+    }
+
+    /// ``counterModeBatches12(_:_:count:counter:from:)``'s loop for one key size and counter layout (both constants
+    /// where it's inlined). A `littleEndian128` counter whose low word would carry within a batch stops the loop (the
+    /// 8-block kernel and single blocks carry).
+    @unsafe @inline(__always)
+    func batches12(
+        _ input: UnsafeRawPointer, _ output: UnsafeMutableRawPointer, _ count: Int, _ counter: inout Counter, _ start: Int,
+        rounds: Int, layout: Counter.Layout
+    ) -> Int {
+        var offset = start
+        let keys = roundKeys
+        let k0 = keys[0], k1 = keys[1], k2 = keys[2], k3 = keys[3], k4 = keys[4], k5 = keys[5], k6 = keys[6], k7 = keys[7]
+        let k8 = keys[8], k9 = keys[9], k10 = keys[10], k11 = keys[11], k12 = keys[12], k13 = keys[13], k14 = keys[14]
+        let (lastKey, finalKey) = rounds == 10 ? (k9, k10) : rounds == 12 ? (k11, k12) : (k13, k14)
+        // The counter in registers: the counting word (native order) and the other (memory order), or GCM's block
+        // with its words byte-swapped to native, so the last is the counter.
+        var low: UInt64 = 0, high: UInt64 = 0
+        var native = SIMD4<UInt32>.zero
+        switch layout {
+        case .bigEndian64:
+            low = UInt64(bigEndian: counter.block[1])
+            high = counter.block[0]
+        case .littleEndian128:
+            low = UInt64(littleEndian: counter.block[0])
+            high = counter.block[1]
+        case .bigEndian32:
+            native = bytes_rev32(bitCast(counter.block, to: SIMD16<UInt8>.self))
+        }
+        while count &- offset >= 192 {
+            if layout == .littleEndian128, low > UInt64.max &- 12 { break }
+            var b0, b1, b2, b3, b4, b5, b6, b7, b8, b9, b10, b11: SIMD16<UInt8>
+            switch layout {
+            case .bigEndian64:
+                // Each block is the first word and the byte-swapped count (one `rev`); wrapping, no carry.
+                b0 = bitCast(SIMD2(high, low.bigEndian), to: SIMD16<UInt8>.self)
+                b1 = bitCast(SIMD2(high, (low &+ 1).bigEndian), to: SIMD16<UInt8>.self)
+                b2 = bitCast(SIMD2(high, (low &+ 2).bigEndian), to: SIMD16<UInt8>.self)
+                b3 = bitCast(SIMD2(high, (low &+ 3).bigEndian), to: SIMD16<UInt8>.self)
+                b4 = bitCast(SIMD2(high, (low &+ 4).bigEndian), to: SIMD16<UInt8>.self)
+                b5 = bitCast(SIMD2(high, (low &+ 5).bigEndian), to: SIMD16<UInt8>.self)
+                b6 = bitCast(SIMD2(high, (low &+ 6).bigEndian), to: SIMD16<UInt8>.self)
+                b7 = bitCast(SIMD2(high, (low &+ 7).bigEndian), to: SIMD16<UInt8>.self)
+                b8 = bitCast(SIMD2(high, (low &+ 8).bigEndian), to: SIMD16<UInt8>.self)
+                b9 = bitCast(SIMD2(high, (low &+ 9).bigEndian), to: SIMD16<UInt8>.self)
+                b10 = bitCast(SIMD2(high, (low &+ 10).bigEndian), to: SIMD16<UInt8>.self)
+                b11 = bitCast(SIMD2(high, (low &+ 11).bigEndian), to: SIMD16<UInt8>.self)
+            case .littleEndian128:
+                // The 128-bit little-endian counter as two native words (arm64 is little-endian); no carry here.
+                let base = SIMD2(low, high)
+                b0 = bitCast(base, to: SIMD16<UInt8>.self)
+                b1 = bitCast(base &+ SIMD2(1, 0), to: SIMD16<UInt8>.self)
+                b2 = bitCast(base &+ SIMD2(2, 0), to: SIMD16<UInt8>.self)
+                b3 = bitCast(base &+ SIMD2(3, 0), to: SIMD16<UInt8>.self)
+                b4 = bitCast(base &+ SIMD2(4, 0), to: SIMD16<UInt8>.self)
+                b5 = bitCast(base &+ SIMD2(5, 0), to: SIMD16<UInt8>.self)
+                b6 = bitCast(base &+ SIMD2(6, 0), to: SIMD16<UInt8>.self)
+                b7 = bitCast(base &+ SIMD2(7, 0), to: SIMD16<UInt8>.self)
+                b8 = bitCast(base &+ SIMD2(8, 0), to: SIMD16<UInt8>.self)
+                b9 = bitCast(base &+ SIMD2(9, 0), to: SIMD16<UInt8>.self)
+                b10 = bitCast(base &+ SIMD2(10, 0), to: SIMD16<UInt8>.self)
+                b11 = bitCast(base &+ SIMD2(11, 0), to: SIMD16<UInt8>.self)
+            case .bigEndian32:
+                // A 32-bit lane add, then the words swapped back to memory order; wrapping.
+                b0 = bytes_rev32_words(native)
+                b1 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 1))
+                b2 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 2))
+                b3 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 3))
+                b4 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 4))
+                b5 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 5))
+                b6 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 6))
+                b7 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 7))
+                b8 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 8))
+                b9 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 9))
+                b10 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 10))
+                b11 = bytes_rev32_words(native &+ SIMD4(0, 0, 0, 11))
+            }
+            low &+= 12
+            native &+= SIMD4(0, 0, 0, 12)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k0)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k1)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k2)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k3)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k4)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k5)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k6)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k7)
+            AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k8)
+            if rounds >= 12 {
+                AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k9)
+                AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k10)
+            }
+            if rounds == 14 {
+                AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k11)
+                AES.round12(&b0, &b1, &b2, &b3, &b4, &b5, &b6, &b7, &b8, &b9, &b10, &b11, k12)
+            }
+            // Unsafe: unchecked loads and stores. Safe: `offset + 192 <= count` (the loop's condition).
+            let source = unsafe input + offset, target = unsafe output + offset
+            unsafe AES.finish(b0, lastKey, finalKey, source, target)
+            unsafe AES.finish(b1, lastKey, finalKey, source + 16, target + 16)
+            unsafe AES.finish(b2, lastKey, finalKey, source + 32, target + 32)
+            unsafe AES.finish(b3, lastKey, finalKey, source + 48, target + 48)
+            unsafe AES.finish(b4, lastKey, finalKey, source + 64, target + 64)
+            unsafe AES.finish(b5, lastKey, finalKey, source + 80, target + 80)
+            unsafe AES.finish(b6, lastKey, finalKey, source + 96, target + 96)
+            unsafe AES.finish(b7, lastKey, finalKey, source + 112, target + 112)
+            unsafe AES.finish(b8, lastKey, finalKey, source + 128, target + 128)
+            unsafe AES.finish(b9, lastKey, finalKey, source + 144, target + 144)
+            unsafe AES.finish(b10, lastKey, finalKey, source + 160, target + 160)
+            unsafe AES.finish(b11, lastKey, finalKey, source + 176, target + 176)
+            offset &+= 192
+        }
+        switch layout {
+        case .bigEndian64: counter.block[1] = low.bigEndian
+        case .littleEndian128: counter.block[0] = low.littleEndian
+        case .bigEndian32: counter.block = bitCast(bytes_rev32_words(native), to: SIMD2<UInt64>.self)
+        }
+        return offset
+    }
+
+    /// One middle round on twelve blocks.
+    @inline(__always)
+    static func round12(
+        _ b0: inout SIMD16<UInt8>, _ b1: inout SIMD16<UInt8>, _ b2: inout SIMD16<UInt8>, _ b3: inout SIMD16<UInt8>,
+        _ b4: inout SIMD16<UInt8>, _ b5: inout SIMD16<UInt8>, _ b6: inout SIMD16<UInt8>, _ b7: inout SIMD16<UInt8>,
+        _ b8: inout SIMD16<UInt8>, _ b9: inout SIMD16<UInt8>, _ b10: inout SIMD16<UInt8>, _ b11: inout SIMD16<UInt8>,
+        _ key: SIMD16<UInt8>
+    ) {
+        b0 = bytes_aes_round(b0, key); b1 = bytes_aes_round(b1, key); b2 = bytes_aes_round(b2, key); b3 = bytes_aes_round(b3, key)
+        b4 = bytes_aes_round(b4, key); b5 = bytes_aes_round(b5, key); b6 = bytes_aes_round(b6, key); b7 = bytes_aes_round(b7, key)
+        b8 = bytes_aes_round(b8, key); b9 = bytes_aes_round(b9, key); b10 = bytes_aes_round(b10, key); b11 = bytes_aes_round(b11, key)
+    }
+
     /// Counter mode eight blocks at a time from `start`, while 128 bytes remain; returns where it stopped.
     ///
     /// Eight independent `aese`/`aesmc` chains keep the AES units' pipelines full. The round keys are copied

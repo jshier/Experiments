@@ -314,6 +314,46 @@ public extension [UInt8] {
         var span = mutableSpan
         return try span.withOutputRawSpan(overwritingFrom: offset, body)
     }
+
+    /// Appends what `body` writes to an output span over `byteCount` bytes of new capacity: a codec's whole output
+    /// into an array, with nothing zeroed or copied.
+    ///
+    /// ```swift
+    /// var compressed: [UInt8] = []
+    /// try compressed.append(writingUpTo: format.maximumCompressedSize(forByteCount: input.byteCount)) {
+    ///     output throws(BytesError) in try encoder.compressAll(input, into: &output)
+    /// }
+    /// ```
+    ///
+    /// When the array lacks the room, its capacity grows geometrically (at least doubling; an empty array gets exactly
+    /// `byteCount`), so appending round after round stays linear; then the standard library's specialized
+    /// `append(addingCapacity:initializingWith:)` appends.
+    /// (`BytesWriter`'s `append(byteCapacity:bitOrder:writing:)` is the counterpart for bit and field writers.)
+    ///
+    /// - Parameters:
+    ///   - byteCount: The most bytes `body` may write.
+    ///   - body: Receives an empty output span over the new capacity.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws; then nothing is appended (the capacity stays reserved).
+    /// - Precondition: `byteCount` isn't negative, and `body` leaves the output span it was given in place.
+    @inlinable
+    mutating func append<R, E: Error>(writingUpTo byteCount: Int, _ body: (inout OutputRawSpan) throws(E) -> R) throws(E) -> R {
+        precondition(byteCount >= 0, "Appending a negative number of bytes")
+        // An exact reserve each round reallocated every round (256 rounds of 16 KiB: 256 reallocations).
+        if capacity &- count < byteCount { reserveCapacity(Swift.max(count &+ byteCount, capacity &* 2)) }
+        var result: R?
+        try append(addingCapacity: byteCount) { (span: inout OutputSpan<UInt8>) throws(E) in
+            // Unsafe: an output span over the array's new capacity. Safe: it covers only the uninitialized part and
+            // ends with the closure; `finalize` checks `body` left it in place, and only what it wrote is counted.
+            try unsafe span.withUnsafeMutableBufferPointer { buffer, initializedCount throws(E) in
+                let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
+                var output = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
+                result = try body(&output)
+                initializedCount &+= unsafe output.finalize(for: free)
+            }
+        }
+        return result!
+    }
 }
 
 // MARK: - ByteBuffer
@@ -334,17 +374,20 @@ public extension [UInt8] {
 /// }
 /// ```
 ///
-/// One allocation, made by the initializer and never moved or grown, so a fill can suspend (a socket read)
-/// with its output span in place: no `Array`'s span can stay borrowed across a suspension point.
+/// Copy bytes in with ``append(copying:)``; grow it with ``reserveCapacity(_:)``.
+///
+/// One allocation, which moves only when ``reserveCapacity(_:)`` grows it, so a fill can suspend (a socket read)
+/// with its output span in place: a fill holds the buffer `inout` for its whole call, so nothing can grow it
+/// meanwhile. (No `Array`'s span can stay borrowed across a suspension point.)
 ///
 /// `Sendable`: it owns its memory, and being `~Copyable`, only one owner can use it.
 @safe @frozen
 public struct ByteBuffer: ~Copyable, @unchecked Sendable {
-    @usableFromInline package let _storage: UnsafeMutableRawBufferPointer
-    /// The buffer's size in bytes. It never grows.
-    public let capacity: Int
-    /// ``fill(_:)`` compacts first when fewer bytes than this are free at the end.
-    public let compactionThreshold: Int
+    @usableFromInline package var _storage: UnsafeMutableRawBufferPointer
+    @usableFromInline var _capacity: Int
+    @usableFromInline var _compactionThreshold: Int
+    /// The threshold is the default, half the capacity: growing keeps it half.
+    @usableFromInline var _halfThreshold: Bool
     /// The unread bytes are `_start ..< _end`.
     @usableFromInline var _start = 0
     @usableFromInline package var _end = 0
@@ -352,17 +395,26 @@ public struct ByteBuffer: ~Copyable, @unchecked Sendable {
     /// Creates an empty buffer.
     ///
     /// - Parameters:
-    ///   - capacity: The buffer's size in bytes; it never grows. More than 0.
+    ///   - capacity: The buffer's size in bytes. More than 0.
     ///   - compactionThreshold: ``fill(_:)`` moves the unread bytes to the front first when fewer than this
-    ///     many bytes are free at the end: by default, half the capacity. Lower means fewer moves and smaller
-    ///     fills.
+    ///     many bytes are free at the end: by default, half the capacity (and still half after growing). Lower
+    ///     means fewer moves and smaller fills.
     @inlinable
     public init(capacity: Int, compactingBelow compactionThreshold: Int? = nil) {
         precondition(capacity > 0, "A buffer needs room")
         unsafe _storage = .allocate(byteCount: capacity, alignment: 64)
-        self.capacity = capacity
-        self.compactionThreshold = compactionThreshold ?? capacity &>> 1
+        _capacity = capacity
+        _compactionThreshold = compactionThreshold ?? capacity &>> 1
+        _halfThreshold = compactionThreshold == nil
     }
+
+    /// The buffer's size in bytes: what it was made with, until ``reserveCapacity(_:)`` grows it.
+    @inlinable
+    public var capacity: Int { _capacity }
+
+    /// ``fill(_:)`` compacts first when fewer bytes than this are free at the end.
+    @inlinable
+    public var compactionThreshold: Int { _compactionThreshold }
 
     @inlinable
     deinit {
@@ -393,9 +445,56 @@ public struct ByteBuffer: ~Copyable, @unchecked Sendable {
     @inlinable
     public var isFull: Bool { _end &- _start == capacity }
 
-    /// The bytes free at the end: what a fill can add without compacting.
+    /// The bytes free at the end: what a fill can add without compacting. Compare ``availableCapacity``.
     @inlinable
     public var freeCapacity: Int { capacity &- _end }
+
+    /// The bytes free in all, at the end and before the unread bytes: what a fill or ``append(copying:)`` can add
+    /// once the unread bytes are moved to the front. At least ``freeCapacity``.
+    @inlinable
+    public var availableCapacity: Int { capacity &- (_end &- _start) }
+
+    /// Grows the buffer to at least `minimumCapacity` bytes, keeping the unread bytes (moved to the front of the new
+    /// allocation). Nothing happens if it's already that large.
+    ///
+    /// Spans from ``unread`` end before this call (it's `mutating`); pointers taken from them don't stay valid.
+    ///
+    /// - Parameter minimumCapacity: The least capacity wanted.
+    @inlinable
+    public mutating func reserveCapacity(_ minimumCapacity: Int) {
+        guard minimumCapacity > capacity else { return }
+        let count = _end &- _start
+        let bigger = UnsafeMutableRawBufferPointer.allocate(byteCount: minimumCapacity, alignment: 64)
+        // Unsafe: copies the unread bytes between two allocations, then frees the old one. Safe: `_start ..< _end` is
+        // within the old allocation and initialized, `count` bytes fit in the new one (it's larger), and nothing
+        // refers to the old one past this point (spans over it borrowed `self`, which this call holds `inout`).
+        unsafe bigger.baseAddress!.copyMemory(from: _storage.baseAddress!.advanced(by: _start), byteCount: count)
+        unsafe _storage.deallocate()
+        unsafe _storage = bigger
+        _capacity = minimumCapacity
+        if _halfThreshold { _compactionThreshold = minimumCapacity &>> 1 }
+        _start = 0
+        _end = count
+    }
+
+    /// Appends a copy of `bytes`, first moving the unread bytes to the front if they don't fit at the end.
+    ///
+    /// - Parameter bytes: The bytes to copy.
+    /// - Precondition: They fit: `bytes.byteCount` is at most ``availableCapacity``. (Cap the copy first, or grow the
+    ///   buffer with ``reserveCapacity(_:)``.)
+    @inlinable
+    public mutating func append(copying bytes: RawSpan) {
+        let count = bytes.byteCount
+        precondition(count <= capacity &- (_end &- _start), "Appending more bytes than a buffer has room for")
+        guard count > 0 else { return }
+        if count > capacity &- _end { compact() }
+        // Unsafe: copies into the free space. Safe: `count` bytes fit after `_end` (checked, after compacting), and
+        // the source is the span's own memory, valid inside its closure.
+        bytes.withUnsafeBytes { source in
+            unsafe _storage.baseAddress!.advanced(by: _end).copyMemory(from: source.baseAddress!, byteCount: count)
+        }
+        _end &+= count
+    }
 
     /// Drops the first `byteCount` unread bytes, which were used. Once none remain, the next fill starts at
     /// the front, with nothing to move.
@@ -467,5 +566,27 @@ public struct ByteBuffer: ~Copyable, @unchecked Sendable {
         }
         _end &+= unsafe output.finalize(for: free)
         return result
+    }
+
+    /// Appends what `body` writes into a mutable span over the free space at the end, for writers that fill a
+    /// `MutableRawSpan` and report a count (a read into a buffer). Compacts first as ``fill(_:)`` does.
+    ///
+    /// ```swift
+    /// let added = buffer.withFreeCapacity { span, written in written = source.read(into: &span) }
+    /// ```
+    ///
+    /// - Parameters:
+    ///   - byteCount: How many free bytes to give `body`: all of them by default.
+    ///   - body: Receives the span (its contents undefined) and sets `written` to how many of its first bytes it
+    ///     wrote; those are added to the unread bytes when it returns.
+    /// - Returns: What `body` returns.
+    /// - Throws: What `body` throws; then nothing is added.
+    /// - Precondition: `byteCount` is at most the free space (after compacting); `written` is at most the span's
+    ///   size, and `body` leaves the span it was given in place.
+    @inlinable
+    public mutating func withFreeCapacity<R: ~Copyable, E: Error>(
+        byteCount: Int? = nil, _ body: (inout MutableRawSpan, _ written: inout Int) throws(E) -> R
+    ) throws(E) -> R {
+        try fill { (output: inout OutputRawSpan) throws(E) -> R in try output.withFreeCapacity(byteCount: byteCount, body) }
     }
 }

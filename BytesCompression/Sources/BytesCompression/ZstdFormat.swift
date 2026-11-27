@@ -127,8 +127,9 @@ package struct ZstdFrameHeader: Hashable, Sendable {
     ///
     /// - Parameter bytes: The frame, or at least its header (up to 18 bytes).
     /// - Returns: The header, or `nil` if `bytes` is too short to hold all of it.
-    /// - Throws: ``BytesError/invalidValue`` if the bytes don't start a Zstandard or skippable frame, or the
-    ///   header sets its reserved bit or a window log above 31.
+    /// - Throws: ``BytesError/invalidValue`` if the bytes don't start a Zstandard or skippable frame;
+    ///   ``BytesError/unsupported`` if the header sets its reserved bit; ``BytesError/limitExceeded`` for a window log
+    ///   above 31.
     package init?(parsing bytes: RawSpan) throws(BytesError) {
         guard let header = try Self.parse(bytes) else { return nil }
         self = header
@@ -184,7 +185,8 @@ package struct ZstdFrameHeader: Hashable, Sendable {
             )
         }
         let descriptor = bytes.load(fromByteOffset: 4, as: UInt8.self)
-        guard !descriptor[ZstdDescriptor.reserved] else { throw .invalidValue }
+        // RFC 8878: the bit may signal a future feature needed to decode the frame.
+        guard !descriptor[ZstdDescriptor.reserved] else { throw .unsupported }
         let singleSegment = descriptor[ZstdDescriptor.singleSegment]
         var position = 5
         var windowSize: UInt64 = 0
@@ -192,7 +194,9 @@ package struct ZstdFrameHeader: Hashable, Sendable {
             let window = bytes.load(fromByteOffset: position, as: UInt8.self)
             position &+= 1
             let windowLog = 10 &+ window[ZstdDescriptor.windowExponent]
-            guard windowLog <= Zstd.windowLogMaximum else { throw .invalidValue }
+            // Valid up to 2^41 (RFC 8878 lets a decoder refuse large windows), but past what this decoder (and libzstd)
+            // can address: a resource limit, as a window over `maximumWindowSize` is.
+            guard windowLog <= Zstd.windowLogMaximum else { throw .limitExceeded }
             let base = UInt64(1) &<< UInt64(windowLog)
             windowSize = base &+ (base &>> 3) &* UInt64(window[ZstdDescriptor.windowMantissa])
         }

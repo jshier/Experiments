@@ -15,7 +15,7 @@ internal import Builtin
 /// let checksum = CRC32.checksum(data.span.bytes)
 /// ```
 ///
-/// On Apple silicon it folds 128 bytes per step with carry-less multiplies (`pmull`), eight 16-byte
+/// On Apple silicon it folds 192 bytes per step with carry-less multiplies (`pmull`), twelve 16-byte
 /// lanes at a time, and finishes with the CPU's CRC32 instructions: faster than zlib's `crc32`. Elsewhere
 /// it uses tables, five interleaved CRCs over 40 bytes per step, as zlib does.
 // Not `@inlinable`, unlike most public API here: each call does enough work (a loop over the bytes, with the
@@ -173,6 +173,7 @@ extension CRC32 {
     // The 128- and 512-bit ones match Linux's (`crc32-pclmul_asm.S`); see the tests for their derivation
     // (`package` for them, in release builds too).
     package static var fold1024: SIMD16<UInt8> { bitCast(SIMD2<UInt64>(0x1_E88E_F372, 0x1_4A7F_E880), to: SIMD16<UInt8>.self) }
+    package static var fold1536: SIMD16<UInt8> { bitCast(SIMD2<UInt64>(0x1_821D_8BC0, 0x1_2E95_8AC4), to: SIMD16<UInt8>.self) }
     package static var fold128: SIMD16<UInt8> { bitCast(SIMD2<UInt64>(0x1_7519_97D0, 0x0_CCAA_009E), to: SIMD16<UInt8>.self) }
 
     /// Inputs this long or longer are folded; shorter ones take the CRC32 instructions 8 bytes at a time
@@ -190,40 +191,47 @@ extension CRC32 {
         return state
     }
 
-    /// Folds whole 16-byte blocks of `reader` (at least 128 bytes) into 16 bytes, then reduces them with
+    /// Folds whole 16-byte blocks of `reader` (at least 192 bytes) into 16 bytes, then reduces them with
     /// the CRC32 instructions. Leaves the last 0–15 bytes.
     ///
-    /// The register's state is XORed into the first 4 bytes, so everything after is a CRC from zero. Eight
-    /// accumulators each fold forward 128 bytes per step (two carry-less multiplies and a three-way XOR):
-    /// independent chains, so the multiplies' latency overlaps. Each 128-byte step is read as a fixed-size
-    /// sub-cursor, so its eight loads need no bounds checks of their own.
+    /// The register's state is XORed into the first 4 bytes, so everything after is a CRC from zero. Twelve
+    /// accumulators each fold forward 192 bytes per step (two carry-less multiplies and a three-way XOR):
+    /// independent chains, so the multiplies' latency overlaps. Each 192-byte step is read as a fixed-size
+    /// sub-cursor, so its twelve loads need no bounds checks of their own.
     ///
     /// - Parameters:
     ///   - state: The unconditioned register.
     ///   - reader: The bytes to fold; advanced past the folded blocks.
     /// - Returns: The register after the folded bytes.
     static func _fold(_ state: UInt32, _ reader: inout BytesReader) -> UInt32 {
-        // The `try!`s here can't trap: the caller checked that 128 bytes remain, the loop checks before each
-        // further 128, each block's eight loads take exactly its 128 bytes, and the last loop's loads check
-        // that 16 remain.
-        var block = BytesReader(try! reader.read(byteCount: 128))
-        // Always inlined: as a call, each load spilled the eight accumulators (3.5x slower).
+        // The `try!`s here can't trap: the caller checked that 256 bytes remain (`foldThreshold`), the loop checks
+        // before each further 192, each block's twelve loads take exactly its 192 bytes, and the last loop's loads
+        // check that 16 remain.
+        var block = BytesReader(try! reader.read(byteCount: 192))
+        // Always inlined: as a call, each load spilled the accumulators (3.5x slower).
         @inline(always) func next(_ block: inout BytesReader) -> SIMD16<UInt8> { try! block.load(SIMD16<UInt8>.self) }
         var x0 = next(&block) ^ bitCast(SIMD4<UInt32>(state, 0, 0, 0), to: SIMD16<UInt8>.self)
         var x1 = next(&block), x2 = next(&block), x3 = next(&block)
         var x4 = next(&block), x5 = next(&block), x6 = next(&block), x7 = next(&block)
+        var x8 = next(&block), x9 = next(&block), x10 = next(&block), x11 = next(&block)
 
-        let fold1024 = Self.fold1024
-        while reader.remainingByteCount >= 128 {
-            block = BytesReader(try! reader.read(byteCount: 128))
-            x0 = bytes_crc_fold(x0, next(&block), fold1024)
-            x1 = bytes_crc_fold(x1, next(&block), fold1024)
-            x2 = bytes_crc_fold(x2, next(&block), fold1024)
-            x3 = bytes_crc_fold(x3, next(&block), fold1024)
-            x4 = bytes_crc_fold(x4, next(&block), fold1024)
-            x5 = bytes_crc_fold(x5, next(&block), fold1024)
-            x6 = bytes_crc_fold(x6, next(&block), fold1024)
-            x7 = bytes_crc_fold(x7, next(&block), fold1024)
+        // Twelve accumulators, folded 192 bytes a step. (Eight, 128 bytes a step, ran at 90% of the vector pipes'
+        // bound in cache, 61 GB/s, where libdeflate's 12 ran at 98%.)
+        let fold1536 = Self.fold1536
+        while reader.remainingByteCount >= 192 {
+            block = BytesReader(try! reader.read(byteCount: 192))
+            x0 = bytes_crc_fold(x0, next(&block), fold1536)
+            x1 = bytes_crc_fold(x1, next(&block), fold1536)
+            x2 = bytes_crc_fold(x2, next(&block), fold1536)
+            x3 = bytes_crc_fold(x3, next(&block), fold1536)
+            x4 = bytes_crc_fold(x4, next(&block), fold1536)
+            x5 = bytes_crc_fold(x5, next(&block), fold1536)
+            x6 = bytes_crc_fold(x6, next(&block), fold1536)
+            x7 = bytes_crc_fold(x7, next(&block), fold1536)
+            x8 = bytes_crc_fold(x8, next(&block), fold1536)
+            x9 = bytes_crc_fold(x9, next(&block), fold1536)
+            x10 = bytes_crc_fold(x10, next(&block), fold1536)
+            x11 = bytes_crc_fold(x11, next(&block), fold1536)
         }
 
         // Combine the lanes, each folded 16 bytes into the next, then the remaining whole blocks.
@@ -235,6 +243,10 @@ extension CRC32 {
         x = bytes_crc_fold(x, x5, fold128)
         x = bytes_crc_fold(x, x6, fold128)
         x = bytes_crc_fold(x, x7, fold128)
+        x = bytes_crc_fold(x, x8, fold128)
+        x = bytes_crc_fold(x, x9, fold128)
+        x = bytes_crc_fold(x, x10, fold128)
+        x = bytes_crc_fold(x, x11, fold128)
         while reader.remainingByteCount >= 16 {
             x = bytes_crc_fold(x, try! reader.load(SIMD16<UInt8>.self), fold128)
         }

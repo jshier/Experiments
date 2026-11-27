@@ -6,9 +6,11 @@ import Dispatch
 import Testing
 
 /// The async parallel codecs stop when their task is cancelled: the workers take no more chunks, and the call throws
-/// `BytesError.cancelled`. A task cancelled before the call stops it before any chunk is taken; the codec then works
-/// again for the next call.
+/// `CancellableError.cancelled`. A task cancelled before the call stops it before any chunk is taken; the codec then
+/// works again for the next call.
 @Suite struct ParallelCancellationTests {
+    typealias Outcome = Result<[UInt8], CancellableError<BytesError>>
+
     enum Form: CaseIterable, Sendable {
         case deflateOnQueue, deflateConcurrently, brotliOnQueue, brotliConcurrently, inflateOnQueue, inflateConcurrently
 
@@ -16,7 +18,7 @@ import Testing
     }
 
     /// The outcome of one async call, in a task cancelled before it (`cancelFirst`) or not.
-    static func run(_ form: Form, _ input: [UInt8], cancelFirst: Bool) async -> Result<[UInt8], BytesError> {
+    static func run(_ form: Form, _ input: [UInt8], cancelFirst: Bool) async -> Outcome {
         await Task {
             if cancelFirst {
                 withUnsafeCurrentTask { $0?.cancel() }
@@ -25,12 +27,12 @@ import Testing
         }.value
     }
 
-    static func call(_ form: Form, _ input: [UInt8]) async -> Result<[UInt8], BytesError> {
+    static func call(_ form: Form, _ input: [UInt8]) async -> Outcome {
         let queue = DispatchQueue(label: "cancellation")
         var output = [UInt8](repeating: 0, count: input.count * 2 + 1024)
         let pointer = output.withUnsafeMutableBytes { $0 }
         var span = OutputRawSpan(buffer: pointer, initializedCount: 0)
-        do throws(BytesError) {
+        do throws(CancellableError<BytesError>) {
             switch form {
             case .deflateOnQueue, .deflateConcurrently:
                 var encoder = ParallelDeflateEncoder(format: .gzip, level: 1, chunkSize: 32 << 10, lanes: 4)
@@ -99,8 +101,8 @@ import Testing
         }
     }
 
-    /// A batch stopped before it runs delivers nothing and ends in `cancelled`; the encoder's next call (its
-    /// scheduler started again) gives the same stream as a fresh encoder's.
+    /// A batch stopped before it runs delivers nothing and reports itself cancelled (the async call then throws, with
+    /// no trailer); the encoder's next call (its scheduler started again) gives the same stream as a fresh encoder's.
     @Test func encoderWorksAfterAStoppedBatch() throws {
         let data = Self.input(1 << 20)
         var encoder = ParallelDeflateEncoder(format: .gzip, level: 1, chunkSize: 32 << 10, lanes: 4)
@@ -116,12 +118,49 @@ import Testing
                     return delivery.produced
                 }
             }
-            #expect(throws: BytesError.cancelled) { try ParallelDeflateEncoder.end(delivery, job: job, into: &span) }
             return 0
         }
         #expect(delivery.cancelled && delivery.produced == 0)
         var fresh = ParallelDeflateEncoder(format: .gzip, level: 1, chunkSize: 32 << 10, lanes: 4)
         #expect(try Self.encode(&encoder, data) == Self.encode(&fresh, data))
+    }
+
+    /// A stopped batch never gets a trailer: its output is incomplete, and a trailer would make a well-formed, wrong
+    /// stream.
+    @Test func endingAStoppedBatchStops() async {
+        await #expect(processExitsWith: .failure) {
+            var encoder = ParallelDeflateEncoder(format: .gzip, level: 1, chunkSize: 32 << 10, lanes: 4)
+            var output = [UInt8](repeating: 0, count: 1024)
+            _ = try? output.withOutputRawSpan { span throws(BytesError) in
+                let job = try encoder.begin(byteCount: 100, into: &span)
+                try ParallelDeflateEncoder.end(ChunkDelivery(cancelled: true), job: job, into: &span)
+            }
+        }
+    }
+
+    /// The decoder's one-call form (what the queue path runs) reports a stop with nothing appended, and the decoder works
+    /// for the next call. (Stopped before the call, no worker takes segment 0, so the join would give up at once and the
+    /// check before the sequential decode stops it: the check before the join matters when workers stop midway, which
+    /// no test can arrange.)
+    @Test func aStoppedDecodeEndsWithNothing() throws {
+        let data = Self.input(1 << 20)
+        let input = try Self.compressed(data)
+        var decoder = ParallelDeflateDecoder(format: .gzip, lanes: 4)
+        let stop = StopFlag()
+        stop.stop()
+        var output = [UInt8](repeating: 0, count: data.count + 1024)
+        let (consumed, produced) = try output.withOutputRawSpan { span throws(BytesError) in
+            let consumed = try decoder.decompressAll(input.span.bytes, into: &span, stopping: stop)
+            return (consumed, span.byteCount)
+        }
+        #expect(consumed == nil && produced == 0)
+        // Not stopped, the same decoder decodes the stream.
+        let decoded = try output.withOutputRawSpan { span throws(BytesError) in
+            _ = try decoder.decompressAll(input.span.bytes, into: &span)
+            return span.byteCount
+        }
+        #expect(Array(output[..<decoded]) == data)
+        #expect(decoder.lastSegmentCount > 1) // It decodes in segments: the stopped call had a join to skip.
     }
 
     static func encode(_ encoder: inout ParallelDeflateEncoder, _ data: [UInt8]) throws(BytesError) -> [UInt8] {
@@ -135,7 +174,7 @@ import Testing
 
     /// Cancelled while it runs, a call either finishes (the output whole) or throws `cancelled`; either way it
     /// returns, and an encoder reused afterwards gives the same stream as a fresh one.
-    @Test(arguments: [Form.deflateConcurrently, .inflateConcurrently])
+    @Test(arguments: [Form.deflateConcurrently, .inflateConcurrently, .deflateOnQueue, .inflateOnQueue])
     func cancelledWhileRunningStopsOrFinishes(form: Form) async throws {
         let data = Self.input(4 << 20)
         let input = form.decodes ? try Self.compressed(data) : data

@@ -289,12 +289,19 @@ func gunzipEveryWay(_ data: [UInt8], cuts: [Int] = [], outputChunk: Int = 4096, 
     }
 
     /// After a member: another member's header, or the end. Anything else throws `invalidValue`, as soon as a byte
-    /// shows it; a header cut short is truncation.
+    /// shows it; a header cut short is truncation. A header setting reserved flags is `unsupported` (RFC 1952: they
+    /// may mean a field a later gzip adds).
     @Test func bytesAfterAMember() {
         let member = Self.small.members[0]
-        for garbage: [UInt8] in [[0], [1, 2, 3], [0x1F, 0x8C], [0x1F, 0x8B, 0x07], [0x1F, 0x8B, 0x08, 0xE0, 0, 0, 0, 0, 0, 3, 3, 0], Array(repeating: 0, count: 100)] {
+        for garbage: [UInt8] in [[0], [1, 2, 3], [0x1F, 0x8C], [0x1F, 0x8B, 0x07], Array(repeating: 0, count: 100)] {
             for (name, result) in gunzipEveryWay(member + garbage, cuts: [member.count]) {
                 #expect(result == .failure(.invalidValue), "\(name), \(garbage.prefix(4))")
+            }
+        }
+        for flags: UInt8 in [0x20, 0x40, 0x80, 0xE0] {
+            let reserved: [UInt8] = [0x1F, 0x8B, 0x08, flags, 0, 0, 0, 0, 0, 3, 3, 0]
+            for (name, result) in gunzipEveryWay(member + reserved, cuts: [member.count]) {
+                #expect(result == .failure(.unsupported), "\(name), flags \(flags)")
             }
         }
         for truncated: [UInt8] in [[0x1F], [0x1F, 0x8B, 0x08], [0x1F, 0x8B, 0x08, 0, 0, 0, 0, 0, 0], Array(Self.small.members[1].dropLast(1))] {
@@ -338,17 +345,18 @@ func gunzipEveryWay(_ data: [UInt8], cuts: [Int] = [], outputChunk: Int = 4096, 
         #expect(result.status == .finished && decoded == text)
     }
 
-    /// Each member's CRC-32, length, and header CRC are checked.
+    /// Each member's CRC-32, length, and header CRC are checked: the check values throw `checksumMismatch`, the
+    /// length (a size) `mismatch`.
     @Test func checksPerMember() {
         let file = Self.file
         let trailerCRC = file.members[0].count + file.members[1].count - 8 // The second member's CRC-32.
         let lengthByte = file.members[0..<3].map(\.count).reduce(0, +) - 1 // The third member's ISIZE.
         let headerCRC = file.members[0].count + file.members[1].count + 10 + 2 + 6 + 11 + 12 // The third's FHCRC.
-        for offset in [trailerCRC, lengthByte, headerCRC] {
+        for (offset, error) in [(trailerCRC, BytesError.checksumMismatch), (lengthByte, .mismatch), (headerCRC, .checksumMismatch)] {
             var bytes = file.bytes
             bytes[offset] ^= 1
             for (name, result) in gunzipEveryWay(bytes, cuts: [offset]) {
-                #expect(result == .failure(.mismatch), "\(name), byte \(offset)")
+                #expect(result == .failure(error), "\(name), byte \(offset)")
             }
         }
     }

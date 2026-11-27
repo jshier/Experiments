@@ -53,9 +53,7 @@ public struct EntryPath: ~Escapable {
     public var description: String { Self.string(bytes) }
 
     static func string(_ bytes: RawSpan) -> String {
-        // Unsafe: decodes the closure's raw buffer. Safe: the span's own bytes, valid inside `withUnsafeBytes`; the
-        // string copies them before the closure returns.
-        bytes.withUnsafeBytes { unsafe String(decoding: $0, as: UTF8.self) }
+        String(decoding: bytes, as: UTF8.self)
     }
 
     // MARK: Checking

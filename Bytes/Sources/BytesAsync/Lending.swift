@@ -3,6 +3,10 @@ public import Bytes
 // `Bytes`' scoped lending (`withLentBytes`, `withLentFreeCapacity`) for asynchronous work: a task group, or a
 // continuation resumed from another queue. The rule is the same: the work must finish before the call returns,
 // which awaiting it ensures.
+//
+// Named apart from the synchronous forms: with one name, Swift 6.4 finds a call whose closure names its error type
+// ambiguous between the two, from async code even when the closure doesn't suspend (as `ByteBuffer.receive` is named
+// apart from `fill`).
 
 public extension RawSpan {
     /// Runs `body` with these bytes lent as a `Sendable` value, for asynchronous work that ends before `body`
@@ -12,7 +16,7 @@ public extension RawSpan {
     /// - Returns: What `body` returns.
     /// - Throws: What `body` throws.
     @inlinable
-    nonisolated(nonsending) func withLentBytes<R, E: Error>(
+    nonisolated(nonsending) func withLentBytesAsync<R, E: Error>(
         _ body: nonisolated(nonsending) (LentBytes) async throws(E) -> R
     ) async throws(E) -> R {
         // Unsafe: the pointer outlives `withUnsafeBytes`' closure. Safe: the span is borrowed for this whole
@@ -33,7 +37,7 @@ public extension OutputRawSpan {
     /// - Precondition: `body` returns at most the free capacity.
     @inlinable
     @_lifetime(self: copy self)
-    nonisolated(nonsending) mutating func withLentFreeCapacity<E: Error>(
+    nonisolated(nonsending) mutating func withLentFreeCapacityAsync<E: Error>(
         _ body: nonisolated(nonsending) (LentMutableBytes) async throws(E) -> Int
     ) async throws(E) -> Int {
         // Unsafe: the pointer outlives `withUnsafeMutableBytes`' closure, and counting bytes as initialized.

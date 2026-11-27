@@ -436,8 +436,8 @@ public extension GenericBytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    mutating func readUTF8(byteCount: Int) throws(BytesError) -> UTF8Span {
-        try readUTF8(byteCount: byteCount, excluding: { _ in .none })
+    mutating func read(utf8ByteCount byteCount: Int) throws(BytesError) -> UTF8Span {
+        try read(utf8ByteCount: byteCount, excluding: { _ in .none })
     }
 
     /// Reads the next `byteCount` bytes as validated UTF-8 in which no byte matches `excluded`, viewing
@@ -454,7 +454,7 @@ public extension GenericBytesReader {
     @inlinable @inline(__always)
     @_lifetime(copy self)
     @_lifetime(self: copy self)
-    mutating func readUTF8(byteCount: Int, excluding excluded: (ByteLanes) -> ByteMatches) throws(BytesError) -> UTF8Span {
+    mutating func read(utf8ByteCount byteCount: Int, excluding excluded: (ByteLanes) -> ByteMatches) throws(BytesError) -> UTF8Span {
         let start = _byteOffset
         let bytes = try read(byteCount: byteCount)
         guard let text = UTF8Span(validating: bytes, excluding: excluded) else {

@@ -8,7 +8,43 @@ Until 2026-11-23 this was the `BytesCompression` module of the Bytes package: it
 `RESULTS-lzraven.md`, `LZRAVEN-FORMAT.md`). The `CompressionBenchmarks` baselines saved in Bytes before the move are
 here too (`.benchmarkBaselines/CompressionBenchmarks/`), under their old names.
 
-## 2026-11-25, latest: zstd against libzstd 1.6.0 (open items 10, 11, 13a; baselines `zstd-before` → `zstd-after`)
+## 2026-11-25, latest: Errors, `Compressor`, detection, and limits that aren't reservations (open items 27, 25, 24, 15; baselines `api-before` → `api-after`)
+
+Plan, its two adversarial reviews, and what changed: `../Writeups/API-Items-Plan-2026-11-25.md`.
+
+- **Errors (27).** `BytesError` gains `checksumMismatch` (a stored check value fails: gzip/zlib/bzip2/xz/Zstandard
+  checksums and CRCs) and `unsupported` (valid data using what no decoder here does: Zstandard dictionaries, zlib's
+  preset dictionary, xz filters other than LZMA2, fields a format reserves for later versions, Brotli's large window;
+  and streaming a whole-buffer format). `mismatch` keeps stated sizes; `invalidValue` is corrupt data;
+  `insufficientData` is truncation (documented, no new case). Still payload-free: one byte. NativeZip reports
+  `unsupported` as `ZipError.unsupportedData` (nunzip's exit 81), HTTPBytes as `unsupportedCoding`.
+- **`Compressor` (25).** Public `init(for:)`, `releaseMemory()`, `compressAll(_:) -> [UInt8]`,
+  `CompressionFormat.maximumCompressedSize(forByteCount:)` (tested at every size 0–300, block sizes, and 300 KB of random
+  bytes, every format), `zstdForHTTP` both ways (HTTPBytes uses them). One parameter rule: high levels run as the
+  highest; negative levels and bad windows trap in the encoders and throw in `Compressor` (`unsupported` for negative
+  Zstandard levels, libzstd's fast ones). SocketStream moved onto `Compressor`/`Decompressor` and gained zstd.
+- **Detection and gzip headers (24).** `DecompressionFormat(detecting:)` (gzip, zstd, xz, bzip2, zlib, LZFSE, framed
+  LZ4, LZBITMAP, LZRAVEN; `detectionByteCount` 6; zlib's test passes 1 in 1,000 random inputs, measured). `GzipHeader`
+  public: `parse(_:)` reads every field (checked against the system `gzip -N`), and `DeflateEncoder`/
+  `ParallelDeflateEncoder` write a custom one (whole, streamed into 1-byte pieces, in parallel).
+- **`decompressAll(_:maximumSize:)` (15).** Without `decodedSize`, the array starts at a size the stream states, or four
+  times the input (at least 64 KiB), and grows fourfold by decoding again; `maximumSize: .max` traps no more (it
+  reserved the limit: "failed to allocate 9223372036854775839 bytes").
+
+**Cost.** Of 983 instruction and malloc rows, 910 are within 1%. The others: reference libraries' rows (Compression,
+Security, libzstd, untouched) and 64-byte coder rows under 30 K instructions, which vary ±1–4% between processes; parallel
+DEFLATE −6% (threads). One real, small change: DEFLATE encoding costs about 65 instructions more per stream (64-byte
+streams: 54,435,148 → 54,500,178 for 1,000 at level 6, +0.12%; 4 KB streams +0.03%), constant per stream and outside
+every loop; not located (not the custom header's delivery, which is inlined behind a counter, nor its writing, which
+is out of line). Mallocs: unchanged everywhere (custom gzip headers too, after the review: 0 per stream). zstd against
+libzstd 1.6.0 (harness, after): unchanged, ahead on every row sampled (encode −0.4 to −34%, decode −4 to −23%).
+
+SocketStream, in memory, 10,000 packets of 64 B with TLS records (`api-before` → `api-after`): DEFLATE and Brotli
+through `Compressor`/`Decompressor` take the same instructions as through their own encoders (34 M/13 M, 41 M/26 M);
+zstd, new: protect 29 M instructions, 2.23 ms (DEFLATE 34 M, 2.97 ms), unprotect 18 M, 1.18 ms (DEFLATE 13 M, 1.03
+ms); 0 mallocs, every pipeline.
+
+## 2026-11-25: zstd against libzstd 1.6.0 (open items 10, 11, 13a; baselines `zstd-before` → `zstd-after`)
 
 The encoder's search loops, block writes, and entropy stage, and the decoder's raw blocks, measured cycle for cycle
 against Homebrew's libzstd 1.6.0 in a scratch harness: what changed, why, and the full tables are in

@@ -111,10 +111,10 @@ public struct DeflateDecoder: ~Copyable {
     /// in turn, keeping its tables and window (`Decompressor` keeps one for all three).
     ///
     /// - Parameter format: The new stream's container.
-    /// - Throws: ``BytesError/invalidValue`` for zlib or gzip on a Deflate64 decoder (Deflate64 only comes raw); the
+    /// - Throws: ``BytesError/unsupported`` for zlib or gzip on a Deflate64 decoder (Deflate64 only comes raw); the
     ///   decoder is unchanged.
     package mutating func reset(format: DeflateFormat) throws(BytesError) {
-        guard stream.variant == .deflate || format == .raw else { throw .invalidValue }
+        guard stream.variant == .deflate || format == .raw else { throw .unsupported }
         stream.format = format
         reset()
     }
@@ -125,7 +125,7 @@ public struct DeflateDecoder: ~Copyable {
 
     /// The header of the latest gzip member read, since the decoder was made or ``reset()``: `nil` before the first
     /// (and always for raw and zlib streams).
-    package var gzipHeader: GzipHeader? { stream.gzipHeader }
+    package var gzipHeader: GzipFixedHeader? { stream.gzipHeader }
 
     /// Decodes a whole stream, from the start, straight into `output`'s free capacity.
     ///
@@ -140,8 +140,9 @@ public struct DeflateDecoder: ~Copyable {
     ///   all of them).
     /// - Throws: ``BytesError/insufficientData`` for a truncated stream; ``BytesError/insufficientCapacity``
     ///   if the output doesn't fit; ``BytesError/invalidValue`` for corrupt data (in gzip, bytes after a member
-    ///   that don't start another); ``BytesError/mismatch`` for a wrong checksum or length, or a stored block's
-    ///   bad length complement.
+    ///   that don't start another); ``BytesError/checksumMismatch`` for a wrong checksum (or gzip header CRC);
+    ///   ``BytesError/mismatch`` for a wrong gzip length; ``BytesError/unsupported`` for a zlib preset dictionary
+    ///   or reserved gzip flags.
     public mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
         reset()
         return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
@@ -255,8 +256,9 @@ public struct DeflateDecoder: ~Copyable {
     ///   stream is finished: for gzip, a member ended with all of `input` used and all output delivered (call
     ///   again with more input if there is more: another member).
     /// - Throws: ``BytesError/invalidValue`` for corrupt data (in gzip, bytes after a member that can't start
-    ///   another); ``BytesError/mismatch`` for a wrong checksum or length. A stream that never ends just keeps
-    ///   asking for input.
+    ///   another); ``BytesError/checksumMismatch`` for a wrong checksum (or gzip header CRC);
+    ///   ``BytesError/mismatch`` for a wrong gzip length; ``BytesError/unsupported`` for a zlib preset dictionary
+    ///   or reserved gzip flags. A stream that never ends just keeps asking for input.
     public mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         var position = stream.bitOffset
         var produced = 0
@@ -385,7 +387,7 @@ struct InflateStream: ~Copyable {
     /// gzip's header flags.
     private var gzipFlags = Byte.zero
     /// The latest gzip member's header, kept from one member to the next until a reset.
-    private(set) var gzipHeader: GzipHeader?
+    private(set) var gzipHeader: GzipFixedHeader?
     /// The CRC-32 of the gzip header so far, for its optional header CRC.
     private var headerCRC = CRC32()
     /// The running checksum of the output: CRC-32 for gzip, Adler-32 for zlib.
@@ -644,15 +646,18 @@ struct InflateStream: ~Copyable {
     ///   - input: The compressed bytes available.
     ///   - position: The bit position, a multiple of 8; advanced past what was read.
     /// - Returns: `false` if the part isn't all there (nothing is consumed).
-    /// - Throws: ``BytesError/invalidValue`` for a header this decoder doesn't accept (another method, a
-    ///   preset dictionary, reserved flags, a bad header check); ``BytesError/mismatch`` for a wrong header CRC.
+    /// - Throws: ``BytesError/invalidValue`` for a header that isn't one (another method, a bad header check);
+    ///   ``BytesError/unsupported`` for a zlib preset dictionary or reserved gzip flags;
+    ///   ``BytesError/checksumMismatch`` for a wrong header CRC.
     private mutating func readContainerHeader(_ input: RawSpan, at position: inout Int) throws(BytesError) -> Bool {
         var reader = try BytesReader(input, atBitPosition: position)
         do throws(BytesError) {
             switch stage {
             case .zlibHeader:
                 let header = try reader.read(Byte2.self, .bigEndian)
-                guard ZlibHeader.isDeflate(header), header.isClear(ZlibHeader.presetDictionary) else { throw BytesError.invalidValue }
+                guard ZlibHeader.isDeflate(header) else { throw BytesError.invalidValue }
+                // A preset dictionary is valid zlib (RFC 1950's FDICT) that no decoder here takes.
+                guard header.isClear(ZlibHeader.presetDictionary) else { throw BytesError.unsupported }
                 stage = .blockHeader
             case .gzipHeader:
                 guard reader.remainingByteCount >= 10 else {
@@ -668,8 +673,9 @@ struct InflateStream: ~Copyable {
                 let high = UInt16(littleEndian: fixed.load(fromByteOffset: 8, as: UInt16.self))
                 guard low & 0xFF_FFFF == 0x08_8B_1F else { throw BytesError.invalidValue } // ID1, ID2, CM (8, DEFLATE)
                 gzipFlags = Byte(truncatingIfNeeded: low &>> 24)
-                try gzipFlags.requireZero(GzipFlags.reserved)
-                gzipHeader = GzipHeader(
+                // Reserved flags may mean a field a later gzip adds (RFC 1952, 2.3.1.2): unreadable here, not corrupt.
+                guard gzipFlags.isZero(GzipFlags.reserved) else { throw BytesError.unsupported }
+                gzipHeader = GzipFixedHeader(
                     flags: gzipFlags, modificationTime: UInt32(truncatingIfNeeded: low &>> 32),
                     extraFlags: UInt8(truncatingIfNeeded: high), operatingSystem: UInt8(truncatingIfNeeded: high &>> 8)
                 )
@@ -709,7 +715,7 @@ struct InflateStream: ~Copyable {
             case .gzipHeaderCRC:
                 if gzipFlags[GzipFlags.headerCRC] { // The low 16 bits of the header's CRC-32.
                     let expected = try reader.read(Byte2.self, .littleEndian)
-                    guard expected == UInt16(truncatingIfNeeded: headerCRC.value) else { throw BytesError.mismatch }
+                    guard expected == UInt16(truncatingIfNeeded: headerCRC.value) else { throw BytesError.checksumMismatch }
                 }
                 stage = .blockHeader
             default:
@@ -738,7 +744,7 @@ struct InflateStream: ~Copyable {
     ///   - input: The compressed bytes available.
     ///   - position: The bit position, a multiple of 8; advanced past the trailer.
     /// - Returns: `false` if the trailer isn't all there (nothing is consumed).
-    /// - Throws: ``BytesError/mismatch`` for a wrong checksum or length.
+    /// - Throws: ``BytesError/checksumMismatch`` for a wrong checksum; ``BytesError/mismatch`` for a wrong length.
     private func readTrailer(_ input: RawSpan, at position: inout Int) throws(BytesError) -> Bool {
         var reader = try BytesReader(input, atBitPosition: position)
         let trailer: RawSpan
@@ -747,7 +753,7 @@ struct InflateStream: ~Copyable {
         } catch .insufficientData {
             return false
         }
-        guard format.trailerMatches(trailer, checksum: checksum, length: length) else { throw .mismatch }
+        try format.checkTrailer(trailer, checksum: checksum, length: length)
         position = reader.bitPosition
         return true
     }
@@ -761,8 +767,8 @@ struct InflateStream: ~Copyable {
     ///   - input: The compressed bytes available.
     ///   - position: The bit position; advanced past the header.
     /// - Returns: `false` if the header isn't all there (nothing is consumed).
-    /// - Throws: ``BytesError/invalidValue`` for the reserved block type or invalid tables;
-    ///   ``BytesError/mismatch`` for a stored block's bad length complement.
+    /// - Throws: ``BytesError/invalidValue`` for the reserved block type, invalid tables, or a stored block's bad
+    ///   length complement.
     private mutating func readBlockHeader(_ input: RawSpan, at position: inout Int) throws(BytesError) -> Bool {
         var bits = try BitBuffer(input, atBitPosition: position, bitOrder: .leastSignificantFirst)
         let isFinal = bits.read(Bool.self)
@@ -774,9 +780,10 @@ struct InflateStream: ~Copyable {
             guard !bits.isOverrun else { return false }
             var stored = try bits.finish()
             let length: Byte2
-            do {
+            do throws(BytesError) {
                 length = try stored.read(Byte2.self)
-                try stored.expect(~length) // NLEN, the one's complement
+                // NLEN, the one's complement: another value is corrupt data.
+                guard try stored.read(Byte2.self) == ~length else { throw .invalidValue }
             } catch .insufficientData {
                 return false
             }
@@ -1153,9 +1160,10 @@ struct InflateStream: ~Copyable {
         unsafe output.storeBytes(of: value, toUncheckedByteOffset: destination, as: T.self)
     }
 
-    /// Copies a match in the fast loop: 16 or 8 bytes at a time with an overrun of up to 32 bytes, libdeflate's
-    /// copy with no branch on the length up to 32. Distances below 8 go through the writer's exact copy (a
-    /// `memset` for 1, a pattern fill for 2–7).
+    /// Copies a match in the fast loop with an overrun of up to 32 bytes and no branch on the length up to 32
+    /// (libdeflate's copy): 16 bytes at a time from 16 back; under 16 back, the pattern repeated from registers
+    /// (`copyShortMatch`: one load, two `tbl`s, stores) once 16 bytes precede the copy. Before that (the stream's
+    /// first bytes): 8 bytes at a time from 8 back, the writer's exact copy below.
     ///
     /// - Precondition: `1 <= distance <= offset`, and `length + 32` bytes of room after `offset`.
     @inline(always)
@@ -1172,6 +1180,10 @@ struct InflateStream: ~Copyable {
                 unsafe move(SIMD16<UInt8>.self, from: source &+ index, to: offset &+ index, in: &output)
                 index &+= 16
             }
+        } else if offset >= 16 {
+            // Unsafe: unchecked. Safe: `1 <= distance <= 15` (this branch), 16 bytes before `offset`, and `length + 32`
+            // bytes of room (the fast loop's).
+            unsafe AlignedBytesWriter.copyShortMatch(distance: distance, count: length, in: &output, at: offset)
         } else if distance >= 8 {
             unsafe move(UInt64.self, from: source, to: offset, in: &output)
             unsafe move(UInt64.self, from: source &+ 8, to: offset &+ 8, in: &output)
@@ -1183,9 +1195,16 @@ struct InflateStream: ~Copyable {
                 index &+= 8
             }
         } else {
-            var writer = try AlignedBytesWriter(&output, atByteOffset: offset)
-            try writer.copy(fromDistance: distance, count: length)
+            try copyMatchExactly(&output, at: offset, distance: distance, length: length)
         }
+    }
+
+    /// A match under 8 bytes back in a stream's first 16 bytes: the writer's exact copy. Out of line, so the fast loop
+    /// doesn't carry the writer's paths.
+    @inline(never)
+    private static func copyMatchExactly(_ output: inout MutableRawSpan, at offset: Int, distance: Int, length: Int) throws(BytesError) {
+        var writer = try AlignedBytesWriter(&output, atByteOffset: offset)
+        try writer.copy(fromDistance: distance, count: length)
     }
 
     /// Decodes symbols near the end of the input or output: one at a time, each finished only if its bits are

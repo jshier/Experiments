@@ -52,7 +52,7 @@ internal import Synchronization
 ///   of their own.
 ///
 /// The async forms stop early when their task is cancelled: workers take no more segments, and the call throws
-/// ``BytesError/cancelled`` with nothing appended (a sequential decode, once started, runs to its end).
+/// `CancellableError.cancelled` with nothing appended (a sequential decode, once started, runs to its end).
 @safe
 public struct ParallelDeflateDecoder: ~Copyable {
     /// The container: raw DEFLATE, zlib, or gzip.
@@ -122,22 +122,26 @@ public struct ParallelDeflateDecoder: ~Copyable {
     ///   them, the input ending after a member).
     /// - Throws: As ``DeflateDecoder/decompressAll(_:into:)``: ``BytesError/invalidValue`` for a corrupt
     ///   stream, ``BytesError/insufficientData`` for a truncated one, ``BytesError/insufficientCapacity``
-    ///   if `output` is too small, ``BytesError/mismatch`` for a wrong checksum or length.
+    ///   if `output` is too small, ``BytesError/checksumMismatch`` for a wrong checksum, ``BytesError/mismatch`` for a
+    ///   wrong gzip length.
     public mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
-        try decompressAll(input, into: &output, stop: nil)
+        // Never stops without a flag.
+        try decompressAll(input, into: &output, stopping: nil)!
     }
 
     /// Decompresses as ``decompressAll(_:into:)`` does, stopping early when `stop` is set (from any thread: an
     /// async call's cancellation handler). The lanes check it as they take each segment, and the call checks it
-    /// once they're done, before the join; a sequential decode, once started, runs to the end.
+    /// between its steps: before the join, a sequential decode, or gzip's later members; a step, once started, runs to
+    /// the end.
     ///
-    /// - Throws: ``BytesError/cancelled`` if `stop` was set before the segments were joined (nothing appended to
-    ///   `output`, though the lanes may have copied segments into its free capacity); otherwise as
-    ///   ``decompressAll(_:into:)``.
+    /// - Returns: The bytes of `input` the stream took, or `nil` if `stop` was set (the output is incomplete: nothing
+    ///   appended if the segments weren't joined, though the lanes may have copied segments into its free capacity).
+    /// - Throws: As ``decompressAll(_:into:)``.
     package mutating func decompressAll(
-        _ input: RawSpan, into output: inout OutputRawSpan, stop: StopFlag?
-    ) throws(BytesError) -> Int {
+        _ input: RawSpan, into output: inout OutputRawSpan, stopping stop: StopFlag?
+    ) throws(BytesError) -> Int? {
         var consumed: Int?
+        var stopped = false
         if let plan = plan(input) {
             // Unsafe: the output's free capacity lent to the workers, which copy accepted segments into it as they
             // finish. Safe: `concurrentPerform` returns before this closure does, and only the bytes the join
@@ -150,15 +154,26 @@ public struct ParallelDeflateDecoder: ~Copyable {
                 DispatchQueue.concurrentPerform(iterations: plan.workerCount) { w in
                     unsafe scheduler.work(w, input, points: plan.points, format: format, lanes: lanes, segments: segments, into: target, stop: stop)
                 }
+                if stop?.isStopped == true {
+                    stopped = true
+                    return 0
+                }
                 // Unsafe: the lent output, joined into. Safe: the workers are done, and the lending outlasts the call.
-                guard let joined = try unsafe joinSegments(input, plan: plan, into: target, stop: stop) else { return 0 }
+                guard let joined = try unsafe joinSegments(input, plan: plan, into: target) else { return 0 }
                 consumed = joined.consumed
                 return joined.produced
             }
         }
-        // (Not `consumed ?? …`: `??` rethrows untyped, which a typed throw mustn't pass through.)
-        let streamEnd: Int = if let consumed { consumed } else { try decompressSequentially(input, into: &output, stop: stop) }
-        return try decompressMembers(input, after: streamEnd, into: &output, stop: stop)
+        if stopped { return nil }
+        let streamEnd: Int
+        if let consumed {
+            streamEnd = consumed
+        } else {
+            if stop?.isStopped == true { return nil }
+            streamEnd = try decompressSequentially(input, into: &output)
+        }
+        if membersFollow(input, after: streamEnd), stop?.isStopped == true { return nil }
+        return try decompressMembers(input, after: streamEnd, into: &output)
     }
 
     // MARK: - The steps of a call (for the synchronous call above and `BytesCompressionAsync`'s task group)
@@ -174,7 +189,7 @@ public struct ParallelDeflateDecoder: ~Copyable {
     /// decodes in parallel: if there's a split point past the first window (if not, the scan from there found none).
     /// Every segment then decodes raw DEFLATE, segment 0 from the first block.
     ///
-    /// - Returns: The plan, or `nil` to decode the stream sequentially (``decompressSequentially(_:into:stop:)``): too
+    /// - Returns: The plan, or `nil` to decode the stream sequentially (``decompressSequentially(_:into:)``): too
     ///   short for two segments, no split point, or a header that's bad, cut short, or reaches the first window's end
     ///   (the sequential decode throws the right error).
     package mutating func plan(_ input: RawSpan) -> Plan? {
@@ -193,7 +208,7 @@ public struct ParallelDeflateDecoder: ~Copyable {
 
     /// The plan's segment workers over lent input and output (the output's free capacity: segments are copied to its
     /// start as they're accepted), for a task group: run ``SegmentBatch/work(_:)`` once for each worker, then
-    /// ``joinSegments(_:plan:into:stop:)``. The workers take no more segments once `stop` is set.
+    /// ``joinSegments(_:plan:into:)`` unless `stop` is set. The workers take no more segments once it is.
     ///
     /// Unsafe: the batch holds pointers to the decoder's lanes and segments. Safe if the decoder stays borrowed (its
     /// storage doesn't move) until every worker has returned, and the input and output stay lent.
@@ -209,18 +224,19 @@ public struct ParallelDeflateDecoder: ~Copyable {
     /// After the workers: the segments joined into `output`'s start, after those the workers delivered (failed
     /// regions decoded again in place), and the container's trailer checked.
     ///
+    /// A call that can stop checks its flag first: once started, the join decodes every region the workers didn't
+    /// accept again, in place (a stopped batch's skipped segments included).
+    ///
     /// - Returns: The input the stream took and the output it produced; `nil` if segment 0 failed (decode the stream
     ///   sequentially instead, which throws the stream's own error).
-    /// - Throws: ``BytesError/cancelled`` if `stop` was set (the lanes may have copied segments into `output`; none
-    ///   count); otherwise as ``decompressAll(_:into:)``.
+    /// - Throws: As ``decompressAll(_:into:)``.
     package mutating func joinSegments(
-        _ input: RawSpan, plan: Plan, into output: LentMutableBytes, stop: StopFlag?
+        _ input: RawSpan, plan: Plan, into output: LentMutableBytes
     ) throws(BytesError) -> (consumed: Int, produced: Int)? {
         lastSplitCount = 0
         for j in 0..<plan.points.count where segments[j].exists {
             lastSplitCount &+= 1
         }
-        if stop?.isStopped == true { throw .cancelled }
         let delivered = scheduler.delivery.withLock { $0 }
         // Unsafe: a span over the lent output. Safe: the workers are done; it ends with this call.
         var span = unsafe MutableRawSpan(_unsafeBytes: output.buffer)
@@ -234,10 +250,8 @@ public struct ParallelDeflateDecoder: ~Copyable {
     /// failed. For gzip, every member.
     ///
     /// - Returns: The bytes of `input` the stream took.
-    /// - Throws: ``BytesError/cancelled`` if `stop` is set (before it starts: once started, it runs to the end);
-    ///   otherwise as ``DeflateDecoder/decompressAll(_:into:)``.
-    package mutating func decompressSequentially(_ input: RawSpan, into output: inout OutputRawSpan, stop: StopFlag?) throws(BytesError) -> Int {
-        if stop?.isStopped == true { throw .cancelled }
+    /// - Throws: As ``DeflateDecoder/decompressAll(_:into:)``.
+    package mutating func decompressSequentially(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
         lastSegmentCount = 1
         lastRepairCount = 0
         return try sequential.decompressAll(input, into: &output)
@@ -249,13 +263,18 @@ public struct ParallelDeflateDecoder: ~Copyable {
     ///
     /// - Parameter consumed: Where the first stream ended in `input`.
     /// - Returns: The bytes of `input` the stream took, all of its members.
-    /// - Throws: ``BytesError/cancelled`` if `stop` is set and members remain; as ``DeflateDecoder/decompressAll(_:into:)``.
+    /// - Throws: As ``DeflateDecoder/decompressAll(_:into:)``.
     package mutating func decompressMembers(
-        _ input: RawSpan, after consumed: Int, into output: inout OutputRawSpan, stop: StopFlag?
+        _ input: RawSpan, after consumed: Int, into output: inout OutputRawSpan
     ) throws(BytesError) -> Int {
-        guard format == .gzip && consumed < input.byteCount else { return consumed }
-        if stop?.isStopped == true { throw .cancelled }
+        guard membersFollow(input, after: consumed) else { return consumed }
         return try consumed &+ sequential.decompressAll(input.extracting(consumed...), into: &output)
+    }
+
+    /// Whether ``decompressMembers(_:after:into:)`` has members to decode after `consumed`: a call that can stop checks
+    /// its flag before them only then.
+    package func membersFollow(_ input: RawSpan, after consumed: Int) -> Bool {
+        format == .gzip && consumed < input.byteCount
     }
 
     // MARK: - Engine
@@ -283,8 +302,9 @@ public struct ParallelDeflateDecoder: ~Copyable {
     ///
     /// - Returns: The input consumed, the output produced, the segments accepted, and the regions decoded
     ///   again; or `nil` if segment 0 failed (decode sequentially instead, which throws the stream's own error).
-    /// - Throws: ``BytesError/insufficientCapacity`` if `output` is too small, ``BytesError/mismatch`` for a
-    ///   trailer that doesn't match, ``BytesError/insufficientData`` for a missing one; a region decoded again
+    /// - Throws: ``BytesError/insufficientCapacity`` if `output` is too small, ``BytesError/checksumMismatch`` or
+    ///   ``BytesError/mismatch`` for a trailer that doesn't match (its checksum, gzip's length),
+    ///   ``BytesError/insufficientData`` for a missing one; a region decoded again
     ///   throws as ``DeflateDecoder/decompressAll(_:into:)`` would at that point of the stream.
     private mutating func join(
         _ input: RawSpan, points: SplitPoints, delivered: InflateDelivery, into span: inout MutableRawSpan
@@ -336,7 +356,7 @@ public struct ParallelDeflateDecoder: ~Copyable {
         // The last segment was decoded as raw DEFLATE: the trailer follows its final block.
         var reader = try AlignedBytesReader(input, atByteOffset: trailer)
         let bytes = try reader.read(byteCount: format.trailerSize)
-        guard format.trailerMatches(bytes, checksum: checksum, length: UInt32(truncatingIfNeeded: total)) else { throw .mismatch }
+        try format.checkTrailer(bytes, checksum: checksum, length: UInt32(truncatingIfNeeded: total))
         return (reader.byteOffset, total, max(accepted, 1), repairs)
     }
 

@@ -224,7 +224,7 @@ public struct HTTPParameter: ~Escapable {
 
     /// Whether the name is `name`, ignoring case on both sides (parameter names are case-insensitive).
     @inlinable
-    public func isNamed(_ name: StaticString) -> Bool { HTTPToken.equalsIgnoringCase(self.name, immortalSpan(name)) }
+    public func isNamed(_ name: StaticString) -> Bool { HTTPToken.equalsIgnoringCase(self.name, name.bytes) }
 }
 
 /// Parameters after a value: `*( OWS ";" OWS [ parameter ] )` (RFC 9110 §5.6.6), each `name=value` with no whitespace

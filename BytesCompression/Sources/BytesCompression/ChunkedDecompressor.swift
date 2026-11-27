@@ -85,9 +85,8 @@ public struct ChunkedDecompressor: ~Copyable {
     /// Borrowed input, and how much of it the decoder has consumed.
     private var input = unsafe UnsafeRawBufferPointer(start: nil, count: 0)
     private var consumed = 0
-    /// Staged input, made on the first ``stageInput()``, and its size (which grows for a format that needs more).
+    /// Staged input, made on the first ``stageInput()`` (it grows for a format that needs more).
     private var staging: ByteBuffer?
-    private var stagingSize = 0
     private var isStaged = false
     /// No more input will come: always for borrowed input; for staged input, once ``fillInput(_:)`` added nothing or
     /// ``endInput()`` was called.
@@ -138,21 +137,11 @@ public struct ChunkedDecompressor: ~Copyable {
     public mutating func stageInput() {
         if staging == nil {
             staging = ByteBuffer(capacity: Self.minimumStagingCapacity)
-            stagingSize = Self.minimumStagingCapacity
         } else {
             staging!.removeAll()
         }
         isStaged = true
         inputEnded = false
-    }
-
-    /// Grows the staged input's buffer to `capacity` if it's smaller, keeping the staged bytes.
-    private mutating func growStaging(to capacity: Int) {
-        guard stagingSize < capacity, let old = staging.take() else { return }
-        var bigger = ByteBuffer(capacity: capacity)
-        bigger.fill { output in output.append(copying: old.unread) }
-        staging = consume bigger
-        stagingSize = capacity
     }
 
     /// Appends staged input: `body` writes into the free space (after the unconsumed bytes are moved to the front) and
@@ -166,13 +155,15 @@ public struct ChunkedDecompressor: ~Copyable {
         precondition(isStaged, "input is staged (stageInput)")
         _ = staging!.compact()
         // Nothing more fits: 0 here would read as the input's end.
-        // Unsafe: only the staged bytes' count is read.
-        guard unsafe pendingInput.count < stagingSize else { throw .insufficientCapacity }
-        let added = staging!.fill { output in
-            output.withFreeCapacity { span, written in
-                written = body(&span)
-                return written
-            }
+        // A `~Copyable` optional: borrowed with `switch` (`staging!` would consume it).
+        let full = switch staging {
+        case let .some(buffer): buffer.isFull
+        case .none: preconditionFailure("Staged input has a staging buffer")
+        }
+        guard !full else { throw .insufficientCapacity }
+        let added = staging!.withFreeCapacity { span, written in
+            written = body(&span)
+            return written
         }
         if added == 0 { inputEnded = true }
         return added
@@ -208,7 +199,6 @@ public struct ChunkedDecompressor: ~Copyable {
     public mutating func releaseMemory() {
         decompressor.releaseMemory()
         staging = nil
-        stagingSize = 0
         isStaged = false
         unsafe input = UnsafeRawBufferPointer(start: nil, count: 0)
         consumed = 0
@@ -232,7 +222,8 @@ public struct ChunkedDecompressor: ~Copyable {
     public mutating func start(_ format: DecompressionFormat, decodedSize: Int?) throws(BytesError) {
         try decompressor.reset(for: format)
         self.format = format
-        if isStaged { growStaging(to: Self.stagingCapacity(for: format)) }
+        // Grown keeping the staged bytes (a container's header may be among them).
+        if isStaged { staging?.reserveCapacity(Self.stagingCapacity(for: format)) }
         atTentativeEnd = false
         lastEnd = 0
         openBuffer = -1

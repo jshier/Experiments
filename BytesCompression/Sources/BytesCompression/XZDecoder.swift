@@ -135,8 +135,10 @@ package struct XZDecoder: ~Copyable {
     /// - Returns: What was consumed and produced, and why it returned: ``TransformStatus/finished`` after a
     ///   stream's footer (and any stream padding) with all of `input` consumed and all output delivered (another
     ///   stream may follow). A file cut short keeps asking for input.
-    /// - Throws: ``BytesError/mismatch`` for a wrong CRC, check, or size; ``BytesError/invalidValue`` for corrupt
-    ///   data, bytes that aren't a stream, or an unsupported filter or check type; ``BytesError/insufficientData``
+    /// - Throws: ``BytesError/checksumMismatch`` for a wrong CRC or check; ``BytesError/mismatch`` for a size or
+    ///   index that disagrees with the blocks; ``BytesError/invalidValue`` for corrupt data or bytes that aren't a
+    ///   stream; ``BytesError/unsupported`` for a filter other than LZMA2 alone, a reserved check type, or reserved
+    ///   flags (SHA-256 checks are read but not verified); ``BytesError/insufficientData``
     ///   for a block header whose fields run past its end; ``BytesError/limitExceeded`` for a dictionary larger than
     ///   ``maximumDictionarySize`` once it's needed, or a file outgrowing the window its size hint made. After an error, every call throws it until the
     ///   next ``reset()``.
@@ -307,10 +309,10 @@ package struct XZDecoder: ~Copyable {
                 switch checkType {
                 case 1:
                     let expected = UInt32(littleEndian: bytes.load(fromByteOffset: padding, as: UInt32.self))
-                    guard block.crc32.value == expected else { throw .mismatch }
+                    guard block.crc32.value == expected else { throw .checksumMismatch }
                 case 4:
                     let expected = UInt64(littleEndian: bytes.load(fromByteOffset: padding, as: UInt64.self))
-                    guard block.crc64.value == expected else { throw .mismatch }
+                    guard block.crc64.value == expected else { throw .checksumMismatch }
                 default:
                     break // None, or SHA-256: not verified.
                 }
@@ -361,7 +363,7 @@ package struct XZDecoder: ~Copyable {
                 }
                 indexCRC.update(bytes.extracting(first: padding))
                 guard indexCRC.value == UInt32(littleEndian: bytes.load(fromByteOffset: padding, as: UInt32.self)) else {
-                    throw .mismatch
+                    throw .checksumMismatch
                 }
                 indexSize &+= padding &+ 4
                 position &+= padding &+ 4

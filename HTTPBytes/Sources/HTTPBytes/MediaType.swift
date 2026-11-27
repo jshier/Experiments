@@ -1,3 +1,5 @@
+public import Bytes
+
 /// A media type (RFC 9110 §8.3.1): `type/subtype` and parameters, as `Content-Type` carries it. Type, subtype, and
 /// parameter names compare without case; parameter values as the parameter defines (`charset`'s without case).
 ///
@@ -40,7 +42,7 @@ public struct HTTPMediaType: ~Escapable {
     /// Whether this is `type/subtype`, ignoring case on both sides.
     @inlinable
     public func matches(_ type: StaticString, _ subtype: StaticString) -> Bool {
-        HTTPToken.equalsIgnoringCase(self.type, immortalSpan(type)) && HTTPToken.equalsIgnoringCase(self.subtype, immortalSpan(subtype))
+        HTTPToken.equalsIgnoringCase(self.type, type.bytes) && HTTPToken.equalsIgnoringCase(self.subtype, subtype.bytes)
     }
 
     /// The `charset` parameter's value, if there is one.

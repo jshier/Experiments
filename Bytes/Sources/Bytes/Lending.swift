@@ -3,7 +3,8 @@
 // A span can't cross threads (it's `~Escapable`, so no task or `concurrentPerform` closure can capture it).
 // These types carry its memory as a `Sendable` pointer instead, made only by the scoped functions below, which
 // state the one rule that makes them safe: the work that uses them must finish before the function returns.
-// `concurrentPerform` and a task group both do; `BytesAsync` has the `async` forms.
+// `concurrentPerform` and a task group both do; `BytesAsync` has the `async` forms (`withLentBytesAsync`,
+// `withLentFreeCapacityAsync`).
 //
 // ```swift
 // let total = input.withLentBytes { bytes in

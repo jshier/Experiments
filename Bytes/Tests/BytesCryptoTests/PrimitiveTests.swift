@@ -219,6 +219,83 @@ extension InlineArray: @retroactive Equatable where Element: Equatable {
         }
     }
 
+    /// A counter's layout and start, modeled independently: the blocks it makes, in order.
+    enum CounterModel {
+        case littleEndian128(UInt64)
+        case bigEndian64(prefix: [UInt8], low: UInt64)
+        case bigEndian32(prefix: [UInt8], low: UInt32)
+
+        func counter() -> BytesCrypto.AES.Counter {
+            switch self {
+            case let .littleEndian128(start): AES.Counter(littleEndianFrom: start)
+            case let .bigEndian64(prefix, low): AES.Counter(bigEndian64BitCounterIn: (prefix + Self.bigEndian(low)).span.bytes)
+            case let .bigEndian32(prefix, low): AES.Counter(bigEndian32BitCounterIn: (prefix + Self.bigEndian(low)).span.bytes)
+            }
+        }
+
+        func block(_ index: Int) -> [UInt8] {
+            switch self {
+            case let .littleEndian128(start):
+                let value = UInt128(start) &+ UInt128(index)
+                return (0..<16).map { UInt8(truncatingIfNeeded: value >> (8 * $0)) }
+            case let .bigEndian64(prefix, low): return prefix + Self.bigEndian(low &+ UInt64(index))
+            case let .bigEndian32(prefix, low): return prefix + Self.bigEndian(low &+ UInt32(truncatingIfNeeded: index))
+            }
+        }
+
+        static func bigEndian<T: FixedWidthInteger>(_ value: T) -> [UInt8] {
+            (0..<(T.bitWidth / 8)).reversed().map { UInt8(truncatingIfNeeded: value >> (8 * $0)) }
+        }
+    }
+
+    /// Counter mode against single blocks of `encrypt`, for each key size and counter layout: lengths around each
+    /// batch (16-byte blocks, 8- and 12-block batches: 127–129, 191–193, 319–321, 383–385, 575–577), counters that
+    /// carry or wrap inside a batch (the 12-block kernel stops for `littleEndian128` when its low word would carry),
+    /// in place and not, whole and in pieces.
+    @Test(arguments: [16, 24, 32])
+    func counterModeAtEveryBatchBoundaryAndCarry(keyLength: Int) {
+        var rng = SplitMix64(seed: UInt64(keyLength) &+ 1_212)
+        let key = rng.bytes(keyLength)
+        let aes = AES(key: key.span.bytes)
+        let message = rng.bytes(4_099)
+        let prefix8 = rng.bytes(8), prefix12 = rng.bytes(12)
+        var models: [CounterModel] = [.littleEndian128(1), .bigEndian64(prefix: prefix8, low: 7), .bigEndian32(prefix: prefix12, low: 9)]
+        for back in [13, 12, 11, 5, 1] {
+            models.append(.littleEndian128(UInt64.max - UInt64(back)))
+            models.append(.bigEndian64(prefix: prefix8, low: UInt64.max - UInt64(back)))
+            models.append(.bigEndian32(prefix: prefix12, low: UInt32.max - UInt32(back)))
+        }
+        let lengths = [0, 1, 15, 16, 17, 127, 128, 129, 191, 192, 193, 255, 256, 319, 320, 321, 383, 384, 385, 575, 576, 577, 4_099]
+        for model in models {
+            let stream = (0..<(message.count / 16 + 1)).flatMap { index in
+                let block = aes.encrypt(SIMD16<UInt8>(model.block(index)))
+                return (0..<16).map { block[$0] }
+            }
+            for length in lengths {
+                let expected = (0..<length).map { message[$0] ^ stream[$0] }
+                for splits in [[], [5, 200, 391]] {
+                    var counter = model.counter()
+                    var output = [UInt8](repeating: 0, count: length)
+                    var begin = 0
+                    for split in splits + [length] where split >= begin && split <= length {
+                        var span = output.mutableSpan
+                        var raw = MutableRawSpan(mutating: &span)
+                        var piece = raw._mutatingExtracting(begin..<split)
+                        aes.counterMode(message.span.bytes.extracting(begin..<split), into: &piece, counter: &counter)
+                        begin = split
+                    }
+                    #expect(output == expected, "\(model), \(length) bytes, split at \(splits)")
+                }
+                var inPlace = Array(message.prefix(length))
+                var counter = model.counter()
+                var span = inPlace.mutableSpan
+                var raw = MutableRawSpan(mutating: &span)
+                aes.counterMode(&raw, counter: &counter)
+                #expect(inPlace == expected, "\(model), \(length) bytes, in place")
+            }
+        }
+    }
+
     /// The 64-bit big-endian counter against CommonCrypto's own CTR mode, from IVs whose low 32 bits (a carry GCM's
     /// layout wouldn't make) and low 64 bits (a wrap with no carry further) are about to overflow, across batch
     /// boundaries and in pieces.

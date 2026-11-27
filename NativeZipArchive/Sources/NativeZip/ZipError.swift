@@ -28,6 +28,9 @@ public enum ZipError: Error, Sendable, Equatable, CustomStringConvertible {
     case unsupportedEncryption(String)
     /// The named entry uses a compression method that can't be read (see ``ZipArchive/Method``).
     case unsupportedMethod(UInt16, String)
+    /// The named entry's compressed data uses a feature of its method that can't be read: a Zstandard dictionary, an
+    /// xz filter other than LZMA2 (a BCJ filter), a flag its format reserves for later versions.
+    case unsupportedData(String)
     /// The named entry's decompressed data doesn't match its recorded CRC-32.
     case crcMismatch(String, expected: UInt32, actual: UInt32)
     /// The named entry's contents aren't its recorded size: a stored entry's payload, or what a compressed entry
@@ -35,7 +38,8 @@ public enum ZipError: Error, Sendable, Equatable, CustomStringConvertible {
     /// with an end marker, `expected + 1`: its decoder stops at the first byte past).
     case sizeMismatch(String, expected: UInt64, actual: UInt64)
     /// The named entry's compressed data didn't decode: the decoder's error (`BytesError`: `invalidValue` for invalid
-    /// data, `insufficientData` for a stream that ends before its end, `trailingData`, …).
+    /// data, `insufficientData` for a stream that ends before its end, `checksumMismatch` for a check inside the
+    /// compressed data (a Zstandard checksum, an xz block's CRC) that fails, `trailingData`, …).
     case decoding(BytesError, String)
     /// Opening the archive, or writing what's in it, failed: Disk's error as it threw it (the call, the path, and the
     /// `errno`; an item that exists; a path that leads out of the destination; …).
@@ -56,10 +60,12 @@ public enum ZipError: Error, Sendable, Equatable, CustomStringConvertible {
         case let .unsupportedEncryption(name): "'\(name)' uses an unsupported encryption method."
         case let .unsupportedMethod(method, name):
             "'\(name)' uses unsupported compression method \(method) (\(ZipArchive.Method.name(method)))."
+        case let .unsupportedData(name): "'\(name)' uses an unsupported feature of its compression method."
         case let .crcMismatch(name, expected, actual):
             "CRC mismatch for '\(name)': expected \(String(expected, radix: 16)), got \(String(actual, radix: 16))."
         case let .sizeMismatch(name, expected, actual):
             "Size mismatch for '\(name)': expected \(expected) bytes, got \(actual)."
+        case let .decoding(.checksumMismatch, name): "Compressed data for '\(name)' fails its own checksum: it's corrupt."
         case let .decoding(error, name): "Compressed data for '\(name)' is corrupt (\(error))."
         case let .disk(error): "\(error.description.prefix(1).uppercased())\(error.description.dropFirst())."
         case .cancelled: "Cancelled."
@@ -69,7 +75,7 @@ public enum ZipError: Error, Sendable, Equatable, CustomStringConvertible {
     /// Whether this is ``cancelled`` (or a cancellation another module reported).
     public var isCancellation: Bool {
         switch self {
-        case .cancelled, .disk(.cancelled), .decoding(.cancelled, _): true
+        case .cancelled, .disk(.cancelled): true
         default: false
         }
     }
@@ -82,10 +88,11 @@ public enum ZipError: Error, Sendable, Equatable, CustomStringConvertible {
         }
     }
 
-    /// A decoder's failure on the named entry: ``decoding(_:_:)``, except cancellation (``cancelled``).
+    /// A decoder's failure on the named entry: ``decoding(_:_:)``, except data the decoder can't read though it's valid
+    /// (``unsupportedData(_:)``).
     init(decoding error: BytesError, _ name: String) {
         switch error {
-        case .cancelled: self = .cancelled
+        case .unsupported: self = .unsupportedData(name)
         default: self = .decoding(error, name)
         }
     }

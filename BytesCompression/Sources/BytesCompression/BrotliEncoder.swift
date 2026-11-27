@@ -45,12 +45,15 @@ public struct BrotliEncoder: ~Copyable {
     /// Creates an encoder, allocating its tables and window.
     ///
     /// - Parameters:
-    ///   - quality: 1 (fastest) through 9; 0 means 1, 10 and 11 mean 9.
-    ///   - windowBits: log2 of the window (how far back matches reach), 10 through 24. The streaming window
-    ///     takes `2^windowBits` bytes plus 256 KB.
+    ///   - quality: 1 (fastest) through 9; 0 runs as 1, 10 and 11 (and higher) as 9. Negative qualities trap;
+    ///     `Compressor` throws for them instead.
+    ///   - windowBits: log2 of the window (how far back matches reach), 10 through 24; others trap. The streaming
+    ///     window takes `2^windowBits` bytes plus 256 KB.
     public init(quality: Int = 5, windowBits: Int = 22) {
+        precondition(quality >= 0, "Brotli qualities are 0 through 11")
+        precondition((10...24).contains(windowBits), "Brotli windows are 10 through 24 bits")
         self.quality = min(max(quality, 1), 9)
-        self.windowBits = min(max(windowBits, 10), 24)
+        self.windowBits = windowBits
         engine = BrotliEngine(quality: self.quality, windowBits: self.windowBits)
         window = StagingBuffer(count: (1 &<< self.windowBits) &+ Self.area)
     }

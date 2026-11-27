@@ -9,16 +9,20 @@ Where to look:
 
 - Vectorization, SIMD, NEON, shuffles, tables: "Vectorization on ARM64", "API design and code generation",
   "Apple's formats, curves…", "A second machine", "Masked tables, word loads, and narrowing", "Block loads, `cmeq`, and
-  dense candidates".
+  dense candidates", "Twelve AES chains…", "Patterns from registers…".
 - Inlining, allocations, codegen traps, typed throws: "Allocations, concurrency, and codegen", "Compression and
   crypto", "The 2026-11-18 pass", "Every zip method in Swift", "Making decoders…".
+- `~Copyable` optionals, exclusivity between stored properties, `@inlinable` and access: "Growing buffers, checked
+  storage…".
 - Compression codecs: "Compression and crypto", "Apple Encrypted Archives and the LZMA decoder", "Xcode's `.xip`…",
   "Every zip method in Swift", "Zstandard encoding", "One-shot reuse and gzip members", "The fix plan", "Small inputs
-  and making coders", "Matching libzstd 1.6.0's encoder cycle for cycle".
+  and making coders", "Matching libzstd 1.6.0's encoder cycle for cycle", "Errors that say what failed…".
+- Errors (which `BytesError` case, unsupported versus corrupt): "Errors that say what failed, `Compressor`'s gaps…".
 - Measuring: branch predictors memorizing repeated inputs, profilers naming inlined code: "Matching libzstd 1.6.0's
   encoder…".
 - Concurrency and parallel work: "Allocations, concurrency, and codegen", "Threads to structured concurrency", "Bytes
-  cleanup", "One codec layer", "The fix plan", "Noncopyable continuations and buffer leases".
+  cleanup", "One codec layer", "The fix plan", "Noncopyable continuations and buffer leases", "Growing buffers…"
+  (cancellation as `CancellableError`).
 - File systems, extraction, Apple's archive tools, Archive Utility: "Apple Encrypted Archives…", "Xcode's `.xip`…",
   "The Disk package and the Nunarchiver app", "Matching Archive Utility", "The survey's bugs", "The archive-coverage
   set".
@@ -1277,3 +1281,107 @@ The zstd encoder against libzstd 1.6.0, levels 1–4 (open items 10, 11, 13a). N
   kept for simplicity), dropping dfast's `ip+256` prefetch (neutral), a branch-free 8-byte backward catch-up (2–9%
   slower: the byte loop's branch predicts), folding `rep1 > 0` into the repeat test with a select (LLVM rebuilt the
   branch; libzstd's clang unswitches its loop on `offset_1 == 0` instead).
+
+## Errors that say what failed, `Compressor`'s gaps, detection, and limits that aren't reservations (2026-11-25)
+
+Open items 27, 25, 24, and 15. Plan and review: `Writeups/API-Items-Plan-2026-11-25.md`; numbers:
+`BytesCompression/RESULTS.md` (2026-11-25, "Errors, `Compressor`, detection").
+
+- **One rule tells "unsupported" from "corrupt"**: what a format's specification *reserves for future use* (gzip's
+  reserved FLG bits, xz's reserved flags and check types, zstd's reserved frame bit) is `unsupported`, since a newer
+  writer may set it (RFC 1952 says so of gzip's bits; liblzma reports xz's as unsupported options); what the
+  specification rules out or calls corrupt (zstd's block type 3) is `invalidValue`. Decide each site from the
+  specification's own words, and check the CRC before the reserved bits: damage first.
+- **An error enum that every codec throws stays payload-free**: `BytesError` is one byte in a register on every hot
+  path's error edge. `unsupported(feature)` or a located error would make it a multi-word value there; offsets stay the
+  readers' opt-in (`located(_:)`).
+- **A streaming decoder that remembers its failure should remember *which***: bzip2's rethrew `invalidValue` after
+  any error, so a `checksumMismatch` became `invalidValue` on the next call. Keep the error in the failed state.
+- **An enum gaining an associated value loses its synthesized `==`**: bzip2's `Stage.failed(BytesError)` broke an
+  `== .streamHeader` test; use `if case`.
+- **A struct that force-unwraps optional members by a "current format" breaks when they're freed**: `Compressor`
+  dispatched on `format` and unwrapped encoders; `releaseMemory()` needed a ready flag and its kept-format markers
+  cleared (the review caught both traps before they shipped).
+- **A limit isn't an allocation size**: `decompressAll(_:maximumSize:)` reserved `maximumSize` when the size was
+  unknown; `maximumSize: .max` trapped ("failed to allocate 9223372036854775839 bytes"). Start from a stated size or an
+  estimate, floor it (BGZF's empty last member states 0: a retry that multiplies 0 never grows), and grow by retrying.
+  Believe stated sizes only as far as the input can expand.
+- **Detection by magic has a zlib-shaped hole**: zlib's two-byte header passes on about 1 in 1,000 random inputs
+  (measured 200 in 200,000), twice the 1-in-2,000 estimate once preset dictionaries are accepted (so their decoder can
+  say `unsupported`). Test it last; no other recognized format's first two bytes pass it.
+- **A variable-size header doesn't fit a fixed staging buffer**: gzip names and comments have no limit, so the encoders
+  deliver a custom header ahead of their staged output (one compare per delivery), not through the staging buffer or
+  the parallel encoder's 16-byte `small`.
+- **`#require` can't take an expression producing a span** (`RawSpan` isn't `Escapable`): bind the result to a local
+  first, as with `~Copyable` values.
+
+## Growing buffers, checked storage, and cancellation as its own error (2026-11-25)
+
+Bytes' API items 18–21 and 23; plan, review, and what changed in `Writeups/Bytes-API-Items-Plan-2026-11-25.md`;
+numbers in `Bytes/Benchmarks/RESULTS.md`.
+
+- **A `~Copyable` optional stored property**: `x!.method()` works for a `mutating` method, but `x!.property` in a read
+  consumes it ("cannot partially consume 'self'", or "'self' used after consume"); borrow with `switch x { case let
+  .some(v): … }`. Inside a `mutating` method, a `switch` borrow of one stored property can coexist with `inout` access
+  to others (`&last`, `&first!`, `&middle!`), but not with a call to another `mutating` method on `self`: make that
+  method `static` and pass the properties it needs `inout`.
+- **`private(set)` setters can't be used from `@inlinable` code**: give a `@frozen` type `@usableFromInline` stored
+  properties and public computed getters.
+- **`bitCast` needs a `ConvertibleFromBytes` destination**: tuples aren't; `InlineArray<2, UInt64>` is (Poly1305 reads
+  a 16-byte element as two words that way).
+- **Test literals viewed as raw bytes**: `[1, 2, 3].span.bytes` is an `[Int]`'s 24 bytes. Type the array (`let b:
+  [UInt8] = …`); an `OutputRawSpan`'s `append(copying:)` has a `Span<UInt8>` overload that infers bytes.
+- **A package builds its dependencies in its own `.build`**: after breaking and restoring a file in Bytes, a build of
+  BytesCompression doesn't refresh Bytes' own test binary. Rebuild the package whose tests run, or they test the break.
+- **A break test can be masked by the next check**: with a stop flag set before the call, no worker takes segment 0, the
+  join gives up at once, and the check before the sequential decode reports the stop: removing the check before the
+  join changes nothing a test can see. That check matters only when workers stop midway, which no test can arrange.
+- **Moving a helper's public uses to a new member of another module** needs that module imported in every file that
+  uses it, and `public import` where `@inlinable` code does (member import visibility).
+
+## Twelve AES chains, a GCM loop that's busy not waiting, and arrays lent across an await (2026-11-27)
+
+Items 7 and 8; numbers in `Bytes/Benchmarks/RESULTS.md`, plan and review in
+`Writeups/AES-Depth-and-Async-Append-Plan-2026-11-26.md`.
+
+- **Count every vector µop, not just the bound you're attacking**: 12 AES chains gave −18% (AES-128) and −25% (AES-256),
+  not the 1.5x of counting rounds alone; once the chains don't bind, the counter, the last round, and the final XOR
+  (about 12.5 µops a block besides the rounds) do. `aese`+`aesmc` fuse into one slot: 152 of them ran in 33 cycles.
+- **Specialize a kernel per key size and layout** with an `@inline(__always)` body called with constants from one
+  `@inline(never)` switch: the last keys become real registers (a `(lastKey, finalKey)` select cost two copies), and
+  12 states plus 15 keys fit with no spill. Check fusion in the disassembly: every `aesmc vN` right after `aese vN`.
+- **A loop running 65 cycles against a 32-cycle chain bound isn't necessarily waiting on a chain**: GCM's stitched loop
+  retires useful work in 67% of slots at 2.3 SIMD instructions a cycle. Shortening its GHASH recurrence cut 7% of
+  instructions and no time. Measure `Tools/counters --mode bottlenecks` and `simd_fp_unit_instructions` before
+  restructuring for latency.
+- **The compiler's scalarization can be the better code**: LLVM computes Karatsuba's `x₀ ⊕ x₁` (only lane 0 of
+  `x ⊕ swap(x)` is used) in general registers, four moves and an `eor`. Forcing it into vectors (`ext`) made GCM open
+  18% slower: in a loop bound by vector throughput, integer pipes are free capacity. Schoolbook's fourth `pmull` lost the
+  same way.
+- **An array's new capacity can be lent across an await**: reserve (which also makes shared storage unique), take
+  `withUnsafeMutableBufferPointer`'s base past `count`, let the body write it, then `append(addingCapacity: written)`
+  setting `initializedCount` without writing (enough capacity: same storage, bytes kept). The array is `inout` for the
+  whole call, so nothing moves it. Count `finalize`'s result, not what the body reports.
+- **Exact `reserveCapacity(count + n)` each round reallocates each round** (256 of 256), but macOS's `realloc` grows
+  large blocks in place, so it costs 2x, not a quadratic copy: a time bound didn't catch it. Count capacity changes.
+
+## Patterns from registers, complemented tables, and one more fold lane (2026-11-27, later)
+
+Item 9; numbers in `Bytes/Benchmarks/RESULTS.md`, plan and review in `Writeups/Item-9-Plan-2026-11-27.md`.
+
+- **A short back-reference is a pattern, not a copy**: load the 16 bytes before the destination once, `tbl` them into
+  the pattern from phase 0 and from byte 16 (index `(16 − d) + i % d`), store, then store the first register at a stride
+  of `16 − 16 % d` from `32 − 32 % d`. No load waits on a store; distances 1–15 all ran at the same speed, 2–5x the
+  old paths. The note blamed store forwarding; the instruction counts (3x a distance-8 copy) said the path.
+- **Check which API the hot loop actually calls** before changing one: DEFLATE's fast loop had its own copy and never
+  reached the overrunning API the plan targeted. And an inlined fallback grows every loop that inlines the API: move
+  it out of line taking values (Brotli +1.4% instructions → +1.0%).
+- **Out-of-range lanes of `tbl` are 0, so store a table complemented** when its "invalid" value is 0xFF: a `tbl`
+  plus one `mvn` replaces `movi` 0xFF plus `tbx` (one vector slot fewer per 16 lanes on the M1 Max). Write the
+  constants complemented: complementing literals in an initializer didn't fold, and cost every call.
+- **Read per-iteration work before quoting a throughput**: a Base64 row's iteration is several megabytes; dividing by
+  one call's size read 2.35 GB/s for a 10 GB/s kernel.
+- **"More accumulators can't help" was wrong for CRC-32's fold**: eight ran at 90% of the vector bound and twelve at
+  about 98% (−11%, libdeflate's count). A pipe-bound estimate isn't a reason to skip the measurement.
+- **Exact minimums from a baseline** (`.statistics.histogram.minNonZeroValue` per row) settle millisecond rows that
+  `bench-table` rounds to two digits; compare them against a control row (libdeflate) in the same runs.

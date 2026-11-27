@@ -61,8 +61,7 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
         return "\(kind): \(detail)"
     }
 
-    // By the detail's bytes, without building `String`s. Unsafe: `StaticString` exposes its bytes only as a
-    // buffer pointer. Safe: they're immutable static data, read only within the closure.
+    // By the detail's bytes, without building `String`s.
     /// Whether two errors have the same kind and the same detail text.
     ///
     /// - Parameters:
@@ -70,7 +69,7 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
     ///   - rhs: Another error.
     /// - Returns: `true` if both are equal.
     public static func ==(lhs: Self, rhs: Self) -> Bool {
-        lhs.kind == rhs.kind && lhs.detail.withUTF8Buffer { a in rhs.detail.withUTF8Buffer { b in unsafe a.elementsEqual(b) } }
+        lhs.kind == rhs.kind && lhs.detail.bytes.bytesEqual(rhs.detail.bytes)
     }
 
     /// Hashes the kind and the detail text, consistent with `==`.
@@ -78,7 +77,9 @@ public struct MQTTError: Error, Hashable, Sendable, CustomStringConvertible {
     /// - Parameter hasher: The hasher to combine into.
     public func hash(into hasher: inout Hasher) {
         hasher.combine(kind)
-        detail.withUTF8Buffer { unsafe hasher.combine(bytes: UnsafeRawBufferPointer($0)) }
+        // Unsafe: `Hasher` takes raw bytes only as a buffer pointer. Safe: the literal's bytes, immutable static data,
+        // read within the closure.
+        detail.bytes.withUnsafeBytes { unsafe hasher.combine(bytes: $0) }
     }
 }
 

@@ -30,7 +30,9 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
     /// A segment's decompressed bytes don't match its checksum.
     case checksumMismatch(segment: Int)
     /// A segment didn't decompress to its recorded size: the decoder's error (`BytesError/mismatch` for another size,
-    /// `trailingData` for a stream that ended before its stored bytes did).
+    /// `trailingData` for a stream that ended before its stored bytes did, `checksumMismatch` for a check inside the
+    /// compressed data that fails, `unsupported` for valid data this reader can't decode: an xz filter other than
+    /// LZMA2).
     case decompressionFailed(segment: Int, BytesError)
     /// A `pbz` block (an `.aar`'s, a `.xip`'s content's, or one of a `pbz` stream inside an archive's segments) didn't
     /// decompress to its recorded size: the decoder's error, as for ``decompressionFailed(segment:_:)``.
@@ -59,6 +61,10 @@ public enum AEAError: Error, Sendable, Equatable, CustomStringConvertible {
         case let .incorrectKey(what): "the key or password doesn't open the archive (\(what))"
         case let .authenticationFailed(what): "authentication failed: \(what)"
         case let .checksumMismatch(segment): "segment \(segment) doesn't match its checksum"
+        case let .decompressionFailed(segment, .unsupported):
+            "segment \(segment) uses a feature of its compression this reader doesn't support"
+        case let .blockDecompressionFailed(block, .unsupported):
+            "block \(block) uses a feature of its compression this reader doesn't support"
         case let .decompressionFailed(segment, why): "segment \(segment) failed to decompress: \(why)"
         case let .blockDecompressionFailed(block, why): "block \(block) failed to decompress: \(why)"
         case let .unsupportedCompression(byte): "unsupported segment compression '\(Unicode.Scalar(byte))'"
@@ -97,7 +103,7 @@ extension AEAError: BlockDecodingFailure {
     /// uncompressed stream that isn't stored as ``unsupportedCompression(_:)`` (`-`), cancellation as ``cancelled``.
     public init(_ error: BlockDecodingError) {
         switch error {
-        case .decoding(.cancelled, _, _), .cancelled: self = .cancelled
+        case .cancelled: self = .cancelled
         case let .decoding(error, block, .indexed): self = .decompressionFailed(segment: block, error)
         case let .decoding(error, block, .pbz), let .decoding(error, block, .slice): self = .blockDecompressionFailed(block: block, error)
         case .notCompressed: self = .unsupportedCompression(AppleArchiveCompression.none.rawValue)

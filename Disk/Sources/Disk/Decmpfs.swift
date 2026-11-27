@@ -279,24 +279,22 @@ final class ForkUnpacker {
             unsafe raw.base.copyMemory(from: stored.base + 1, byteCount: rawCount)
             return true
         }
-        // Unsafe: a span over `stored`, with no lifetime the compiler can check. Safe: the `count` bytes `unpack`
-        // filled, in storage `self` owns; used only by the decoders below, within this call.
-        let input = unsafe RawSpan(_unsafeStart: stored.base, byteCount: count)
-        // Unsafe: a buffer over `raw`. Safe: `rawCount` bytes, at most the chunk `raw` holds; local to this call.
-        let rawBuffer = unsafe UnsafeMutableRawBufferPointer(start: raw.base, count: rawCount)
-        // Unsafe: an output span over that buffer, none of it initialized. Safe: the buffer outlives the span, which
-        // is finalized against it below; the decoders write only through it, so within `rawCount`.
-        var output = unsafe OutputRawSpan(buffer: rawBuffer, initializedCount: 0)
         guard codec != .zlib else { return false } // Never in a fork.
-        do throws(BytesError) {
-            let format = codec.decompressionFormat
-            if decompressor.format != format { try decompressor.reset(for: format) }
-            _ = try decompressor.decompressAll(input, into: &output, decodedSize: rawCount)
-        } catch {
-            return false
+        // A local reference: the span borrows it (one borrowed from the property would end with the property's access).
+        let stored = stored
+        let input = stored.bytes(0..<count)
+        // Unsafe: writes `raw`'s first `rawCount` bytes. Safe: this unpacker's own buffer, a separate allocation from
+        // `stored`, used by nothing else during the call; `rawCount` is at most the chunk it holds.
+        return unsafe raw.withOutputRawSpan(overwriting: 0..<rawCount) { output in
+            do throws(BytesError) {
+                let format = codec.decompressionFormat
+                if decompressor.format != format { try decompressor.reset(for: format) }
+                _ = try decompressor.decompressAll(input, into: &output, decodedSize: rawCount)
+            } catch {
+                return false
+            }
+            return output.byteCount == rawCount
         }
-        // Unsafe: ends the output span, taking its count. Safe: `rawBuffer` is the buffer the span was made over.
-        return unsafe output.finalize(for: rawBuffer) == rawCount
     }
 
     /// Rewrites the open file `descriptor` (`size` bytes, `chunkCount` chunks of `codec` in its fork) plain.

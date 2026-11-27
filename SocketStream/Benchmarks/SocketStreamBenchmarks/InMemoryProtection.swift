@@ -14,24 +14,16 @@ class InMemoryProtection: @unchecked Sendable {
 
     static func make(_ protection: Protection, payloadSize: Int, packets: Int) -> InMemoryProtection {
         let keys = TLSKeySchedule.applicationKeys(sharedSecret: [UInt8](repeating: 9, count: 32).span.bytes).client
-        switch (protection.compression, protection.encrypted) {
-        case (.deflate, true):
-            return Pipelines(
-                sender: DeflateEncoder(format: .raw, level: 1).then(TLSRecordSealer(keys: keys)),
-                receiver: TLSRecordOpener(keys: keys).then(DeflateDecoder(format: .raw)),
-                rewind: { $0.first.reset(sequence: 0) },
-                payloadSize: payloadSize, packets: packets
-            )
-        case (.brotli, true):
-            return Pipelines(
-                sender: BrotliEncoder(quality: 1, windowBits: 18).then(TLSRecordSealer(keys: keys)),
-                receiver: TLSRecordOpener(keys: keys).then(BrotliDecoder()),
-                rewind: { $0.first.reset(sequence: 0) },
-                payloadSize: payloadSize, packets: packets
-            )
-        default:
+        // The transfers' stages: `Compressor` and `Decompressor` for the stream's format.
+        guard let compression = protection.compression.compressionFormat, let decompression = protection.compression.decompressionFormat else {
             return Pipelines(sender: TLSRecordSealer(keys: keys), receiver: TLSRecordOpener(keys: keys), rewind: { $0.reset(sequence: 0) }, payloadSize: payloadSize, packets: packets)
         }
+        return Pipelines(
+            sender: try! Compressor(for: compression).then(TLSRecordSealer(keys: keys)),
+            receiver: TLSRecordOpener(keys: keys).then(try! Decompressor(for: decompression)),
+            rewind: { $0.first.reset(sequence: 0) },
+            payloadSize: payloadSize, packets: packets
+        )
     }
 }
 

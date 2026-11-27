@@ -180,6 +180,6 @@ public struct HTTPSetCookie: ~Escapable {
 
     @inlinable
     static func attribute(_ text: StaticString, to writer: inout AlignedBytesWriter) throws(HTTPFieldValueError) {
-        try FieldGrammar.write(immortalSpan(text), to: &writer)
+        try FieldGrammar.write(text.bytes, to: &writer)
     }
 }

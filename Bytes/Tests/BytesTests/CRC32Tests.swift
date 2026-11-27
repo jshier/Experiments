@@ -98,6 +98,7 @@ import Testing
         }
         #expect(bitCast(CRC32.fold128, to: SIMD2<UInt64>.self) == SIMD2(constant(128 + 32), constant(128 - 32)))
         #expect(bitCast(CRC32.fold1024, to: SIMD2<UInt64>.self) == SIMD2(constant(1024 + 32), constant(1024 - 32)))
+        #expect(bitCast(CRC32.fold1536, to: SIMD2<UInt64>.self) == SIMD2(constant(1536 + 32), constant(1536 - 32)))
     }
     #endif
 }

@@ -622,7 +622,7 @@ enum ZstdHistogram {
         precondition(scratch.count == 1024 && counts.count >= 256)
         let words = Span<InlineArray<8, UInt8>>(viewing: source.bytes.extracting(first: source.count & ~15))
         for index in words.indices {
-            let word = bitCast(words[index], to: UInt64.self)
+            let word = UInt64(littleEndianBytes: words[index])
             scratch[Int(truncatingIfNeeded: word & 0xFF)] &+= 1
             scratch[256 &+ Int(truncatingIfNeeded: (word &>> 8) & 0xFF)] &+= 1
             scratch[512 &+ Int(truncatingIfNeeded: (word &>> 16) & 0xFF)] &+= 1

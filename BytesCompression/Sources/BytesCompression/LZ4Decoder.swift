@@ -68,6 +68,38 @@ package struct LZ4Decoder: Sendable {
         }
     }
 
+    /// The size Compression's framed stream at `input`'s start records: its blocks' decoded sizes summed, through the
+    /// end marker (saturating), from their headers alone. `nil` if the headers don't read as a stream: an estimate for
+    /// reserving, not a check.
+    static func framedSize(_ input: RawSpan) -> Int? {
+        let count = input.byteCount
+        var position = 0
+        var total = 0
+        while count &- position >= 4 {
+            let magic = UInt32(littleEndian: input.load(fromByteOffset: position, as: UInt32.self))
+            let decoded: Int
+            let skip: Int
+            switch magic {
+            case Magic.end:
+                return total
+            case Magic.compressed:
+                guard count &- position >= 12 else { return nil }
+                decoded = Int(UInt32(littleEndian: input.load(fromByteOffset: position &+ 4, as: UInt32.self)))
+                skip = 12 &+ Int(UInt32(littleEndian: input.load(fromByteOffset: position &+ 8, as: UInt32.self)))
+            case Magic.stored:
+                guard count &- position >= 8 else { return nil }
+                decoded = Int(UInt32(littleEndian: input.load(fromByteOffset: position &+ 4, as: UInt32.self)))
+                skip = 8 &+ decoded
+            default:
+                return nil
+            }
+            guard skip <= count &- position else { return nil }
+            position &+= skip
+            total = total > Int.max &- decoded ? Int.max : total &+ decoded
+        }
+        return nil
+    }
+
     /// Block magics, as little-endian integers.
     enum Magic {
         static var compressed: UInt32 { 0x3134_7662 } // "bv41"

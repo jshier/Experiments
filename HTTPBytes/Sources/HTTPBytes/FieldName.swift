@@ -65,8 +65,7 @@ public struct HTTPFieldName: Sendable, Hashable, CustomStringConvertible {
 
     /// The canonical spelling, as a string.
     public var description: String {
-        let bytes = canonicalBytes
-        return String(decoding: (0..<bytes.byteCount).map { bytes.load(fromByteOffset: $0, as: UInt8.self) }, as: UTF8.self)
+        String(decoding: canonicalBytes, as: UTF8.self)
     }
 
     /// The name's first index in HPACK's static table (1–61, RFC 7541 Appendix A), or `nil` if it has none.
@@ -94,12 +93,12 @@ extension HTTPFieldName {
 
     @usableFromInline
     static var lowercaseTable: RawSpan {
-        @_lifetime(immortal) get { immortalSpan(FieldNameTable.lowercase) }
+        @_lifetime(immortal) get { FieldNameTable.lowercase.bytes }
     }
 
     @usableFromInline
     static var canonicalTable: RawSpan {
-        @_lifetime(immortal) get { immortalSpan(FieldNameTable.canonical) }
+        @_lifetime(immortal) get { FieldNameTable.canonical.bytes }
     }
 
     /// A name's two hash words, each byte ORed with 0x20 (case folding for token characters): 8 or more bytes, the first
@@ -159,16 +158,6 @@ extension HTTPFieldName {
         }
         return index
     }
-}
-
-/// A string literal's bytes as a span that lives forever.
-@inlinable @inline(__always)
-@_lifetime(immortal)
-package func immortalSpan(_ string: StaticString) -> RawSpan {
-    // Unsafe: a span over a raw pointer, with its lifetime overridden. Safe: a string literal's bytes are constant data
-    // in the binary, at an address that never changes and is never freed, for `utf8CodeUnitCount` bytes.
-    let bytes = unsafe UnsafeRawBufferPointer(start: string.utf8Start, count: string.utf8CodeUnitCount)
-    return unsafe _overrideLifetime(RawSpan(_unsafeBytes: bytes), borrowing: ())
 }
 
 /// Whether `bytes` (token characters, any case) spell the `bytes.byteCount` lowercase bytes of `table` at `offset`:

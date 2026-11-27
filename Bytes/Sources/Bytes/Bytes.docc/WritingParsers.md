@@ -380,7 +380,7 @@ global executor in the calling task, so never on the caller's actor, with the ta
 task-locals, and without a thread switch for a caller that's already off any actor. Where work must stay off
 the cooperative pool's threads, or run on a queue of its own, `offloaded(to:)` runs the calls on a Dispatch
 queue instead (two thread switches per call). The parallel codecs have `async` entry points too, which stop
-when their task is cancelled.
+when their task is cancelled (throwing ``CancellableError/cancelled``).
 
 ```swift
 import BytesAsync

@@ -151,11 +151,7 @@ public struct Planner<Source: ContentSource>: ~Copyable {
     /// the storage's bytes (`setPath`, `ensureDirectory`'s NUL).
     @inline(__always) @_lifetime(borrow storage)
     private static func prefix(_ storage: RawStorage, _ count: Int) -> RawSpan {
-        precondition(UInt(bitPattern: count) <= UInt(bitPattern: storage.byteCount), "a prefix longer than its buffer")
-        // Unsafe (the next two): a span over the storage, its lifetime set by hand to a borrow of it. Safe: within it
-        // (checked above), in memory it owns while the reference lives, which the borrow outlasts.
-        let span = unsafe RawSpan(_unsafeStart: storage.base, byteCount: count)
-        return unsafe _overrideLifetime(span, borrowing: storage)
+        storage.bytes(0..<count)
     }
 
     /// Appends `count` bytes of the path buffer to the arena, NUL-terminated: its offset.

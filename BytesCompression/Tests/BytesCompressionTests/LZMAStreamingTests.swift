@@ -253,14 +253,14 @@ struct LZMAStreamingTests {
         let cases: [(String, [UInt8], BytesError)] = [
             ("trailing garbage", good + [1, 2, 3, 4], .invalidValue),
             ("truncated footer", Array(good.dropLast()), .insufficientData),
-            ("other filter", xzCompress(data, options: lzmaOptions(preset: 6), filtersBefore: [LZMAFilterID.delta]), .invalidValue),
+            ("other filter", xzCompress(data, options: lzmaOptions(preset: 6), filtersBefore: [LZMAFilterID.delta]), .unsupported),
         ]
         for (name, file, error) in cases {
             #expect(streamXZ(file, outputChunk: 4096, decoder: &decoder) == .failure(error), "\(name)")
         }
         var wrongCheck = good
         wrongCheck[good.count - 24 - 1] ^= 0x40 // The CRC-64's last byte.
-        #expect(streamXZ(wrongCheck, outputChunk: 4096, decoder: &decoder) == .failure(.mismatch))
+        #expect(streamXZ(wrongCheck, outputChunk: 4096, decoder: &decoder) == .failure(.checksumMismatch))
     }
 
     @Test func xzTransform() throws {

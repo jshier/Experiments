@@ -87,6 +87,87 @@ public extension DecompressionFormat {
     }
 }
 
+public extension DecompressionFormat {
+    /// The fewest leading bytes ``init(detecting:)`` decides from: with this many (or the whole input, if shorter),
+    /// `nil` means not recognized; with fewer of a stream still to come, it may mean "wait for more" (an xz magic is 6
+    /// bytes).
+    static var detectionByteCount: Int { 6 }
+
+    /// The format of a stream recognized by its first bytes: gzip (`1F 8B 08`), Zstandard (a frame's magic
+    /// `28 B5 2F FD`, or a skippable frame's `5x 2A 4D 18`), xz (`FD 37 7A 58 5A 00`), bzip2 (`BZh` and a block size
+    /// digit), Apple's LZFSE (`bvx2`, `bvx1`, `bvx-`, `bvxn`, `bvx$`), Compression's framed LZ4 (`bv41`, `bv4-`,
+    /// `bv4$`), LZBITMAP (`ZBM` and its variant byte), LZRAVEN (its magic), and zlib (RFC 1950's header test: method 8,
+    /// a window of at most 32 KiB, the check bits; a preset dictionary is still zlib, which its decoder refuses as
+    /// ``BytesError/unsupported``).
+    ///
+    /// ```swift
+    /// guard let format = DecompressionFormat(detecting: file.extracting(first: DecompressionFormat.detectionByteCount)) else {
+    ///     return  // not a single compressed stream this can name
+    /// }
+    /// ```
+    ///
+    /// Formats with limits get their defaults (`.zstd()`, `.xz()`): set them from what the caller knows. Not
+    /// recognized, so `nil`: formats with no magic (raw DEFLATE, Deflate64, Brotli, raw LZMA, raw LZ4 blocks, LZVN), the
+    /// standard LZ4 frame format (`04 22 4D 18`, not decoded here), Zstandard's legacy frames, and `.lzma` files.
+    /// Skippable frames are read as Zstandard's, though the LZ4 frame format shares their magic. zlib's two bytes are
+    /// tested last; random bytes pass it about once in 1,000 tries (no other format here starts with bytes that do).
+    ///
+    /// - Parameter bytes: The stream's first bytes: ``detectionByteCount`` of them decide.
+    init?(detecting bytes: RawSpan) {
+        let count = bytes.byteCount
+        guard count >= 2 else { return nil }
+        let first = bytes.load(fromByteOffset: 0, as: UInt8.self)
+        let second = bytes.load(fromByteOffset: 1, as: UInt8.self)
+        if count >= 3, first == 0x1F, second == 0x8B, bytes.load(fromByteOffset: 2, as: UInt8.self) == 8 {
+            self = .deflate(.gzip)
+            return
+        }
+        if count >= 4 {
+            let magic = UInt32(littleEndian: bytes.load(fromByteOffset: 0, as: UInt32.self))
+            switch magic {
+            case Zstd.magic:
+                self = .zstd()
+                return
+            case _ where magic & 0xFFFF_FFF0 == Zstd.skippableMagic:
+                self = .zstd()
+                return
+            case LZFSEDecoder.Magic.lzfseV2, LZFSEDecoder.Magic.lzfseV1, LZFSEDecoder.Magic.stored, LZFSEDecoder.Magic.lzvn,
+                 LZFSEDecoder.Magic.end:
+                self = .lzfse
+                return
+            case LZ4Decoder.Magic.compressed, LZ4Decoder.Magic.stored, LZ4Decoder.Magic.end:
+                self = .lz4(framed: true)
+                return
+            case LZRAVENDecoder.magic:
+                self = .lzraven
+                return
+            case _ where magic & 0x00FF_FFFF == 0x68_5A42: // "BZh", then the block size: '1' through '9'.
+                let level = magic &>> 24
+                if level >= 0x31, level <= 0x39 {
+                    self = .bzip2
+                    return
+                }
+            // LZBITMAP's magic is read big-endian.
+            case _ where (try? LZBitmapFormat.variant(magic.byteSwapped)) != nil:
+                self = .lzbitmap
+                return
+            default:
+                break
+            }
+        }
+        if count >= 6, bytes.load(fromByteOffset: 0, as: UInt32.self) == UInt32(littleEndian: 0x587A_37FD),
+           bytes.load(fromByteOffset: 4, as: UInt16.self) == UInt16(littleEndian: 0x005A) {
+            self = .xz()
+            return
+        }
+        if ZlibHeader.isDeflate(UInt16(first) &<< 8 | UInt16(second)) {
+            self = .deflate(.zlib)
+            return
+        }
+        return nil
+    }
+}
+
 public extension DeflateFormat {
     /// The container of a stream that comes as zlib or as raw DEFLATE, decided by its first two bytes: HTTP's `deflate`
     /// content coding is zlib (RFC 9110 §8.4.1.2), but some servers send raw DEFLATE under the name, and browsers accept

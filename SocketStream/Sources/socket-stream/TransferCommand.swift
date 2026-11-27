@@ -17,7 +17,7 @@ struct TransferCommand: AsyncParsableCommand {
     @Option(help: "What to send: MQTT packets, or the same bytes unencoded (the socket's ceiling).")
     var mode: TransferMode = .mqtt
 
-    @Option(help: "Compress the MQTT stream: none, deflate (level 1, a sync flush per batch), or brotli (quality 1).")
+    @Option(help: "Compress the MQTT stream: none, deflate (level 1, a sync flush per batch), brotli (quality 1), or zstd (level 1).")
     var compression: StreamCompression = .none
 
     @Flag(help: "Encrypt the MQTT stream in TLS 1.3 records (ChaCha20-Poly1305).")

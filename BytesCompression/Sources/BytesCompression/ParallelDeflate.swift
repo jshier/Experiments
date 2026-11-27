@@ -35,7 +35,7 @@ internal import Dispatch
 ///   for the whole call.
 ///
 /// The async forms stop early when their task is cancelled: workers take no more chunks (those under way
-/// finish), and the call throws ``BytesError/cancelled`` with the output incomplete.
+/// finish), and the call throws `CancellableError.cancelled` with the output incomplete.
 @safe
 public struct ParallelDeflateEncoder: ~Copyable {
     /// The container: raw DEFLATE, zlib, or gzip.
@@ -72,6 +72,11 @@ public struct ParallelDeflateEncoder: ~Copyable {
     private var small = InlineArray<16, UInt8>(repeating: 0)
     private var smallStart = 0
     private var smallEnd = 0
+    /// A gzip header other than the default 10 bytes (``init(gzipHeader:level:chunkSize:lanes:independentChunks:)``),
+    /// and a stream's copy of its bytes, delivered before anything else (it has no size limit `small` could take).
+    private var gzipHeader: GzipHeader?
+    private var headerBytes: [UInt8] = []
+    private var headerDelivered = 0
 
     /// The largest chunk: the most a lane's staging buffer holds compressed, with every block's worst case.
     static var maximumChunkSize: Int { 512 << 10 }
@@ -92,7 +97,8 @@ public struct ParallelDeflateEncoder: ~Copyable {
     ///
     /// - Parameters:
     ///   - format: The container.
-    ///   - level: The compression level, 0 through 9 (clamped).
+    ///   - level: The compression level, 0 through 9; higher levels run as 9, negative ones trap (as
+    ///     ``DeflateEncoder``'s).
     ///   - chunkSize: The most bytes of input per chunk, 32 KB through ``maximumChunkSize`` (clamped).
     ///     Larger chunks lose less to chunk boundaries; smaller ones spread a short input over more lanes.
     ///   - lanes: How many chunks to compress at once, at least 1: usually every core. Workers take chunks one
@@ -105,8 +111,10 @@ public struct ParallelDeflateEncoder: ~Copyable {
         format: DeflateFormat = .raw, level: Int = 6, chunkSize: Int = 256 << 10, lanes: Int,
         independentChunks: Bool = false
     ) {
+        precondition(level >= 0, "DEFLATE levels are 0 through 9")
         self.format = format
-        self.level = min(max(level, 0), 9)
+        self.level = min(level, 9)
+        // Chunk sizes and lanes are tuning, not the format's: clamped to what works.
         self.chunkSize = min(max(chunkSize, 32 << 10), Self.maximumChunkSize)
         self.independentChunks = independentChunks
         let level = self.level
@@ -124,6 +132,16 @@ public struct ParallelDeflateEncoder: ~Copyable {
         self.slots = slots
     }
 
+    /// Creates a gzip encoder that writes `gzipHeader` at each stream's start (as
+    /// ``DeflateEncoder/init(gzipHeader:level:)``); the other parameters as ``init(format:level:chunkSize:lanes:independentChunks:)``'s.
+    public init(gzipHeader: GzipHeader, level: Int = 6, chunkSize: Int = 256 << 10, lanes: Int, independentChunks: Bool = false) {
+        self.init(format: .gzip, level: level, chunkSize: chunkSize, lanes: lanes, independentChunks: independentChunks)
+        if !gzipHeader.isDefault {
+            self.gzipHeader = gzipHeader
+            headerBytes.reserveCapacity(gzipHeader.encodedByteCount)
+        }
+    }
+
     /// Slots for compressed chunks waiting to be delivered: a few more than lanes, so a lane rarely waits for
     /// one to free up.
     static func slotCount(lanes: Int) -> Int {
@@ -139,7 +157,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
         let fullChunks = (byteCount &+ chunkSize &- 1) / chunkSize
         let smallChunks = min(Self.chunksPerLane &* lanes.count, byteCount / Self.smallestSplitChunk)
         let chunks = max(max(1, fullChunks), smallChunks) &+ lanes.count
-        return byteCount &+ byteCount / 800 &+ chunks &* 1024 &+ 64
+        return byteCount &+ byteCount / 800 &+ chunks &* 1024 &+ 64 &+ ((gzipHeader?.encodedByteCount ?? 10) &- 10)
     }
 
     // MARK: - Synchronous
@@ -176,7 +194,12 @@ public struct ParallelDeflateEncoder: ~Copyable {
     package mutating func begin(byteCount: Int, into output: inout OutputRawSpan) throws(BytesError) -> Job {
         reset()
         let job = job(byteCount: byteCount)
-        try Self.write(header: job.format, level: job.level, into: &output)
+        if let gzipHeader {
+            gzipHeader.encode(into: &headerBytes, extraFlags: DeflateFormat.gzipExtraFlags(level: level))
+            try Self.append(headerBytes.span.bytes, to: &output)
+        } else {
+            try Self.write(header: job.format, level: job.level, into: &output)
+        }
         return job
     }
 
@@ -193,10 +216,11 @@ public struct ParallelDeflateEncoder: ~Copyable {
 
     /// Ends a call once its workers are done (the delivered bytes already counted in `output`): the trailer.
     ///
-    /// - Throws: ``BytesError/cancelled`` if the batch was stopped before the end (no trailer is written),
-    ///   ``BytesError/insufficientCapacity`` if the output ran out of room.
+    /// - Throws: ``BytesError/insufficientCapacity`` if the output ran out of room.
+    /// - Precondition: The batch wasn't stopped (`delivery.cancelled`: the caller throws its cancellation first). A
+    ///   stopped batch's output is incomplete, and a trailer after it would make a well-formed, wrong stream.
     package static func end(_ delivery: ChunkDelivery, job: Job, into output: inout OutputRawSpan) throws(BytesError) {
-        guard !delivery.cancelled else { throw .cancelled }
+        precondition(!delivery.cancelled, "Ending a stopped batch")
         guard !delivery.failed else { throw .insufficientCapacity }
         try write(trailer: job.format, checksum: delivery.checksum, length: job.byteCount, into: &output)
     }
@@ -302,14 +326,20 @@ public struct ParallelDeflateEncoder: ~Copyable {
         if !started {
             started = true
             streamChecksum = format.initialChecksum
-            (small, smallEnd) = format.header(level: level)
             smallStart = 0
+            if let gzipHeader {
+                gzipHeader.encode(into: &headerBytes, extraFlags: DeflateFormat.gzipExtraFlags(level: level))
+                headerDelivered = 0
+                smallEnd = 0
+            } else {
+                (small, smallEnd) = format.header(level: level)
+            }
         }
         var consumed = 0
         var produced = 0
         while true {
             produced &+= deliver(into: &output)
-            if smallStart < smallEnd || deliveryLane < deliveryEnd || trailerQueued {
+            if headerDelivered < headerBytes.count || smallStart < smallEnd || deliveryLane < deliveryEnd || trailerQueued {
                 return TransformProgress(consumed: consumed, produced: produced, status: .needsOutput)
             }
             if finished {
@@ -356,6 +386,7 @@ public struct ParallelDeflateEncoder: ~Copyable {
         trailerStaged = false
         smallStart = 0
         smallEnd = 0
+        headerDelivered = headerBytes.count
     }
 
     /// Compresses the window's input in one parallel round, then keeps its last 32 KB as history.
@@ -393,6 +424,14 @@ public struct ParallelDeflateEncoder: ~Copyable {
     private mutating func deliver(into output: inout OutputRawSpan) -> Int {
         var produced = 0
         while true {
+            if headerDelivered < headerBytes.count {
+                let count = min(headerBytes.count &- headerDelivered, output.freeCapacity)
+                guard count > 0 else { return produced }
+                output.append(copying: headerBytes.span.bytes.extracting(headerDelivered..<(headerDelivered &+ count)))
+                headerDelivered &+= count
+                produced &+= count
+                continue
+            }
             if smallStart < smallEnd {
                 let count = min(smallEnd &- smallStart, output.freeCapacity)
                 guard count > 0 else { return produced }

@@ -256,9 +256,10 @@ bit first, the order of the codecs that use it.
   `offloaded(to:)` runs them on a Dispatch queue, for work that must stay off the cooperative pool's threads.
   `ByteBuffer.receive` fills a buffer from a read that suspends. The parallel codecs have `async` entry points
   too (as child tasks of a task group, `compressAllConcurrently(_:into:)`, or on a Dispatch queue,
-  `compressAll(_:into:on:)`), which stop early when their task is cancelled (`BytesError.cancelled`).
+  `compressAll(_:into:on:)`), which stop early when their task is cancelled (``CancellableError/cancelled``).
 - ``LentBytes``, ``LentMutableSpan``, and ``LentMutableBytes`` carry a span's memory to other threads for the
-  length of one call (`withLentBytes` on `RawSpan` and `MutableRawSpan`, `withLentFreeCapacity`): a span can't be
+  length of one call (`withLentBytes` on `RawSpan` and `MutableRawSpan`, `withLentFreeCapacity`; BytesAsync's
+  `withLentBytesAsync` and `withLentFreeCapacityAsync` for work that's awaited): a span can't be
   captured by a task, so parallel work over a caller's input, memory it reads and rewrites in place (scrypt's
   scratch), and output is lent it as a `Sendable` pointer, valid until the lending call returns (which the work must
   finish before).

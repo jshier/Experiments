@@ -57,7 +57,7 @@ public struct HTTPMethod: Sendable, Hashable, CustomStringConvertible {
     }
 
     public var description: String {
-        withBytes { bytes in String(decoding: (0..<bytes.byteCount).map { bytes.load(fromByteOffset: $0, as: UInt8.self) }, as: UTF8.self) }
+        withBytes { bytes in String(decoding: bytes, as: UTF8.self) }
     }
 
     /// `GET`.

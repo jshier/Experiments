@@ -11,7 +11,10 @@ package extension BZip2Decoder {
 
     /// Whether a stream has ended with all its output delivered: the input may end here, or another stream may
     /// follow.
-    var isFinished: Bool { streaming.stage == .streamHeader && streaming.hasEndedStream }
+    var isFinished: Bool {
+        guard case .streamHeader = streaming.stage else { return false }
+        return streaming.hasEndedStream
+    }
 
     /// Decodes as much of `input` as it can, appending to `output`, continuing the current stream (and the
     /// streams that directly follow it, as ``decompressAll(_:into:decodedSize:)`` does).
@@ -42,8 +45,9 @@ package extension BZip2Decoder {
     ///   ``TransformStatus/needsInput`` when `input` ends inside a stream (truncated input keeps asking, so a
     ///   caller with no more throws ``BytesError/insufficientData``, as ``transform(_:into:flush:)`` does at
     ///   `.finish`); ``TransformStatus/needsOutput`` when `output` is full.
-    /// - Throws: ``BytesError/invalidValue`` for a missing header, corrupt data, or a CRC that doesn't match.
-    ///   After an error, every call throws ``BytesError/invalidValue`` until ``reset()``.
+    /// - Throws: ``BytesError/invalidValue`` for a missing header or corrupt data; ``BytesError/checksumMismatch`` for
+    ///   a block's or the stream's CRC that doesn't match. After an error, every call throws it again until
+    ///   ``reset()``.
     mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         let workspace = unsafe workspace.base
         var state = streaming
@@ -60,8 +64,8 @@ package extension BZip2Decoder {
             streaming = state
             return progress
         } catch {
-            // The workspace may hold part of a block now: nothing more until a reset.
-            streaming.stage = .failed
+            // The workspace may hold part of a block now: nothing more until a reset, and the same error each time.
+            streaming.stage = .failed(error)
             throw error
         }
     }
@@ -109,8 +113,8 @@ struct BZip2StreamingState {
         /// The block's bytes are in the workspace, its run-length coding undone into outputs as far as
         /// ``expansion``.
         case expanding
-        /// An error was thrown.
-        case failed
+        /// An error was thrown: thrown again by every call until a reset.
+        case failed(BytesError)
     }
 
     var stage = Stage.streamHeader
@@ -172,7 +176,7 @@ extension BZip2Stream {
                     break decoding
                 }
                 let crc = ~state.crc
-                guard crc == state.storedCRC else { throw .invalidValue }
+                guard crc == state.storedCRC else { throw .checksumMismatch }
                 state.combinedCRC = (state.combinedCRC &<< 1 | state.combinedCRC &>> 31) ^ crc
                 state.stage = .blockHeader
 
@@ -213,7 +217,7 @@ extension BZip2Stream {
                         status = .needsInput
                         break decoding
                     }
-                    guard stored == state.combinedCRC else { throw .invalidValue }
+                    guard stored == state.combinedCRC else { throw .checksumMismatch }
                     // The next stream starts at the next byte.
                     position = (bits.bitPosition &+ 7) & ~7
                     state.hasEndedStream = true
@@ -297,8 +301,8 @@ extension BZip2Stream {
                 state.crc = 0xFFFF_FFFF
                 state.stage = .expanding
 
-            case .failed:
-                throw .invalidValue
+            case let .failed(error):
+                throw error
             }
         }
         state.bitOffset = position & 7

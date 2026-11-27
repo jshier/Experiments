@@ -1,4 +1,5 @@
 import Benchmark
+import Bytes
 import BytesAsync
 
 // BytesAsync's waiting primitives: the uncontended fast paths (no suspension), and contended ones where tasks wait and
@@ -156,5 +157,104 @@ func registerAsyncBenchmarks() {
     } setup: {
         let sum = await queueFanOut(count: 100_000, capacity: 64, consumers: 4)
         precondition(sum == 100_000 * 99_999 / 2)
+    }
+
+    // `AsyncByteTransform.transform(_:appending:)`: its own cost around the cheapest stages (a copy, and a 4x expansion
+    // that takes several rounds at the default growth), into an array kept between iterations (its capacity reused).
+    let appended = Benchmark.Configuration(
+        metrics: [.wallClock, .instructions, .mallocCountTotal], warmupIterations: 1, scalingFactor: .one,
+        maxDuration: .seconds(1), maxIterations: 100
+    )
+    Benchmark("Async append: copy stage, 4 MB in one call", configuration: appended) { benchmark async in
+        var output: [UInt8] = []
+        let input = appendInput
+        for _ in benchmark.scaledIterations {
+            output.removeAll(keepingCapacity: true)
+            await blackHole(appendThrough(CopyStage(), input.span.bytes, into: &output, pieces: 1))
+        }
+    } setup: {
+        var output: [UInt8] = []
+        _ = await appendThrough(CopyStage(), appendInput.span.bytes, into: &output, pieces: 1)
+        precondition(output == appendInput)
+    }
+    Benchmark("Async append: copy stage, 1 MB in 64 KB calls", configuration: appended) { benchmark async in
+        var output: [UInt8] = []
+        let input = appendInput
+        for _ in benchmark.scaledIterations {
+            output.removeAll(keepingCapacity: true)
+            await blackHole(appendThrough(CopyStage(), input.span.bytes.extracting(0..<(1 << 20)), into: &output, pieces: 16))
+        }
+    } setup: {
+        var output: [UInt8] = []
+        _ = await appendThrough(CopyStage(), appendInput.span.bytes.extracting(0..<(1 << 20)), into: &output, pieces: 16)
+        precondition(output[...] == appendInput[..<(1 << 20)])
+    }
+    Benchmark("Async append: 4x stage, 1 MB in one call", configuration: appended) { benchmark async in
+        var output: [UInt8] = []
+        let input = appendInput
+        for _ in benchmark.scaledIterations {
+            output.removeAll(keepingCapacity: true)
+            await blackHole(appendThrough(ExpandingStage(), input.span.bytes.extracting(0..<(1 << 20)), into: &output, pieces: 1))
+        }
+    } setup: {
+        var output: [UInt8] = []
+        _ = await appendThrough(ExpandingStage(), appendInput.span.bytes.extracting(0..<(1 << 20)), into: &output, pieces: 1)
+        precondition(output.count == 4 << 20 && output[4 * 12_345] == appendInput[12_345])
+    }
+}
+
+/// The append rows' input: 4 MB of varied bytes, made on first use.
+let appendInput: [UInt8] = (0..<(4 << 20)).map { UInt8(truncatingIfNeeded: ($0 &* 2_654_435_761) >> 13) }
+
+/// Appends `input`, in `pieces` calls, through `stage` (made synchronous: the calls don't suspend, so the row is the
+/// append's own work); returns the bytes produced.
+@inline(never)
+func appendThrough<Stage: ByteTransform & ~Copyable>(
+    _ stage: consuming Stage, _ input: RawSpan, into output: inout [UInt8], pieces: Int
+) async -> Int where Stage.Failure == Never {
+    var transform = stage.synchronously()
+    let size = (input.byteCount + pieces - 1) / pieces
+    var produced = 0
+    var offset = 0
+    while offset < input.byteCount {
+        let end = min(input.byteCount, offset + size)
+        let flush: TransformFlush = end == input.byteCount ? .finish : .none
+        let progress = await transform.transform(input.extracting(offset..<end), appending: &output, flush: flush)
+        produced += progress.produced
+        offset = end
+    }
+    return produced
+}
+
+/// Copies its input: the cheapest stage.
+struct CopyStage: ByteTransform {
+    typealias Failure = Never
+
+    mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) -> TransformProgress {
+        let count = min(input.byteCount, output.freeCapacity)
+        output.append(copying: input.extracting(0..<count))
+        let done = count == input.byteCount
+        return TransformProgress(
+            consumed: count, produced: count, status: !done ? .needsOutput : flush == .finish ? .finished : .needsInput
+        )
+    }
+}
+
+/// Writes each input byte four times: output four times its input, as a decoder's, so an append takes several rounds.
+struct ExpandingStage: ByteTransform {
+    typealias Failure = Never
+
+    static var minimumOutputCapacity: Int { 4 }
+
+    mutating func transform(_ input: RawSpan, into output: inout OutputRawSpan, flush: TransformFlush) -> TransformProgress {
+        let count = min(input.byteCount, output.freeCapacity / 4)
+        for index in 0..<count {
+            let byte = UInt32(input.load(fromByteOffset: index, as: UInt8.self)) &* 0x0101_0101
+            output.append(byte, as: UInt32.self)
+        }
+        let done = count == input.byteCount
+        return TransformProgress(
+            consumed: count, produced: count &* 4, status: !done ? .needsOutput : flush == .finish ? .finished : .needsInput
+        )
     }
 }

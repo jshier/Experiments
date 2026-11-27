@@ -142,6 +142,42 @@ import Testing
         #expect(throws: HTTPPayloadError.unsupportedCoding) { try decoder.reset(contentEncoding: Array("compress".utf8).span.bytes) }
     }
 
+    /// A stacked body fed in 7-byte pieces (through the carry and middle buffers) that turns to garbage halfway: the
+    /// decode throws from inside the stacked decode, and after a reset the same decoder decodes a whole body in the same
+    /// pieces. (`resetForEachBody` is the one that catches a reset leaving carried bytes behind.)
+    @Test func resetAfterAThrowingDecode() throws {
+        let small = Array(Self.body.prefix(20_000))
+        let stacked = try Self.encode(Self.encode(small, .gzip), .brotli)
+        var corrupted = stacked
+        corrupted.replaceSubrange((stacked.count / 2)..., with: [UInt8](repeating: 0xFF, count: stacked.count - stacked.count / 2))
+        var decoder = try HTTPContentDecoder(contentEncoding: Array("gzip, br".utf8).span.bytes)
+        var out = [UInt8](repeating: 0, count: 64 << 10)
+        /// Decodes `coded` in 7-byte pieces into `out`: the bytes produced, or the error.
+        func decodePieces(_ coded: [UInt8]) -> Result<[UInt8], HTTPPayloadError> {
+            var produced: [UInt8] = []
+            var offset = 0
+            while offset < coded.count {
+                let piece = Array(coded[offset..<min(coded.count, offset + 7)])
+                do throws(HTTPPayloadError) {
+                    let progress = try out.withOutputRawSpan { span throws(HTTPPayloadError) in try decoder.decode(piece.span.bytes, into: &span) }
+                    produced += out[..<progress.produced]
+                    offset += progress.consumed
+                    if progress.status == .finished { break }
+                } catch {
+                    return .failure(error)
+                }
+            }
+            return .success(produced)
+        }
+        guard case .failure = decodePieces(corrupted) else {
+            Issue.record("The corrupted body decoded")
+            return
+        }
+        try decoder.reset(contentEncoding: Array("gzip, br".utf8).span.bytes)
+        #expect(decodePieces(stacked) == .success(small))
+        try decoder.finish()
+    }
+
     @Test func limitsAndErrors() throws {
         let coded = try Self.encode(Self.body, .gzip)
         #expect(throws: HTTPPayloadError.tooLarge) { _ = try Self.decode(coded, contentEncoding: "gzip", step: 65_536, limit: 100_000) }

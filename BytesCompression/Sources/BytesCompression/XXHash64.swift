@@ -108,7 +108,7 @@ package struct XXHash64: Sendable {
         let count = bytes.byteCount
         let words = bytes.chunks(of: InlineArray<8, UInt8>.self)
         for index in words.indices {
-            hash ^= round(0, WordReads.value(words[index]))
+            hash ^= round(0, UInt64(littleEndianBytes: words[index]))
             hash = hash.rotatedLeft(by: 27) &* prime1 &+ prime4
         }
         var rest = bytes.extracting(droppingFirst: count & ~7)

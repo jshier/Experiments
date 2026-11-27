@@ -11,12 +11,16 @@ public import Dispatch
 ///
 /// The requirement is `nonisolated(nonsending)`: it borrows the caller's spans (`inout OutputRawSpan`), which can't
 /// cross to another isolation domain, so a stage that moves its work elsewhere lends the memory for the call
-/// (``Bytes/RawSpan/withLentBytes(_:)``) and awaits the work before returning.
+/// (``Bytes/RawSpan/withLentBytesAsync(_:)``) and awaits the work before returning.
 ///
 /// Stages follow `ByteTransform`'s rules, including the end of a stream: `.finished` at `.finish`, or a throw.
 public protocol AsyncByteTransform: ~Copyable {
     /// What the stage throws: `Never` if it can't fail.
     associatedtype Failure: Error
+
+    /// The least free output a call needs to make progress, as ``Bytes/ByteTransform/minimumOutputCapacity``: the
+    /// adapters report their stage's. 1 by default.
+    static var minimumOutputCapacity: Int { get }
 
     /// Transforms as much of `input` as it can, appending to `output`, as ``Bytes/ByteTransform/transform(_:into:flush:)``.
     ///
@@ -32,65 +36,40 @@ public protocol AsyncByteTransform: ~Copyable {
 }
 
 public extension AsyncByteTransform where Self: ~Copyable {
+    static var minimumOutputCapacity: Int { 1 }
+
     /// Transforms all of `input`, appending the output to `output`, which grows as needed: the drive loop, as
-    /// ``Bytes/ByteTransform/transform(_:appending:flush:growth:)``.
+    /// ``Bytes/ByteTransform/transform(_:appending:flush:growth:)``. Each round lends the stage the array's new
+    /// capacity, uninitialized (``Swift/Array/append(receivingUpTo:_:)``): nothing is zeroed or trimmed.
     ///
     /// - Parameters:
     ///   - input: The bytes to transform.
     ///   - output: The array to append to.
     ///   - flush: As for ``transform(_:into:flush:)``; with `.finish`, this returns `.finished`.
-    ///   - growth: The least room to add at a time.
+    ///   - growth: The least room to add at a time (at least the stage's ``minimumOutputCapacity``).
     /// - Returns: What was consumed and produced.
-    /// - Throws: The stage's ``Failure``. The output appended before it stays.
+    /// - Throws: The stage's ``Failure``. The output appended before it stays; nothing of the round that threw.
+    /// - Precondition: `growth` is more than 0.
     nonisolated(nonsending) mutating func transform(
         _ input: RawSpan, appending output: inout [UInt8], flush: TransformFlush, growth: Int = 16 << 10
     ) async throws(Failure) -> TransformProgress {
+        precondition(growth > 0, "Appending with no room to grow")
         var consumed = 0
         var produced = 0
         while true {
-            let room = max(growth, input.byteCount &- consumed)
-            let start = output.count
-            // Room at the end, initialized (the stage overwrites it): an array's new capacity can't stay open
-            // across a suspension, so it's added first and trimmed after.
-            output.append(contentsOf: repeatElement(0, count: room))
-            var span = output.mutableSpan
-            var bytes = MutableRawSpan(mutating: &span)
-            var progress = TransformProgress(consumed: 0, produced: 0, status: .needsInput)
-            var failure: Failure?
-            do throws(Failure) {
-                progress = try await bytes.withOutputRawSpan(overwritingFrom: start) { raw async throws(Failure) in
-                    try await transform(input.extracting(consumed...), into: &raw, flush: flush)
-                }
-            } catch {
-                failure = error
+            let room = max(Self.minimumOutputCapacity, growth, input.byteCount &- consumed)
+            let rest = input.extracting(consumed...)
+            let progress = try await output.append(receivingUpTo: room) { (raw: inout OutputRawSpan) async throws(Failure) in
+                let progress = try await transform(rest, into: &raw, flush: flush)
+                precondition(progress.produced == raw.byteCount, "A stage reported other than what it wrote")
+                return progress
             }
-            output.removeLast(room &- progress.produced)
-            if let failure { throw failure }
             consumed &+= progress.consumed
             produced &+= progress.produced
             if progress.status != .needsOutput {
                 return TransformProgress(consumed: consumed, produced: produced, status: progress.status)
             }
         }
-    }
-}
-
-extension MutableRawSpan {
-    /// An output span over these bytes from `offset`, for an asynchronous body.
-    @_lifetime(self: copy self)
-    nonisolated(nonsending) mutating func withOutputRawSpan<R, E: Error>(
-        overwritingFrom offset: Int, _ body: nonisolated(nonsending) (inout OutputRawSpan) async throws(E) -> R
-    ) async throws(E) -> R {
-        precondition(offset >= 0 && offset <= byteCount, "An output span starting outside a span")
-        // Unsafe: an output span over these bytes, outliving `withUnsafeMutableBytes`' closure. Safe: the span is
-        // `inout` for this whole call, so its memory stays put; `finalize` checks that `body` left it in place.
-        let region = withUnsafeMutableBytes { buffer in
-            unsafe UnsafeMutableRawBufferPointer(rebasing: buffer[offset...])
-        }
-        var output = unsafe OutputRawSpan(buffer: region, initializedCount: 0)
-        let result = try await body(&output)
-        _ = unsafe output.finalize(for: region)
-        return result
     }
 }
 
@@ -142,6 +121,9 @@ public struct SynchronousTransform<Base: ByteTransform & ~Copyable>: ~Copyable {
 extension SynchronousTransform: AsyncByteTransform where Base: ~Copyable {
     /// The stage's error type.
     public typealias Failure = Base.Failure
+
+    /// The stage's.
+    public static var minimumOutputCapacity: Int { Base.minimumOutputCapacity }
 
     /// Runs the stage's `transform` where the caller is, without suspending.
     ///
@@ -229,8 +211,8 @@ nonisolated(nonsending) func transformLending<Base: ByteTransform & ~Copyable>(
     let pointer = withUnsafeMutablePointer(to: &stage) { unsafe UnsafeStage(pointer: $0) }
     var result: Result<TransformProgress, Base.Failure> = .success(TransformProgress(consumed: 0, produced: 0, status: .needsInput))
     // Unsafe: the input, the output's free capacity, and the stage lent to work elsewhere. Safe: `run` awaits it.
-    _ = await unsafe input.withLentBytes { source in
-        await unsafe output.withLentFreeCapacity { target in
+    _ = await unsafe input.withLentBytesAsync { source in
+        await unsafe output.withLentFreeCapacityAsync { target in
             result = await unsafe run(pointer, source, target)
             return (try? result.get())?.produced ?? 0
         }
@@ -241,6 +223,9 @@ nonisolated(nonsending) func transformLending<Base: ByteTransform & ~Copyable>(
 extension ConcurrentTransform: AsyncByteTransform where Base: ~Copyable & SendableMetatype {
     /// The stage's error type.
     public typealias Failure = Base.Failure
+
+    /// The stage's.
+    public static var minimumOutputCapacity: Int { Base.minimumOutputCapacity }
 
     /// Runs the stage's `transform` on the global concurrent executor (a `@concurrent` function), suspending
     /// until it returns if that means leaving the caller's executor.
@@ -264,6 +249,9 @@ extension ConcurrentTransform: AsyncByteTransform where Base: ~Copyable & Sendab
 extension OffloadedTransform: AsyncByteTransform where Base: ~Copyable & SendableMetatype {
     /// The stage's error type.
     public typealias Failure = Base.Failure
+
+    /// The stage's.
+    public static var minimumOutputCapacity: Int { Base.minimumOutputCapacity }
 
     /// Runs the stage's `transform` on ``queue``, suspending until it returns.
     ///

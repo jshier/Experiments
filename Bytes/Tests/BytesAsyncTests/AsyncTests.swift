@@ -13,8 +13,8 @@ import Testing
         let written = await span.withOutputRawSpanAsync { output in
             // Unsafe: the input and the output's free capacity lent as pointers. Safe: the task group is awaited
             // inside the lending closures.
-            await unsafe input.span.bytes.withLentBytes { source in
-                await unsafe output.withLentFreeCapacity { target in
+            await unsafe input.span.bytes.withLentBytesAsync { source in
+                await unsafe output.withLentFreeCapacityAsync { target in
                     await withDiscardingTaskGroup { group in
                         for lane in 0..<4 {
                             group.addTask {

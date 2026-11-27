@@ -19,7 +19,11 @@ enum XZ {
     }
 
     /// The dictionary size an LZMA2 filter's properties byte gives.
+    ///
+    /// - Throws: ``BytesError/unsupported`` for bits 6–7 set (reserved for future use, xz 5.3.1);
+    ///   ``BytesError/invalidValue`` for a size code above 40.
     static func dictionarySize(_ byte: UInt8) throws(BytesError) -> Int {
+        guard byte & 0xC0 == 0 else { throw .unsupported }
         guard byte <= 40 else { throw .invalidValue }
         if byte == 40 { return 0xFFFF_FFFF }
         return (2 | Int(byte) & 1) &<< (Int(byte) / 2 &+ 11)
@@ -29,21 +33,23 @@ enum XZ {
     /// CRC-32.
     ///
     /// - Returns: The check type.
-    /// - Throws: ``BytesError/invalidValue`` for the wrong magic, reserved flags, or a reserved check type;
-    ///   ``BytesError/mismatch`` for a wrong CRC.
+    /// - Throws: ``BytesError/invalidValue`` for the wrong magic; ``BytesError/checksumMismatch`` for a wrong CRC;
+    ///   ``BytesError/unsupported`` for reserved flags or a reserved check type (the format reserves them for later
+    ///   versions: liblzma reports them as unsupported options too).
     static func streamHeader(_ header: RawSpan) throws(BytesError) -> Int {
         let magic = UInt64(UInt32(littleEndian: header.load(fromByteOffset: 0, as: UInt32.self)))
             | UInt64(UInt16(littleEndian: header.load(fromByteOffset: 4, as: UInt16.self))) &<< 32
         guard magic == headerMagic else { throw .invalidValue }
         let flags = header.extracting(6..<8)
         let checkType = Int(flags.load(fromByteOffset: 1, as: UInt8.self))
-        guard flags.load(fromByteOffset: 0, as: UInt8.self) == 0, checkType & 0xF0 == 0 else { throw .invalidValue }
+        // The CRC first: reserved bits in a damaged header are damage, not a later version.
         guard CRC32.checksum(flags) == UInt32(littleEndian: header.load(fromByteOffset: 8, as: UInt32.self)) else {
-            throw .mismatch
+            throw .checksumMismatch
         }
+        guard flags.load(fromByteOffset: 0, as: UInt8.self) == 0, checkType & 0xF0 == 0 else { throw .unsupported }
         switch checkType {
         case 0, 1, 4, 10: return checkType
-        default: throw .invalidValue // Reserved check types.
+        default: throw .unsupported // Reserved check types.
         }
     }
 
@@ -59,11 +65,12 @@ enum XZ {
     /// Checks the stream footer at the start of `footer` (`headerSize` bytes or more): its CRC-32, the backward size
     /// against the index's `indexSize`, the flags against the header's `checkType`, and "YZ".
     ///
-    /// - Throws: ``BytesError/invalidValue`` for the wrong magic; ``BytesError/mismatch`` for anything else.
+    /// - Throws: ``BytesError/invalidValue`` for the wrong magic; ``BytesError/checksumMismatch`` for a wrong CRC;
+    ///   ``BytesError/mismatch`` for a backward size or flags that differ from the index's and the header's.
     static func checkFooter(_ footer: RawSpan, indexSize: Int, checkType: Int) throws(BytesError) {
         guard UInt16(littleEndian: footer.load(fromByteOffset: 10, as: UInt16.self)) == 0x5A59 else { throw .invalidValue } // "YZ"
         guard CRC32.checksum(footer.extracting(4..<10)) == UInt32(littleEndian: footer.load(fromByteOffset: 0, as: UInt32.self)) else {
-            throw .mismatch
+            throw .checksumMismatch
         }
         let backwardSize = UInt32(littleEndian: footer.load(fromByteOffset: 4, as: UInt32.self))
         guard (Int(backwardSize) &+ 1) &* 4 == indexSize, footer.load(fromByteOffset: 8, as: UInt8.self) == 0,
@@ -71,6 +78,30 @@ enum XZ {
         else {
             throw .mismatch
         }
+    }
+
+    /// The uncompressed size the last stream in `input` (a whole `.xz` file) records in its index, read back from the
+    /// end: past stream padding, the footer's backward size to the index, and its records' uncompressed sizes summed
+    /// (saturating). `nil` for anything that doesn't read as an index: an estimate for reserving, not a check (the
+    /// decoder checks the index against the blocks).
+    static func lastStreamSize(_ input: RawSpan) -> Int? {
+        var end = input.byteCount
+        while end >= 4 && input.load(fromByteOffset: end &- 4, as: UInt32.self) == 0 {
+            end &-= 4
+        }
+        guard end >= 2 &* headerSize, UInt16(littleEndian: input.load(fromByteOffset: end &- 2, as: UInt16.self)) == 0x5A59 else { return nil }
+        let backwardSize = (Int(UInt32(littleEndian: input.load(fromByteOffset: end &- 8, as: UInt32.self))) &+ 1) &* 4
+        guard backwardSize <= end &- 2 &* headerSize else { return nil }
+        let indexStart = end &- headerSize &- backwardSize
+        guard input.load(fromByteOffset: indexStart, as: UInt8.self) == 0 else { return nil }
+        var cursor = XZCursor(input.extracting(indexStart..<(end &- headerSize)), position: 1)
+        guard let records = try? cursor.integer(), records <= UInt64(backwardSize) else { return nil }
+        var total: UInt64 = 0
+        for _ in 0..<records {
+            guard (try? cursor.integer()) != nil, let uncompressed = try? cursor.integer() else { return nil }
+            total = total &+ uncompressed < total ? .max : total &+ uncompressed
+        }
+        return total > UInt64(Int.max) ? Int.max : Int(total)
     }
 
     /// What a block header says.
@@ -84,15 +115,17 @@ enum XZ {
     /// Parses the block header of `headerSize` bytes at the start of `block`: its CRC-32, flags, sizes, and filter
     /// chain, which must be LZMA2 alone.
     ///
-    /// - Throws: ``BytesError/mismatch`` for a wrong CRC; ``BytesError/invalidValue`` for reserved flags, other
-    ///   filters, or nonzero padding; ``BytesError/insufficientData`` for fields running past the header.
+    /// - Throws: ``BytesError/checksumMismatch`` for a wrong CRC; ``BytesError/unsupported`` for reserved flags or a
+    ///   filter chain other than LZMA2 alone (BCJ, delta, several filters: valid xz this decoder doesn't do);
+    ///   ``BytesError/invalidValue`` for LZMA2's properties of another size, a bad size field, or nonzero padding;
+    ///   ``BytesError/insufficientData`` for fields running past the header.
     static func blockHeader(_ block: RawSpan, headerSize: Int) throws(BytesError) -> BlockHeader {
         let fields = block.extracting(0..<(headerSize &- 4))
         let headerCRC = UInt32(littleEndian: block.load(fromByteOffset: headerSize &- 4, as: UInt32.self))
-        guard CRC32.checksum(fields) == headerCRC else { throw .mismatch }
+        guard CRC32.checksum(fields) == headerCRC else { throw .checksumMismatch }
         var cursor = XZCursor(fields, position: 1)
         let flags = try cursor.byte()
-        guard flags & 0x3C == 0 else { throw .invalidValue }
+        guard flags & 0x3C == 0 else { throw .unsupported }
         var compressedSize: Int?
         var uncompressedSize: Int?
         if flags & 0x40 != 0 {
@@ -106,7 +139,8 @@ enum XZ {
             uncompressedSize = Int(size)
         }
         // One filter, LZMA2, whose one property byte is the dictionary size.
-        guard flags & 3 == 0, try cursor.integer() == lzma2Filter, try cursor.integer() == 1 else { throw .invalidValue }
+        guard flags & 3 == 0, try cursor.integer() == lzma2Filter else { throw .unsupported }
+        guard try cursor.integer() == 1 else { throw .invalidValue }
         let dictionarySize = try dictionarySize(cursor.byte())
         while cursor.position < cursor.end {
             guard try cursor.byte() == 0 else { throw .invalidValue }
@@ -194,9 +228,11 @@ extension LZMA2Decoder {
     ///   - output: Where to append the decompressed bytes; it needs room for all of them.
     /// - Returns: The number of input bytes decoded: all of them.
     /// - Throws: ``BytesError/insufficientData`` for a truncated file; ``BytesError/insufficientCapacity`` if
-    ///   the output doesn't fit; ``BytesError/mismatch`` for a wrong CRC, check, or size; and
-    ///   ``BytesError/invalidValue`` for corrupt data, trailing bytes that aren't a stream, or an unsupported
-    ///   filter (BCJ, delta, or any but LZMA2 alone) or check type (any but none, CRC-32, CRC-64, SHA-256).
+    ///   the output doesn't fit; ``BytesError/checksumMismatch`` for a wrong CRC or check;
+    ///   ``BytesError/mismatch`` for a size or index that disagrees with the blocks; ``BytesError/invalidValue`` for
+    ///   corrupt data or trailing bytes that aren't a stream; ``BytesError/unsupported`` for a filter other than
+    ///   LZMA2 alone (BCJ, delta, several), a reserved check type (any but none, CRC-32, CRC-64, SHA-256), or
+    ///   reserved flags.
     package mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
         guard input.byteCount > 0 else { throw .insufficientData }
         return try output.withFreeCapacity { span, written throws(BytesError) -> Int in
@@ -264,7 +300,7 @@ extension LZMA2Decoder {
                 guard try cursor.byte() == 0 else { throw .invalidValue }
             }
             let indexCRC = CRC32.checksum(input.extracting(indexStart..<cursor.position))
-            guard try cursor.uint32() == indexCRC else { throw .mismatch }
+            guard try cursor.uint32() == indexCRC else { throw .checksumMismatch }
             let indexSize = cursor.position &- indexStart
             position = cursor.position
 
@@ -328,10 +364,10 @@ extension LZMA2Decoder {
         switch checkType {
         case 1:
             let expected = UInt32(littleEndian: block.load(fromByteOffset: position, as: UInt32.self))
-            guard CRC32.checksum(content) == expected else { throw .mismatch }
+            guard CRC32.checksum(content) == expected else { throw .checksumMismatch }
         case 4:
             let expected = UInt64(littleEndian: block.load(fromByteOffset: position, as: UInt64.self))
-            guard CRC64.checksum(content) == expected else { throw .mismatch }
+            guard CRC64.checksum(content) == expected else { throw .checksumMismatch }
         default:
             break // None, or SHA-256: not verified.
         }

@@ -23,6 +23,15 @@ The ARM64 kernels need Bytes' `NEONShuffle` trait (on by default) and not `Porta
 NEON's `tbl`, `tbx`, `uzp`, and `zip` come through the `CBytesNEON` C module, because Swift can't express them.
 Otherwise encoding and decoding use the portable kernels.
 
+## 2026-11-27: a complemented decoding window (M1 Max; baselines `b64-old-1` → `b64-new-2`)
+
+The decoder's window of values is kept complemented (0 for characters not in the alphabet): its first lookup is a
+4-register `tbl` instead of `movi` 0xFF and a 4-register `tbx`, then one `mvn` (on the M1 Max, 4 vector slots for 5 per
+16 characters). Decoding 1 KB −11.6%, 16 KB −5.6%, 1 MB −8.5%, 64 MB −8.0%; 40–95 bytes level (instructions equal).
+The standard alphabets' windows are written complemented: complementing them in the initializer didn't fold and cost
+8.6% at 40 bytes. Muła and Lemire's nibble-lookup decode, counted at this core's costs, would take about 62 slots per
+64 characters against 53 now, so it wasn't tried. Details: `RESULTS.md`, 2026-11-27, later.
+
 ## 2026-11-19: the same suite on an M1 Max (baselines `d2-final` → `m1max`)
 
 Every benchmark, run unchanged on a new machine and compared with the M3 Ultra's `d2-final` (2026-11-18). The M3

@@ -340,10 +340,12 @@ public final class BlockBufferPool: Sendable {
     @inlinable @inline(__always) @_lifetime(borrow self)
     public func bytes(_ index: Int, at offset: Int, count byteCount: Int) -> RawSpan {
         checkRange(index, offset, byteCount)
-        // Unsafe (the next two): a span over the pool's storage, its lifetime set by hand to a borrow of the pool.
-        // Safe: within buffer `index` (checked above), in storage the pool owns and frees only when it goes, which the
-        // borrow outlasts.
-        let span = unsafe RawSpan(_unsafeStart: blockBase(index) + offset, byteCount: byteCount)
+        let start = index &* stride &+ carryCapacity &+ offset
+        // The storage's span borrows the local reference; the pool holds the storage for as long as it lives, which the
+        // borrow of the pool outlasts.
+        let storage = storage
+        let span = storage.bytes(start..<(start &+ byteCount))
+        // Unsafe: the span's lifetime moved from the local reference to the pool. Safe: the pool owns the storage.
         return unsafe _overrideLifetime(span, borrowing: self)
     }
 
@@ -354,10 +356,10 @@ public final class BlockBufferPool: Sendable {
         _ index: Int, at offset: Int, count byteCount: Int, _ body: (inout MutableRawSpan) throws(E) -> R
     ) throws(E) -> R {
         checkRange(index, offset, byteCount)
-        // Unsafe: a mutable span over the pool's storage. Safe: within buffer `index` (checked above), in storage the
-        // pool owns; the span ends with `body`.
-        var span = unsafe MutableRawSpan(_unsafeStart: blockBase(index) + offset, byteCount: byteCount)
-        return try body(&span)
+        let start = index &* stride &+ carryCapacity &+ offset
+        // Unsafe: writes the shared storage. Safe: within buffer `index` (checked above), which the caller holds and no
+        // one else reads or writes meanwhile (this method's rule).
+        return try unsafe storage.withMutableBytes(start..<(start &+ byteCount), body)
     }
 
     /// Copies `byteCount` bytes from `offset` in buffer `source` to just before buffer `target`'s block bytes, into its

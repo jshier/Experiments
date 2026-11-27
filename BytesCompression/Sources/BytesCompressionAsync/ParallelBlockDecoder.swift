@@ -860,10 +860,7 @@ public final class ParallelBlockDecoder<Stage: BlockStage>: OrderedBlockSource, 
             guard got == PBZ.blockHeaderSize else { throw Failure(.framing(.blockHeaderCutShort)) }
             let raw: Int, stored: Int
             do throws(PBZError) {
-                // The header storage's 16 bytes: safe.
-                (raw, stored) = try unsafe PBZ.blockSizes(
-                    RawSpan(_unsafeStart: header.base, byteCount: PBZ.blockHeaderSize), index: index, blockSize: blockSize
-                )
+                (raw, stored) = try PBZ.blockSizes(header.bytes(0..<PBZ.blockHeaderSize), index: index, blockSize: blockSize)
             } catch {
                 throw Failure(.framing(error))
             }
@@ -972,9 +969,8 @@ extension ParallelBlockDecoder where Stage: BlockReadingStage {
             offset += PBZ.blockHeaderSize
             let raw: Int, stored: Int
             do throws(PBZError) {
-                // The header storage's 16 bytes, just read: safe.
-                (raw, stored) = try unsafe PBZ.blockSizes(
-                    RawSpan(_unsafeStart: header.base, byteCount: PBZ.blockHeaderSize), index: index, blockSize: blockSize, available: end - offset
+                (raw, stored) = try PBZ.blockSizes(
+                    header.bytes(0..<PBZ.blockHeaderSize), index: index, blockSize: blockSize, available: end - offset
                 )
             } catch {
                 throw Failure(.framing(error))

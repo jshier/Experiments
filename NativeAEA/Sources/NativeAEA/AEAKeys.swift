@@ -63,9 +63,9 @@ public struct KeyInfo {
 
     public init(_ label: StaticString, index: UInt32? = nil) {
         precondition(label.utf8CodeUnitCount <= 12, "Key schedule labels are short")
-        let bytes = unsafe UnsafeRawBufferPointer(start: label.utf8Start, count: label.utf8CodeUnitCount) // A static string's bytes: safe.
-        for unsafe byte in unsafe bytes {
-            storage[count] = byte
+        let bytes = label.bytes
+        for index in 0..<bytes.byteCount {
+            storage[count] = bytes.load(fromByteOffset: index, as: UInt8.self)
             count += 1
         }
         if let index {

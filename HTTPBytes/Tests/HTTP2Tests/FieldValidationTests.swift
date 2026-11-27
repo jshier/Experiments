@@ -163,7 +163,7 @@ import Testing
 
     @Test func pseudoHeadersSeen() throws {
         var validator = HTTP2FieldValidator(.response)
-        try validator.check(name: immortalSpan(":status"), value: immortalSpan("404"), knownName: .pseudoStatus)
+        try validator.check(name: (":status" as StaticString).bytes, value: ("404" as StaticString).bytes, knownName: .pseudoStatus)
         let seen = try validator.finish()
         #expect(seen.status == 404 && seen.contains(.pseudoStatus) && !seen.contains(.pseudoPath))
     }

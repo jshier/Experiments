@@ -456,7 +456,7 @@ public struct ExtractionSink: ArchiveSink, ~Copyable {
         guard let range = entry.path, let type = entry.type else { throw .invalidArchive("an entry without a type or path") }
         let name = header.extracting(range.offset..<(range.offset + range.count))
         guard range.count <= EntryPath.maximumByteCount else {
-            throw .unsafePath(String(decoding: [UInt8](copying: name), as: UTF8.self))
+            throw .unsafePath(String(decoding: name, as: UTF8.self))
         }
         var pathBytes = path.mutableSpan
         pathBytes.copyBytes(from: name, toByteOffset: 0) // Under PATH_MAX (checked above).

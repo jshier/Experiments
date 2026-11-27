@@ -179,9 +179,7 @@ struct ListingSink: ArchiveSink, ~Copyable {
     nonisolated(nonsending) mutating func entry(_ entry: AAEntryHeader, header: RawSpan, buffer: Int) async throws(AEAError) {
         func string(_ range: AAHeaderRange?) -> String? {
             guard let range else { return nil }
-            // Unsafe: decodes the bytes' buffer. Safe: the range's bytes (`extracting` checks it is in the header),
-            // valid inside `withUnsafeBytes`; the string copies them.
-            return header.extracting(range.offset..<(range.offset + range.count)).withUnsafeBytes { unsafe String(decoding: $0, as: UTF8.self) }
+            return String(decoding: header.extracting(range.offset..<(range.offset + range.count)), as: UTF8.self)
         }
         statistics.entries += 1
         switch entry.type {

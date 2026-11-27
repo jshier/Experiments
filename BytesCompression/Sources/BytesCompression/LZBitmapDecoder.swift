@@ -103,7 +103,8 @@ extension LZBitmapDecoder: @unchecked Sendable {}
 enum LZBitmapFormat {
     /// The magic's last byte: Compression writes 0x09 (`ZBM\t`) and reads 0x08 the same way. It also accepts
     /// 0x0C and 0x0D, but with those, rejects every compressed chunk it writes: some other chunk format, which
-    /// nothing here writes. Streams of only stored chunks decode under them.
+    /// nothing here writes. Streams of only stored chunks decode under them; a compressed chunk under them throws
+    /// ``BytesError/unsupported``.
     enum Variant { case standard, storedOnly }
 
     /// The variant a stream's first 4 bytes (big-endian) name.
@@ -246,7 +247,8 @@ enum LZBitmapStream {
             if kind == .stored {
                 unsafe (output + produced).update(from: header + 6, count: size)
             } else {
-                guard variant == .standard else { throw .invalidValue }
+                // The 0x0C/0x0D variants' compressed chunks are another chunk format, which nothing here reads.
+                guard variant == .standard else { throw .unsupported }
                 try unsafe decodeChunk(
                     header, length: length, output: output, start: produced, size: size, workspace: workspace
                 )

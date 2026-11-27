@@ -80,7 +80,11 @@ let package = Package(
         ),
         .target(
             name: "HTTPBytesHTTPTypes",
-            dependencies: ["HTTPBytes", .product(name: "HTTPTypes", package: "swift-http-types")],
+            dependencies: [
+                "HTTPBytes",
+                .product(name: "Bytes", package: "Bytes"),
+                .product(name: "HTTPTypes", package: "swift-http-types"),
+            ],
             swiftSettings: strictSettings
         ),
         .testTarget(

@@ -19,6 +19,143 @@ Base64 was its own package until 2026-11-19; it's now the `BytesBase64` module h
 [RESULTS-base64.md](RESULTS-base64.md); its baselines (`.benchmarkBaselines/Base64Benchmarks/`) and allocation
 thresholds (`Thresholds/Base64Benchmarks.*`) kept their names. BytesCrypto's PEM now decodes and encodes with it.
 
+## 2026-11-27, later: short back-references from registers, Base64's complemented window, CRC-32 with 12 lanes (M1 Max)
+
+Open item 9, the M1 Max notes' "not tried" ideas (plan and review: `Writeups/Item-9-Plan-2026-11-27.md`). Times
+are minimums from each baseline's histogram (the tables' two digits can't show these), old and new run alternately
+on an idle machine.
+
+**Short back-references.** `GenericBytesWriter.copyShortMatch(distance:count:in:at:)` (public: DEFLATE's fast loop
+calls it directly): for distances 1–15 with room to overrun, one 16-byte load of the bytes before the copy, two
+one-register `tbl`s from a 480-byte index table (pattern byte `i` is loaded byte `(16 − d) + i % d`, from phase 0 and
+from byte 16), two stores, then stores of the first register at a stride of `16 − 16 % d`. It replaces the exact path
+for 2–7 (an out-of-line fill after a variable-width load), `memset` for 1, and 8-byte load–store chains for 8–15; the
+overrunning copy's exact fallback moved out of line (inlined, it grew Brotli's loop). Baselines `short-old-1` →
+`short-new15`/`short-new15b` (Bytes, BytesCompression).
+
+| Row | Before | After |
+|---|---|---|
+| Back-references, distance 1, 3–32 B / 3–258 B | 42.2 / 2.92 µs | 12.5 / 3.00 µs |
+| Back-references, distances 2–7, 3–32 B / 3–258 B | 27.4–34.0 / 4.6–5.5 µs | 12.5–12.8 / 2.9–3.1 µs |
+| Back-references, distance 8, 3–32 B / 3–258 B | 15.9 / 12.25 µs | 12.5 / 2.92 µs |
+| Inflate x-ray / samba (8.1 / 20.6 MB) | 18.19 / 15.22 ms | 17.73 / 15.08 ms (−2.6% / −1.0%; instructions −3.3% / −1.0%) |
+| Inflate dickens, Main.js | | flat |
+| Brotli decode q5, four corpora | | −0.9 to +0.6% (instructions +0.3 to +1.0%) |
+
+libdeflate's rows, the control, moved ±0.7% between the same runs. The decoders gain only where short distances are
+common (binary data); text barely uses them.
+
+**Base64's decoder** keeps its window of values complemented (0 for characters not in the alphabet), so the first
+lookup is a 4-register `tbl` (3 vector slots on this core, its out-of-range lanes 0) and one `mvn` restores the values,
+where a 4-register `tbx` (4 slots) needed a vector of 0xFF made for each (5 slots against 4 per 16 characters). The
+standard alphabets' windows are written complemented (complementing in the initializer cost about 3 instructions a
+call: +8.6% at 40 bytes). Baselines `b64-old-1` → `b64-new-2`, `Decode …: Bytes (BytesReader → BytesWriter)`:
+
+| Text | Before | After |
+|---|---|---|
+| 40 / 64 / 95 B | 1.69 / 1.20 / 0.82 µs | 1.74 / 1.19 / 0.80 µs (instructions equal) |
+| 1 KB / 16 KB | 493 / 404 µs | 436 / 381 µs (−11.6% / −5.6%) |
+| 1 MB / 64 MB | 401 µs / 6.46 ms | 367 µs / 5.94 ms (−8.5% / −8.0%; about 10.7 GB/s of text) |
+
+(Each row's iteration decodes several megabytes, so these aren't per-call times; the 2.35 GB/s in the plan was a
+misreading: the kernel runs about 10 GB/s.)
+
+**CRC-32's fold** has 12 accumulators, folding 192 bytes a step (constants x^(1536 ± 32) mod P, derived by the same
+test as the others), as libdeflate's: 1 MB 18.17 → 16.04 and 16.33 µs (−11%, level with libdeflate's 16.0–16.3), the
+1,000,003-byte row 17.2 → 15.3–15.6 µs; 64 B unchanged (below the fold). Baselines `crc-old-1`, `crc-new-{1,2}`.
+**Not done:** scalar `crc32x` streams beside the fold (corsix's hybrid): it could add up to about 35% in cache only,
+from memory the fold is at the load rate, and no client's CRC is its bottleneck.
+
+## 2026-11-27: AES-CTR with 12 blocks in flight; GCM measured and left; the async append without zeros (M1 Max)
+
+Open items 7 and 8 (plan, review, and what changed: `Writeups/AES-Depth-and-Async-Append-Plan-2026-11-26.md`).
+
+**AES counter mode, 12 blocks in flight** (`counterModeBatches12`; BytesCompression baselines `ctr12-old-{1,2}` →
+`ctr12-new-{1,2}`, old and new built alternately on an idle machine). One straight-line loop per key size and counter
+layout (the body inlined with constants: the last keys are real registers, the counter stays in registers), the
+8-block kernel kept for 128–191-byte remainders and the little-endian counter's carry. No stack traffic in any of
+the nine loops; every `aesmc` right after its `aese` (1,188 pairs, checked in the disassembly).
+
+| Row (1 MB) | 8 blocks | 12 blocks | CommonCrypto |
+|---|---|---|---|
+| AES-128-CTR, time (p25) | 85 / 84 µs | 70 / 69 µs (−18%, 15.1 GB/s) | 78 µs |
+| AES-256-CTR, time (p25) | 120 / 120 µs | 90 / 90 µs (−25%, 11.6 GB/s) | 107 µs |
+| Instructions | 1.782 M / 2.331 M | 1.698 M / 2.222 M (−4.7%) | |
+
+Both now beat CommonCrypto. The new kernel's p50 swung between runs (AES-128 79 and 69 µs, AES-256 90 and 102) while
+the old one's didn't; p25 agreed. The gain is the review's estimate, not the notes' 1.5x: about 12.5 vector µops a
+block besides the AES rounds bind once the chains don't (`Writeups/M1-Max-vs-M3-Ultra.md`'s "AES kernels" counted the
+rounds alone).
+
+**AES-GCM's stitched loops: not changed.** They run about 65 cycles a group of 128 bytes against 32 for the AES
+chains, so more chains can't help. The review's reading, a GHASH chain through `y` (stack round trip, the reduction in
+general registers), was tested and is not the bound: with `y·H⁸` added last and the reduction kept in vector registers,
+instructions fell 6–8% and time didn't move (seal 1 MB 168–172 µs either way, open 16 KB 188 → 186). The counters say
+throughput: 67% of slots retiring useful work, 2.30 SIMD instructions a cycle (CTR's 12-block loop: 2.64). Worse, moving
+lane picks from general registers into vectors (`ext` for `SIMD2(x[1], x[0])`, the reduction's lanes) slowed open by
+18% (158 → 188 µs at 16 KB): the compiler's scalarized Karatsuba middle term (`x₀ ⊕ x₁` in general registers, as only
+lane 0 is used) takes work off the busy vector pipes. All of it reverted (baselines `gcm-before`, `gcm-old-{1,2}`,
+`gcm-new-{1,2}`).
+
+**`AsyncByteTransform.transform(_:appending:)`** lends the array's uninitialized new capacity to the stage across the
+await (`[UInt8].append(receivingUpTo:_:)`, BytesAsync) instead of appending `room` zeros and trimming; both appends grow
+geometrically (an exact reserve per round reallocated every round); the async stages report `minimumOutputCapacity`
+(the async loop ignored it and could spin on `needsOutput`). New rows (`Async.swift`), `append-before` → `append-after`:
+
+| Row | Instructions | Time |
+|---|---|---|
+| copy stage, 4 MB in one call | 1.130 M → 0.801 M (−29%) | 205 → 75 µs |
+| copy stage, 1 MB in 64 KB calls | 551 K → 454 K (−18%) | 70 → 60 µs |
+| 4x stage, 1 MB in one call | 1.662 M → 1.334 M (−20%) | 205 → 143 µs |
+
+(The before run overlapped a reviewer's probes: the counts are the evidence, the times indicative.)
+
+## 2026-11-25: Growing `ByteBuffer`, checked `RawStorage`, text helpers, `CancellableError` (M1 Max; baselines `bytesapi-before` → `bytesapi-after`)
+
+Open items 18–21 and 23 (`Writeups/Open-Items-2026-11-25.md`; plan, review, and what changed in
+`Writeups/Bytes-API-Items-Plan-2026-11-25.md`):
+
+- `ByteBuffer`: `reserveCapacity(_:)` (keeps the unread bytes; a default compaction threshold stays half),
+  `append(copying:)` (compacts only if the bytes don't fit at the end), `availableCapacity`, `withFreeCapacity`.
+  `[UInt8].append(writingUpTo:_:)` replaces the reserve/`append(addingCapacity:)`/`OutputRawSpan`/`finalize` idiom
+  (`Pipeline`'s array transform, `Compressor.compressAll(_:)`, `Decompressor.decompressAll(_:maximumSize:)`).
+- `RawStorage.pointer(_:)` checks its offset (one unsigned compare); `bytes(_:)` (a span borrowing the storage),
+  `withMutableBytes(_:_:)` and `withOutputRawSpan(overwriting:_:)` (`@unsafe`: shared by reference), range-checked.
+- `String(decoding: RawSpan, as: UTF8.self)`; `StaticString.bytes` (immortal); `UInt64`/`UInt32(littleEndianBytes:)`
+  and `(bigEndianBytes:)` for `chunks(of:)` elements, in place of a `withWords(of:)` closure (`chunks(of:)` is that
+  view already).
+- `read(utf8ByteCount:)`; `skip(bitCount:)`/`peek(bitCount:)` check with one unsigned compare.
+- `BytesError.cancelled` is gone: `CancellableError<Failure>` (`.cancelled`, `.failed(Failure)`) is what the parallel
+  codecs' async forms throw. BytesAsync's lending is `withLentBytesAsync`/`withLentFreeCapacityAsync` (the same name
+  as the sync forms was ambiguous; Disk's `withUnsafeBytesAsync` workaround is gone).
+
+Clients: `ChunkedDecompressor`'s staging grows with `reserveCapacity`; HTTPPayload's carry and middle buffers are
+`ByteBuffer`s (six `unsafe` copies gone); HTTPBytes' `immortalSpan` and BytesCompression's `WordReads.value` moved
+here; Disk's `Planner`/`Decmpfs`, `ParallelBlockDecoder`'s header reads and `BlockBufferPool`'s accessors on
+`RawStorage`'s; six `String`-from-bytes sites (and HTTPBytesHTTPTypes' per-byte field copy is `[UInt8](copying:)`);
+HPKE, `AEAKeys`, MQTT's `MQTTError` equality on `StaticString.bytes`.
+
+Instruction and malloc counts (other benchmarks ran alongside; no times are claimed):
+
+| Package, rows | Before → after |
+|---|---|
+| Bytes: bit readers and writers, bandwidth, scans, pipelines | flat (±0.1%) |
+| Bytes: rows under ~100 K whose code didn't change ("Runs: bytes, 1000 each", "Span copies: 64 B", `lastByteOffset`) | +1–2 K instructions per iteration, the same in a rerun |
+| BytesCompression: ChaCha20-Poly1305 (every size), CRC-64, XXH64, zstd L1 bodies, pipelines, sequential inflate | flat (Poly1305's `bitCast` read: 8,643,000 both ways for 1 MB) |
+| BytesCompression: parallel codecs, run alone (`bytesapi-parallel-quiet`) | flat (8 lanes); first run beside NativeAEA's benchmarks +1.5–5% |
+| HTTPBytes: content decoding and encoding, fields, HPACK/QPACK | flat; chunked gzip body pipeline 5 → 4 mallocs (one `ByteBuffer` for the carry, not a class and its memory) |
+| MQTT | flat |
+| NativeAEA: segment decoders, listing, extraction | flat; making a segment decoder 6,811 → 6,743 (−1.0%); synthetic extraction's mallocs wander 363–373 across runs |
+| SocketStream (PR toolchain; against `api-after`): in-memory protect/unprotect, encode, check | flat; every zero-malloc gate 0 |
+| Disk: writers, decmpfs, workers, Xcode-like trees | −3.6 to +1.9%, inside the run's noise: the probes that run no code of ours (raw `pwrite`, DispatchIO) moved −7 to −14%; mallocs ±1–4 in threaded rows |
+| Every zero-malloc gate | 0 |
+
+The small Bytes rows: "Runs: bytes, 40 each" writes about 1,600 runs an iteration and moved +1 K, the same as the
+65-run "1000 each" row's +1.3 K, so the extra instructions are a fixed amount per iteration outside the measured
+loop (whose code is unchanged; `Tools/calls` finds only `memset` in it), not per run. The 10-lane parallel deflate
+6 row on samba moved 1,839 → 1,904 → 1,991 M across three runs of the same code (two of its workers on the efficiency
+cores); its 8-lane row was 1,828 → 1,829 M.
+
 ## 2026-11-25: BytesAsync on the standard library's `Continuation` (M1 Max; baselines `async-before` → `async-after`)
 
 Open items 6 and 22 (`Writeups/Open-Items-2026-11-25.md`; plan, review, and what changed in
@@ -442,6 +579,8 @@ CRC-32's `pmull` fold, looked at and not changed: 8 accumulators, each `pmull` +
 24 vector operations: 6 cycles on 4 pipes, so pipe-bound (86 GB/s at 4.02 GHz; measured 77, 90%). More accumulators
 can't help (3 operations per 16 bytes is a fold's minimum); the way past is the integer pipes, scalar `crc32x` streams
 alongside the `pmull` lanes, combined at the end (corsix's fast-crc32), up to about 32 GB/s more in theory. Not tried.
+(2026-11-27, M1 Max: 12 accumulators, as libdeflate, took the fold from 90% to about 98% of the bound, −11% at 1 MB;
+the hybrid is still not done: in-cache only, and never a client's bottleneck.)
 
 ## 2026-11-20, M3 Ultra: the whole suite after the cleanup, and the M1 Max probes repeated (baseline `m3-1120`)
 
@@ -990,12 +1129,15 @@ and level with it from memory (about 60). In cache the fold is compute-bound: 16
 - Back-references at short distances (group ratio 1.47, `distance 1`–`7` rows 1.6–1.85, the largest in the suite for
   equal instructions) and `Write: Byte10`/stores generally (1.8–2.1): consistent with partial-width loads and stores that
   can't forward on the M1 Max, but no probe was run; a decoder that keeps the last 8 output bytes in a register would
-  avoid the loads. Raw SIMD stores run 62 GB/s on the M1 Max against 113 on the M3.
+  avoid the loads. Raw SIMD stores run 62 GB/s on the M1 Max against 113 on the M3. (Done 2026-11-27: distances 1–15
+  repeat the pattern from registers, 2–5x faster on these rows; the cost was mostly the path, not forwarding.)
 - Base64's decoder, tuned around `tbl`/`tbx` micro-op counts on the M3: on this core a 4-register `tbl` is three slots and
-  a `tbx` four with 8-cycle latency, so a window of 2-register lookups may rank differently; not tried.
+  a `tbx` four with 8-cycle latency, so a window of 2-register lookups may rank differently; not tried. (Done 2026-11-27:
+  a complemented window, `tbl` and `mvn` for `movi` and `tbx`, 6–12% on 1 KB and up; 2-register lookups would cost more.)
 - AES counter mode (and AES-GCM's stitched loop) with 12 blocks in flight instead of 8: the eight-block kernel is at the
   bound of its round chains, and the units allow about 1.5x (above); not tried, and the M3's rate for the fused pair isn't
-  known.
+  known. (Done 2026-11-27 for CTR: −18% AES-128, −25% AES-256; GCM's loop is bound by vector throughput and stays at 8.
+  See that day's section.)
 - The parallel decoder's rejected speculation on mozilla level 1 at 4, 8, 12, 13, 15, and 16 lanes (above): cause not
   investigated.
 - ChaCha20's eight-block layout, AES-GCM aggregation, Brotli's tag filter: unchanged, ranking on the M1 Max not tested.

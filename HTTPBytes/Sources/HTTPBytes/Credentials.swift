@@ -40,7 +40,7 @@ public struct HTTPCredentials: ~Escapable {
 
     /// Whether the scheme is `scheme`, ignoring case (on both sides: `"Bearer"` and `"bearer"` alike).
     @inlinable
-    public func isScheme(_ scheme: StaticString) -> Bool { HTTPToken.equalsIgnoringCase(self.scheme, immortalSpan(scheme)) }
+    public func isScheme(_ scheme: StaticString) -> Bool { HTTPToken.equalsIgnoringCase(self.scheme, scheme.bytes) }
 
     /// The auth-params (none when there's a token68).
     @inlinable

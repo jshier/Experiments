@@ -8,6 +8,22 @@ the last receiver's end of stream. Every packet is checked on arrival. The packa
 compressed and TLS-encrypted streams through Bytes pipelines (2026-11-15 below). The 2026-11-19 section below repeats
 the benchmarks on an M1 Max and compares them with the M3 Ultra's.
 
+## 2026-11-25: compression through `Compressor`/`Decompressor`, and zstd (baselines `api-before` → `api-after`, M1 Max)
+
+The sequential sender and receiver take BytesCompression's `Compressor` and `Decompressor` as their stages, for every
+format (`StreamCompression.compressionFormat`/`decompressionFormat`, one mapping for the transfers and the benchmark);
+`ParallelDeflateEncoder` stays for `--compression-lanes` above 1. New: `--compression zstd` (level 1, a 256 KB window,
+the receiver limited to it). In memory, 10,000 packets of 64 B with TLS records:
+
+| Pipeline | Protect instructions | Protect ms | Unprotect instructions | Unprotect ms |
+|---|---:|---:|---:|---:|
+| DEFLATE (before → after) | 34 M → 34 M | 3.00 → 2.97 | 13 M → 13 M | 1.03 → 1.03 |
+| Brotli (before → after) | 41 M → 41 M | 3.83 → 3.60 | 26 M → 26 M | 2.03 → 2.05 |
+| zstd (new) | 29 M | 2.23 | 18 M | 1.18 |
+
+`Compressor`'s one `switch` per call costs nothing measurable (as the 2026-11-24 survey measured). Every pipeline
+allocates nothing (the `Allocations:` gates, zstd's included). Transfer tests run zstd plain and with TLS records.
+
 ## 2026-11-19: M1 Max against M3 Ultra (baselines `d2-final` → `m1max`)
 
 The same toolchain (pr-91981 build 2511, Swift 6.5-dev; installed on the new machine with `Tools/toolchain install`,

@@ -137,7 +137,7 @@ public enum PNG {
         let languageTag = try String(copying: body.read(utf8TerminatedBy: 0))
         let translatedKeyword = try String(copying: body.read(utf8TerminatedBy: 0))
         // Validated, where the example repairs invalid UTF-8 (`String(parsingUTF8:)`): the same for valid text.
-        let text = try String(copying: body.readUTF8(byteCount: body.remainingByteCount))
+        let text = try String(copying: body.read(utf8ByteCount: body.remainingByteCount))
         return ExampleChunk.InternationalText(
             keyword: keyword, compressionFlag: compressionFlag, compressionMethod: compressionMethod,
             languageTag: languageTag, translatedKeyword: translatedKeyword, text: text

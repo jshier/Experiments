@@ -40,7 +40,7 @@ public struct HTTPTokenList: ~Escapable {
         var found = false
         do throws(HTTPFieldValueError) {
             while let element = try list.next() {
-                if HTTPToken.equalsIgnoringCase(element, immortalSpan(token)) { found = true }
+                if HTTPToken.equalsIgnoringCase(element, token.bytes) { found = true }
             }
         } catch {
             return false

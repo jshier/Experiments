@@ -48,6 +48,43 @@ That gap is a new item (13a below).
    repeated small bodies measure the branch predictor's memory (judge by varied bodies). Tests no longer use
    `@testable` or `@_spi` anywhere; `-enable-testing` is gone from the docs and `Tools/toolchain test`.
 
+27, 25, 24, 15. **Errors, `Compressor`'s gaps, detection and gzip headers, `decompressAll`'s reservation**
+   (2026-11-25, `BytesCompression/RESULTS.md`; plan and both reviews in `API-Items-Plan-2026-11-25.md`).
+   `BytesError.checksumMismatch` and `.unsupported` (one rule: reserved-for-later is unsupported, ruled-out is
+   corrupt), every codec's sites and the clients' mappings; `Compressor.init(for:)`, `releaseMemory()`,
+   `compressAll(_:) -> [UInt8]`, `maximumCompressedSize`, `zstdForHTTP` both ways, one parameter rule; SocketStream on
+   `Compressor`/`Decompressor` with zstd; `DecompressionFormat(detecting:)`; public `GzipHeader` read and written; a
+   `maximumSize` that's a limit, not a reservation. Departures: no `truncated` case (`insufficientData` is that), no
+   `LocatedBytesError` in the codecs (a payload on every hot path), LZFSE's block sizes not read for item 15 (needs its
+   tables decoded), `CompressionFormat` takes no gzip header (the encoders do), Bytes-Survey's
+   `ArchiveKind.compressedFile` (single-file archives in the app) still open. Cost: DEFLATE streams +65 instructions
+   each (0.12% at 64 B); zstd still ahead of libzstd 1.6.0.
+
+18–21, 23. **`ByteBuffer` growth and copies, checked `RawStorage`, text and word helpers, the lending names,
+   cancellation** (2026-11-25, `Bytes/Benchmarks/RESULTS.md`; plan, review, and what changed in
+   `Bytes-API-Items-Plan-2026-11-25.md`). `ByteBuffer.reserveCapacity`/`append(copying:)`/`withFreeCapacity`,
+   `[UInt8].append(writingUpTo:)`; `RawStorage.pointer` checked, with range-checked span accessors;
+   `String(decoding: RawSpan, as:)`, `StaticString.bytes`, `UInt64(littleEndianBytes:)` and kin; `read(utf8ByteCount:)`;
+   one-compare bit counts; `withLentBytesAsync`/`withLentFreeCapacityAsync`; `CancellableError<Failure>` in Bytes in
+   place of `BytesError.cancelled`. Adopted by `ChunkedDecompressor`, HTTPPayload's buffers, Disk, the block decoder,
+   HTTPBytes (`immortalSpan` gone), HPKE, NativeAEA, MQTT. Departures: no `withWords(of:)` (`chunks(of:)` plus the word
+   initializers are that); `CancellableError` lives in Bytes, not BytesAsync (BytesCompression's stop-aware composite
+   reports a stop, and BytesCompressionAsync needed no new import); Murmur64 and `StaticFieldEntries` unchanged (loads
+   that already fold; a table of addresses). Counts flat in every client; one malloc fewer per chunked gzip body.
+
+7, 8. **AES-CTR with 12 blocks in flight; the async append without zeros** (2026-11-27, `Bytes/Benchmarks/RESULTS.md`;
+   plan and review in `AES-Depth-and-Async-Append-Plan-2026-11-26.md`). AES-128-CTR −18%, AES-256-CTR −25% (now
+   ahead of CommonCrypto); `transform(_:appending:)` −18 to −29% instructions on its new rows, with geometric growth in
+   both appends and `minimumOutputCapacity` honored by the async adapters. Departure: AES-GCM's stitched loops are bound
+   by vector throughput, not chains or the GHASH recurrence (tested: −7% instructions, no time; moving lane work into
+   vectors made open 18% slower), so they're unchanged.
+
+9. **Short back-references from registers, Base64's complemented window, CRC-32 with 12 lanes** (2026-11-27,
+   `Bytes/Benchmarks/RESULTS.md`; plan and review in `Item-9-Plan-2026-11-27.md`). Distances 1–15 repeat their pattern
+   with two `tbl`s (back-reference rows 2–5x faster, DEFLATE on x-ray −2.6%, Brotli level); Base64 decoding −6 to −12%
+   from 1 KB up; CRC-32 −11%, level with libdeflate. Departure: scalar `crc32x` streams beside the fold not built
+   (in-cache only, never a bottleneck).
+
 ## Performance: Bytes
 
 3. **[H] Block loads are checked one by one.** `byteBlock(at:)` has one precondition, but `ByteBlock(loading:)`
@@ -61,12 +98,9 @@ That gap is a new item (13a below).
    candidate.
 6. **[H–M] BytesAsync shadows the SDK's noncopyable `Continuation`** (SE-0528; `Waiting.swift:15,31`). It also has two
    `[Element?]` rings that index with `%` (`WaiterQueue`, `AsyncQueue`).
-7. **[M] AES-CTR and stitched AES-GCM run 8 blocks in flight**, not 12 (`AES.swift:319`).
-8. **[L] `AsyncByteTransform.transform(_:appending:)` zero-fills every round** (`AsyncByteTransform.swift:55`).
-9. Not tried, from RESULTS:
-   - CRC-32 with scalar `crc32x` streams beside `pmull`.
-   - Short-distance back-references kept in a register.
-   - Base64's decoder tuned for the M1 Max.
+7. ~~**[M] AES-CTR and stitched AES-GCM run 8 blocks in flight.**~~ (done, above: CTR only; GCM measured and left).
+8. ~~**[L] `AsyncByteTransform.transform(_:appending:)` zero-fills every round.**~~ (done, above).
+9. ~~Not tried, from RESULTS.~~ (done, above; the `crc32x` hybrid left out).
 
 ## Performance: BytesCompression
 
@@ -78,8 +112,8 @@ That gap is a new item (13a below).
 13a. ~~**[M] The zstd encoder against libzstd 1.6.0.**~~ (done, above; 1.6.0's source changed little on this path:
     its gain was its compiler's).
 14. **[L, large] zstd encoder levels 5 and up; DEFLATE levels 10–12** (both clamped).
-15. **[L] `Decompressor.decompressAll(_:maximumSize:)` reserves `maximumSize` when the size is unknown**
-    (`Decompressor.swift:451–455`).
+15. ~~**[L] `Decompressor.decompressAll(_:maximumSize:)` reserves `maximumSize` when the size is unknown**~~ (done,
+    above).
 
 ## API: Bytes
 
@@ -87,29 +121,21 @@ That gap is a new item (13a below).
     and `matching(lessThan:)`/`matching(atLeast:)`.
 17. **A public typed block view** (`RawSpan.blocks<let n>()` or `ByteBlock(InlineArray<64, UInt8>)`), with
     `WordReads` moved down from BytesCompression. This goes with item 3.
-18. **`ByteBuffer` gaps** (`Buffers.swift:342–471`): `append(copying:)`, `withFreeCapacity`, growth.
-    `ChunkedDecompressor.growStaging`/`fillInput` hand-roll them.
-19. **The sync/async `withLentBytes` name clash** (`Lending.swift:93` against `BytesAsync/Lending.swift:15`).
-20. **`RawStorage` vends pointers only**, and `pointer(_:)` doesn't check its precondition (`RawStorage.swift:63–67`).
-21. **Missing helpers:** `String` from a `RawSpan`; `StaticString` as an immortal `RawSpan`; `withWords(of:)`.
+18. ~~**`ByteBuffer` gaps.**~~ (done, above).
+19. ~~**The sync/async `withLentBytes` name clash.**~~ (done, above).
+20. ~~**`RawStorage` vends pointers only.**~~ (done, above).
+21. ~~**Missing helpers.**~~ (done, above).
 22. **Scoped resources:** `AsyncLimiter.withPermit`, a `~Copyable` lease from `AsyncIndexPool`, a closable pool in
     BytesAsync.
-23. **Small cleanups:**
-    - `readUTF8(byteCount:)` → `read(utf8ByteCount:)`.
-    - One unsigned compare in `skip(bitCount:)`/`peek(bitCount:)`.
-    - A cancellation error for BytesAsync.
+23. ~~**Small cleanups.**~~ (done, above).
 
 ## API: BytesCompression
 
-24. **Format detection and gzip headers.** No `DecompressionFormat(detecting:)`; `GzipHeader` is `package` and
-    skips the name and comment; the encoder's header is hard-coded.
-25. **`Compressor` gaps.** `init(for:)` is `package`; no `maximumCompressedSize` or array one-shot; it throws on a
-    negative level where `DeflateEncoder` clamps. `ZstdEncoder` is half-public. A `zstdForHTTP(level:)` format would
-    let SocketStream move onto `Compressor`/`Decompressor`. `Compressor.releaseMemory()` would mirror item 1.
+24. ~~**Format detection and gzip headers.**~~ (done, above).
+25. ~~**`Compressor` gaps.**~~ (done, above).
 26. **`BlockBufferPool` hands out `Int` indices** with manual `retain`/`release` (`BlockBufferPool.swift:307,313`).
     The proposal is a `~Copyable` lease.
-27. **Error vocabulary.** Unsupported features throw `invalidValue`; there are no `unsupported`, `checksumMismatch`,
-    or `truncated` cases; `LocatedBytesError` is unused here.
+27. ~~**Error vocabulary.**~~ (done, above).
 28. **Smaller items:**
     - `ParallelDeflateDecoder.decompressAllConcurrently` is `package`.
     - No streaming `ParallelBrotliEncoder`.
@@ -165,5 +191,7 @@ That gap is a new item (13a below).
 
 Items 3–5 with 16–17 are done (above; baselines `scan-before*` → `scan-after*` in Bytes, BytesCompression,
 HTTPBytes/Benchmarks, and MQTT), and so are 6 with 22 and 26 (`async-before` → `async-after` in Bytes, Disk, and
-NativeAEA), and 10–11 with 13a (`zstd-before` → `zstd-after` in BytesCompression). Next: the API reshaping (18–21,
-24–25, 27). Narrowing (29) goes last.
+NativeAEA), 10–11 with 13a (`zstd-before` → `zstd-after` in BytesCompression), and 27, 25, 24 with 15 (`api-before` →
+`api-after` in BytesCompression and SocketStream), and 18–21 with 23 (`bytesapi-before` → `bytesapi-after` in Bytes,
+HTTPBytes/Benchmarks, MQTT, NativeAEA, Disk, and SocketStream; BytesCompression's against `api-after`), 7 and 8
+(`ctr12-*`, `append-*`), and 9 (`short-*`, `b64-*`, `crc-*`). Narrowing (29) goes last.

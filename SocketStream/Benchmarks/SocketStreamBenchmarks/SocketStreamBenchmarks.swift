@@ -161,7 +161,10 @@ let benchmarks: @Sendable () -> Void = {
         maxIterations: 10,
         thresholds: [.mallocCountTotal: BenchmarkThresholds(absolute: [.p0: 0, .p50: 0, .p90: 0, .p100: 0])]
     )
-    for protection in [Protection(compression: .deflate, encrypted: true), Protection(compression: .brotli, encrypted: true), Protection(encrypted: true)] {
+    for protection in [
+        Protection(compression: .deflate, encrypted: true), Protection(compression: .brotli, encrypted: true),
+        Protection(compression: .zstd, encrypted: true), Protection(encrypted: true),
+    ] {
         let pipelines = lazyPipelines(protection)
         let prepare: () async throws -> Void = { _ = pipelines.value }
         let name = "\(protection)".replacingOccurrences(of: " ", with: "")

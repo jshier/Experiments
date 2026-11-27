@@ -801,15 +801,14 @@ extension BytesError {
     ///
     /// - Parameter what: The structure being read, for the error's message.
     /// - Returns: ``ZipError/truncated(_:)`` for `insufficientData`, ``ZipError/badSignature(_:)`` for
-    ///   `mismatch`, ``ZipError/cancelled`` for `cancelled` (which synchronous reads never throw), and
-    ///   ``ZipError/invalidRecord(_:_:)`` with the error for the rest.
+    ///   `mismatch`, and ``ZipError/invalidRecord(_:_:)`` with the error for the rest.
     func zipError(_ what: String) -> ZipError {
         switch self {
         case .insufficientData: .truncated(what)
         case .mismatch: .badSignature(what)
-        case .cancelled: .cancelled
-        // The parser doesn't use typed views, writing, raw-value fields, or limits, which throw these.
-        case .misaligned, .insufficientCapacity, .limitExceeded, .invalidValue, .trailingData: .invalidRecord(self, what)
+        // The parser doesn't use typed views, writing, raw-value fields, limits, or checksums, which throw these.
+        case .misaligned, .insufficientCapacity, .limitExceeded, .invalidValue, .trailingData, .checksumMismatch,
+             .unsupported: .invalidRecord(self, what)
         }
     }
 }

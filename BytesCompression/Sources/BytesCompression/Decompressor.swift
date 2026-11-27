@@ -58,9 +58,14 @@ public enum DecompressionFormat: Hashable, Sendable {
     /// Apple's LZRAVEN. Whole buffers only.
     case lzraven
 
+    /// Zstandard for HTTP's `zstd` content coding (RFC 9659 §3): frames needing a window over 8 MiB are refused
+    /// (``BytesError/limitExceeded``) before anything is allocated. ``CompressionFormat/zstdForHTTP(level:)`` encodes
+    /// within it.
+    public static var zstdForHTTP: Self { .zstd(maximumWindowSize: 8 << 20) }
+
     /// Whether ``Decompressor/decompress(_:into:)`` decodes it in pieces: everything but Apple's LZ formats and
     /// LZ4, which decode only whole buffers (``Decompressor/decompressAll(_:into:decodedSize:)``).
-    package var isStreamable: Bool {
+    public var isStreamable: Bool {
         switch self {
         case .deflate, .deflate64, .brotli, .zstd, .bzip2, .lzma, .xz: true
         case .lzfse, .lzvn, .lz4, .lzbitmap, .lzraven: false
@@ -266,6 +271,7 @@ public struct Decompressor: ~Copyable {
     /// plus faulting in a large window's pages as the next stream touches them.
     ///
     /// It discards a stream in progress; until the next reset, decoding calls throw ``BytesError/invalidValue``.
+    /// Unlike ``reset(for:)``, it keeps ``format``, so ``reset()`` starts the same format's stream again.
     public mutating func releaseMemory() {
         codec = .none
         streamPending = false
@@ -341,8 +347,9 @@ public struct Decompressor: ~Copyable {
     ///   - input: The next compressed bytes, starting with any not consumed last time.
     ///   - output: Where to append decompressed bytes.
     /// - Returns: What was consumed and produced, and why it returned.
-    /// - Throws: The format's decoder's errors; ``BytesError/invalidValue`` for a format that decodes only whole
-    ///   buffers (``DecompressionFormat/isStreamable``).
+    /// - Throws: The format's decoder's errors; ``BytesError/unsupported`` for a format that decodes only whole
+    ///   buffers (``DecompressionFormat/isStreamable``); ``BytesError/invalidValue`` before the first
+    ///   ``reset(for:)`` (or after ``releaseMemory()``).
     public mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         if streamPending { try startStream() }
         return switch codec {
@@ -353,7 +360,8 @@ public struct Decompressor: ~Copyable {
         case .bzip2: try bzip2!.decompress(input, into: &output)
         case .lzma: try lzma!.decompress(input, into: &output)
         case .xz: try xz!.decompress(input, into: &output)
-        case .none, .lzfse, .lzvn, .lz4Raw, .lz4Framed, .lzbitmap, .lzraven: throw .invalidValue
+        case .lzfse, .lzvn, .lz4Raw, .lz4Framed, .lzbitmap, .lzraven: throw .unsupported
+        case .none: throw .invalidValue
         }
     }
 
@@ -366,15 +374,16 @@ public struct Decompressor: ~Copyable {
     ///   - buffer: The history, then room to decode into.
     ///   - historyCount: How many bytes at the start of `buffer` are history.
     /// - Returns: What was consumed and produced (after the history), and why it returned.
-    /// - Throws: The decoder's errors; ``BytesError/invalidValue`` for a format without a history size (or before
-    ///   the first ``reset(for:)``).
+    /// - Throws: The decoder's errors; ``BytesError/unsupported`` for a format without a history size;
+    ///   ``BytesError/invalidValue`` before the first ``reset(for:)``.
     public mutating func decompress(
         _ input: RawSpan, into buffer: inout MutableRawSpan, historyCount: Int
     ) throws(BytesError) -> TransformProgress {
         switch codec {
         case .deflate: try deflate!.decompress(input, into: &buffer, historyCount: historyCount)
         case .deflate64: try deflate64!.decompress(input, into: &buffer, historyCount: historyCount)
-        default: throw .invalidValue
+        case .none: throw .invalidValue
+        default: throw .unsupported
         }
     }
 
@@ -397,7 +406,8 @@ public struct Decompressor: ~Copyable {
     /// - Returns: The number of input bytes the stream took.
     /// - Throws: The format's decoder's errors; ``BytesError/mismatch`` for a size other than `decodedSize`;
     ///   ``BytesError/insufficientCapacity`` if `output` has room for fewer than `decodedSize` bytes;
-    ///   ``BytesError/invalidValue`` for a negative `decodedSize`, or a raw LZ4 block without one.
+    ///   ``BytesError/invalidValue`` for a negative `decodedSize`, a raw LZ4 block without one, or a call before the
+    ///   first ``reset(for:)``.
     public mutating func decompressAll(
         _ input: RawSpan, into output: inout OutputRawSpan, decodedSize: Int? = nil
     ) throws(BytesError) -> Int {
@@ -461,8 +471,14 @@ public struct Decompressor: ~Copyable {
     /// let toc = try decompressor.decompressAll(compressed, maximumSize: 64 << 20, decodedSize: tocSize)
     /// ```
     ///
-    /// The array is reserved once (`decodedSize`, or `maximumSize` without it) and decoded into in place: nothing is
-    /// zeroed or copied.
+    /// With `decodedSize`, the array is reserved once, for exactly that, and decoded into in place: nothing is zeroed or
+    /// copied. Without it, `maximumSize` is only a limit, never the reservation: the array starts at a size the stream
+    /// states (a Zstandard frame's content size, gzip's ISIZE, an xz index's total, framed LZ4's block sizes, a raw LZMA
+    /// stream's or a format's size hint), believed only as far as the input can expand, or else at four times the
+    /// input; at least 64 KiB (bzip2: its block size). If the stream decodes to more, it's decoded again from the start
+    /// into four times the room, up to `maximumSize`. A failed try decodes at most what fits, so the retries cost at most
+    /// about 4/3 of the decoded size more (and a bzip2 block more), and the array is at most four times the decoded size
+    /// (plus 64 KiB).
     ///
     /// - Parameters:
     ///   - input: The stream, as ``decompressAll(_:into:decodedSize:)`` takes it.
@@ -478,26 +494,76 @@ public struct Decompressor: ~Copyable {
         if let decodedSize {
             guard decodedSize >= 0 else { throw .invalidValue }
             guard decodedSize <= maximumSize else { throw .limitExceeded }
+            return try decompressAll(input, capacity: decodedSize, decodedSize: decodedSize)
         }
-        let capacity = decodedSize ?? maximumSize
-        // An empty array reserved, then appended to: the standard library's specialized `append(addingCapacity:)`
-        // (`init(capacity:initializingWith:)` goes through an unspecialized allocation, ~500 instructions more).
-        var bytes: [UInt8] = []
-        bytes.reserveCapacity(capacity)
-        try bytes.append(addingCapacity: capacity) { (span: inout OutputSpan<UInt8>) throws(BytesError) in
-            // Unsafe: an output span over the array's new capacity. Safe: it covers only the uninitialized part and
-            // ends with the closure; what the decoder wrote is added to the initialized count.
-            try unsafe span.withUnsafeMutableBufferPointer { buffer, initializedCount throws(BytesError) in
-                let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
-                var output = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
-                do throws(BytesError) {
-                    _ = try decompressAll(input, into: &output, decodedSize: decodedSize)
-                } catch .insufficientCapacity where decodedSize == nil {
-                    // The room is the caller's maximum: the stream decodes to more than it allows.
-                    throw .limitExceeded
-                }
-                initializedCount &+= unsafe output.finalize(for: free)
+        guard let format else { throw .invalidValue }
+        // A floor, so a stated size of 0 (BGZF's empty last member) still grows, and small streams decode in one try.
+        let floor = min(maximumSize, max(64 << 10, Self.blockFloor(format, input)))
+        var capacity = max(floor, min(maximumSize, Self.startingCapacity(format, input)))
+        while true {
+            do throws(BytesError) {
+                return try decompressAll(input, capacity: capacity, decodedSize: nil)
+            } catch .insufficientCapacity {
+                // The room was the caller's maximum: the stream decodes to more than it allows.
+                guard capacity < maximumSize else { throw .limitExceeded }
+                capacity = capacity > maximumSize / 4 ? maximumSize : max(capacity &* 4, capacity &+ 1)
             }
+        }
+    }
+
+    /// A size `input`, a stream of `format`, states it decodes to (capped by how far the format can expand the input), or
+    /// four times the input: where ``decompressAll(_:maximumSize:decodedSize:)`` starts without a decoded size.
+    static func startingCapacity(_ format: DecompressionFormat, _ input: RawSpan) -> Int {
+        let count = input.byteCount
+        // Saturating: a stated size is a starting point, never more than the input can become (DEFLATE expands at most
+        // 1032:1; the others' runs reach further, Zstandard's RLE blocks 32,768:1).
+        let expansion = if case .deflate = format { 1032 } else { 1 << 15 }
+        let ceiling = count > Int.max / expansion ? Int.max : count &* expansion
+        if let stated = statedSize(format, input) { return min(stated, ceiling) }
+        return count > Int.max / 4 ? Int.max : count &* 4
+    }
+
+    /// The size `input` (a stream of `format`) or the format itself states the stream decodes to, if either does. Read
+    /// without decoding: a frame or trailer field, an index, block headers. Untrusted: only a starting capacity.
+    static func statedSize(_ format: DecompressionFormat, _ input: RawSpan) -> Int? {
+        let count = input.byteCount
+        switch format {
+        case let .zstd(_, sizeHint):
+            if let sizeHint { return sizeHint }
+            guard let header = try? ZstdFrameHeader.parse(input), !header.isSkippable, let size = header.contentSize else { return nil }
+            return size > UInt64(Int.max) ? Int.max : Int(size)
+        case .deflate(.gzip):
+            // ISIZE: the last member's size modulo 2^32 (all of a single member's, below 4 GiB).
+            guard count >= 18 else { return nil }
+            return Int(UInt32(littleEndian: input.load(fromByteOffset: count &- 4, as: UInt32.self)))
+        case let .xz(sizeHint):
+            if let sizeHint { return sizeHint }
+            return XZ.lastStreamSize(input)
+        case let .lzma(_, uncompressedSize, _):
+            return uncompressedSize
+        case .lz4(framed: true):
+            return LZ4Decoder.framedSize(input)
+        default:
+            return nil
+        }
+    }
+
+    /// The smallest room worth trying for a format that decodes in large blocks: bzip2's block size (the header's level
+    /// × 100,000), since a block that doesn't fit is found only after it's decoded. 0 for the others.
+    static func blockFloor(_ format: DecompressionFormat, _ input: RawSpan) -> Int {
+        guard case .bzip2 = format, input.byteCount >= 4 else { return 0 }
+        let level = Int(input.load(fromByteOffset: 3, as: UInt8.self)) &- 0x30
+        return (1...9).contains(level) ? level &* 100_000 : 0
+    }
+
+    /// Decodes a whole stream into a new array of `capacity` bytes' room.
+    private mutating func decompressAll(_ input: RawSpan, capacity: Int, decodedSize: Int?) throws(BytesError) -> [UInt8] {
+        // An empty array appended to: the standard library's specialized `append(addingCapacity:)`, through Bytes'
+        // `append(writingUpTo:)` (`init(capacity:initializingWith:)` goes through an unspecialized allocation, ~500
+        // instructions more).
+        var bytes: [UInt8] = []
+        try bytes.append(writingUpTo: capacity) { (output: inout OutputRawSpan) throws(BytesError) in
+            _ = try decompressAll(input, into: &output, decodedSize: decodedSize)
         }
         return bytes
     }
@@ -543,7 +609,8 @@ extension Decompressor: ResettableByteTransform {
         case .bzip2: try bzip2!.transform(input, into: &output, flush: flush)
         case .lzma: try lzma!.transform(input, into: &output, flush: flush)
         case .xz: try xz!.transform(input, into: &output, flush: flush)
-        case .none, .lzfse, .lzvn, .lz4Raw, .lz4Framed, .lzbitmap, .lzraven: throw .invalidValue
+        case .lzfse, .lzvn, .lz4Raw, .lz4Framed, .lzbitmap, .lzraven: throw .unsupported
+        case .none: throw .invalidValue
         }
     }
 }

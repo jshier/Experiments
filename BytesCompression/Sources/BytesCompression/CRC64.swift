@@ -72,7 +72,7 @@ package struct CRC64: Hashable, Sendable {
         let count = bytes.byteCount
         let words = bytes.chunks(of: InlineArray<8, UInt8>.self)
         for index in words.indices {
-            crc = update(crc, word: WordReads.value(words[index]), table)
+            crc = update(crc, word: UInt64(littleEndianBytes: words[index]), table)
         }
         let tail = Span<UInt8>(viewing: bytes.extracting(droppingFirst: count & ~7))
         for index in tail.indices {

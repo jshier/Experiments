@@ -60,12 +60,17 @@ extension DeflateFormat {
             return (bytes, 2)
         case .gzip:
             // Magic, DEFLATE, no flags, no time, extra flags (2 slowest, 4 fastest), unknown OS.
-            let header: InlineArray<10, UInt8> = [0x1F, 0x8B, 8, 0, 0, 0, 0, 0, level >= 8 ? 2 : level <= 1 ? 4 : 0, 255]
+            let header: InlineArray<10, UInt8> = [0x1F, 0x8B, 8, 0, 0, 0, 0, 0, Self.gzipExtraFlags(level: level), 255]
             for index in 0..<10 {
                 bytes[index] = header[index]
             }
             return (bytes, 10)
         }
+    }
+
+    /// gzip's XFL for a DEFLATE level: 2 for the slowest levels (8 and up), 4 for the fastest (1 and below), else 0.
+    static func gzipExtraFlags(level: Int) -> UInt8 {
+        level >= 8 ? 2 : level <= 1 ? 4 : 0
     }
 
     /// The trailer's size: 0, 4 (zlib's Adler-32), or 8 (gzip's CRC-32 and length).
@@ -98,17 +103,20 @@ extension DeflateFormat {
         return (bytes, trailerSize)
     }
 
-    /// Whether `bytes`, ``trailerSize`` of them, are the trailer of output with `checksum` and `length`.
-    func trailerMatches(_ bytes: RawSpan, checksum: UInt32, length: UInt32) -> Bool {
-        guard bytes.byteCount == trailerSize else { return false }
+    /// Checks that `bytes`, ``trailerSize`` of them, are the trailer of output with `checksum` and `length`.
+    ///
+    /// - Throws: ``BytesError/checksumMismatch`` for the wrong Adler-32 or CRC-32; ``BytesError/mismatch`` for the
+    ///   wrong length (gzip's ISIZE: a size, not a check value) or the wrong number of bytes.
+    func checkTrailer(_ bytes: RawSpan, checksum: UInt32, length: UInt32) throws(BytesError) {
+        guard bytes.byteCount == trailerSize else { throw .mismatch }
         switch self {
         case .raw:
-            return true
+            return
         case .zlib:
-            return UInt32(bigEndian: bytes.load(fromByteOffset: 0, as: UInt32.self)) == checksum
+            guard UInt32(bigEndian: bytes.load(fromByteOffset: 0, as: UInt32.self)) == checksum else { throw .checksumMismatch }
         case .gzip:
-            return UInt32(littleEndian: bytes.load(fromByteOffset: 0, as: UInt32.self)) == checksum
-                && UInt32(littleEndian: bytes.load(fromByteOffset: 4, as: UInt32.self)) == length
+            guard UInt32(littleEndian: bytes.load(fromByteOffset: 0, as: UInt32.self)) == checksum else { throw .checksumMismatch }
+            guard UInt32(littleEndian: bytes.load(fromByteOffset: 4, as: UInt32.self)) == length else { throw .mismatch }
         }
     }
 }
@@ -179,12 +187,13 @@ enum GzipFlags {
     static var text: BitFlag { BitFlag(bit: 0) }
 }
 
-/// A gzip member's header fields (RFC 1952, 2.3.1), as ``DeflateDecoder/gzipHeader`` reports them: the fixed ones,
-/// and which optional fields the member has.
+/// A gzip member's header fields (RFC 1952, 2.3.1), as ``DeflateDecoder/gzipHeader`` reports them while streaming: the
+/// fixed ones, and which optional fields the member has.
 ///
 /// The optional fields' contents (the file name, comment, and extra subfields) are checked by the header CRC when
-/// there is one, then skipped: keeping them would need storage of no fixed size, made while streaming.
-package struct GzipHeader: Hashable, Sendable {
+/// there is one, then skipped: keeping them would need storage of no fixed size, made while streaming (the decoder's
+/// state stays trivially copyable). ``GzipHeader/parse(_:)`` reads them from a member's first bytes.
+package struct GzipFixedHeader: Hashable, Sendable {
     /// FTEXT: the encoder thought the data was text.
     package var isText: Bool
     /// FHCRC: the header ends with the low 16 bits of its CRC-32 (verified).

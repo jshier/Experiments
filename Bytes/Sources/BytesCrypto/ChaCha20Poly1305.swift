@@ -489,12 +489,12 @@ struct Poly1305 {
         let r0 = r0, r1 = r1, s1 = s1
         @inline(__always)
         func process(_ t0: UInt64, _ t1: UInt64) { Self.absorb(t0, t1, into: &h0, &h1, &h2, r0: r0, r1: r1, s1: s1) }
-        // The whole blocks as 16-byte elements: loads at constant offsets within one need no checks.
-        let whole = Span<InlineArray<16, UInt8>>(viewing: data.extracting(first: count & ~15))
+        // The whole blocks as 16-byte elements, each read as two words by `bitCast`: no checks within an element, and no
+        // stack copy (reading it through its `span` made one).
+        let whole = data.chunks(of: InlineArray<16, UInt8>.self)
         for index in whole.indices {
-            let block = whole[index].span.bytes
-            process(UInt64(littleEndian: block.load(fromByteOffset: 0, as: UInt64.self)),
-                    UInt64(littleEndian: block.load(fromByteOffset: 8, as: UInt64.self)))
+            let words = bitCast(whole[index], to: InlineArray<2, UInt64>.self)
+            process(UInt64(littleEndian: words[0]), UInt64(littleEndian: words[1]))
         }
         offset = count & ~15
         if offset < count {

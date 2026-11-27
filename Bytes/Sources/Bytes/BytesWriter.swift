@@ -823,10 +823,11 @@ public extension GenericBytesWriter {
     /// with arbitrary values, when `allowingOverrun` and there's room for them. Use it when the bytes after
     /// the cursor are scratch, such as a decoder's output buffer.
     ///
-    /// Then a copy of up to 32 bytes (most LZ77 matches) is two 16-byte moves, or four 8-byte moves for
-    /// distances 8 to 15, whatever its length: straight-line code with no branch on the length for the
-    /// processor to mispredict, as in libdeflate. Longer copies continue in a loop. Without room for the
-    /// overrun, or for distances below 8, it copies exactly.
+    /// Then a copy of up to 32 bytes (most LZ77 matches) is two 16-byte moves, or for distances under 16 the
+    /// pattern repeated from registers (``copyShortMatch(distance:count:in:at:)``), whatever its length:
+    /// straight-line code with no branch on the length for the processor to mispredict, as in libdeflate. Longer
+    /// copies continue in a loop. Without room for the overrun, or within 16 bytes of the start for distances
+    /// under 16, it copies exactly.
     ///
     /// - Parameters:
     ///   - distance: How far back the copy starts, in bytes: 1 through ``byteOffset``.
@@ -838,39 +839,53 @@ public extension GenericBytesWriter {
     @inlinable @inline(always)
     @_lifetime(self: copy self)
     mutating func copy(fromDistance distance: Int, count: Int, allowingOverrun: Bool) throws(BytesError) {
-        guard allowingOverrun, distance >= 8, likely(_bytes.byteCount &- _byteOffset >= count &+ Self.copyOverrun) else {
-            try copy(fromDistance: distance, count: count)
+        guard allowingOverrun, distance >= 16 || (distance > 0 && _byteOffset >= 16),
+              likely(_bytes.byteCount &- _byteOffset >= count &+ Self.copyOverrun)
+        else {
+            // Out of line: inlined, the exact copy's paths sat in every decoder loop beside the fast one (Brotli's
+            // decode +1.4% instructions).
+            _byteOffset = try Self._copyExactly(distance: distance, count: count, in: &_bytes, at: _byteOffset, bitOffset: _bitOffset)
             return
         }
         precondition(count >= 0, "Negative count")
         precondition(_bitOffset == 0, "Copying requires byte alignment: call alignToByte() first")
         _assumeInvariant()
         guard likely(distance <= _byteOffset) else { throw .invalidValue }
+        if distance < 16 {
+            // Unsafe: unchecked. Safe: `1 <= distance <= 15` and 16 bytes before the cursor (the guard above), and
+            // `count + copyOverrun` bytes of room.
+            unsafe Self.copyShortMatch(distance: distance, count: count, in: &_bytes, at: _byteOffset)
+            _byteOffset &+= count
+            return
+        }
         let source = _byteOffset &- distance
         let destination = _byteOffset
-        // A move of n bytes at `index` reads up to `destination + index + n - distance`, at most
-        // `destination + index` when `distance >= n`: bytes already final. Moves past `count` write only
-        // the overrun.
-        if distance >= 16 {
-            unsafe Self._move(SIMD16<UInt8>.self, from: source, to: destination, in: &_bytes)
-            unsafe Self._move(SIMD16<UInt8>.self, from: source &+ 16, to: destination &+ 16, in: &_bytes)
-            var index = 32
-            while index < count {
-                unsafe Self._move(SIMD16<UInt8>.self, from: source &+ index, to: destination &+ index, in: &_bytes)
-                index &+= 16
-            }
-        } else {
-            unsafe Self._move(UInt64.self, from: source, to: destination, in: &_bytes)
-            unsafe Self._move(UInt64.self, from: source &+ 8, to: destination &+ 8, in: &_bytes)
-            unsafe Self._move(UInt64.self, from: source &+ 16, to: destination &+ 16, in: &_bytes)
-            unsafe Self._move(UInt64.self, from: source &+ 24, to: destination &+ 24, in: &_bytes)
-            var index = 32
-            while index < count {
-                unsafe Self._move(UInt64.self, from: source &+ index, to: destination &+ index, in: &_bytes)
-                index &+= 8
-            }
+        // 16 or more back: a move of 16 bytes at `index` reads up to `destination + index + 16 - distance`, at most
+        // `destination + index`: bytes already final. Moves past `count` write only the overrun.
+        unsafe Self._move(SIMD16<UInt8>.self, from: source, to: destination, in: &_bytes)
+        unsafe Self._move(SIMD16<UInt8>.self, from: source &+ 16, to: destination &+ 16, in: &_bytes)
+        var index = 32
+        while index < count {
+            unsafe Self._move(SIMD16<UInt8>.self, from: source &+ index, to: destination &+ index, in: &_bytes)
+            index &+= 16
         }
         _byteOffset &+= count
+    }
+
+    /// ``copy(fromDistance:count:)`` out of line, taking and returning values: the overrunning copy's rare path.
+    ///
+    /// - Returns: The cursor's new byte offset.
+    @usableFromInline @inline(never)
+    internal static func _copyExactly(
+        distance: Int, count: Int, in bytes: inout MutableRawSpan, at offset: Int, bitOffset: Int
+    ) throws(BytesError) -> Int {
+        precondition(count >= 0, "Negative count")
+        precondition(bitOffset == 0, "Copying requires byte alignment: call alignToByte() first")
+        guard distance > 0 && distance <= offset else { throw .invalidValue }
+        guard bytes.byteCount &- offset >= count else { throw .insufficientCapacity }
+        // Unsafe: the exact copy within the span. Safe: both bounds checked above.
+        unsafe _copyBack(distance: distance, count: count, in: &bytes, at: offset)
+        return offset &+ count
     }
 
     /// Copies `count` bytes from `distance` before `offset` to `offset`, forward. Bounds already checked.
@@ -916,6 +931,93 @@ public extension GenericBytesWriter {
                 unsafe _move(UInt8.self, from: source &+ index, to: offset &+ index, in: &bytes)
             }
         }
+    }
+}
+
+public extension GenericBytesWriter {
+    /// Writes a back-reference 1 to 15 bytes back, overrunning: the last `distance` bytes repeated for `count`
+    /// bytes, as an LZ77 decoder's short match (or a run, at distance 1), in vector stores that may write up to
+    /// ``copyOverrun`` bytes past the copy.
+    ///
+    /// One 16-byte load (the bytes before `offset`, the pattern being their last `distance`), two one-register
+    /// `tbl`s that repeat the pattern from phase 0 and from byte 16 (indices from a table), and two 16-byte stores:
+    /// up to 32 bytes with no branch on the length. Longer copies store the first register again at a stride that's
+    /// a multiple of the distance (`16 − 16 % distance`), from a multiple of it, so nothing more is loaded: each
+    /// store would otherwise wait on forwarding from the one before. (Distances 2–7 took an exact path that loaded
+    /// `distance` bytes after the literal just stored and filled out of line, about 3x the instructions of a
+    /// distance-8 copy; distances 8–15, chains of 8-byte loads from bytes just stored.)
+    ///
+    /// Unsafe: unchecked. Callers keep `1 <= distance <= 15`, `offset >= 16`, and `count + copyOverrun` bytes of room
+    /// after `offset`.
+    ///
+    /// - Parameters:
+    ///   - distance: How far back the pattern starts, 1 through 15.
+    ///   - count: The number of bytes to write.
+    ///   - bytes: The memory copied within.
+    ///   - offset: Where the copy is written, at least 16.
+    @unsafe @inlinable @inline(__always)
+    static func copyShortMatch(distance: Int, count: Int, in bytes: inout MutableRawSpan, at offset: Int) {
+        // Unsafe (the loads and stores here): unchecked. Safe: the caller's preconditions keep the load within the
+        // 16 bytes before `offset`, the stores within `count + 32` bytes after it, and the index loads within the
+        // table's 480 bytes (`distance` 1–15).
+        let table = unsafe bytes.bytes.unsafeLoadUnaligned(fromUncheckedByteOffset: offset &- 16, as: SIMD16<UInt8>.self)
+        let indices = _shortMatchIndices.bytes
+        let at = 32 &* (distance &- 1)
+        let first = ByteLanes(unsafe indices.unsafeLoadUnaligned(fromUncheckedByteOffset: at, as: SIMD16<UInt8>.self))
+            .lookup(in: table)
+        let second = ByteLanes(unsafe indices.unsafeLoadUnaligned(fromUncheckedByteOffset: at &+ 16, as: SIMD16<UInt8>.self))
+            .lookup(in: table)
+        unsafe bytes.storeBytes(of: first, toUncheckedByteOffset: offset, as: SIMD16<UInt8>.self)
+        unsafe bytes.storeBytes(of: second, toUncheckedByteOffset: offset &+ 16, as: SIMD16<UInt8>.self)
+        guard count > 32 else { return }
+        // Stores of `first` start at multiples of the distance (phase 0), at most 16 apart: from `32 − 32 % d`, which
+        // the two stores above reach, two a round; the last ends before `count + 32`.
+        let step = 16 &- 16 % distance
+        var index = 32 &- 32 % distance
+        while index < count {
+            unsafe bytes.storeBytes(of: first, toUncheckedByteOffset: offset &+ index, as: SIMD16<UInt8>.self)
+            unsafe bytes.storeBytes(of: first, toUncheckedByteOffset: offset &+ index &+ step, as: SIMD16<UInt8>.self)
+            index &+= 2 &* step
+        }
+    }
+
+    /// `copyShortMatch`'s `tbl` indices into the 16 loaded bytes: for each distance d (1–15), 16 bytes repeating the
+    /// pattern from phase 0, then 16 from phase `16 % d`; pattern byte `i` is loaded byte `(16 − d) + i % d`. A
+    /// literal, so the table is constant data (a `static let` would be a lazy global).
+    @usableFromInline
+    internal static var _shortMatchIndices: StaticString {
+        """
+        \u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\
+        \u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\u{0F}\
+        \u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\
+        \u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\u{0E}\u{0F}\
+        \u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\
+        \u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\u{0F}\u{0D}\u{0E}\
+        \u{0C}\u{0D}\u{0E}\u{0F}\u{0C}\u{0D}\u{0E}\u{0F}\u{0C}\u{0D}\u{0E}\u{0F}\u{0C}\u{0D}\u{0E}\u{0F}\
+        \u{0C}\u{0D}\u{0E}\u{0F}\u{0C}\u{0D}\u{0E}\u{0F}\u{0C}\u{0D}\u{0E}\u{0F}\u{0C}\u{0D}\u{0E}\u{0F}\
+        \u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0B}\
+        \u{0C}\u{0D}\u{0E}\u{0F}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0B}\u{0C}\
+        \u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0A}\u{0B}\u{0C}\u{0D}\
+        \u{0E}\u{0F}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{0A}\u{0B}\
+        \u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{09}\u{0A}\
+        \u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{09}\u{0A}\u{0B}\u{0C}\
+        \u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\
+        \u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\
+        \u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\
+        \u{0E}\u{0F}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{07}\u{08}\u{09}\u{0A}\u{0B}\
+        \u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\
+        \u{0C}\u{0D}\u{0E}\u{0F}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{06}\u{07}\
+        \u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{05}\u{06}\u{07}\u{08}\u{09}\
+        \u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\
+        \u{04}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{04}\u{05}\u{06}\u{07}\
+        \u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{04}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\
+        \u{03}\u{04}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{03}\u{04}\u{05}\
+        \u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{03}\u{04}\u{05}\u{06}\u{07}\u{08}\
+        \u{02}\u{03}\u{04}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{02}\u{03}\
+        \u{04}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{02}\u{03}\u{04}\u{05}\
+        \u{01}\u{02}\u{03}\u{04}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{01}\
+        \u{02}\u{03}\u{04}\u{05}\u{06}\u{07}\u{08}\u{09}\u{0A}\u{0B}\u{0C}\u{0D}\u{0E}\u{0F}\u{01}\u{02}
+        """
     }
 }
 

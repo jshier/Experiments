@@ -41,7 +41,7 @@ public enum HTTP1HeadWriter {
                 try writer.write(reasonPhrase)
             } else {
                 let phrase = status.reasonPhrase
-                try writer.write(immortalSpan(phrase))
+                try writer.write(phrase.bytes)
             }
             try writer.write(0x0A0D as UInt16, as: Byte2.self, .littleEndian)
         } catch { throw .outOfRoom }

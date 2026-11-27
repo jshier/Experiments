@@ -340,25 +340,33 @@ func parallelDecodeAll(_ decoder: inout ParallelDeflateDecoder, _ data: [UInt8],
                 var output = [UInt8](repeating: 0, count: capacity)
                 let pointer = output.withUnsafeMutableBytes { $0 }
                 var span = OutputRawSpan(buffer: pointer, initializedCount: 0)
-                do throws(BytesError) {
-                    let consumed = if concurrently {
-                        try await decoder.decompressAllConcurrently(stream.span.bytes, into: &span)
+                do throws(CancellableError<BytesError>) {
+                    let consumed: Int
+                    if concurrently {
+                        consumed = try await decoder.decompressAllConcurrently(stream.span.bytes, into: &span)
                     } else {
-                        try decoder.decompressAll(stream.span.bytes, into: &span)
+                        do throws(BytesError) {
+                            consumed = try decoder.decompressAll(stream.span.bytes, into: &span)
+                        } catch {
+                            throw .failed(error)
+                        }
                     }
                     let produced = span.finalize(for: pointer)
                     #expect(consumed == stream.count, "\(name)")
                     outcomes.append(.success(Array(output[..<produced])))
                 } catch {
                     _ = span.finalize(for: pointer)
-                    outcomes.append(.failure(error))
+                    switch error {
+                    case let .failed(error): outcomes.append(.failure(error))
+                    case .cancelled: Issue.record("\(name): cancelled, uncancelled")
+                    }
                 }
                 segmentCounts.append(decoder.lastSegmentCount)
             }
             #expect(outcomes[0] == outcomes[1], "\(name)")
             #expect(segmentCounts[0] == segmentCounts[1], "\(name)")
             switch name {
-            case "bad CRC": #expect(outcomes[1] == .failure(.mismatch), "\(name)")
+            case "bad CRC": #expect(outcomes[1] == .failure(.checksumMismatch), "\(name)")
             case "a byte short": #expect(outcomes[1] == .failure(.insufficientCapacity), "\(name)")
             default: #expect(outcomes[1] == .success(expected), "\(name)")
             }

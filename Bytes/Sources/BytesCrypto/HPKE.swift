@@ -204,9 +204,7 @@ public enum HPKE {
 
         /// Calls `body` with a static string's UTF-8 bytes.
         static func withBytes(_ string: StaticString, _ body: (RawSpan) -> Void) {
-            // Unsafe: the string's buffer as a span. Safe: the buffer is the string's own static storage, and the
-            // span doesn't outlive the closure.
-            string.withUTF8Buffer { buffer in body(unsafe RawSpan(_unsafeElements: buffer)) }
+            body(string.bytes)
         }
     }
 

@@ -60,11 +60,75 @@ public final class RawStorage: @unchecked Sendable {
 
     /// A pointer `offset` bytes in.
     ///
-    /// - Precondition: `offset` is within the storage.
+    /// - Precondition: `offset` is within the storage: 0 through ``byteCount`` (the end).
     @inlinable @inline(__always)
     public func pointer(_ offset: Int) -> UnsafeMutableRawPointer {
-        // Unsafe: pointer arithmetic. Safe: within the allocation (the precondition); no access here.
-        unsafe base + offset
+        precondition(UInt(bitPattern: offset) <= UInt(bitPattern: byteCount), "An offset outside a storage")
+        // Unsafe: pointer arithmetic. Safe: within the allocation (checked above); no access here.
+        return unsafe base + offset
+    }
+
+    /// The bytes in `range`, to read. Nothing synchronizes them: their owner's rule says no one writes them while the
+    /// span lives.
+    ///
+    /// The span borrows the reference it's read through: from a stored property, copy the reference to a local first
+    /// (`let storage = self.storage`), or the span can't outlive the property's access.
+    ///
+    /// - Precondition: `range` is within the storage.
+    @inlinable @inline(__always) @_lifetime(borrow self)
+    public func bytes(_ range: Range<Int>) -> RawSpan {
+        checkRange(range)
+        // Unsafe (the next two): a span over the allocation, its lifetime set by hand to a borrow of the object. Safe:
+        // within it (checked above), in memory the object frees only in `deinit`, which the borrow outlasts.
+        let span = unsafe RawSpan(_unsafeStart: base + range.lowerBound, byteCount: range.count)
+        return unsafe _overrideLifetime(span, borrowing: self)
+    }
+
+    /// Calls `body` with the bytes in `range` to read and write in place.
+    ///
+    /// Unsafe: the storage is shared by reference, so nothing stops another span over these bytes (from ``bytes(_:)``,
+    /// or another task's call) while `body` writes them. The caller's rule makes the bytes its own for the call.
+    ///
+    /// - Precondition: `range` is within the storage.
+    @unsafe @inlinable @inline(__always)
+    public func withMutableBytes<R: ~Copyable, E: Error>(
+        _ range: Range<Int>, _ body: (inout MutableRawSpan) throws(E) -> R
+    ) throws(E) -> R {
+        checkRange(range)
+        // Unsafe: a mutable span over the allocation. Safe: within it (checked above); exclusive by the caller's rule;
+        // it ends with `body`.
+        var span = unsafe MutableRawSpan(_unsafeStart: base + range.lowerBound, byteCount: range.count)
+        return try body(&span)
+    }
+
+    /// Calls `body` with an empty output span over the bytes in `range`: what it appends overwrites them (it reads
+    /// the span's `byteCount` for how many).
+    ///
+    /// Unsafe as ``withMutableBytes(_:_:)``: the caller's rule makes the bytes its own for the call.
+    ///
+    /// - Precondition: `range` is within the storage, and `body` leaves the output span it was given in place.
+    @unsafe @inlinable @inline(__always)
+    public func withOutputRawSpan<R: ~Copyable, E: Error>(
+        overwriting range: Range<Int>, _ body: (inout OutputRawSpan) throws(E) -> R
+    ) throws(E) -> R {
+        checkRange(range)
+        // Unsafe: an output span over the allocation. Safe: within it (checked above); exclusive by the caller's rule;
+        // `finalize` checks `body` left it in place.
+        let region = unsafe UnsafeMutableRawBufferPointer(start: base + range.lowerBound, count: range.count)
+        var output = unsafe OutputRawSpan(buffer: region, initializedCount: 0)
+        do throws(E) {
+            let result = try body(&output)
+            _ = unsafe output.finalize(for: region)
+            return result
+        } catch {
+            _ = unsafe output.finalize(for: region)
+            throw error
+        }
+    }
+
+    @inlinable @inline(__always)
+    func checkRange(_ range: Range<Int>) {
+        precondition(range.lowerBound >= 0 && range.upperBound <= byteCount, "A range outside a storage")
     }
 
     /// Before writing `count` bytes from the start: takes back the pages past ``residentFloor`` that

@@ -121,8 +121,9 @@ public struct ZstdDecoder: ~Copyable {
     ///     capacity past the decompressed ones may be overwritten.
     /// - Returns: The number of input bytes decoded: all of them.
     /// - Throws: ``BytesError/insufficientData`` for a truncated stream; ``BytesError/insufficientCapacity`` if
-    ///   the output doesn't fit; ``BytesError/invalidValue`` for corrupt data, trailing bytes that aren't a
-    ///   frame, or a frame needing a dictionary; ``BytesError/mismatch`` for a wrong checksum or content size.
+    ///   the output doesn't fit; ``BytesError/invalidValue`` for corrupt data or trailing bytes that aren't a
+    ///   frame; ``BytesError/checksumMismatch`` for a wrong checksum; ``BytesError/mismatch`` for a wrong content
+    ///   size; ``BytesError/unsupported`` for a frame needing a dictionary (or setting its reserved bit).
     public mutating func decompressAll(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> Int {
         reset()
         guard input.byteCount > 0 else { throw .insufficientData }
@@ -156,7 +157,8 @@ public struct ZstdDecoder: ~Copyable {
                 position &+= 8 &+ size
                 continue
             }
-            guard header.dictionaryID == 0 else { throw .invalidValue }
+            // A dictionary is valid Zstandard that no decoder here takes.
+            guard header.dictionaryID == 0 else { throw .unsupported }
             position &+= header.headerSize
             if let contentSize = header.contentSize, contentSize > UInt64(capacity &- end) {
                 throw .insufficientCapacity
@@ -229,7 +231,7 @@ public struct ZstdDecoder: ~Copyable {
             if let hasher {
                 guard count &- position >= 4 else { throw .insufficientData }
                 let expected = UInt32(littleEndian: input.load(fromByteOffset: position, as: UInt32.self))
-                guard UInt32(truncatingIfNeeded: hasher.digest) == expected else { throw .mismatch }
+                guard UInt32(truncatingIfNeeded: hasher.digest) == expected else { throw .checksumMismatch }
                 position &+= 4
             }
         } while position < count
@@ -250,8 +252,9 @@ public struct ZstdDecoder: ~Copyable {
     ///   - output: Where to append decompressed bytes.
     /// - Returns: What was consumed and produced, and why it returned: ``TransformStatus/finished`` at the end
     ///   of a frame, with all its output delivered and all of `input` consumed (another frame may follow).
-    /// - Throws: ``BytesError/invalidValue`` for corrupt data, bytes that aren't a frame, or a frame needing a
-    ///   dictionary; ``BytesError/mismatch`` for a wrong checksum or content size;
+    /// - Throws: ``BytesError/invalidValue`` for corrupt data or bytes that aren't a frame;
+    ///   ``BytesError/checksumMismatch`` for a wrong checksum; ``BytesError/mismatch`` for a wrong content size;
+    ///   ``BytesError/unsupported`` for a frame needing a dictionary (or setting its reserved bit);
     ///   ``BytesError/limitExceeded`` for a frame whose window exceeds ``maximumWindowSize``.
     public mutating func decompress(_ input: RawSpan, into output: inout OutputRawSpan) throws(BytesError) -> TransformProgress {
         guard input.byteCount > 0 else { return try unsafe step(nil, count: 0, into: &output) }
@@ -328,7 +331,7 @@ public struct ZstdDecoder: ~Copyable {
                         return TransformProgress(consumed: position, produced: produced, status: .needsInput)
                     }
                     let expected = UInt32(littleEndian: unsafe bytes.loadUnaligned(as: UInt32.self))
-                    guard UInt32(truncatingIfNeeded: hasher.digest) == expected else { throw .mismatch }
+                    guard UInt32(truncatingIfNeeded: hasher.digest) == expected else { throw .checksumMismatch }
                     unsafe finishUnit(4, bytes, input, at: &position)
                 }
                 hasFinishedFrame = true
@@ -344,7 +347,7 @@ public struct ZstdDecoder: ~Copyable {
             stage = .skip(remaining: Int(header.contentSize ?? 0))
             return
         }
-        guard header.dictionaryID == 0 else { throw .invalidValue }
+        guard header.dictionaryID == 0 else { throw .unsupported }
         var windowSize = header.windowSize
         if let contentSize = header.contentSize { windowSize = min(windowSize, contentSize) }
         // The container's size, when it gives one: the same bound for frames that don't state theirs. Matches are

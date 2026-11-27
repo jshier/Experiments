@@ -115,26 +115,19 @@ public extension ByteTransform where Self: ~Copyable {
     ///   - growth: The least room to add at a time.
     /// - Returns: What was consumed and produced: input a stage keeps back (a partial unit) isn't consumed.
     /// - Throws: The stage's `Failure`. The output appended before it stays.
+    /// - Precondition: `growth` is more than 0.
     @inlinable
     mutating func transform(
         _ input: RawSpan, appending output: inout [UInt8], flush: TransformFlush, growth: Int = 16 << 10
     ) throws(Failure) -> TransformProgress {
+        precondition(growth > 0, "Appending with no room to grow")
         var consumed = 0
         var produced = 0
         while true {
             let room = max(Self.minimumOutputCapacity, growth, input.byteCount &- consumed)
-            output.reserveCapacity(output.count &+ room)
             let rest = input.extracting(consumed...)
-            var progress = TransformProgress(consumed: 0, produced: 0, status: .needsInput)
-            try output.append(addingCapacity: room) { (span: inout OutputSpan<UInt8>) throws(Failure) in
-                // Unsafe: an output span over the array's new capacity. Safe: it covers only the uninitialized
-                // part and ends with the closure; what the stage wrote is added to the initialized count.
-                try unsafe span.withUnsafeMutableBufferPointer { buffer, initializedCount throws(Failure) in
-                    let free = unsafe UnsafeMutableRawBufferPointer(rebasing: UnsafeMutableRawBufferPointer(buffer)[initializedCount...])
-                    var raw = unsafe OutputRawSpan(buffer: free, initializedCount: 0)
-                    progress = try transform(rest, into: &raw, flush: flush)
-                    initializedCount &+= unsafe raw.finalize(for: free)
-                }
+            let progress = try output.append(writingUpTo: room) { (raw: inout OutputRawSpan) throws(Failure) in
+                try transform(rest, into: &raw, flush: flush)
             }
             consumed &+= progress.consumed
             produced &+= progress.produced

@@ -422,7 +422,7 @@ struct NUnzip: AsyncParsableCommand {
     /// Info-ZIP's exit codes for an entry's failure: 81 unsupported, 82 bad password, otherwise 2.
     private static func exitCode(for error: ZipError) -> Int32 {
         switch error {
-        case .unsupportedMethod, .unsupportedEncryption: 81
+        case .unsupportedMethod, .unsupportedEncryption, .unsupportedData: 81
         case .incorrectPassword, .passwordRequired: 82
         default: 2
         }
